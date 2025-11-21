@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: reparodynamics-autonomous-agent
+    env: python
+
+    # ✳️ Plan: change "starter" to "free" if you want the free tier
+    plan: starter
+
+    # Where your code lives in the repo (root = ".")
+    rootDir: .
+
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+
+    startCommand: >
+      streamlit run app_streamlit.py
+      --server.port $PORT
+      --server.address 0.0.0.0
+
+    # Auto-deploy when you push to GitHub
+    autoDeploy: true
+
+    # Basic health check so Render knows the app is alive
+    healthCheckPath: /
+
+    # Optional: keep logs a bit longer
+    disk:
+      name: agent-logs
+      mountPath: /opt/render/project/src/logs
+      sizeGB: 1
+
+    # Environment variables (you set the actual values in Render dashboard)
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11
+
+      - key: OPENAI_API_KEY
+        sync: false
+
+      - key: TAVILY_API_KEY
+        sync: false
