@@ -12,9 +12,12 @@ from .rye_metrics import rolling_rye, efficiency_trend
 
 
 def _safe_float(x: Any, default: float = 0.0) -> float:
+    """Best-effort conversion to float, without throwing."""
     try:
         if isinstance(x, (int, float)):
             return float(x)
+        if x is None:
+            return default
         return float(str(x))
     except Exception:
         return default
@@ -54,26 +57,24 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
 
     domains = set()
     goals_seen = set()
+    timestamps: List[str] = []
 
     all_hypotheses: List[Dict[str, Any]] = []
     all_citations: List[Dict[str, Any]] = []
 
     for c in cycles:
-        # Metrics
-        rye = c.get("RYE")
-        delta_r = c.get("delta_R")
-        energy_e = c.get("energy_E")
-
-        if isinstance(rye, (int, float)):
-            rye_values.append(float(rye))
-        if isinstance(delta_r, (int, float)):
-            delta_values.append(float(delta_r))
-        if isinstance(energy_e, (int, float)):
-            energy_values.append(float(energy_e))
+        # Metrics (robust to weird types)
+        rye_values.append(_safe_float(c.get("RYE"), 0.0))
+        delta_values.append(_safe_float(c.get("delta_R"), 0.0))
+        energy_values.append(_safe_float(c.get("energy_E"), 0.0))
 
         # Meta
         domains.add(c.get("domain", "general"))
         goals_seen.add(c.get("goal", ""))
+
+        ts = c.get("timestamp")
+        if isinstance(ts, str) and ts:
+            timestamps.append(ts)
 
         # Hypotheses + citations
         hyps = c.get("hypotheses") or []
@@ -89,6 +90,11 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
         for ct in cits:
             if isinstance(ct, dict):
                 all_citations.append(ct)
+
+    # Strip zeros if they were all defaulted
+    rye_values = [v for v in rye_values if v != 0.0] or [0.0]
+    delta_values = [v for v in delta_values if v != 0.0] or [0.0]
+    energy_values = [v for v in energy_values if v != 0.0] or [0.0]
 
     avg_rye = sum(rye_values) / len(rye_values) if rye_values else 0.0
     avg_delta = sum(delta_values) / len(delta_values) if delta_values else 0.0
@@ -114,6 +120,15 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
                 lines.append(f"- {trimmed}")
             if len(goals_list) > 10:
                 lines.append(f"- ... and {len(goals_list) - 10} more")
+        lines.append("")
+
+    # Session time span (best effort from timestamps)
+    if timestamps:
+        first_ts = sorted(timestamps)[0]
+        last_ts = sorted(timestamps)[-1]
+        lines.append("**Session time span (UTC, best-effort from logs):**")
+        lines.append(f"- First cycle: `{first_ts}`")
+        lines.append(f"- Last cycle: `{last_ts}`")
         lines.append("")
 
     # Core stats
@@ -189,8 +204,9 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     )
     lines.append(
         f"The average RYE of **{avg_rye:.3f}** captures how much verified improvement (ΔR) "
-        "was achieved per unit of energy (E). Positive RYE trend suggests that the system "
-        "is learning to repair itself more efficiently over time."
+        "was achieved per unit of energy (E). A positive RYE trend suggests that the system "
+        "is learning to repair itself more efficiently over time, while a negative trend "
+        "indicates diminishing returns or increasing repair difficulty."
     )
     lines.append("")
 
