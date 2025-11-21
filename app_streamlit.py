@@ -3,7 +3,7 @@
 Features:
 - Continuous Mode with duration presets (1h, 8h, 24h, 90 days, Forever)
 - Researcher + Critic multi-agent mode
-- Swarm mode with up to 5 specialized roles
+- Swarm mode with up to dozens of specialized mini agents
 - Domain presets (General, Longevity, Math)
 - PubMed / Semantic Scholar ingestion controls
 - Biomarker analysis toggle (for anti-aging teams)
@@ -45,7 +45,7 @@ CONFIG_PATH_DEFAULT = "config/settings.yaml"
 # This is now just a safety cap; real time is controlled by max_minutes.
 CYCLES_PER_HOUR_ESTIMATE = 120
 
-# Swarm roles: up to 5 specialized mini agents
+# Swarm roles: base archetypes for mini agents
 SWARM_ROLES: List[Tuple[str, str]] = [
     ("researcher", "Deep literature and web researcher"),
     ("critic", "Methodology critic and refiner"),
@@ -53,6 +53,10 @@ SWARM_ROLES: List[Tuple[str, str]] = [
     ("theorist", "Model builder and unifier"),
     ("integrator", "Synthesizer that integrates and summarizes"),
 ]
+
+# Safe upper bound for swarm size on typical Render / Streamlit setups.
+# All swarm agents are still run sequentially in a single process.
+MAX_SWARM_AGENTS: int = 32
 
 
 # -------------------------------------------------------------------
@@ -176,37 +180,60 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
 
 
 def build_swarm_roles(enabled: bool, swarm_size: int) -> List[Tuple[str, str]]:
-    """Return the active swarm roles (name, description) given size."""
+    """Return the active swarm roles (name, description) given total swarm agents.
+
+    If swarm_size <= len(SWARM_ROLES), we just take the first N base roles.
+    If swarm_size > len(SWARM_ROLES), we create multiple agents per base role,
+    with role names like 'researcher_1', 'critic_2', etc.
+    """
     if not enabled or swarm_size <= 1:
         return []
-    size = max(1, min(swarm_size, len(SWARM_ROLES)))
-    return SWARM_ROLES[:size]
+
+    total = max(1, min(swarm_size, MAX_SWARM_AGENTS))
+    agents: List[Tuple[str, str]] = []
+
+    for idx in range(total):
+        base_role, base_desc = SWARM_ROLES[idx % len(SWARM_ROLES)]
+        if total <= len(SWARM_ROLES):
+            role_name = base_role
+            desc = base_desc
+        else:
+            # Distinguish clones of the same archetype
+            role_name = f"{base_role}_{idx + 1}"
+            desc = f"{base_desc} (agent {idx + 1}/{total})"
+        agents.append((role_name, desc))
+
+    return agents
 
 
 def role_specific_goal(base_goal: str, role: str) -> str:
     """Specialize the goal text slightly for each swarm role."""
     base_goal = base_goal.strip()
-    if role == "researcher":
+
+    # Strip any clone suffix like "_3" so we map back to the archetype
+    archetype = role.split("_", 1)[0] if "_" in role else role
+
+    if archetype == "researcher":
         return (
             f"Primary deep research agent for goal: {base_goal}.\n"
             "Focus on high quality sources, detailed notes, and clear summaries."
         )
-    if role == "critic":
+    if archetype == "critic":
         return (
             f"Critically review, cross check, and refine all existing Reparodynamic notes and hypotheses for: {base_goal}.\n"
             "Identify weaknesses, gaps, and overclaims."
         )
-    if role == "explorer":
+    if archetype == "explorer":
         return (
             f"Exploration agent for goal: {base_goal}.\n"
             "Look for unusual angles, analogies, adjacent fields, and surprising connections."
         )
-    if role == "theorist":
+    if archetype == "theorist":
         return (
             f"Theory building agent for goal: {base_goal}.\n"
             "Try to organize findings into coherent models, equations, or structured frameworks."
         )
-    if role == "integrator":
+    if archetype == "integrator":
         return (
             f"Integration agent for goal: {base_goal}.\n"
             "Synthesize results from all prior agents into clear narratives, tables, and distilled insights."
@@ -280,20 +307,28 @@ def main() -> None:
     enable_swarm = st.sidebar.checkbox(
         "Enable Swarm (multi-role mini agents)",
         value=False,
-        help="Run up to 5 specialized agents (researcher, critic, explorer, theorist, integrator).",
+        help=(
+            "Run up to dozens of specialized agents (researchers, critics, explorers, "
+            "theorists, integrators). All agents run sequentially in one process for safety."
+        ),
     )
+
     swarm_size = 1
     swarm_roles: List[Tuple[str, str]] = []
     if enable_swarm:
         swarm_size = st.sidebar.slider(
-            "Number of swarm agents",
+            "Total swarm agents",
             min_value=2,
-            max_value=len(SWARM_ROLES),
-            value=3,
-            help="Swarm size is how many specialized roles you activate at once.",
+            max_value=MAX_SWARM_AGENTS,
+            value=min(5, MAX_SWARM_AGENTS),
+            help=(
+                "Total number of mini agents in the swarm. "
+                "They share memory but take on specialized roles. "
+                "Higher values mean more total cycles and more API usage."
+            ),
         )
         swarm_roles = build_swarm_roles(True, swarm_size)
-        st.sidebar.write("Active roles:")
+        st.sidebar.write("Active swarm agents:")
         for name, desc in swarm_roles:
             st.sidebar.write(f"- **{name}**: {desc}")
 
@@ -420,9 +455,10 @@ def main() -> None:
         if run_mode == "Manual (finite cycles)":
             # Swarm manual mode
             if enable_swarm and swarm_roles:
+                total_cycles = len(swarm_roles) * int(cycles)
                 st.info(
-                    f"Manual Swarm mode: {len(swarm_roles)} roles × {int(cycles)} cycles "
-                    f"(total {len(swarm_roles) * int(cycles)} mini-cycles)."
+                    f"Manual Swarm mode: {len(swarm_roles)} agents × {int(cycles)} cycles "
+                    f"(total {total_cycles} mini-cycles)."
                 )
                 for i in range(int(cycles)):
                     base_index = next_index + i * len(swarm_roles)
@@ -535,8 +571,8 @@ def main() -> None:
             if enable_swarm and swarm_roles and max_minutes is not None:
                 minutes_per_agent = max_minutes / float(len(swarm_roles))
                 st.info(
-                    f"Swarm continuous mode: {len(swarm_roles)} roles, "
-                    f"~{minutes_per_agent:.1f} minutes per role."
+                    f"Swarm continuous mode: {len(swarm_roles)} agents, "
+                    f"~{minutes_per_agent:.1f} minutes per agent."
                 )
                 for idx, (role_name, _) in enumerate(swarm_roles, start=1):
                     st.write(f"Starting swarm agent {idx}/{len(swarm_roles)} (role: {role_name})...")
