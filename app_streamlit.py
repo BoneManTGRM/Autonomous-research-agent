@@ -81,7 +81,12 @@ def tavily_status() -> Dict[str, Any]:
 
 def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
     """Pretty print cycle summary output."""
-    st.markdown(f"### Cycle {cycle_summary['cycle'] + 1} ({cycle_summary.get('role', 'agent')})")
+    role = cycle_summary.get("role", "agent")
+    domain = cycle_summary.get("domain") or "general"
+    st.markdown(
+        f"### Cycle {cycle_summary['cycle'] + 1} "
+        f"(role: {role}, domain: {domain})"
+    )
 
     # Metrics
     col1, col2, col3 = st.columns(3)
@@ -155,9 +160,10 @@ def main() -> None:
     # -----------------------------
     st.sidebar.header("Run settings")
 
-    # Preset selector (General, Longevity, Math)
+    # Preset selector (General, Longevity, Math, etc.)
     preset_keys = list(PRESETS.keys())
     preset_labels = [PRESETS[k]["label"] for k in preset_keys]
+
     # Make "general" the default if it exists
     default_preset_index = 0
     if "general" in preset_keys:
@@ -172,6 +178,7 @@ def main() -> None:
     # Map label back to preset key
     selected_key = preset_keys[preset_labels.index(selected_label)]
     preset = get_preset(selected_key)
+    domain_tag = preset.get("domain", selected_key)
 
     # Tavily status
     status = tavily_status()
@@ -239,8 +246,6 @@ def main() -> None:
     # but user edits are preserved across reruns.
     if "goal_text" not in st.session_state:
         st.session_state["goal_text"] = default_goal
-    # If user changed preset, optionally update the goal if it still equals the old preset,
-    # but to keep it simple on mobile we will not auto overwrite user text.
 
     goal = st.text_area("Enter research goal:", value=st.session_state["goal_text"], height=160)
     # Update session state to keep latest text
@@ -260,7 +265,7 @@ def main() -> None:
     # Run cycles
     # ------------------------------
     if run_button:
-        st.write(f"Running agent with preset: {preset.get('label', selected_label)}")
+        st.write(f"Running agent with preset: {preset.get('label', selected_label)} (domain: {domain_tag})")
         history = memory.get_cycle_history()
         next_index = len(history)
         results: List[Dict[str, Any]] = []
@@ -284,6 +289,7 @@ def main() -> None:
 
         if continuous_mode:
             st.warning("Continuous mode enabled. The agent will run multiple cycles until limit or stop condition.")
+            # CoreAgent.run_continuous handles extra kwargs with a safe wrapper
             summaries = agent.run_continuous(
                 goal=goal,
                 max_cycles=int(cycles),
@@ -292,6 +298,7 @@ def main() -> None:
                 source_controls=source_controls,
                 pdf_bytes=pdf_bytes,
                 biomarker_snapshot=None,
+                domain=domain_tag,
             )
             results.extend(summaries)
         else:
@@ -306,6 +313,7 @@ def main() -> None:
                         source_controls=source_controls,
                         pdf_bytes=pdf_bytes,
                         biomarker_snapshot=None,
+                        domain=domain_tag,
                     )
                     results.append(out["summary"])
             else:
@@ -321,6 +329,7 @@ def main() -> None:
                         source_controls=source_controls,
                         pdf_bytes=pdf_bytes,
                         biomarker_snapshot=None,
+                        domain=domain_tag,
                     )
                     results.append(r["summary"])
 
@@ -333,6 +342,7 @@ def main() -> None:
                         source_controls=source_controls,
                         pdf_bytes=None,  # critic does not need to re-ingest PDF
                         biomarker_snapshot=None,
+                        domain=domain_tag,
                     )
                     results.append(c["summary"])
 
@@ -358,6 +368,7 @@ def main() -> None:
                 {
                     "cycle": entry.get("cycle"),
                     "role": entry.get("role", "agent"),
+                    "domain": entry.get("domain", "general"),
                     "goal": goal_text[:60] + ("..." if len(goal_text) > 60 else ""),
                     "delta_R": entry.get("delta_R"),
                     "energy_E": entry.get("energy_E"),
