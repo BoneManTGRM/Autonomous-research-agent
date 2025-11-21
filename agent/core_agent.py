@@ -21,10 +21,14 @@ RYE (Repair Yield per Energy):
 
 Multi-agent extension:
     CoreAgent can now orchestrate multiple logical agent roles
-    (researcher, critic, planner, synthesizer, explorer) over the same
-    MemoryStore. This makes it possible to run:
+    (researcher, critic, planner, synthesizer, explorer, plus up to
+    a total of 32 agents) over the same MemoryStore. This makes it
+    possible to run:
         - one cycle per role (multi-agent round), or
         - long continuous runs where each “round” consists of many roles.
+
+    The maximum number of logical agents is capped at 32 for safety,
+    and can be configured via config["max_agents"] (1–32).
 """
 
 from __future__ import annotations
@@ -76,19 +80,46 @@ class CoreAgent:
         self.auto_resume_enabled: bool = bool(self.config.get("auto_resume_enabled", True))
 
         # ------------------------------------------------------------------
-        # Multi-agent configuration
+        # Multi-agent configuration (up to 32 logical agents)
         # ------------------------------------------------------------------
-        # Logical agent “roles” that can be run in rounds.
-        # You can change or extend this list in config if desired:
-        #   config["agent_roles"] = ["researcher", "critic", "planner", "synthesizer", "explorer"]
-        default_roles: List[str] = [
+        # Hard safety cap for number of logical agents this CoreAgent
+        # will coordinate in any single round.
+        self.max_agents: int = int(self.config.get("max_agents", 32))
+        if self.max_agents < 1:
+            self.max_agents = 1
+        if self.max_agents > 32:
+            self.max_agents = 32
+
+        # Logical “base” roles. Additional generic roles are generated
+        # as agent_01, agent_02, ... up to self.max_agents.
+        base_roles: List[str] = [
             "researcher",
             "critic",
             "planner",
             "synthesizer",
             "explorer",
         ]
-        self.agent_roles: List[str] = list(self.config.get("agent_roles", default_roles))
+
+        # Generate a full role list up to max_agents
+        generated_roles: List[str] = list(base_roles)
+        # Fill remaining slots with generic agent_NN labels
+        counter = 1
+        while len(generated_roles) < self.max_agents:
+            generated_roles.append(f"agent_{counter:02d}")
+            counter += 1
+
+        # If config provides an explicit list of roles, use it but
+        # enforce the max_agents cap.
+        config_roles = self.config.get("agent_roles")
+        if isinstance(config_roles, (list, tuple)):
+            roles: List[str] = [str(r) for r in config_roles if r]
+            if not roles:
+                roles = generated_roles
+        else:
+            roles = generated_roles
+
+        # Enforce safety cap
+        self.agent_roles: List[str] = roles[: self.max_agents]
 
     # ------------------------------------------------------------------
     # Internal helpers for crash proofing
@@ -128,8 +159,8 @@ class CoreAgent:
     # Multi-agent utilities
     # ------------------------------------------------------------------
     def get_agent_roles(self) -> List[str]:
-        """Return the configured logical agent roles."""
-        return list(self.agent_roles)
+        """Return the configured logical agent roles (capped at max_agents)."""
+        return list(self.agent_roles[: self.max_agents])
 
     def spawn_child_agent(self, extra_config: Optional[Dict[str, Any]] = None) -> "CoreAgent":
         """Create a new CoreAgent that shares the same MemoryStore.
@@ -137,6 +168,9 @@ class CoreAgent:
         This is a light-weight way for agents to "create" agents.
         Child agents share the same memory substrate but can have their
         own configuration (for example different prompts, domains, etc.).
+
+        The child will inherit max_agents (capped at 32) unless overridden
+        in extra_config["max_agents"].
         """
         cfg = dict(self.config)
         if extra_config:
@@ -155,7 +189,7 @@ class CoreAgent:
     ) -> List[Dict[str, Any]]:
         """Run a single 'round' of multiple logical agents.
 
-        Example round (5 agents):
+        Example round (5 agents, but can go up to 32):
             1. researcher   – primary gatherer and explainer
             2. critic       – attacks weak points, flags gaps
             3. planner      – proposes next experiments and steps
@@ -166,15 +200,20 @@ class CoreAgent:
         with different `role` labels so you can distinguish their
         contributions in the logs and RYE history.
 
-        Returns:
-            List of human-facing summaries (one per role).
+        The number of roles actually run is capped by self.max_agents
+        (default 32).
         """
         if roles is None:
-            roles = self.agent_roles
+            roles_seq: Sequence[str] = self.agent_roles
+        else:
+            roles_seq = roles
+
+        # Enforce max agent count for safety
+        roles_list: List[str] = [str(r) for r in roles_seq][: self.max_agents]
 
         summaries: List[Dict[str, Any]] = []
 
-        for idx, role in enumerate(roles):
+        for idx, role in enumerate(roles_list):
             ci = base_cycle_index + idx
             result = self.run_cycle(
                 goal=goal,
@@ -324,7 +363,7 @@ class CoreAgent:
                 If True, ignore max_cycles and keep running until
                 stopped by `max_minutes`, `stop_rye`, or the environment.
             resume_from_checkpoint:
-                If True, try to detect a previous interrupted run from
+                If True, try to detect a previous interrupted continuous run from
                 the checkpoint file and adjust the remaining time budget.
             watchdog_interval_minutes:
                 How often to update the checkpoint heartbeat at minimum.
