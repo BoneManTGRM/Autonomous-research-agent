@@ -23,7 +23,7 @@ TGRM phases (implemented below)
 
 from __future__ import annotations
 
-import datetime
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from .rye_metrics import compute_delta_r, compute_energy, compute_rye
@@ -102,6 +102,7 @@ class TGRMLoop:
                 }
         """
         src_ctrl = self._normalise_source_controls(source_controls)
+        domain_tag = domain or "general"
 
         # TEST phase – evaluate current state
         prior_notes = self.memory_store.get_notes(goal)
@@ -156,15 +157,19 @@ class TGRMLoop:
         # Create cycle summary (machine-facing log)
         cycle_summary = {
             "cycle": cycle_index,
-            "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
             "goal": goal,
             "role": role,
-            "domain": domain,
-            "issues_detected": issue_descriptions,
+            "domain": domain_tag,
+            # Issues before/after
+            "issues_before": issue_descriptions,
             "issues_after": issues_after,
+            # Actions / artifacts
             "repairs_applied": repair_actions,
+            "notes_added": notes_added,
             "citations": citations,
             "hypotheses": hypotheses,
+            # Raw stats and metrics
             "stats": stats,
             "delta_R": delta_r,
             "energy_E": energy_e,
@@ -174,13 +179,15 @@ class TGRMLoop:
         # Log cycle into memory
         self.memory_store.log_cycle(cycle_summary)
 
-        # Human-readable summary
+        # Human-readable summary (what Streamlit shows per cycle)
         human_summary = {
             "cycle": cycle_index,
             "role": role,
-            "domain": domain,
+            "domain": domain_tag,
+            "goal": goal,
             "issues_before": issue_descriptions,
-            "repairs": [a["description"] for a in repair_actions],
+            "issues_after": issues_after,
+            "repairs": [a.get("description", "") for a in repair_actions],
             "delta_R": delta_r,
             "energy_E": energy_e,
             "RYE": rye_value,
@@ -188,6 +195,7 @@ class TGRMLoop:
             "citations": citations,
             "hypotheses": hypotheses,
         }
+
         return {"summary": human_summary, "log": cycle_summary}
 
     # ------------------------------------------------------------------
@@ -503,7 +511,7 @@ class TGRMLoop:
 
         # For each question, run multi-source research
         for q in questions:
-            note_lines.append(f"### Question-focused search:")
+            note_lines.append("### Question-focused search:")
             note_lines.append(q)
             note_lines.append("")
 
