@@ -1,0 +1,11 @@
+# Default configuration for the autonomous research agent.
+#
+# You can modify these settings to adjust paths and other parameters. These
+# values are read at runtime by main.py. If this file is missing, sensible
+# defaults defined in the code will be used instead.
+
+# Path to the memory file where notes and cycle logs are stored.
+memory_file: logs/sessions/default_memory.json
+
+# Number of results to retrieve when performing web searches (unused in stub).
+web_search_results: 2
