@@ -3,6 +3,7 @@
 Features:
 - Continuous Mode (agent runs up to N cycles or until RYE threshold)
 - Researcher + Critic multi-agent mode
+- Domain presets (General, Longevity, Math)
 - PubMed / Semantic Scholar ingestion controls
 - Biomarker analysis toggle (for anti-aging teams)
 - Hypothesis generation viewer
@@ -29,6 +30,7 @@ import yaml
 
 from agent.core_agent import CoreAgent
 from agent.memory_store import MemoryStore
+from agent.presets import PRESETS, get_preset  # new presets import
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
@@ -153,6 +155,24 @@ def main() -> None:
     # -----------------------------
     st.sidebar.header("Run settings")
 
+    # Preset selector (General, Longevity, Math)
+    preset_keys = list(PRESETS.keys())
+    preset_labels = [PRESETS[k]["label"] for k in preset_keys]
+    # Make "general" the default if it exists
+    default_preset_index = 0
+    if "general" in preset_keys:
+        default_preset_index = preset_keys.index("general")
+
+    selected_label = st.sidebar.selectbox(
+        "Preset",
+        options=preset_labels,
+        index=default_preset_index,
+        help="Choose a domain preset. You can still edit all settings below.",
+    )
+    # Map label back to preset key
+    selected_key = preset_keys[preset_labels.index(selected_label)]
+    preset = get_preset(selected_key)
+
     # Tavily status
     status = tavily_status()
     st.sidebar.subheader("Internet research")
@@ -165,17 +185,30 @@ def main() -> None:
     # Multi-agent toggle
     multi_agent = st.sidebar.checkbox("Enable Multi Agent (Researcher + Critic)", value=False)
 
-    # Source controls
-    use_pubmed = st.sidebar.checkbox("Use PubMed (scientific literature)", value=False)
-    use_semantic = st.sidebar.checkbox("Use Semantic Scholar ingestion", value=False)
-    use_pdf = st.sidebar.checkbox("Enable PDF ingestion (upload papers below)", value=False)
+    # Source controls (defaults from preset, but user can override)
+    sc_defaults = preset.get("source_controls", {})
+    use_pubmed = st.sidebar.checkbox(
+        "Use PubMed (scientific literature)",
+        value=bool(sc_defaults.get("pubmed", False)),
+    )
+    use_semantic = st.sidebar.checkbox(
+        "Use Semantic Scholar ingestion",
+        value=bool(sc_defaults.get("semantic", False)),
+    )
+    use_pdf = st.sidebar.checkbox(
+        "Enable PDF ingestion (upload papers below)",
+        value=bool(sc_defaults.get("pdf", True)),
+    )
 
     uploaded_pdf = None
     if use_pdf:
         uploaded_pdf = st.sidebar.file_uploader("Upload a PDF paper", type=["pdf"])
 
     # Biomarker mode (future use for anti-aging / longevity dashboards)
-    use_biomarkers = st.sidebar.checkbox("Biomarker / Longevity Mode (anti-aging teams)", value=False)
+    use_biomarkers = st.sidebar.checkbox(
+        "Biomarker / Longevity Mode (anti-aging teams)",
+        value=bool(sc_defaults.get("biomarkers", False)),
+    )
 
     # Continuous mode
     continuous_mode = st.sidebar.checkbox("Continuous mode (up to N cycles with stop condition)", value=False)
@@ -196,11 +229,22 @@ def main() -> None:
     # -----------------------------
     st.subheader("Research goal")
 
-    default_goal = (
+    # Default goal from preset, but user can override
+    default_goal = preset.get("default_goal") or (
         "Research and summarize the concept of Reparodynamics, define RYE and TGRM, "
         "identify similar frameworks in the literature, and produce a structured comparison table."
     )
-    goal = st.text_area("Enter research goal:", value=default_goal, height=160)
+
+    # Use a key for the goal so the preset is used as default,
+    # but user edits are preserved across reruns.
+    if "goal_text" not in st.session_state:
+        st.session_state["goal_text"] = default_goal
+    # If user changed preset, optionally update the goal if it still equals the old preset,
+    # but to keep it simple on mobile we will not auto overwrite user text.
+
+    goal = st.text_area("Enter research goal:", value=st.session_state["goal_text"], height=160)
+    # Update session state to keep latest text
+    st.session_state["goal_text"] = goal
 
     cycles = st.number_input(
         "Number of TGRM cycles to run",
@@ -216,7 +260,7 @@ def main() -> None:
     # Run cycles
     # ------------------------------
     if run_button:
-        st.write("Running agent…")
+        st.write(f"Running agent with preset: {preset.get('label', selected_label)}")
         history = memory.get_cycle_history()
         next_index = len(history)
         results: List[Dict[str, Any]] = []
@@ -239,8 +283,7 @@ def main() -> None:
                 pdf_bytes = None
 
         if continuous_mode:
-            st.warning("Continuous mode enabled — agent will run multiple cycles until limit or stop condition.")
-            # Use CoreAgent.run_continuous if implemented as discussed
+            st.warning("Continuous mode enabled. The agent will run multiple cycles until limit or stop condition.")
             summaries = agent.run_continuous(
                 goal=goal,
                 max_cycles=int(cycles),
@@ -248,7 +291,7 @@ def main() -> None:
                 role="agent",
                 source_controls=source_controls,
                 pdf_bytes=pdf_bytes,
-                biomarker_snapshot=None,  # placeholder hook
+                biomarker_snapshot=None,
             )
             results.extend(summaries)
         else:
@@ -288,7 +331,7 @@ def main() -> None:
                         cycle_index=base + 1,
                         role="critic",
                         source_controls=source_controls,
-                        pdf_bytes=None,  # critic doesn't need to re-ingest PDF
+                        pdf_bytes=None,  # critic does not need to re-ingest PDF
                         biomarker_snapshot=None,
                     )
                     results.append(c["summary"])
@@ -334,10 +377,10 @@ def main() -> None:
 
         if cycles_x:
             st.line_chart({"RYE": rye_y})
-            st.caption("Higher RYE = more efficient repair (ΔR per unit energy).")
+            st.caption("Higher RYE means more efficient repair (delta_R per unit energy).")
 
             st.line_chart({"delta_R": delta_y})
-            st.caption("delta_R = how much improvement each cycle produced.")
+            st.caption("delta_R is how much improvement each cycle produced.")
 
             st.line_chart({"energy_E": energy_y})
             st.caption("Energy per cycle (approximate effort cost).")
