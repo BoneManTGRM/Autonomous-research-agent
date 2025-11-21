@@ -22,6 +22,7 @@ RYE (Repair Yield per Energy):
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, List, Optional
 
 from .memory_store import MemoryStore
@@ -197,10 +198,42 @@ class CoreAgent:
             List[Dict[str, Any]]: List of human-facing summaries for
             each completed cycle.
         """
-        import time
-
         summaries: List[Dict[str, Any]] = []
         recent_rye: List[float] = []
+
+        # ------------------------------------------------------------------
+        # Auto map the "hour presets" from app_streamlit to real time
+        # without changing any other files.
+        #
+        # app_streamlit.py currently does:
+        #   CYCLES_PER_HOUR_ESTIMATE = 120
+        #   1h  -> max_cycles = 120
+        #   8h  -> max_cycles = 960
+        #   24h -> max_cycles = 2880
+        #   Forever -> max_cycles = 10_000_000
+        #
+        # Here we detect those magic values and convert them back into
+        # wall-clock minutes so that the run actually respects time,
+        # not just cycle count.
+        # ------------------------------------------------------------------
+        if max_minutes is None:
+            if max_cycles == 120:
+                # 1 hour preset
+                max_minutes = 60.0
+                max_cycles = 1_000_000
+            elif max_cycles == 960:
+                # 8 hour preset
+                max_minutes = 480.0
+                max_cycles = 1_000_000
+            elif max_cycles == 2880:
+                # 24 hour preset
+                max_minutes = 1440.0
+                max_cycles = 1_000_000
+            elif max_cycles >= 10_000_000:
+                # "Forever" preset: let environment or stop_rye decide
+                forever = True
+                # keep a very high cap as a hard safety
+                max_cycles = 10_000_000
 
         # Start counting cycles from the existing history length
         history = self.memory_store.get_cycle_history()
@@ -214,7 +247,7 @@ class CoreAgent:
             if not forever and i >= max_cycles:
                 break
 
-            # Time-based stopping (for 1h / 8h / 24h presets if wired)
+            # Time-based stopping (for 1h / 8h / 24h presets)
             if max_minutes is not None:
                 elapsed_min = (time.monotonic() - start_time) / 60.0
                 if elapsed_min >= max_minutes:
