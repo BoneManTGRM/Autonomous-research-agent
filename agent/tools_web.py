@@ -5,16 +5,22 @@ This module powers the "web" part of the autonomous research agent.
 Features
 --------
 - REAL internet search via Tavily when TAVILY_API_KEY is available.
-- Safe stubbed search when no key / client is available (agent never crashes).
-- Optional page fetch + HTML cleanup for deeper analysis.
+- Safe stubbed search when no key or client is available (agent never crashes).
+- Optional page fetch plus HTML cleanup for deeper analysis.
 - Helper to convert search results into structured citation objects.
-- Normalised citation structure for use across PubMed / Semantic / Web.
+- Normalised citation structure for use across PubMed, Semantic Scholar, and web.
 
 Reparodynamics / TGRM:
     The Repair phase calls this tool to bring in new information from
     the environment. The quality and efficiency of these calls are
     reflected in ΔR (issues resolved, contradictions clarified) and E
     (energy cost) which together define RYE = ΔR / E.
+
+API key model:
+    - This file never hardcodes a key.
+    - It prefers a key passed in to WebResearchTool(api_key=...).
+    - If none is passed, it falls back to the TAVILY_API_KEY environment
+      variable (set by your UI, for example Streamlit).
 """
 
 from __future__ import annotations
@@ -29,21 +35,33 @@ try:
     # High level Tavily client (recommended)
     from tavily import TavilyClient
 except ImportError:
-    TavilyClient = None  # Streamlit Cloud installs this from requirements.txt
+    TavilyClient = None  # Installed from requirements.txt if available
 
 try:
     # For optional HTML cleanup of fetched pages
     from bs4 import BeautifulSoup  # type: ignore
 except ImportError:
-    BeautifulSoup = None  # Optional – tool still works without this
+    BeautifulSoup = None  # Optional - tool still works without this
 
 
 class WebResearchTool:
     """Web research tool powered by Tavily Search API."""
 
-    def __init__(self) -> None:
-        # Streamlit Secrets inject TAVILY_API_KEY into environment
-        self.api_key = os.getenv("TAVILY_API_KEY", None)
+    def __init__(self, api_key: Optional[str] = None) -> None:
+        """Create a WebResearchTool.
+
+        Args:
+            api_key:
+                Optional Tavily API key. If not provided, the tool will
+                look for TAVILY_API_KEY in the environment. This lets
+                each user supply their own key at runtime through the UI.
+        """
+        # Prefer explicit key if given, otherwise read from environment
+        if api_key:
+            self.api_key = api_key
+        else:
+            self.api_key = os.getenv("TAVILY_API_KEY", None)
+
         self.client: Optional[TavilyClient] = None  # type: ignore[type-arg]
 
         if self.api_key and TavilyClient is not None:
@@ -133,7 +151,7 @@ class WebResearchTool:
         return "; ".join(titles)
 
     # ------------------------------------------------------------------
-    # OPTIONAL PAGE FETCH + CLEANUP
+    # OPTIONAL PAGE FETCH PLUS CLEANUP
     # ------------------------------------------------------------------
     def fetch_page_text(self, url: str, max_chars: int = 4000) -> str:
         """Download a web page and return cleaned text (best-effort).
