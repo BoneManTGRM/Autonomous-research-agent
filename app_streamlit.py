@@ -32,7 +32,7 @@ import yaml
 from agent.core_agent import CoreAgent
 from agent.memory_store import MemoryStore
 from agent.presets import PRESETS, get_preset  # domain presets
-from agent.report_generator import generate_report  # NEW: report builder
+from agent.report_generator import generate_report  # report builder
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
@@ -175,7 +175,7 @@ def main() -> None:
     # -----------------------------
     st.sidebar.header("Run settings")
 
-    # --- Tavily key input (per-user, replaces hard-wired secrets use) ---
+    # Tavily key input (per-user)
     st.sidebar.subheader("Tavily API key")
     existing_key = st.session_state.get("tavily_key", "")
     tavily_key_input = st.sidebar.text_input(
@@ -188,11 +188,9 @@ def main() -> None:
         ),
     )
     if tavily_key_input:
-        # Store in session state and mirror into environment
         st.session_state["tavily_key"] = tavily_key_input
         os.environ["TAVILY_API_KEY"] = tavily_key_input
     else:
-        # If user clears the box, clear env var for this process
         st.session_state["tavily_key"] = ""
         os.environ.pop("TAVILY_API_KEY", None)
 
@@ -200,7 +198,6 @@ def main() -> None:
     preset_keys = list(PRESETS.keys())
     preset_labels = [PRESETS[k]["label"] for k in preset_keys]
 
-    # Make "general" the default if it exists
     default_preset_index = 0
     if "general" in preset_keys:
         default_preset_index = preset_keys.index("general")
@@ -211,7 +208,6 @@ def main() -> None:
         index=default_preset_index,
         help="Choose a domain preset. You can still edit all settings below.",
     )
-    # Map label back to preset key
     selected_key = preset_keys[preset_labels.index(selected_label)]
     preset = get_preset(selected_key)
     domain_tag = preset.get("domain", selected_key)
@@ -247,13 +243,13 @@ def main() -> None:
     if use_pdf:
         uploaded_pdf = st.sidebar.file_uploader("Upload a PDF paper", type=["pdf"])
 
-    # Biomarker mode (future use for anti-aging / longevity dashboards)
+    # Biomarker mode
     use_biomarkers = st.sidebar.checkbox(
         "Biomarker / Longevity Mode (anti-aging teams)",
         value=bool(sc_defaults.get("biomarkers", False)),
     )
 
-    # Run mode presets: manual, timed, forever
+    # Run mode presets
     run_mode = st.sidebar.radio(
         "Run mode",
         [
@@ -264,10 +260,10 @@ def main() -> None:
             "Forever (until stopped)",
         ],
         index=0,
-        help="Timed modes approximate hours by running many cycles; actual wall time depends on environment.",
+        help="Timed modes approximate hours by running many cycles. Actual wall time depends on environment.",
     )
 
-    # Only continuous modes need a RYE stop condition
+    # Optional RYE stop for continuous modes
     stop_rye_threshold: Optional[float] = None
     if run_mode != "Manual (finite cycles)":
         stop_rye_threshold = st.sidebar.number_input(
@@ -285,19 +281,15 @@ def main() -> None:
     # -----------------------------
     st.subheader("Research goal")
 
-    # Default goal from preset, but user can override
     default_goal = preset.get("default_goal") or (
         "Research and summarize the concept of Reparodynamics, define RYE and TGRM, "
         "identify similar frameworks in the literature, and produce a structured comparison table."
     )
 
-    # Use a key for the goal so the preset is used as default,
-    # but user edits are preserved across reruns.
     if "goal_text" not in st.session_state:
         st.session_state["goal_text"] = default_goal
 
     goal = st.text_area("Enter research goal:", value=st.session_state["goal_text"], height=160)
-    # Update session state to keep latest text
     st.session_state["goal_text"] = goal
 
     # Cycles only matter in manual mode
@@ -321,7 +313,7 @@ def main() -> None:
         next_index = len(history)
         results: List[Dict[str, Any]] = []
 
-        # Build source_controls dict for the agent / TGRM loop
+        # Source controls for TGRM loop
         source_controls = {
             "web": True,
             "pubmed": bool(use_pubmed),
@@ -338,9 +330,8 @@ def main() -> None:
             except Exception:
                 pdf_bytes = None
 
-        # ---------------- Continuous presets vs manual ---------------
+        # Manual finite mode
         if run_mode == "Manual (finite cycles)":
-            # Finite cycles mode (existing logic)
             if not multi_agent:
                 for i in range(int(cycles)):
                     ci = next_index + i
@@ -355,7 +346,6 @@ def main() -> None:
                     )
                     results.append(out["summary"])
             else:
-                # Multi-agent: researcher + critic per logical cycle
                 for i in range(int(cycles)):
                     base = next_index + 2 * i
 
@@ -378,7 +368,7 @@ def main() -> None:
                         cycle_index=base + 1,
                         role="critic",
                         source_controls=source_controls,
-                        pdf_bytes=None,  # critic does not need to re-ingest PDF
+                        pdf_bytes=None,
                         biomarker_snapshot=None,
                         domain=domain_tag,
                     )
@@ -392,10 +382,15 @@ def main() -> None:
             elif run_mode == "24 hours (estimated)":
                 effective_max_cycles = 24 * CYCLES_PER_HOUR_ESTIMATE
             elif run_mode == "Forever (until stopped)":
-                # Very high cap - practically "forever" until environment stops it
                 effective_max_cycles = 10_000_000
             else:
                 effective_max_cycles = CYCLES_PER_HOUR_ESTIMATE
+
+            if multi_agent:
+                st.info(
+                    "Multi Agent toggle is currently ignored in timed modes. "
+                    "Continuous runs use a single agent role for now."
+                )
 
             st.info(
                 f"Continuous mode: target {run_mode} "
@@ -415,7 +410,7 @@ def main() -> None:
             )
             results.extend(summaries)
 
-        # Display cycle summaries
+        # Show cycle summaries
         st.subheader("Cycle Summaries")
         for cs in results:
             render_cycle_summary(cs)
