@@ -83,6 +83,7 @@ class CoreAgent:
         source_controls: Optional[Dict[str, bool]] = None,
         pdf_bytes: Optional[bytes] = None,
         biomarker_snapshot: Optional[Dict[str, Any]] = None,  # reserved for future biomarker engine
+        domain: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run a single cycle of research using the TGRM loop.
 
@@ -103,7 +104,9 @@ class CoreAgent:
                 to any previously attached PDF stored in self._attached_pdf_bytes.
             biomarker_snapshot:
                 Placeholder for a future biomarker or lab value payload.
-                Currently not forwarded but kept for API stability.
+            domain:
+                Optional domain tag (e.g. "general", "longevity", "math")
+                to label this cycle in the logs.
 
         Returns:
             Dict[str, Any]: Dictionary containing the human-facing
@@ -117,7 +120,9 @@ class CoreAgent:
             effective_source_controls.update(source_controls)
 
         # Choose PDF bytes: per-call bytes override attached PDF
-        effective_pdf_bytes: Optional[bytes] = pdf_bytes if pdf_bytes is not None else self._attached_pdf_bytes
+        effective_pdf_bytes: Optional[bytes] = (
+            pdf_bytes if pdf_bytes is not None else self._attached_pdf_bytes
+        )
 
         # Forward into the TGRM loop.
         # Use a TypeError-safe wrapper for compatibility with older signatures.
@@ -128,11 +133,16 @@ class CoreAgent:
                 role=role,
                 source_controls=effective_source_controls,
                 pdf_bytes=effective_pdf_bytes,
+                biomarker_snapshot=biomarker_snapshot,
+                domain=domain,
             )
         except TypeError:
             # Backwards compatibility: older TGRMLoop.run_cycle
-            # that only accepts (goal, cycle_index).
-            return self.tgrm_loop.run_cycle(goal, cycle_index)
+            # that only accepts (goal, cycle_index) or (goal, cycle_index, role).
+            try:
+                return self.tgrm_loop.run_cycle(goal, cycle_index, role)
+            except TypeError:
+                return self.tgrm_loop.run_cycle(goal, cycle_index)
 
     def run_continuous(
         self,
@@ -143,6 +153,7 @@ class CoreAgent:
         source_controls: Optional[Dict[str, bool]] = None,
         pdf_bytes: Optional[bytes] = None,
         biomarker_snapshot: Optional[Dict[str, Any]] = None,
+        domain: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Run multiple TGRM cycles in a row ("continuous mode").
 
@@ -170,6 +181,9 @@ class CoreAgent:
             biomarker_snapshot:
                 Optional biomarker or lab value payload shared for
                 future biomarker-aware logic.
+            domain:
+                Optional domain tag (e.g. "general", "longevity", "math")
+                forwarded into each cycle.
 
         Returns:
             List[Dict[str, Any]]: List of human-facing summaries for
@@ -191,6 +205,7 @@ class CoreAgent:
                 source_controls=source_controls,
                 pdf_bytes=pdf_bytes,
                 biomarker_snapshot=biomarker_snapshot,
+                domain=domain,
             )
             summary = result.get("summary", {})
             summaries.append(summary)
