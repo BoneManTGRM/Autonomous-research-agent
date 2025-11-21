@@ -88,12 +88,11 @@ class TGRMLoop:
                 as part of the Repair phase if "pdf" is enabled.
             biomarker_snapshot:
                 Optional dict of biomarker / lab values for future
-                longevity analysis (currently not used directly here,
-                but included for forward compatibility).
+                longevity analysis (currently not used directly here).
             domain:
                 Optional domain tag (e.g. "general", "longevity", "math")
-                from presets. Not yet used to change logic here, but
-                preserved in the log for future domain-specific behavior.
+                from presets. Preserved in the log for future
+                domain-specific behavior.
 
         Returns:
             Dict with:
@@ -242,6 +241,7 @@ class TGRMLoop:
         - Tavily web search runs
         - PubMed and Semantic Scholar are queried
         - PDF ingestion can be used when available
+        - Targeted research is performed for open questions / TODOs
         """
         repair_actions: List[Dict[str, str]] = []
         notes_added: List[str] = []
@@ -263,7 +263,7 @@ class TGRMLoop:
                 self.memory_store.add_citation(goal, c)
 
         for issue, desc in zip(issues, descriptions):
-            # Main "no notes" entry point
+            # Main "no notes" entry point – broad initial sweep
             if issue == "no_notes":
                 note_text, new_cites, issue_stats = self._initial_research(goal, role, source_controls, pdf_bytes)
                 self.memory_store.add_note(goal, note_text, role=role)
@@ -282,19 +282,31 @@ class TGRMLoop:
                     stats[k] = stats.get(k, 0) + v
 
             elif issue in {"question_mark", "todo_item"}:
-                # Future: targeted queries built from the specific note/question.
-                followup = (
-                    f"[{role}] Detected issue '{issue}': {desc}. "
-                    "Further targeted research is required (not yet specialised)."
+                # ---- FULL TARGETED RESEARCH MODE (Option A) ----
+                # Extract concrete questions / TODO lines from existing notes
+                questions = self._extract_questions(goal, issue_type=issue)
+                note_text, new_cites, issue_stats = self._targeted_research(
+                    goal=goal,
+                    role=role,
+                    issue=issue,
+                    issue_description=desc,
+                    source_controls=source_controls,
+                    questions=questions,
                 )
-                self.memory_store.add_note(goal, followup, role=role)
+
+                self.memory_store.add_note(goal, note_text, role=role)
                 repair_actions.append(
                     {
                         "issue": issue,
-                        "description": f"[{role}] Logged follow-up requirement for targeted research.",
+                        "description": f"[{role}] Performed targeted multi-source research for open items.",
                     }
                 )
-                notes_added.append(followup)
+                notes_added.append(note_text)
+                citations.extend(new_cites)
+                _log_citations(new_cites)
+
+                for k, v in issue_stats.items():
+                    stats[k] = stats.get(k, 0) + v
 
             elif issue == "contradiction":
                 # Placeholder: we mark that a contradiction was observed.
@@ -415,5 +427,120 @@ class TGRMLoop:
                 pass
 
         # Join all lines into a single note text
+        note_text = "\n".join(note_lines)
+        return note_text, citations, stats
+
+    def _extract_questions(self, goal: str, issue_type: str) -> List[str]:
+        """Extract concrete question or TODO lines from stored notes.
+
+        This scans existing notes for lines that contain a '?' (for
+        'question_mark') or 'TODO'/'todo' (for 'todo_item') and returns
+        a deduplicated list of candidate queries.
+        """
+        notes = self.memory_store.get_notes(goal)
+        candidates: List[str] = []
+
+        for note in notes:
+            content = note.get("content", "")
+            for line in content.splitlines():
+                line_strip = line.strip()
+                if issue_type == "question_mark" and "?" in line_strip:
+                    if len(line_strip) > 10:
+                        candidates.append(line_strip)
+                elif issue_type == "todo_item" and ("TODO" in line_strip or "todo" in line_strip):
+                    if len(line_strip) > 10:
+                        candidates.append(line_strip)
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique_questions: List[str] = []
+        for q in candidates:
+            if q not in seen:
+                seen.add(q)
+                unique_questions.append(q)
+
+        # Limit to the first few to control cost
+        return unique_questions[:5]
+
+    def _targeted_research(
+        self,
+        goal: str,
+        role: str,
+        issue: str,
+        issue_description: str,
+        source_controls: Dict[str, bool],
+        questions: Optional[List[str]] = None,
+    ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
+        """Perform focused multi-source research on open questions/TODOs.
+
+        This is the "Option A" full targeted mode:
+        - Use exact question/TODO lines when available.
+        - Query web, PubMed, and Semantic Scholar for each.
+        - Build a rich note that links each question to sources.
+        """
+        citations: List[Dict[str, str]] = []
+        stats = {
+            "web_calls": 0,
+            "pubmed_calls": 0,
+            "semantic_calls": 0,
+            "pdf_ingestions": 0,
+            "contradictions_resolved": 0,
+            "sources_used": 0,
+        }
+
+        # If we didn't extract specific questions, fall back to a generic query.
+        if not questions:
+            questions = [f"{goal} — focus on: {issue_description}"]
+
+        note_lines: List[str] = []
+        note_lines.append(f"[{role}] Targeted research on open items ({issue}) for goal:")
+        note_lines.append(goal)
+        note_lines.append("")
+        note_lines.append("Questions / TODOs considered:")
+        for q in questions:
+            note_lines.append(f"- {q}")
+        note_lines.append("")
+
+        # For each question, run multi-source research
+        for q in questions:
+            note_lines.append(f"### Question-focused search:")
+            note_lines.append(q)
+            note_lines.append("")
+
+            # Web search
+            if source_controls.get("web", True):
+                web_results = self.web_tool.search(q)
+                stats["web_calls"] += 1
+                web_summary = self.web_tool.summarize_results(web_results)
+                web_cites = self.web_tool.to_citations(web_results)
+                citations.extend(web_cites)
+
+                note_lines.append("Web summary (Tavily):")
+                note_lines.append(web_summary)
+                note_lines.append("Web sources:")
+                for c in web_cites:
+                    note_lines.append(f"- {c.get('title', '')} ({c.get('url', '')})")
+                note_lines.append("")
+
+            # PubMed
+            if source_controls.get("pubmed", False):
+                pubmed_results = self.pubmed_tool.search(q, max_results=5)
+                stats["pubmed_calls"] += 1
+                citations.extend(pubmed_results)
+                note_lines.append("PubMed sources:")
+                for r in pubmed_results:
+                    note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+                note_lines.append("")
+
+            # Semantic Scholar
+            if source_controls.get("semantic", False):
+                sem_results = self.semantic_tool.search(q, max_results=5)
+                stats["semantic_calls"] += 1
+                citations.extend(sem_results)
+                note_lines.append("Semantic Scholar sources:")
+                for r in sem_results:
+                    note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+                note_lines.append("")
+
         note_text = "\n".join(note_lines)
         return note_text, citations, stats
