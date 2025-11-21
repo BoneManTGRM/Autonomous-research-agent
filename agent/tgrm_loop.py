@@ -24,24 +24,27 @@ class TGRMLoop:
         self.memory_store = memory_store
         self.config = config or {}
 
-        # Initialise tools. In a full implementation these could take API keys
+        # Tools: web, papers, local files
         self.web_tool = WebResearchTool()
         self.paper_tool = PaperTool()
         self.file_tool = FileTool()
 
-    def run_cycle(self, goal: str, cycle_index: int) -> Dict[str, Any]:
-        """Run one TGRM cycle for a given research goal."""
-        # Test phase – evaluate current state
+    def run_cycle(self, goal: str, cycle_index: int, role: str = "researcher") -> Dict[str, Any]:
+        """Run one TGRM cycle for a given research goal and agent role.
+
+        role can be "researcher", "critic", or any tag you want to use.
+        """
+        # Test phase: evaluate current state
         prior_notes = self.memory_store.get_notes(goal)
         status_report = self._test(goal, prior_notes)
 
-        # Detect phase – identify issues to repair
+        # Detect phase: identify issues to repair
         issues, issue_descriptions = self._detect(status_report)
 
-        # Repair phase – apply targeted repairs
-        repair_actions, notes_added = self._repair(goal, issues, issue_descriptions)
+        # Repair phase: apply targeted repairs
+        repair_actions, notes_added, citations = self._repair(goal, issues, issue_descriptions, role)
 
-        # Verify phase – re-evaluate state after repair
+        # Verify phase: re evaluate state after repair
         new_notes = self.memory_store.get_notes(goal)
         new_status_report = self._test(goal, new_notes)
         issues_after, _ = self._detect(new_status_report)
@@ -60,9 +63,11 @@ class TGRMLoop:
             "cycle": cycle_index,
             "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
             "goal": goal,
+            "role": role,
             "issues_detected": issue_descriptions,
             "issues_after": issues_after,
             "repairs_applied": repair_actions,
+            "citations": citations,
             "delta_R": delta_r,
             "energy_E": energy_e,
             "RYE": rye_value,
@@ -71,15 +76,17 @@ class TGRMLoop:
         # Log cycle
         self.memory_store.log_cycle(cycle_summary)
 
-        # Human-readable summary
+        # Human readable summary
         human_summary = {
             "cycle": cycle_index,
+            "role": role,
             "issues_before": issue_descriptions,
             "repairs": [a["description"] for a in repair_actions],
             "delta_R": delta_r,
             "energy_E": energy_e,
             "RYE": rye_value,
             "notes_added": notes_added,
+            "citations": citations,
         }
         return {"summary": human_summary, "log": cycle_summary}
 
@@ -116,38 +123,89 @@ class TGRMLoop:
         goal: str,
         issues: List[str],
         descriptions: List[str],
+        role: str,
     ):
-        """Apply repairs to address detected issues."""
+        """Apply repairs to address detected issues.
+
+        This is where:
+        - real web search runs
+        - Semantic Scholar is queried
+        - PDF ingestion can be added later if you store URLs in notes
+        """
         repair_actions: List[Dict[str, str]] = []
         notes_added: List[str] = []
+        citations: List[Dict[str, str]] = []
 
         for issue, desc in zip(issues, descriptions):
+            # Main research entry point
             if issue == "no_notes":
-                # Perform a web search as a first repair step
-                results = self.web_tool.search(goal)
-                summary = self.web_tool.summarize_results(results)
-                note_text = f"Initial research summary: {summary}"
+                # 1. Tavily web search
+                web_results = self.web_tool.search(goal)
+                web_summary = self.web_tool.summarize_results(web_results)
+
+                # 2. Semantic Scholar search for more academic sources
+                scholar_results = self.paper_tool.search_semantic_scholar(goal, limit=5)
+
+                # Build citation list
+                for r in web_results:
+                    citations.append(
+                        {
+                            "source": "web",
+                            "title": r.get("title", ""),
+                            "url": r.get("url", ""),
+                        }
+                    )
+                for r in scholar_results:
+                    citations.append(
+                        {
+                            "source": "semantic_scholar",
+                            "title": r.get("title", ""),
+                            "url": r.get("url", ""),
+                        }
+                    )
+
+                # Build a rich note that includes sources
+                note_lines: List[str] = []
+                note_lines.append(f"[{role}] Initial research summary:")
+                note_lines.append(web_summary)
+                note_lines.append("")
+                note_lines.append("Web sources:")
+                for r in web_results:
+                    title = r.get("title", "")
+                    url = r.get("url", "")
+                    note_lines.append(f"- {title} ({url})")
+
+                note_lines.append("")
+                note_lines.append("Semantic Scholar sources:")
+                for r in scholar_results:
+                    title = r.get("title", "")
+                    url = r.get("url", "")
+                    note_lines.append(f"- {title} ({url})")
+
+                note_text = "\n".join(note_lines)
                 self.memory_store.add_note(goal, note_text)
                 repair_actions.append(
                     {
                         "issue": issue,
-                        "description": f"Performed web search for '{goal}'",
+                        "description": f"[{role}] Performed Tavily and Semantic Scholar search for '{goal}'",
                     }
                 )
                 notes_added.append(note_text)
+
             elif issue in {"question_mark", "todo_item"}:
-                # For now, log that more directed research is needed
+                # For now, log that more directed research is required.
+                # Later you can add targeted queries or PDF ingestion based on the specific question.
                 followup = (
-                    f"Detected issue '{issue}': {desc}. "
-                    "Further targeted research is required (not implemented in stub)."
+                    f"[{role}] Detected issue '{issue}': {desc}. "
+                    "Further targeted research is required (not yet specialized)."
                 )
                 self.memory_store.add_note(goal, followup)
                 repair_actions.append(
                     {
                         "issue": issue,
-                        "description": "Logged follow-up requirement for targeted research.",
+                        "description": f"[{role}] Logged follow up requirement for targeted research.",
                     }
                 )
                 notes_added.append(followup)
 
-        return repair_actions, notes_added
+        return repair_actions, notes_added, citations
