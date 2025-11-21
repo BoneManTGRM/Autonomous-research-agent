@@ -3,6 +3,7 @@
 Features:
 - Continuous Mode with duration presets (1h, 8h, 24h, 90 days, Forever)
 - Researcher + Critic multi-agent mode
+- Swarm mode with up to 5 specialized roles
 - Domain presets (General, Longevity, Math)
 - PubMed / Semantic Scholar ingestion controls
 - Biomarker analysis toggle (for anti-aging teams)
@@ -17,6 +18,10 @@ Reparodynamics:
     The UI is a front panel on a reparodynamic system:
     - Each click runs the TGRM loop (Test, Detect, Repair, Verify).
     - Each cycle computes RYE = delta_R / E and is logged.
+
+Time:
+    All continuous run presets (1h, 8h, 24h, 90 days) map to real
+    wall-clock minutes via the CoreAgent's max_minutes budget.
 """
 
 from __future__ import annotations
@@ -37,8 +42,17 @@ from agent.report_generator import generate_report  # report builder
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
 # Rough estimate for how many cycles you expect per hour in continuous mode.
-# This is now a safety cap, since time is controlled by max_minutes.
+# This is now just a safety cap; real time is controlled by max_minutes.
 CYCLES_PER_HOUR_ESTIMATE = 120
+
+# Swarm roles: up to 5 specialized mini agents
+SWARM_ROLES: List[Tuple[str, str]] = [
+    ("researcher", "Deep literature and web researcher"),
+    ("critic", "Methodology critic and refiner"),
+    ("explorer", "Out-of-distribution explorer (new angles, analogies)"),
+    ("theorist", "Model builder and unifier"),
+    ("integrator", "Synthesizer that integrates and summarizes"),
+]
 
 
 # -------------------------------------------------------------------
@@ -161,12 +175,52 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
                 st.write(f"- [{src}] {title} — {url}")
 
 
+def build_swarm_roles(enabled: bool, swarm_size: int) -> List[Tuple[str, str]]:
+    """Return the active swarm roles (name, description) given size."""
+    if not enabled or swarm_size <= 1:
+        return []
+    size = max(1, min(swarm_size, len(SWARM_ROLES)))
+    return SWARM_ROLES[:size]
+
+
+def role_specific_goal(base_goal: str, role: str) -> str:
+    """Specialize the goal text slightly for each swarm role."""
+    base_goal = base_goal.strip()
+    if role == "researcher":
+        return (
+            f"Primary deep research agent for goal: {base_goal}.\n"
+            "Focus on high quality sources, detailed notes, and clear summaries."
+        )
+    if role == "critic":
+        return (
+            f"Critically review, cross check, and refine all existing Reparodynamic notes and hypotheses for: {base_goal}.\n"
+            "Identify weaknesses, gaps, and overclaims."
+        )
+    if role == "explorer":
+        return (
+            f"Exploration agent for goal: {base_goal}.\n"
+            "Look for unusual angles, analogies, adjacent fields, and surprising connections."
+        )
+    if role == "theorist":
+        return (
+            f"Theory building agent for goal: {base_goal}.\n"
+            "Try to organize findings into coherent models, equations, or structured frameworks."
+        )
+    if role == "integrator":
+        return (
+            f"Integration agent for goal: {base_goal}.\n"
+            "Synthesize results from all prior agents into clear narratives, tables, and distilled insights."
+        )
+    # Fallback: use the original goal
+    return base_goal
+
+
 # -------------------------------------------------------------------
 # Main UI
 # -------------------------------------------------------------------
 def main() -> None:
     st.title("Autonomous Research Agent")
-    st.caption("Reparodynamics, RYE, and TGRM powered research loop")
+    st.caption("Reparodynamics, RYE, and TGRM powered research loop (with swarm mode)")
 
     agent, memory = init_agent()
 
@@ -221,8 +275,39 @@ def main() -> None:
         st.sidebar.warning(status["display"])
         st.sidebar.write("Paste a Tavily key above to enable real web search. Otherwise, stubbed results are used.")
 
-    # Multi-agent toggle
-    multi_agent = st.sidebar.checkbox("Enable Multi Agent (Researcher + Critic)", value=False)
+    # Swarm toggle and size
+    st.sidebar.subheader("Swarm configuration")
+    enable_swarm = st.sidebar.checkbox(
+        "Enable Swarm (multi-role mini agents)",
+        value=False,
+        help="Run up to 5 specialized agents (researcher, critic, explorer, theorist, integrator).",
+    )
+    swarm_size = 1
+    swarm_roles: List[Tuple[str, str]] = []
+    if enable_swarm:
+        swarm_size = st.sidebar.slider(
+            "Number of swarm agents",
+            min_value=2,
+            max_value=len(SWARM_ROLES),
+            value=3,
+            help="Swarm size is how many specialized roles you activate at once.",
+        )
+        swarm_roles = build_swarm_roles(True, swarm_size)
+        st.sidebar.write("Active roles:")
+        for name, desc in swarm_roles:
+            st.sidebar.write(f"- **{name}**: {desc}")
+
+    # Multi-agent toggle (classic researcher + critic)
+    # Disabled when swarm is on, because swarm already includes critic logic.
+    multi_agent = False
+    if not enable_swarm:
+        multi_agent = st.sidebar.checkbox(
+            "Enable classic Multi Agent (Researcher + Critic)",
+            value=False,
+            help="If swarm is disabled, you can still run a simple researcher+critic pair.",
+        )
+    else:
+        st.sidebar.info("Classic Multi Agent is disabled when Swarm is enabled.")
 
     # Source controls (defaults from preset, but user can override)
     sc_defaults = preset.get("source_controls", {})
@@ -254,14 +339,14 @@ def main() -> None:
         "Run mode",
         [
             "Manual (finite cycles)",
-            "1 hour (estimated)",
-            "8 hours (estimated)",
-            "24 hours (estimated)",
+            "1 hour (real clock)",
+            "8 hours (real clock)",
+            "24 hours (real clock)",
             "90 days (real clock)",
             "Forever (until stopped)",
         ],
         index=0,
-        help="Timed modes now try to respect real wall clock minutes using the agent time budget.",
+        help="Timed modes respect real wall-clock minutes via the agent's time budget.",
     )
 
     # Optional RYE stop for continuous modes
@@ -333,58 +418,81 @@ def main() -> None:
 
         # Manual finite mode
         if run_mode == "Manual (finite cycles)":
-            if not multi_agent:
+            # Swarm manual mode
+            if enable_swarm and swarm_roles:
+                st.info(
+                    f"Manual Swarm mode: {len(swarm_roles)} roles × {int(cycles)} cycles "
+                    f"(total {len(swarm_roles) * int(cycles)} mini-cycles)."
+                )
                 for i in range(int(cycles)):
-                    ci = next_index + i
-                    out = agent.run_cycle(
-                        goal=goal,
-                        cycle_index=ci,
-                        role="agent",
-                        source_controls=source_controls,
-                        pdf_bytes=pdf_bytes,
-                        biomarker_snapshot=None,
-                        domain=domain_tag,
-                    )
-                    results.append(out["summary"])
+                    base_index = next_index + i * len(swarm_roles)
+                    for j, (role_name, _) in enumerate(swarm_roles):
+                        ci = base_index + j
+                        role_goal = role_specific_goal(goal, role_name)
+                        out = agent.run_cycle(
+                            goal=role_goal,
+                            cycle_index=ci,
+                            role=role_name,
+                            source_controls=source_controls,
+                            pdf_bytes=pdf_bytes,
+                            biomarker_snapshot=None,
+                            domain=domain_tag,
+                        )
+                        results.append(out["summary"])
             else:
-                for i in range(int(cycles)):
-                    base = next_index + 2 * i
+                # Classic single or researcher+critic manual mode
+                if not multi_agent:
+                    for i in range(int(cycles)):
+                        ci = next_index + i
+                        out = agent.run_cycle(
+                            goal=goal,
+                            cycle_index=ci,
+                            role="agent",
+                            source_controls=source_controls,
+                            pdf_bytes=pdf_bytes,
+                            biomarker_snapshot=None,
+                            domain=domain_tag,
+                        )
+                        results.append(out["summary"])
+                else:
+                    for i in range(int(cycles)):
+                        base = next_index + 2 * i
 
-                    # Researcher
-                    r = agent.run_cycle(
-                        goal=goal,
-                        cycle_index=base,
-                        role="researcher",
-                        source_controls=source_controls,
-                        pdf_bytes=pdf_bytes,
-                        biomarker_snapshot=None,
-                        domain=domain_tag,
-                    )
-                    results.append(r["summary"])
+                        # Researcher
+                        r = agent.run_cycle(
+                            goal=goal,
+                            cycle_index=base,
+                            role="researcher",
+                            source_controls=source_controls,
+                            pdf_bytes=pdf_bytes,
+                            biomarker_snapshot=None,
+                            domain=domain_tag,
+                        )
+                        results.append(r["summary"])
 
-                    # Critic
-                    critic_goal = f"Critically review and refine notes for: {goal}"
-                    c = agent.run_cycle(
-                        goal=critic_goal,
-                        cycle_index=base + 1,
-                        role="critic",
-                        source_controls=source_controls,
-                        pdf_bytes=None,
-                        biomarker_snapshot=None,
-                        domain=domain_tag,
-                    )
-                    results.append(c["summary"])
+                        # Critic
+                        critic_goal = f"Critically review and refine notes for: {goal}"
+                        c = agent.run_cycle(
+                            goal=critic_goal,
+                            cycle_index=base + 1,
+                            role="critic",
+                            source_controls=source_controls,
+                            pdf_bytes=None,
+                            biomarker_snapshot=None,
+                            domain=domain_tag,
+                        )
+                        results.append(c["summary"])
         else:
             # Continuous modes with real time budget via max_minutes
             # Map run_mode to minutes
             max_minutes: Optional[float] = None
             forever_flag: bool = False
 
-            if run_mode == "1 hour (estimated)":
+            if run_mode == "1 hour (real clock)":
                 max_minutes = 60.0
-            elif run_mode == "8 hours (estimated)":
+            elif run_mode == "8 hours (real clock)":
                 max_minutes = 8 * 60.0
-            elif run_mode == "24 hours (estimated)":
+            elif run_mode == "24 hours (real clock)":
                 max_minutes = 24 * 60.0
             elif run_mode == "90 days (real clock)":
                 max_minutes = 90.0 * 24.0 * 60.0
@@ -400,17 +508,20 @@ def main() -> None:
                 # so we pick a large cap so time is the real stop condition.
                 effective_max_cycles = 10_000_000
 
-            if multi_agent:
-                st.info(
-                    "Multi Agent toggle is currently ignored in timed modes. "
-                    "Continuous runs use a single agent role for now."
+            # Swarm + Forever is ambiguous in a single-threaded UI, so we
+            # treat it as a single agent run when Forever is selected.
+            if enable_swarm and forever_flag:
+                st.warning(
+                    "Swarm mode with 'Forever' is not supported in this UI. "
+                    "Running as a single continuous agent instead."
                 )
+                swarm_roles = []
 
             # Show what the agent will try to do
             if max_minutes is not None:
                 st.info(
                     f"Continuous mode: target {run_mode} "
-                    f"(time budget ~ {max_minutes:.1f} minutes, up to {effective_max_cycles} cycles). "
+                    f"(time budget ~ {max_minutes:.1f} minutes total, up to {effective_max_cycles} cycles). "
                     f"RYE stop condition: {'disabled' if stop_rye_threshold is None else stop_rye_threshold}."
                 )
             else:
@@ -420,19 +531,44 @@ def main() -> None:
                     f"RYE stop condition: {'disabled' if stop_rye_threshold is None else stop_rye_threshold}."
                 )
 
-            summaries = agent.run_continuous(
-                goal=goal,
-                max_cycles=int(effective_max_cycles),
-                stop_rye=stop_rye_threshold,
-                role="agent",
-                source_controls=source_controls,
-                pdf_bytes=pdf_bytes,
-                biomarker_snapshot=None,
-                domain=domain_tag,
-                max_minutes=max_minutes,
-                forever=forever_flag,
-            )
-            results.extend(summaries)
+            # Continuous swarm: split time budget across roles
+            if enable_swarm and swarm_roles and max_minutes is not None:
+                minutes_per_agent = max_minutes / float(len(swarm_roles))
+                st.info(
+                    f"Swarm continuous mode: {len(swarm_roles)} roles, "
+                    f"~{minutes_per_agent:.1f} minutes per role."
+                )
+                for idx, (role_name, _) in enumerate(swarm_roles, start=1):
+                    st.write(f"Starting swarm agent {idx}/{len(swarm_roles)} (role: {role_name})...")
+                    role_goal = role_specific_goal(goal, role_name)
+                    summaries = agent.run_continuous(
+                        goal=role_goal,
+                        max_cycles=int(effective_max_cycles),
+                        stop_rye=stop_rye_threshold,
+                        role=role_name,
+                        source_controls=source_controls,
+                        pdf_bytes=pdf_bytes,
+                        biomarker_snapshot=None,
+                        domain=domain_tag,
+                        max_minutes=minutes_per_agent,
+                        forever=False,
+                    )
+                    results.extend(summaries)
+            else:
+                # Single-agent or classic continuous run
+                summaries = agent.run_continuous(
+                    goal=goal,
+                    max_cycles=int(effective_max_cycles),
+                    stop_rye=stop_rye_threshold,
+                    role="agent",
+                    source_controls=source_controls,
+                    pdf_bytes=pdf_bytes,
+                    biomarker_snapshot=None,
+                    domain=domain_tag,
+                    max_minutes=max_minutes,
+                    forever=forever_flag,
+                )
+                results.extend(summaries)
 
         # Show cycle summaries
         st.subheader("Cycle Summaries")
