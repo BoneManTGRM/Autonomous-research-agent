@@ -25,7 +25,7 @@ Backwards compatibility:
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 # ---------------------------------------------------------------------------
@@ -190,7 +190,7 @@ def compute_rye(delta_r: float, energy_e: float) -> float:
 # ---------------------------------------------------------------------------
 
 
-def rolling_rye(history: List[Dict[str, any]], window: int = 10) -> Optional[float]:
+def rolling_rye(history: List[Dict[str, Any]], window: int = 10) -> Optional[float]:
     """Compute a rolling average of RYE over the last N cycles.
 
     Args:
@@ -219,7 +219,7 @@ def rolling_rye(history: List[Dict[str, any]], window: int = 10) -> Optional[flo
     return sum(values) / len(values)
 
 
-def efficiency_trend(history: List[Dict[str, any]]) -> Optional[float]:
+def efficiency_trend(history: List[Dict[str, Any]]) -> Optional[float]:
     """Compute a simple trend indicator of RYE over time.
 
     This is a very lightweight slope-like metric: it compares the
@@ -244,7 +244,7 @@ def efficiency_trend(history: List[Dict[str, any]]) -> Optional[float]:
     old = history[:mid]
     recent = history[mid:]
 
-    def _avg(h: List[Dict[str, any]]) -> Optional[float]:
+    def _avg(h: List[Dict[str, Any]]) -> Optional[float]:
         vals: List[float] = []
         for e in h:
             v = e.get("RYE")
