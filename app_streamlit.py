@@ -1,7 +1,7 @@
 """Enhanced Streamlit interface for the Autonomous Research Agent.
 
 Features:
-- Continuous Mode (agent runs up to N cycles or until RYE threshold)
+- Continuous Mode with duration presets (1h, 8h, 24h, Forever)
 - Researcher + Critic multi-agent mode
 - Domain presets (General, Longevity, Math)
 - PubMed / Semantic Scholar ingestion controls
@@ -11,6 +11,7 @@ Features:
 - RYE, delta_R, and Energy charts
 - Real Tavily search support detection
 - Source citation viewer
+- Report generation from full cycle history
 
 Reparodynamics:
     The UI is a front panel on a reparodynamic system:
@@ -30,9 +31,14 @@ import yaml
 
 from agent.core_agent import CoreAgent
 from agent.memory_store import MemoryStore
-from agent.presets import PRESETS, get_preset  # new presets import
+from agent.presets import PRESETS, get_preset  # domain presets
+from agent.report_generator import generate_report  # NEW: report builder
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
+
+# Rough estimate for how many cycles you expect per hour in continuous mode.
+# You can tweak this later based on real-world runs.
+CYCLES_PER_HOUR_ESTIMATE = 120
 
 
 # -------------------------------------------------------------------
@@ -200,7 +206,7 @@ def main() -> None:
         default_preset_index = preset_keys.index("general")
 
     selected_label = st.sidebar.selectbox(
-        "Preset",
+        "Domain preset",
         options=preset_labels,
         index=default_preset_index,
         help="Choose a domain preset. You can still edit all settings below.",
@@ -247,10 +253,23 @@ def main() -> None:
         value=bool(sc_defaults.get("biomarkers", False)),
     )
 
-    # Continuous mode
-    continuous_mode = st.sidebar.checkbox("Continuous mode (up to N cycles with stop condition)", value=False)
+    # Run mode presets: manual, timed, forever
+    run_mode = st.sidebar.radio(
+        "Run mode",
+        [
+            "Manual (finite cycles)",
+            "1 hour (estimated)",
+            "8 hours (estimated)",
+            "24 hours (estimated)",
+            "Forever (until stopped)",
+        ],
+        index=0,
+        help="Timed modes approximate hours by running many cycles; actual wall time depends on environment.",
+    )
+
+    # Only continuous modes need a RYE stop condition
     stop_rye_threshold: Optional[float] = None
-    if continuous_mode:
+    if run_mode != "Manual (finite cycles)":
         stop_rye_threshold = st.sidebar.number_input(
             "Optional stop when RYE falls below (0 = ignore)",
             min_value=0.0,
@@ -281,28 +300,22 @@ def main() -> None:
     # Update session state to keep latest text
     st.session_state["goal_text"] = goal
 
+    # Cycles only matter in manual mode
     cycles = st.number_input(
-        "Number of TGRM cycles to run",
+        "Number of TGRM cycles to run (manual mode)",
         min_value=1,
         max_value=200,
         value=3,
         step=1,
+        help="Used when Run mode is 'Manual (finite cycles)'. Timed modes ignore this and run many cycles.",
     )
 
-    # Buttons: normal run + forever mode
     run_button = st.button("Run agent")
-    forever_button = st.button("Run until stopped (experimental)")
 
     # ------------------------------
     # Run cycles
     # ------------------------------
-    if run_button or forever_button:
-        if forever_button:
-            st.warning(
-                "Forever mode enabled. The agent will attempt to run for a very large number of cycles "
-                "until the environment or you stop it."
-            )
-
+    if run_button:
         st.write(f"Running agent with preset: {preset.get('label', selected_label)} (domain: {domain_tag})")
         history = memory.get_cycle_history()
         next_index = len(history)
@@ -325,35 +338,9 @@ def main() -> None:
             except Exception:
                 pdf_bytes = None
 
-        # Decide effective continuous mode + limits
-        if forever_button:
-            effective_continuous = True
-            effective_max_cycles = 10_000_000  # practically "forever"
-            effective_stop_rye = None          # never stop on RYE in forever mode
-        else:
-            effective_continuous = continuous_mode
-            effective_max_cycles = int(cycles)
-            effective_stop_rye = stop_rye_threshold
-
-        if effective_continuous:
-            st.info(
-                f"Continuous mode: up to {effective_max_cycles} cycles. "
-                f"RYE stop condition: {'disabled' if effective_stop_rye is None else effective_stop_rye}."
-            )
-            # Long-running mode handled by CoreAgent.run_continuous
-            summaries = agent.run_continuous(
-                goal=goal,
-                max_cycles=effective_max_cycles,
-                stop_rye=effective_stop_rye,
-                role="agent",
-                source_controls=source_controls,
-                pdf_bytes=pdf_bytes,
-                biomarker_snapshot=None,
-                domain=domain_tag,
-            )
-            results.extend(summaries)
-        else:
-            # Finite cycles mode
+        # ---------------- Continuous presets vs manual ---------------
+        if run_mode == "Manual (finite cycles)":
+            # Finite cycles mode (existing logic)
             if not multi_agent:
                 for i in range(int(cycles)):
                     ci = next_index + i
@@ -396,6 +383,37 @@ def main() -> None:
                         domain=domain_tag,
                     )
                     results.append(c["summary"])
+        else:
+            # Continuous modes with approximate hour presets
+            if run_mode == "1 hour (estimated)":
+                effective_max_cycles = CYCLES_PER_HOUR_ESTIMATE
+            elif run_mode == "8 hours (estimated)":
+                effective_max_cycles = 8 * CYCLES_PER_HOUR_ESTIMATE
+            elif run_mode == "24 hours (estimated)":
+                effective_max_cycles = 24 * CYCLES_PER_HOUR_ESTIMATE
+            elif run_mode == "Forever (until stopped)":
+                # Very high cap - practically "forever" until environment stops it
+                effective_max_cycles = 10_000_000
+            else:
+                effective_max_cycles = CYCLES_PER_HOUR_ESTIMATE
+
+            st.info(
+                f"Continuous mode: target {run_mode} "
+                f"(up to {effective_max_cycles} cycles). "
+                f"RYE stop condition: {'disabled' if stop_rye_threshold is None else stop_rye_threshold}."
+            )
+
+            summaries = agent.run_continuous(
+                goal=goal,
+                max_cycles=int(effective_max_cycles),
+                stop_rye=stop_rye_threshold,
+                role="agent",
+                source_controls=source_controls,
+                pdf_bytes=pdf_bytes,
+                biomarker_snapshot=None,
+                domain=domain_tag,
+            )
+            results.extend(summaries)
 
         # Display cycle summaries
         st.subheader("Cycle Summaries")
@@ -449,6 +467,28 @@ def main() -> None:
 
         with st.expander("Raw JSON"):
             st.code(json.dumps(history, indent=2), language="json")
+
+    # ------------------------------
+    # Report generation
+    # ------------------------------
+    st.markdown("---")
+    st.subheader("Generate report")
+
+    st.caption(
+        "Build a summarized report from the current cycle history. "
+        "You can re-run this after long autonomous sessions."
+    )
+
+    if st.button("Generate report from full history"):
+        report_md = generate_report(memory_store=memory, goal=None)
+        st.markdown(report_md)
+
+        st.download_button(
+            "Download report as Markdown",
+            data=report_md,
+            file_name="autonomous_research_report.md",
+            mime="text/markdown",
+        )
 
 
 if __name__ == "__main__":
