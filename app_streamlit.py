@@ -1,15 +1,20 @@
 """Enhanced Streamlit interface for the Autonomous Research Agent.
 
-New features added:
-- Continuous Mode (agent runs forever until stopped)
+Features:
+- Continuous Mode (agent runs up to N cycles or until RYE threshold)
 - Researcher + Critic multi-agent mode
 - PubMed / Semantic Scholar ingestion controls
-- Biomarker analysis mode (for anti-aging teams)
+- Biomarker analysis toggle (for anti-aging teams)
 - Hypothesis generation viewer
 - PDF ingestion for real scientific papers
 - RYE, delta_R, and Energy charts
 - Real Tavily search support detection
 - Source citation viewer
+
+Reparodynamics:
+    The UI is a front panel on a reparodynamic system:
+    - Each click runs the TGRM loop (Test, Detect, Repair, Verify).
+    - Each cycle computes RYE = delta_R / E and is logged.
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 
 import streamlit as st
 import yaml
@@ -79,24 +84,26 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
     # Metrics
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("delta_R", cycle_summary["delta_R"])
+        st.metric("delta_R", cycle_summary.get("delta_R", 0.0))
     with col2:
-        st.metric("Energy E", cycle_summary["energy_E"])
+        st.metric("Energy E", cycle_summary.get("energy_E", 0.0))
     with col3:
-        st.metric("RYE", round(cycle_summary["RYE"], 3))
+        st.metric("RYE", round(cycle_summary.get("RYE", 0.0), 3))
 
     # Issues
-    if cycle_summary["issues_before"]:
+    issues_before = cycle_summary.get("issues_before", [])
+    if issues_before:
         st.write("Issues before repair:")
-        for issue in cycle_summary["issues_before"]:
+        for issue in issues_before:
             st.write(f"- {issue}")
     else:
         st.write("No issues detected before repair.")
 
     # Repairs
-    if cycle_summary["repairs"]:
+    repairs = cycle_summary.get("repairs", [])
+    if repairs:
         st.write("Repairs applied:")
-        for rep in cycle_summary["repairs"]:
+        for rep in repairs:
             st.write(f"- {rep}")
     else:
         st.write("No repairs performed.")
@@ -107,17 +114,29 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
             for note in cycle_summary["notes_added"]:
                 st.write(f"- {note}")
 
-    # Hypotheses (NEW)
-    if cycle_summary.get("hypotheses"):
+    # Hypotheses
+    hypotheses = cycle_summary.get("hypotheses") or []
+    if hypotheses:
         with st.expander("Generated hypotheses"):
-            for h in cycle_summary["hypotheses"]:
-                st.write(f"• {h}")
+            for h in hypotheses:
+                if isinstance(h, dict):
+                    text = h.get("text", "")
+                    conf = h.get("confidence")
+                    if conf is not None:
+                        st.write(f"• {text} (confidence ~ {conf})")
+                    else:
+                        st.write(f"• {text}")
+                else:
+                    st.write(f"• {h}")
 
     # Citations
     if cycle_summary.get("citations"):
         with st.expander("Citations for this cycle"):
             for c in cycle_summary["citations"]:
-                st.write(f"- [{c.get('source','')}] {c.get('title','')} — {c.get('url','')}")
+                src = c.get("source", "")
+                title = c.get("title", "")
+                url = c.get("url", "")
+                st.write(f"- [{src}] {title} — {url}")
 
 
 # -------------------------------------------------------------------
@@ -144,26 +163,33 @@ def main() -> None:
         st.sidebar.write("Add TAVILY_API_KEY in Streamlit Secrets to enable real web search.")
 
     # Multi-agent toggle
-    multi_agent = st.sidebar.checkbox("Enable Multi Agent (Researcher + Critic)")
+    multi_agent = st.sidebar.checkbox("Enable Multi Agent (Researcher + Critic)", value=False)
 
-    # PubMed
-    use_pubmed = st.sidebar.checkbox("Use PubMed (scientific literature)")
-
-    # Semantic Scholar
-    use_semantic = st.sidebar.checkbox("Use Semantic Scholar ingestion")
-
-    # PDF ingestion
-    use_pdf = st.sidebar.checkbox("Enable PDF ingestion (upload papers below)")
+    # Source controls
+    use_pubmed = st.sidebar.checkbox("Use PubMed (scientific literature)", value=False)
+    use_semantic = st.sidebar.checkbox("Use Semantic Scholar ingestion", value=False)
+    use_pdf = st.sidebar.checkbox("Enable PDF ingestion (upload papers below)", value=False)
 
     uploaded_pdf = None
     if use_pdf:
         uploaded_pdf = st.sidebar.file_uploader("Upload a PDF paper", type=["pdf"])
 
-    # Biomarker mode
-    use_biomarkers = st.sidebar.checkbox("Biomarker / Longevity Mode (anti-aging teams)")
+    # Biomarker mode (future use for anti-aging / longevity dashboards)
+    use_biomarkers = st.sidebar.checkbox("Biomarker / Longevity Mode (anti-aging teams)", value=False)
 
-    # Continuous Mode
-    continuous_mode = st.sidebar.checkbox("Continuous mode (run without stopping)")
+    # Continuous mode
+    continuous_mode = st.sidebar.checkbox("Continuous mode (up to N cycles with stop condition)", value=False)
+    stop_rye_threshold: Optional[float] = None
+    if continuous_mode:
+        stop_rye_threshold = st.sidebar.number_input(
+            "Optional stop when RYE falls below (0 = ignore)",
+            min_value=0.0,
+            max_value=10.0,
+            value=0.0,
+            step=0.1,
+        )
+        if stop_rye_threshold <= 0:
+            stop_rye_threshold = None
 
     # -----------------------------
     # Main area
@@ -195,37 +221,76 @@ def main() -> None:
         next_index = len(history)
         results: List[Dict[str, Any]] = []
 
-        # Attach source preferences to agent
-        agent.source_controls = {
-            "pubmed": use_pubmed,
-            "semantic": use_semantic,
-            "pdf": use_pdf,
-            "biomarkers": use_biomarkers,
+        # Build source_controls dict for the agent / TGRM loop
+        source_controls = {
+            "web": True,
+            "pubmed": bool(use_pubmed),
+            "semantic": bool(use_semantic),
+            "pdf": bool(use_pdf and uploaded_pdf is not None),
+            "biomarkers": bool(use_biomarkers),
         }
 
-        if uploaded_pdf:
-            agent.attach_pdf(uploaded_pdf)
+        # PDF bytes (if provided)
+        pdf_bytes: Optional[bytes] = None
+        if use_pdf and uploaded_pdf is not None:
+            try:
+                pdf_bytes = uploaded_pdf.getvalue()
+            except Exception:
+                pdf_bytes = None
 
         if continuous_mode:
-            st.warning("Continuous mode enabled — agent will run until manually stopped.")
-            results = agent.run_continuous(goal)
+            st.warning("Continuous mode enabled — agent will run multiple cycles until limit or stop condition.")
+            # Use CoreAgent.run_continuous if implemented as discussed
+            summaries = agent.run_continuous(
+                goal=goal,
+                max_cycles=int(cycles),
+                stop_rye=stop_rye_threshold,
+                role="agent",
+                source_controls=source_controls,
+                pdf_bytes=pdf_bytes,
+                biomarker_snapshot=None,  # placeholder hook
+            )
+            results.extend(summaries)
         else:
+            # Finite cycles mode
             if not multi_agent:
                 for i in range(int(cycles)):
                     ci = next_index + i
-                    out = agent.run_cycle(goal=goal, cycle_index=ci)
+                    out = agent.run_cycle(
+                        goal=goal,
+                        cycle_index=ci,
+                        role="agent",
+                        source_controls=source_controls,
+                        pdf_bytes=pdf_bytes,
+                        biomarker_snapshot=None,
+                    )
                     results.append(out["summary"])
             else:
+                # Multi-agent: researcher + critic per logical cycle
                 for i in range(int(cycles)):
                     base = next_index + 2 * i
 
                     # Researcher
-                    r = agent.run_cycle(goal=goal, cycle_index=base, role="researcher")
+                    r = agent.run_cycle(
+                        goal=goal,
+                        cycle_index=base,
+                        role="researcher",
+                        source_controls=source_controls,
+                        pdf_bytes=pdf_bytes,
+                        biomarker_snapshot=None,
+                    )
                     results.append(r["summary"])
 
                     # Critic
                     critic_goal = f"Critically review and refine notes for: {goal}"
-                    c = agent.run_cycle(goal=critic_goal, cycle_index=base + 1, role="critic")
+                    c = agent.run_cycle(
+                        goal=critic_goal,
+                        cycle_index=base + 1,
+                        role="critic",
+                        source_controls=source_controls,
+                        pdf_bytes=None,  # critic doesn't need to re-ingest PDF
+                        biomarker_snapshot=None,
+                    )
                     results.append(c["summary"])
 
         # Display cycle summaries
@@ -245,11 +310,12 @@ def main() -> None:
     else:
         rows = []
         for entry in history:
+            goal_text = entry.get("goal", "") or ""
             rows.append(
                 {
                     "cycle": entry.get("cycle"),
                     "role": entry.get("role", "agent"),
-                    "goal": entry.get("goal", "")[:60] + ("..." if len(entry.get("goal", "")) > 60 else ""),
+                    "goal": goal_text[:60] + ("..." if len(goal_text) > 60 else ""),
                     "delta_R": entry.get("delta_R"),
                     "energy_E": entry.get("energy_E"),
                     "RYE": entry.get("RYE"),
@@ -268,7 +334,7 @@ def main() -> None:
 
         if cycles_x:
             st.line_chart({"RYE": rye_y})
-            st.caption("Higher RYE = more efficient repair.")
+            st.caption("Higher RYE = more efficient repair (ΔR per unit energy).")
 
             st.line_chart({"delta_R": delta_y})
             st.caption("delta_R = how much improvement each cycle produced.")
