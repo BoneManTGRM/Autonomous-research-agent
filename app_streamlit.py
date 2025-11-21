@@ -37,7 +37,7 @@ from agent.report_generator import generate_report  # report builder
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
 # Rough estimate for how many cycles you expect per hour in continuous mode.
-# You can tweak this later based on real-world runs.
+# This is now a safety cap, since time is controlled by max_minutes.
 CYCLES_PER_HOUR_ESTIMATE = 120
 
 
@@ -260,7 +260,7 @@ def main() -> None:
             "Forever (until stopped)",
         ],
         index=0,
-        help="Timed modes approximate hours by running many cycles. Actual wall time depends on environment.",
+        help="Timed modes now try to respect real wall-clock minutes using the agent's time budget.",
     )
 
     # Optional RYE stop for continuous modes
@@ -299,7 +299,7 @@ def main() -> None:
         max_value=200,
         value=3,
         step=1,
-        help="Used when Run mode is 'Manual (finite cycles)'. Timed modes ignore this and run many cycles.",
+        help="Used when Run mode is 'Manual (finite cycles)'. Timed modes ignore this and rely on minutes.",
     )
 
     run_button = st.button("Run agent")
@@ -374,17 +374,28 @@ def main() -> None:
                     )
                     results.append(c["summary"])
         else:
-            # Continuous modes with approximate hour presets
+            # Continuous modes with real time budget via max_minutes
+            # Map run_mode to minutes
+            max_minutes: Optional[float] = None
+            forever_flag: bool = False
+
             if run_mode == "1 hour (estimated)":
-                effective_max_cycles = CYCLES_PER_HOUR_ESTIMATE
+                max_minutes = 60.0
             elif run_mode == "8 hours (estimated)":
-                effective_max_cycles = 8 * CYCLES_PER_HOUR_ESTIMATE
+                max_minutes = 8 * 60.0
             elif run_mode == "24 hours (estimated)":
-                effective_max_cycles = 24 * CYCLES_PER_HOUR_ESTIMATE
+                max_minutes = 24 * 60.0
             elif run_mode == "Forever (until stopped)":
+                max_minutes = None
+                forever_flag = True
+
+            # Cycles are now a safety cap. Use a large upper bound.
+            if forever_flag:
                 effective_max_cycles = 10_000_000
             else:
-                effective_max_cycles = CYCLES_PER_HOUR_ESTIMATE
+                # For timed runs, cycles are not the primary limiter,
+                # so we pick a large cap so time is the real stop condition.
+                effective_max_cycles = 10_000_000
 
             if multi_agent:
                 st.info(
@@ -392,11 +403,19 @@ def main() -> None:
                     "Continuous runs use a single agent role for now."
                 )
 
-            st.info(
-                f"Continuous mode: target {run_mode} "
-                f"(up to {effective_max_cycles} cycles). "
-                f"RYE stop condition: {'disabled' if stop_rye_threshold is None else stop_rye_threshold}."
-            )
+            # Show what the agent will try to do
+            if max_minutes is not None:
+                st.info(
+                    f"Continuous mode: target {run_mode} "
+                    f"(time budget ~ {max_minutes:.1f} minutes, up to {effective_max_cycles} cycles). "
+                    f"RYE stop condition: {'disabled' if stop_rye_threshold is None else stop_rye_threshold}."
+                )
+            else:
+                st.info(
+                    "Continuous mode: Forever (until stopped by environment or RYE threshold). "
+                    f"Cycle safety cap: {effective_max_cycles}. "
+                    f"RYE stop condition: {'disabled' if stop_rye_threshold is None else stop_rye_threshold}."
+                )
 
             summaries = agent.run_continuous(
                 goal=goal,
@@ -407,6 +426,8 @@ def main() -> None:
                 pdf_bytes=pdf_bytes,
                 biomarker_snapshot=None,
                 domain=domain_tag,
+                max_minutes=max_minutes,
+                forever=forever_flag,
             )
             results.extend(summaries)
 
