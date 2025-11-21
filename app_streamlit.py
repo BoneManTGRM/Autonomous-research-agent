@@ -289,12 +289,20 @@ def main() -> None:
         step=1,
     )
 
+    # Buttons: normal run + forever mode
     run_button = st.button("Run agent")
+    forever_button = st.button("Run until stopped (experimental)")
 
     # ------------------------------
     # Run cycles
     # ------------------------------
-    if run_button:
+    if run_button or forever_button:
+        if forever_button:
+            st.warning(
+                "Forever mode enabled. The agent will attempt to run for a very large number of cycles "
+                "until the environment or you stop it."
+            )
+
         st.write(f"Running agent with preset: {preset.get('label', selected_label)} (domain: {domain_tag})")
         history = memory.get_cycle_history()
         next_index = len(history)
@@ -317,13 +325,26 @@ def main() -> None:
             except Exception:
                 pdf_bytes = None
 
-        if continuous_mode:
-            st.warning("Continuous mode enabled. The agent will run multiple cycles until limit or stop condition.")
-            # CoreAgent.run_continuous handles extra kwargs with a safe wrapper
+        # Decide effective continuous mode + limits
+        if forever_button:
+            effective_continuous = True
+            effective_max_cycles = 10_000_000  # practically "forever"
+            effective_stop_rye = None          # never stop on RYE in forever mode
+        else:
+            effective_continuous = continuous_mode
+            effective_max_cycles = int(cycles)
+            effective_stop_rye = stop_rye_threshold
+
+        if effective_continuous:
+            st.info(
+                f"Continuous mode: up to {effective_max_cycles} cycles. "
+                f"RYE stop condition: {'disabled' if effective_stop_rye is None else effective_stop_rye}."
+            )
+            # Long-running mode handled by CoreAgent.run_continuous
             summaries = agent.run_continuous(
                 goal=goal,
-                max_cycles=int(cycles),
-                stop_rye=stop_rye_threshold,
+                max_cycles=effective_max_cycles,
+                stop_rye=effective_stop_rye,
                 role="agent",
                 source_controls=source_controls,
                 pdf_bytes=pdf_bytes,
