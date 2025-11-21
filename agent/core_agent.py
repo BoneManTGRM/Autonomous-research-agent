@@ -22,7 +22,9 @@ RYE (Repair Yield per Energy):
 
 from __future__ import annotations
 
+import json
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .memory_store import MemoryStore
@@ -58,6 +60,47 @@ class CoreAgent:
 
         # Optional attached PDF bytes (from an uploaded file in the UI)
         self._attached_pdf_bytes: Optional[bytes] = None
+
+        # Checkpoint file for continuous runs
+        checkpoint_default = "logs/continuous_checkpoint.json"
+        self.checkpoint_path = Path(self.config.get("checkpoint_file", checkpoint_default))
+
+        # Whether continuous runs should try to auto resume from checkpoint
+        self.auto_resume_enabled: bool = bool(self.config.get("auto_resume_enabled", True))
+
+    # ------------------------------------------------------------------
+    # Internal helpers for crash proofing
+    # ------------------------------------------------------------------
+    def _load_checkpoint(self) -> Optional[Dict[str, Any]]:
+        """Load checkpoint from disk if present."""
+        try:
+            if not self.checkpoint_path.exists():
+                return None
+            with self.checkpoint_path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return None
+            return data
+        except Exception:
+            return None
+
+    def _save_checkpoint(self, state: Dict[str, Any]) -> None:
+        """Persist checkpoint state to disk for auto resume and watchdog."""
+        try:
+            self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.checkpoint_path.open("w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except Exception:
+            # Checkpoint failures must not crash the agent
+            return
+
+    def _clear_checkpoint(self) -> None:
+        """Remove checkpoint file when a continuous run completes cleanly."""
+        try:
+            if self.checkpoint_path.exists():
+                self.checkpoint_path.unlink()
+        except Exception:
+            return
 
     # ------------------------------------------------------------------
     # Public API used by Streamlit and CLI
@@ -106,7 +149,7 @@ class CoreAgent:
             biomarker_snapshot:
                 Placeholder for a future biomarker or lab value payload.
             domain:
-                Optional domain tag (e.g. "general", "longevity", "math")
+                Optional domain tag (for example "general", "longevity", "math")
                 to label this cycle in the logs.
 
         Returns:
@@ -157,6 +200,8 @@ class CoreAgent:
         domain: Optional[str] = None,
         max_minutes: Optional[float] = None,
         forever: bool = False,
+        resume_from_checkpoint: bool = True,
+        watchdog_interval_minutes: float = 5.0,
     ) -> List[Dict[str, Any]]:
         """Run multiple TGRM cycles in a row ("continuous mode").
 
@@ -173,8 +218,7 @@ class CoreAgent:
             stop_rye:
                 Optional RYE threshold. If set, the loop stops
                 early once average RYE over recent cycles
-                falls below this value (indicating diminishing
-                returns on additional repair actions).
+                falls below this value.
             role:
                 Logical role for the continuous runner, usually "agent".
             source_controls:
@@ -185,14 +229,18 @@ class CoreAgent:
                 Optional biomarker or lab value payload shared for
                 future biomarker-aware logic.
             domain:
-                Optional domain tag (e.g. "general", "longevity", "math")
-                forwarded into each cycle.
+                Optional domain tag forwarded into each cycle.
             max_minutes:
                 Optional wall-clock time budget in minutes. If provided,
-                the loop will stop once this time has elapsed.
+                the loop stops once this time has elapsed.
             forever:
                 If True, ignore max_cycles and keep running until
                 stopped by `max_minutes`, `stop_rye`, or the environment.
+            resume_from_checkpoint:
+                If True, try to detect a previous interrupted run from
+                the checkpoint file and adjust the remaining time budget.
+            watchdog_interval_minutes:
+                How often to update the checkpoint heartbeat at minimum.
 
         Returns:
             List[Dict[str, Any]]: List of human-facing summaries for
@@ -201,45 +249,45 @@ class CoreAgent:
         summaries: List[Dict[str, Any]] = []
         recent_rye: List[float] = []
 
-        # ------------------------------------------------------------------
-        # Auto map the "hour presets" from app_streamlit to real time
-        # without changing any other files.
-        #
-        # app_streamlit.py currently does:
-        #   CYCLES_PER_HOUR_ESTIMATE = 120
-        #   1h  -> max_cycles = 120
-        #   8h  -> max_cycles = 960
-        #   24h -> max_cycles = 2880
-        #   Forever -> max_cycles = 10_000_000
-        #
-        # Here we detect those magic values and convert them back into
-        # wall-clock minutes so that the run actually respects time,
-        # not just cycle count.
-        # ------------------------------------------------------------------
+        # Detect and adapt hour presets from older app versions if
+        # max_minutes is still None.
         if max_minutes is None:
             if max_cycles == 120:
-                # 1 hour preset
                 max_minutes = 60.0
                 max_cycles = 1_000_000
             elif max_cycles == 960:
-                # 8 hour preset
                 max_minutes = 480.0
                 max_cycles = 1_000_000
             elif max_cycles == 2880:
-                # 24 hour preset
                 max_minutes = 1440.0
                 max_cycles = 1_000_000
             elif max_cycles >= 10_000_000:
-                # "Forever" preset: let environment or stop_rye decide
                 forever = True
-                # keep a very high cap as a hard safety
                 max_cycles = 10_000_000
+
+        # Try to resume from a previous interrupted continuous run
+        checkpoint = None
+        if resume_from_checkpoint and self.auto_resume_enabled:
+            checkpoint = self._load_checkpoint()
+            if checkpoint and checkpoint.get("in_progress"):
+                if (
+                    checkpoint.get("goal") == goal
+                    and checkpoint.get("role") == role
+                    and checkpoint.get("domain") == (domain or "general")
+                ):
+                    remaining = checkpoint.get("remaining_minutes")
+                    if isinstance(remaining, (int, float)) and remaining > 0:
+                        # Treat remaining minutes as the new budget
+                        if max_minutes is None or max_minutes > float(remaining):
+                            max_minutes = float(remaining)
 
         # Start counting cycles from the existing history length
         history = self.memory_store.get_cycle_history()
         start_index = len(history)
 
         start_time = time.monotonic()
+        last_watchdog_update = start_time
+
         i = 0
 
         while True:
@@ -247,11 +295,38 @@ class CoreAgent:
             if not forever and i >= max_cycles:
                 break
 
-            # Time-based stopping (for 1h / 8h / 24h presets)
-            if max_minutes is not None:
-                elapsed_min = (time.monotonic() - start_time) / 60.0
-                if elapsed_min >= max_minutes:
-                    break
+            # Time-based stopping
+            elapsed_min = (time.monotonic() - start_time) / 60.0
+            if max_minutes is not None and elapsed_min >= max_minutes:
+                break
+
+            # Watchdog heartbeat and checkpoint before starting the cycle
+            now = time.monotonic()
+            since_last_heartbeat = (now - last_watchdog_update) / 60.0
+            if since_last_heartbeat >= min(watchdog_interval_minutes, max(1.0, watchdog_interval_minutes)):
+                remaining_minutes = None
+                if max_minutes is not None:
+                    remaining_minutes = max(max_minutes - elapsed_min, 0.0)
+
+                checkpoint_state: Dict[str, Any] = {
+                    "version": 1,
+                    "in_progress": True,
+                    "goal": goal,
+                    "role": role,
+                    "domain": domain or "general",
+                    "max_cycles": max_cycles,
+                    "max_minutes": max_minutes,
+                    "elapsed_minutes": elapsed_min,
+                    "remaining_minutes": remaining_minutes,
+                    "stop_rye": stop_rye,
+                    "forever": forever,
+                    "cycle_history_length": len(history),
+                    "local_cycle_index": i,
+                    "recent_rye": recent_rye[-10:],
+                    "last_heartbeat_ts": time.time(),
+                }
+                self._save_checkpoint(checkpoint_state)
+                last_watchdog_update = now
 
             ci = start_index + i
             result = self.run_cycle(
@@ -277,12 +352,10 @@ class CoreAgent:
             if stop_rye is not None and recent_rye:
                 avg_rye = sum(recent_rye) / len(recent_rye)
                 if avg_rye < stop_rye:
-                    # Reparodynamic interpretation:
-                    # The system's marginal repair yield per energy
-                    # has fallen below the target; further cycles are
-                    # not energetically efficient, so we stop.
                     break
 
             i += 1
 
+        # Continuous run finished cleanly
+        self._clear_checkpoint()
         return summaries
