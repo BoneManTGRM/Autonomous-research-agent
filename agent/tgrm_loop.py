@@ -51,6 +51,11 @@ class TGRMLoop:
         self.pubmed_tool = PubMedTool()
         self.semantic_tool = SemanticScholarTool()
 
+        # Long run optimization: track which questions have already been
+        # researched so we do not re-query the same text a thousand times
+        # during 8h or 24h sessions.
+        self._seen_questions: set[str] = set()
+
     # ------------------------------------------------------------------
     # Main cycle
     # ------------------------------------------------------------------
@@ -72,7 +77,7 @@ class TGRMLoop:
             cycle_index:
                 Global cycle index (used for logging and history).
             role:
-                Logical role (e.g., "agent", "researcher", "critic").
+                Logical role (for example "agent", "researcher", "critic").
             source_controls:
                 Optional switches like:
                     {
@@ -87,10 +92,10 @@ class TGRMLoop:
                 Optional PDF content (uploaded file) that can be ingested
                 as part of the Repair phase if "pdf" is enabled.
             biomarker_snapshot:
-                Optional dict of biomarker / lab values for future
+                Optional dict of biomarker or lab values for future
                 longevity analysis (currently not used directly here).
             domain:
-                Optional domain tag (e.g. "general", "longevity", "math")
+                Optional domain tag (for example "general", "longevity", "math")
                 from presets. Preserved in the log for future
                 domain-specific behavior.
 
@@ -104,14 +109,36 @@ class TGRMLoop:
         src_ctrl = self._normalise_source_controls(source_controls)
         domain_tag = domain or "general"
 
-        # TEST phase – evaluate current state
+        # Long run context: fetch RYE stats for this goal if available.
+        # This lets us switch into a maintenance mode when the system is
+        # already performing well, which protects RYE during very long runs.
+        avg_rye: Optional[float] = None
+        total_cycles_for_goal: int = 0
+        try:
+            if hasattr(self.memory_store, "get_rye_stats"):
+                avg, _min_rye, _max_rye, count = self.memory_store.get_rye_stats(goal=goal)
+                avg_rye = avg
+                total_cycles_for_goal = count
+        except Exception:
+            avg_rye = None
+            total_cycles_for_goal = 0
+
+        # Maintenance mode:
+        # If we already have many cycles on this goal and RYE is high,
+        # we avoid heavy repeated web/PubMed calls and focus on light
+        # refinement. This keeps RYE high and cost low over 24h+ runs.
+        maintenance_mode = False
+        if avg_rye is not None and total_cycles_for_goal >= 20 and avg_rye >= 0.8:
+            maintenance_mode = True
+
+        # TEST phase: evaluate current state
         prior_notes = self.memory_store.get_notes(goal)
         status_report = self._test(goal, prior_notes)
 
-        # DETECT phase – identify issues to repair
+        # DETECT phase: identify issues to repair
         issues, issue_descriptions = self._detect(status_report)
 
-        # REPAIR phase – apply targeted repairs
+        # REPAIR phase: apply targeted repairs
         (
             repair_actions,
             notes_added,
@@ -124,9 +151,10 @@ class TGRMLoop:
             role=role,
             source_controls=src_ctrl,
             pdf_bytes=pdf_bytes,
+            maintenance_mode=maintenance_mode,
         )
 
-        # VERIFY phase – re-evaluate state after repair
+        # VERIFY phase: re-evaluate state after repair
         new_notes = self.memory_store.get_notes(goal)
         new_status_report = self._test(goal, new_notes)
         issues_after, _ = self._detect(new_status_report)
@@ -161,10 +189,10 @@ class TGRMLoop:
             "goal": goal,
             "role": role,
             "domain": domain_tag,
-            # Issues before/after
+            # Issues before and after
             "issues_before": issue_descriptions,
             "issues_after": issues_after,
-            # Actions / artifacts
+            # Actions and artifacts
             "repairs_applied": repair_actions,
             "notes_added": notes_added,
             "citations": citations,
@@ -174,6 +202,10 @@ class TGRMLoop:
             "delta_R": delta_r,
             "energy_E": energy_e,
             "RYE": rye_value,
+            # Long run context snapshot
+            "avg_rye_for_goal_before_cycle": avg_rye,
+            "total_cycles_for_goal_before_cycle": total_cycles_for_goal,
+            "maintenance_mode": maintenance_mode,
         }
 
         # Log cycle into memory
@@ -194,6 +226,7 @@ class TGRMLoop:
             "notes_added": notes_added,
             "citations": citations,
             "hypotheses": hypotheses,
+            "maintenance_mode": maintenance_mode,
         }
 
         return {"summary": human_summary, "log": cycle_summary}
@@ -242,6 +275,7 @@ class TGRMLoop:
         role: str,
         source_controls: Dict[str, bool],
         pdf_bytes: Optional[bytes],
+        maintenance_mode: bool = False,
     ):
         """Apply repairs to address detected issues.
 
@@ -249,13 +283,19 @@ class TGRMLoop:
         - Tavily web search runs
         - PubMed and Semantic Scholar are queried
         - PDF ingestion can be used when available
-        - Targeted research is performed for open questions / TODOs
+        - Targeted research is performed for open questions or TODOs
+
+        Long run optimization:
+            - In maintenance mode, only a small number of issues are
+              processed per cycle to avoid hammering web APIs.
+            - Even in normal mode, we cap issues per cycle so that 24h
+              runs do not explode in cost.
         """
         repair_actions: List[Dict[str, str]] = []
         notes_added: List[str] = []
         citations: List[Dict[str, str]] = []
 
-        # Stats for RYE energy + improvement
+        # Stats for RYE energy and improvement
         stats: Dict[str, Any] = {
             "web_calls": 0,
             "pubmed_calls": 0,
@@ -265,15 +305,28 @@ class TGRMLoop:
             "sources_used": 0,
         }
 
+        # Process only a bounded number of issues per cycle
+        if maintenance_mode:
+            max_issues = 2
+        else:
+            max_issues = 5  # plenty for progress, but bounded for 24h runs
+
+        issues_to_handle = issues[:max_issues]
+        descriptions_to_handle = descriptions[:max_issues]
+
         # Helper to register citations into MemoryStore
         def _log_citations(cites: List[Dict[str, str]]) -> None:
             for c in cites:
                 self.memory_store.add_citation(goal, c)
 
-        for issue, desc in zip(issues, descriptions):
-            # Main "no notes" entry point – broad initial sweep
+        for issue, desc in zip(issues_to_handle, descriptions_to_handle):
+            # Main "no notes" entry point: broad initial sweep
             if issue == "no_notes":
-                note_text, new_cites, issue_stats = self._initial_research(goal, role, source_controls, pdf_bytes)
+                # Even in maintenance mode, first cycle for a goal should do
+                # a proper initial pass.
+                note_text, new_cites, issue_stats = self._initial_research(
+                    goal, role, source_controls, pdf_bytes
+                )
                 self.memory_store.add_note(goal, note_text, role=role)
                 repair_actions.append(
                     {
@@ -290,9 +343,9 @@ class TGRMLoop:
                     stats[k] = stats.get(k, 0) + v
 
             elif issue in {"question_mark", "todo_item"}:
-                # ---- FULL TARGETED RESEARCH MODE (Option A) ----
-                # Extract concrete questions / TODO lines from existing notes
+                # Extract concrete questions or TODO lines from existing notes
                 questions = self._extract_questions(goal, issue_type=issue)
+
                 note_text, new_cites, issue_stats = self._targeted_research(
                     goal=goal,
                     role=role,
@@ -300,13 +353,14 @@ class TGRMLoop:
                     issue_description=desc,
                     source_controls=source_controls,
                     questions=questions,
+                    maintenance_mode=maintenance_mode,
                 )
 
                 self.memory_store.add_note(goal, note_text, role=role)
                 repair_actions.append(
                     {
                         "issue": issue,
-                        "description": f"[{role}] Performed targeted multi-source research for open items.",
+                        "description": f"[{role}] Performed targeted research for open items (maintenance_mode={maintenance_mode}).",
                     }
                 )
                 notes_added.append(note_text)
@@ -444,6 +498,11 @@ class TGRMLoop:
         This scans existing notes for lines that contain a '?' (for
         'question_mark') or 'TODO'/'todo' (for 'todo_item') and returns
         a deduplicated list of candidate queries.
+
+        Long run optimization:
+            - We also track which exact lines have already been used as
+              questions in previous cycles, so we do not repeatedly
+              hammer the web for the same text.
         """
         notes = self.memory_store.get_notes(goal)
         candidates: List[str] = []
@@ -460,15 +519,22 @@ class TGRMLoop:
                         candidates.append(line_strip)
 
         # Deduplicate while preserving order
-        seen = set()
+        seen_local = set()
         unique_questions: List[str] = []
         for q in candidates:
-            if q not in seen:
-                seen.add(q)
+            if q not in seen_local:
+                seen_local.add(q)
                 unique_questions.append(q)
 
+        # Filter out questions we have already researched in previous cycles
+        fresh_questions: List[str] = []
+        for q in unique_questions:
+            if q not in self._seen_questions:
+                self._seen_questions.add(q)
+                fresh_questions.append(q)
+
         # Limit to the first few to control cost
-        return unique_questions[:5]
+        return fresh_questions[:5]
 
     def _targeted_research(
         self,
@@ -478,13 +544,21 @@ class TGRMLoop:
         issue_description: str,
         source_controls: Dict[str, bool],
         questions: Optional[List[str]] = None,
+        maintenance_mode: bool = False,
     ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
-        """Perform focused multi-source research on open questions/TODOs.
+        """Perform focused multi-source research on open questions or TODOs.
 
         This is the "Option A" full targeted mode:
-        - Use exact question/TODO lines when available.
-        - Query web, PubMed, and Semantic Scholar for each.
-        - Build a rich note that links each question to sources.
+            - Use exact question or TODO lines when available.
+            - Query web, PubMed, and Semantic Scholar for each.
+            - Build a rich note that links each question to sources.
+
+        Long run optimization:
+            - If there are no new questions for this issue, we log a
+              lightweight maintenance note and avoid external calls.
+            - In maintenance mode we still answer new questions, but we
+              keep the note compact and allow the issue cap in _repair
+              to limit cost.
         """
         citations: List[Dict[str, str]] = []
         stats = {
@@ -496,9 +570,22 @@ class TGRMLoop:
             "sources_used": 0,
         }
 
-        # If we didn't extract specific questions, fall back to a generic query.
-        if not questions:
-            questions = [f"{goal} — focus on: {issue_description}"]
+        # If questions is None (no extraction attempted) we fall back to a generic prompt.
+        # If questions is an empty list, that means no new questions left. We then
+        # produce a lightweight note without external queries.
+        if questions is None:
+            questions = [f"{goal} - focus on: {issue_description}"]
+        elif len(questions) == 0:
+            note_lines: List[str] = []
+            note_lines.append(f"[{role}] Maintenance pass on open items ({issue}) for goal:")
+            note_lines.append(goal)
+            note_lines.append("")
+            note_lines.append(
+                "No new unresolved questions were found beyond what has already been researched. "
+                "This cycle performs a light consolidation of existing knowledge without new web or paper calls."
+            )
+            note_text = "\n".join(note_lines)
+            return note_text, citations, stats
 
         note_lines: List[str] = []
         note_lines.append(f"[{role}] Targeted research on open items ({issue}) for goal:")
