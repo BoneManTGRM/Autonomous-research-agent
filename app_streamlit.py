@@ -6,6 +6,22 @@ This UI lets you:
 - See human readable summaries
 - Inspect RYE, delta_R, and energy per cycle
 - View past cycle history stored in the MemoryStore
+
+Reparodynamics:
+    The agent is interpreted as a reparodynamic system that tries to
+    maintain and improve the quality of its internal knowledge over time.
+
+RYE (Repair Yield per Energy):
+    Each cycle computes ΔR / E, where ΔR is the improvement in detected
+    issues and E is an approximate effort cost (number of actions).
+    Higher RYE means more efficient self-repair.
+
+TGRM (Test–Detect–Repair–Verify):
+    Each cycle in CoreAgent/TGRMLoop follows:
+        Test   – evaluate current notes / state
+        Detect – find gaps, TODOs, unanswered questions
+        Repair – perform targeted web/file/paper actions
+        Verify – re-test and compute ΔR and RYE
 """
 
 from __future__ import annotations
@@ -52,6 +68,37 @@ def init_agent(config_path: str = CONFIG_PATH_DEFAULT) -> Tuple[CoreAgent, Memor
     return agent, memory
 
 
+def tavily_status() -> Dict[str, Any]:
+    """Check whether a Tavily API key is available.
+
+    The WebResearchTool uses this key to perform REAL internet research.
+    If no key is present, the agent will fall back to stubbed results.
+    """
+    # Streamlit secrets (preferred on Streamlit Cloud)
+    key_from_secrets = None
+    try:
+        key_from_secrets = st.secrets.get("TAVILY_API_KEY", None)  # type: ignore[attr-defined]
+    except Exception:
+        # st.secrets might not exist outside Streamlit Cloud
+        key_from_secrets = None
+
+    # Environment variable (Streamlit also exposes secrets here)
+    key_from_env = os.getenv("TAVILY_API_KEY")
+
+    key = key_from_secrets or key_from_env
+    if key:
+        # Never show the full key – just confirm presence + a short hash
+        tail = key[-4:]
+        return {
+            "has_key": True,
+            "display": f"Tavily key detected (…{tail})",
+        }
+    return {
+        "has_key": False,
+        "display": "No Tavily API key found – web search will use stubbed results.",
+    }
+
+
 def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
     """Pretty print one cycle summary inside Streamlit."""
     st.markdown(f"### Cycle {cycle_summary['cycle'] + 1}")
@@ -90,7 +137,23 @@ def main() -> None:
 
     agent, memory = init_agent()
 
+    # ----- Sidebar: run settings + environment status -----
     st.sidebar.header("Run settings")
+
+    # Show Tavily / internet status
+    status = tavily_status()
+    st.sidebar.subheader("Internet research")
+    if status["has_key"]:
+        st.sidebar.success(status["display"])
+        st.sidebar.write(
+            "The agent will perform **real Tavily web searches** during Repair steps."
+        )
+    else:
+        st.sidebar.warning(status["display"])
+        st.sidebar.write(
+            "Add `TAVILY_API_KEY` to Streamlit secrets to enable real internet research."
+        )
+
     default_goal = (
         "Research and summarize the concept of Reparodynamics, define RYE and TGRM, "
         "identify similar frameworks in the literature, and produce a structured comparison table."
@@ -107,6 +170,7 @@ def main() -> None:
 
     run_button = st.button("Run agent")
 
+    # ----- Main area: cycle execution -----
     if run_button:
         st.write("Running agent...")
         cycle_results: List[Dict[str, Any]] = []
@@ -118,6 +182,7 @@ def main() -> None:
         for cs in cycle_results:
             render_cycle_summary(cs)
 
+    # ----- History section -----
     st.markdown("---")
     st.subheader("Cycle history")
 
@@ -131,7 +196,8 @@ def main() -> None:
             simple_rows.append(
                 {
                     "cycle": entry.get("cycle"),
-                    "goal": entry.get("goal", "")[:60] + ("..." if len(entry.get("goal", "")) > 60 else ""),
+                    "goal": entry.get("goal", "")[:60]
+                    + ("..." if len(entry.get("goal", "")) > 60 else ""),
                     "delta_R": entry.get("delta_R"),
                     "energy_E": entry.get("energy_E"),
                     "RYE": entry.get("RYE"),
