@@ -6,6 +6,7 @@ This module defines helper functions to compute:
 - E  (effort / energy cost) for each cycle
 - RYE = ΔR / E (Repair Yield per Energy)
 - Optional rolling RYE and efficiency trends
+- Optional regression slope (better long-run trend detection)
 
 Reparodynamics interpretation:
     The research agent is a reparodynamic system trying to raise RYE over
@@ -14,24 +15,19 @@ Reparodynamics interpretation:
     effort. Higher RYE means more efficient self repair.
 
 Backwards compatibility:
-    Existing calls that use the simple signatures:
-
-        compute_delta_r(issues_before, issues_after, repairs_applied)
-        compute_energy(actions_taken)
-
-    still work exactly as before. The extra parameters are optional and
-    only used when provided by newer parts of the agent.
+    All existing calls continue working exactly as before.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+import math
+
 
 # ---------------------------------------------------------------------------
 # ΔR (improvement) computation
 # ---------------------------------------------------------------------------
-
 
 def compute_delta_r(
     issues_before: int,
@@ -41,51 +37,17 @@ def compute_delta_r(
     hypotheses_generated: int = 0,
     sources_used: int = 0,
 ) -> float:
-    """Compute the improvement ΔR for a cycle.
+    """Compute the improvement ΔR for a cycle."""
 
-    Args:
-        issues_before:
-            Number of issues detected before repairs (gaps, TODOs,
-            unanswered questions, contradictions).
-        issues_after:
-            Number of issues remaining after repairs.
-        repairs_applied:
-            Count of repair actions taken (web searches, ingestion,
-            notes added, etc.).
-        contradictions_resolved:
-            Optional count of contradictions explicitly resolved in this
-            cycle (e.g., two papers disagreed and this cycle clarified).
-        hypotheses_generated:
-            Optional count of new, non-trivial hypotheses produced this
-            cycle by the hypothesis engine.
-        sources_used:
-            Optional count of distinct sources (web pages, papers, etc.)
-            that contributed to the repair.
-
-    Returns:
-        float: The improvement score ΔR.
-
-    Heuristic logic:
-        - Base improvement is the number of issues resolved.
-        - Additional credit for resolved contradictions and hypotheses.
-        - Very small bonus for number of sources used (diverse evidence).
-    """
-    # Base improvement: number of issues resolved (cannot be negative)
     base = max(issues_before - issues_after, 0)
 
-    # Each resolved contradiction is quite valuable: +0.5
     contradiction_gain = contradictions_resolved * 0.5
-
-    # Each hypothesis is useful but may be noisy: +0.2
     hypothesis_gain = hypotheses_generated * 0.2
-
-    # Diverse sources help, but with very small per-source gain: +0.05
-    source_gain = min(max(sources_used, 0), 20) * 0.05  # cap to avoid explosion
+    source_gain = min(max(sources_used, 0), 20) * 0.05
 
     delta = float(base + contradiction_gain + hypothesis_gain + source_gain)
 
-    # If no issues existed at all, we still give a tiny credit so
-    # "maintenance cycles" that only refine knowledge are not zero.
+    # Maintenance credit (avoid ΔR = 0 with real work)
     if issues_before == 0 and delta == 0 and repairs_applied > 0:
         delta = repairs_applied * 0.1
 
@@ -96,7 +58,6 @@ def compute_delta_r(
 # E (effort / energy) computation
 # ---------------------------------------------------------------------------
 
-
 def compute_energy(
     actions_taken: List[Dict[str, str]],
     web_calls: int = 0,
@@ -105,40 +66,10 @@ def compute_energy(
     pdf_ingestions: int = 0,
     tokens_estimate: Optional[int] = None,
 ) -> float:
-    """Estimate the effort (E) expended during the cycle.
+    """Estimate the effort (E) expended during the cycle."""
 
-    Args:
-        actions_taken:
-            A list of action dictionaries representing the operations
-            executed during the cycle. Each action contributes at least
-            1 unit of cost.
-        web_calls:
-            Optional explicit count of general web/Tavily calls.
-        pubmed_calls:
-            Optional explicit count of PubMed API queries.
-        semantic_calls:
-            Optional explicit count of Semantic Scholar queries.
-        pdf_ingestions:
-            Optional explicit count of PDF downloads/parse operations.
-        tokens_estimate:
-            Optional estimate of language model tokens processed in this
-            cycle (if you later integrate an LLM). If provided, each
-            1000 tokens adds 1 unit of cost.
-
-    Returns:
-        float: A numeric energy cost.
-
-    Heuristic cost model:
-        - Each action: +1
-        - Each web call: +1.5
-        - Each PubMed / Semantic call: +2
-        - Each PDF ingestion: +2.5 (heavier operation)
-        - Each 1000 tokens: +1
-    """
-    # Base effort: each logged action costs 1
     base_cost = float(len(actions_taken)) if actions_taken else 1.0
 
-    # Add weighted external calls
     cost_web = max(web_calls, 0) * 1.5
     cost_pubmed = max(pubmed_calls, 0) * 2.0
     cost_sem = max(semantic_calls, 0) * 2.0
@@ -146,13 +77,15 @@ def compute_energy(
 
     total = base_cost + cost_web + cost_pubmed + cost_sem + cost_pdf
 
-    # Token-based cost if available
+    # Soft token-costing
     if tokens_estimate is not None and tokens_estimate > 0:
         total += float(tokens_estimate) / 1000.0
 
-    # Ensure energy is never zero (avoid division by zero)
+    # Safety clamp to avoid RYE explosions
     if total <= 0:
         total = 1.0
+    if total < 0.05:
+        total = 0.05
 
     return float(total)
 
@@ -161,98 +94,53 @@ def compute_energy(
 # RYE computation
 # ---------------------------------------------------------------------------
 
-
 def compute_rye(delta_r: float, energy_e: float) -> float:
-    """Compute the Repair Yield per Energy (RYE) metric.
-
-    Args:
-        delta_r:
-            Improvement achieved during the cycle (ΔR).
-        energy_e:
-            Effort spent during the cycle (E).
-
-    Returns:
-        float: The RYE value. Defaults to 0 if energy is zero.
-
-    Reparodynamics interpretation:
-        RYE is the core efficiency law for this agent: how much verified
-        repair or improvement you get per unit of energy. The goal of
-        the entire system is to raise RYE over time while maintaining
-        stability and correctness.
-    """
+    """Compute RYE = ΔR / E."""
     if energy_e <= 0:
         return 0.0
     return float(delta_r) / float(energy_e)
 
 
 # ---------------------------------------------------------------------------
-# Helpers for long-running sessions
+# Rolling RYE
 # ---------------------------------------------------------------------------
 
-
 def rolling_rye(history: List[Dict[str, Any]], window: int = 10) -> Optional[float]:
-    """Compute a rolling average of RYE over the last N cycles.
-
-    Args:
-        history:
-            List of cycle logs, each ideally containing a "RYE" field.
-        window:
-            Number of most recent cycles to include.
-
-    Returns:
-        float or None:
-            Rolling average RYE over the requested window, or None if
-            there is not enough data.
-    """
+    """Compute a rolling average of RYE."""
     if not history:
         return None
 
     recent = history[-window:]
-    values: List[float] = []
+    vals: List[float] = []
+
     for entry in recent:
-        val = entry.get("RYE")
-        if isinstance(val, (int, float)):
-            values.append(float(val))
+        v = entry.get("RYE")
+        if isinstance(v, (int, float)):
+            vals.append(float(v))
 
-    if not values:
+    if not vals:
         return None
-    return sum(values) / len(values)
 
+    return sum(vals) / len(vals)
+
+
+# ---------------------------------------------------------------------------
+# Simple trend
+# ---------------------------------------------------------------------------
 
 def efficiency_trend(history: List[Dict[str, Any]]) -> Optional[float]:
-    """Compute a simple trend indicator of RYE over time.
-
-    This is a very lightweight slope-like metric: it compares the
-    average RYE of the first half of the history and the second half.
-    Positive values suggest improving efficiency; negative values
-    suggest deteriorating efficiency.
-
-    Args:
-        history:
-            List of cycle logs.
-
-    Returns:
-        float or None:
-            Difference (avg_recent - avg_old) or None if there is not
-            enough data.
-    """
+    """Compare first half vs second half RYE averages."""
     n = len(history)
     if n < 4:
-        return None  # not enough data to say anything meaningful
+        return None
 
     mid = n // 2
     old = history[:mid]
     recent = history[mid:]
 
     def _avg(h: List[Dict[str, Any]]) -> Optional[float]:
-        vals: List[float] = []
-        for e in h:
-            v = e.get("RYE")
-            if isinstance(v, (int, float)):
-                vals.append(float(v))
-        if not vals:
-            return None
-        return sum(vals) / len(vals)
+        vals = [float(e.get("RYE")) for e in h if isinstance(e.get("RYE"), (int, float))]
+        return sum(vals) / len(vals) if vals else None
 
     avg_old = _avg(old)
     avg_recent = _avg(recent)
@@ -260,3 +148,68 @@ def efficiency_trend(history: List[Dict[str, Any]]) -> Optional[float]:
         return None
 
     return avg_recent - avg_old
+
+
+# ---------------------------------------------------------------------------
+# NEW: Regression-based RYE slope (better for long runs)
+# ---------------------------------------------------------------------------
+
+def regression_rye_slope(history: List[Dict[str, Any]]) -> Optional[float]:
+    """Compute a smoother RYE trend using linear regression.
+
+    Returns:
+        slope (float) or None
+    """
+
+    if not history or len(history) < 4:
+        return None
+
+    xs: List[float] = []
+    ys: List[float] = []
+
+    for i, entry in enumerate(history):
+        v = entry.get("RYE")
+        if isinstance(v, (int, float)):
+            xs.append(float(i))
+            ys.append(float(v))
+
+    if len(xs) < 4:
+        return None
+
+    # Linear regression: slope = covariance / variance
+    n = len(xs)
+    mean_x = sum(xs) / n
+    mean_y = sum(ys) / n
+
+    num = sum((xs[i] - mean_x) * (ys[i] - mean_y) for i in range(n))
+    den = sum((xs[i] - mean_x) ** 2 for i in range(n))
+
+    if den == 0:
+        return None
+
+    return num / den
+
+
+# ---------------------------------------------------------------------------
+# Optional domain weighting hook
+# ---------------------------------------------------------------------------
+
+def apply_domain_weight(rye_value: float, domain: Optional[str] = None) -> float:
+    """Optional RYE adjustment by domain.
+
+    Not used yet, but ready for future presets:
+        general → 1.0
+        math → 1.1
+        longevity → 1.15
+    """
+
+    if domain is None:
+        return rye_value
+
+    multipliers = {
+        "general": 1.0,
+        "math": 1.1,
+        "longevity": 1.15,
+    }
+
+    return rye_value * multipliers.get(domain, 1.0)
