@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # Optional vector memory integration
 try:
@@ -326,3 +326,135 @@ class MemoryStore:
     def get_cycle_history(self) -> List[Dict[str, Any]]:
         """Return the history of cycles."""
         return self._data.get("cycles", [])
+
+    def get_recent_cycles(
+        self,
+        goal: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """Return recent cycles, optionally filtered by goal.
+
+        Args:
+            goal:
+                If provided, only cycles whose 'goal' matches are returned.
+            limit:
+                Maximum number of cycles to return (most recent first).
+        """
+        history = self._data.get("cycles", [])
+        if goal is not None:
+            history = [c for c in history if c.get("goal") == goal]
+        # Most recent first
+        history_sorted = sorted(
+            history,
+            key=lambda c: c.get("timestamp", ""),
+            reverse=True,
+        )
+        return history_sorted[:limit]
+
+    # ------------------------------------------------------------------
+    # Reporting helpers (for long autonomous runs)
+    # ------------------------------------------------------------------
+    def get_rye_stats(
+        self,
+        goal: Optional[str] = None,
+    ) -> Tuple[Optional[float], Optional[float], Optional[float], int]:
+        """Compute basic RYE statistics for a goal or for all cycles.
+
+        Returns:
+            (avg_rye, min_rye, max_rye, count)
+        """
+        history = self._data.get("cycles", [])
+        if goal is not None:
+            history = [c for c in history if c.get("goal") == goal]
+
+        values: List[float] = []
+        for c in history:
+            v = c.get("RYE")
+            if isinstance(v, (int, float)):
+                values.append(float(v))
+
+        if not values:
+            return None, None, None, 0
+
+        avg_rye = sum(values) / len(values)
+        min_rye = min(values)
+        max_rye = max(values)
+        return avg_rye, min_rye, max_rye, len(values)
+
+    def build_text_report(self, goal: Optional[str] = None) -> str:
+        """Build a simple text/markdown report for a given goal or all goals.
+
+        This is designed to be used by the UI after a long run:
+        - You can show it directly in Streamlit
+        - Or offer it as a downloadable .txt / .md file
+        """
+        # Header
+        if goal:
+            title = f"Autonomous Research Report\nGoal: {goal}\n"
+        else:
+            title = "Autonomous Research Report\n(All goals)\n"
+
+        title += "=" * 40 + "\n\n"
+
+        # Basic stats
+        history = self.get_cycle_history()
+        if goal is not None:
+            history = [c for c in history if c.get("goal") == goal]
+
+        total_cycles = len(history)
+        avg_rye, min_rye, max_rye, rye_count = self.get_rye_stats(goal=goal)
+
+        title += f"Total cycles: {total_cycles}\n"
+        if rye_count > 0 and avg_rye is not None:
+            title += f"RYE (avg): {avg_rye:.3f}\n"
+            title += f"RYE (min): {min_rye:.3f}\n"
+            title += f"RYE (max): {max_rye:.3f}\n"
+        else:
+            title += "RYE: no data available\n"
+        title += "\n"
+
+        # Notes
+        notes = self.get_notes(goal=goal)
+        title += f"Notes collected: {len(notes)}\n"
+        if notes:
+            title += "\nRecent notes:\n"
+            for n in notes[-5:]:
+                ts = n.get("timestamp", "")
+                content = str(n.get("content", "")).strip()
+                if len(content) > 200:
+                    content = content[:200] + "..."
+                title += f"- [{ts}] {content}\n"
+        title += "\n"
+
+        # Hypotheses
+        hyps = self.get_hypotheses(goal=goal)
+        title += f"Hypotheses generated: {len(hyps)}\n"
+        if hyps:
+            title += "\nRecent hypotheses:\n"
+            for h in hyps[-5:]:
+                ts = h.get("timestamp", "")
+                text = str(h.get("text", "")).strip()
+                score = h.get("score", None)
+                if len(text) > 200:
+                    text = text[:200] + "..."
+                if isinstance(score, (int, float)):
+                    title += f"- [{ts}] ({score:.2f}) {text}\n"
+                else:
+                    title += f"- [{ts}] {text}\n"
+        title += "\n"
+
+        # Citations
+        cits = self.get_citations(goal=goal)
+        title += f"Citations logged: {len(cits)}\n"
+        if cits:
+            title += "\nSample citations:\n"
+            for e in cits[-5:]:
+                ts = e.get("timestamp", "")
+                c = e.get("citation", {}) or {}
+                src = c.get("source", "web")
+                c_title = c.get("title", "")
+                url = c.get("url", "")
+                title += f"- [{ts}] [{src}] {c_title} — {url}\n"
+
+        title += "\nEnd of report.\n"
+        return title
