@@ -1,7 +1,7 @@
 """Enhanced Streamlit interface for the Autonomous Research Agent.
 
 Features:
-- Continuous Mode with duration presets (1h, 8h, 24h, Forever)
+- Continuous Mode with duration presets (1h, 8h, 24h, 90 days, Forever)
 - Researcher + Critic multi-agent mode
 - Domain presets (General, Longevity, Math)
 - PubMed / Semantic Scholar ingestion controls
@@ -171,7 +171,7 @@ def main() -> None:
     agent, memory = init_agent()
 
     # -----------------------------
-    # Sidebar – settings
+    # Sidebar - settings
     # -----------------------------
     st.sidebar.header("Run settings")
 
@@ -257,10 +257,11 @@ def main() -> None:
             "1 hour (estimated)",
             "8 hours (estimated)",
             "24 hours (estimated)",
+            "90 days (real clock)",
             "Forever (until stopped)",
         ],
         index=0,
-        help="Timed modes now try to respect real wall-clock minutes using the agent's time budget.",
+        help="Timed modes now try to respect real wall clock minutes using the agent time budget.",
     )
 
     # Optional RYE stop for continuous modes
@@ -385,6 +386,8 @@ def main() -> None:
                 max_minutes = 8 * 60.0
             elif run_mode == "24 hours (estimated)":
                 max_minutes = 24 * 60.0
+            elif run_mode == "90 days (real clock)":
+                max_minutes = 90.0 * 24.0 * 60.0
             elif run_mode == "Forever (until stopped)":
                 max_minutes = None
                 forever_flag = True
