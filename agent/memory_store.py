@@ -6,6 +6,8 @@ This module provides a JSON-based persistent storage layer. It stores:
 - citations
 - biomarker summaries (future use)
 - cycle logs
+- run_state metadata (for long continuous runs and auto resume)
+- watchdog information (heartbeats for crash diagnostics)
 
 The memory store acts as a lightweight knowledge base for the agent and is
 referenced each cycle to retrieve prior context and to persist new findings.
@@ -15,13 +17,17 @@ Reparodynamics interpretation:
     Each TGRM cycle writes its improvements here, and future cycles read
     from it to reduce energy cost. When combined with VectorMemory, this
     becomes a semantic, time-aware repair substrate.
+
+    The run_state and watchdog sections act as a meta-layer:
+    they record how the system itself is running so that the agent
+    can restart and continue repair with minimal extra energy.
 """
 
 from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 # Optional vector memory integration
@@ -29,6 +35,11 @@ try:
     from .vector_memory import VectorMemory  # type: ignore[import]
 except Exception:  # pragma: no cover - optional dependency
     VectorMemory = None  # type: ignore[assignment]
+
+
+def _utc_now_iso() -> str:
+    """Return current UTC time in ISO 8601 with Z suffix."""
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 class MemoryStore:
@@ -40,6 +51,8 @@ class MemoryStore:
         - "hypotheses":  generated hypotheses for each goal
         - "citations":   structured citation objects from web/papers
         - "biomarkers":  placeholder for anti-aging / lab data
+        - "run_state":   metadata for long-running autonomous sessions
+        - "watchdog":    timestamps and counters for heartbeats
 
     In-memory (non-persistent) vector memory may also be attached to
     support semantic search and time-decayed retrieval if the optional
@@ -58,6 +71,8 @@ class MemoryStore:
             "hypotheses": [],
             "citations": [],
             "biomarkers": [],
+            "run_state": {},  # crash proof run metadata
+            "watchdog": {},   # heartbeat and last seen info
         }
         self._load()
         self._ensure_keys()
@@ -76,15 +91,26 @@ class MemoryStore:
     # ------------------------------------------------------------------
     def _ensure_keys(self) -> None:
         """Ensure all expected top-level keys exist in _data."""
-        for key, default in [
-            ("notes", []),
-            ("cycles", []),
-            ("hypotheses", []),
-            ("citations", []),
-            ("biomarkers", []),
-        ]:
-            if key not in self._data or not isinstance(self._data.get(key), list):
+        defaults = {
+            "notes": [],
+            "cycles": [],
+            "hypotheses": [],
+            "citations": [],
+            "biomarkers": [],
+            "run_state": {},
+            "watchdog": {},
+        }
+        for key, default in defaults.items():
+            if key not in self._data:
                 self._data[key] = default
+            else:
+                # Make sure types are reasonable
+                if key in ("notes", "cycles", "hypotheses", "citations", "biomarkers"):
+                    if not isinstance(self._data.get(key), list):
+                        self._data[key] = []
+                else:
+                    if not isinstance(self._data.get(key), dict):
+                        self._data[key] = {}
 
     def _load(self) -> None:
         """Load memory from disk if the file exists."""
@@ -100,6 +126,8 @@ class MemoryStore:
                     "hypotheses": [],
                     "citations": [],
                     "biomarkers": [],
+                    "run_state": {},
+                    "watchdog": {},
                 }
 
     def _save(self) -> None:
@@ -121,7 +149,7 @@ class MemoryStore:
     ) -> None:
         """Add a note associated with a research goal."""
         note = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": _utc_now_iso(),
             "goal": goal,
             "content": content,
             "tags": tags or [],
@@ -167,7 +195,7 @@ class MemoryStore:
                     meta = dict(it.metadata)
                     # Reconstruct minimal note-like structure
                     meta.setdefault("content", it.text)
-                    meta.setdefault("timestamp", it.timestamp.isoformat() + "Z")
+                    meta.setdefault("timestamp", _utc_now_iso())
                     if goal is None or meta.get("goal") == goal:
                         results.append(meta)
                 return results
@@ -194,7 +222,7 @@ class MemoryStore:
     ) -> None:
         """Store a generated hypothesis for a given goal."""
         hyp = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": _utc_now_iso(),
             "goal": goal,
             "text": text,
             "score": float(score) if score is not None else None,
@@ -229,7 +257,7 @@ class MemoryStore:
     def add_citation(self, goal: str, citation: Dict[str, Any]) -> None:
         """Add a structured citation object."""
         entry = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": _utc_now_iso(),
             "goal": goal,
             "citation": citation,
         }
@@ -268,7 +296,7 @@ class MemoryStore:
     def add_biomarker_snapshot(self, goal: str, data: Dict[str, Any]) -> None:
         """Store a biomarker snapshot (anti-aging / health metrics)."""
         entry = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": _utc_now_iso(),
             "goal": goal,
             "data": data,
         }
@@ -319,6 +347,108 @@ class MemoryStore:
         return history_sorted[:limit]
 
     # ------------------------------------------------------------------
+    # Run state and checkpoint helpers
+    # ------------------------------------------------------------------
+    def save_run_state(
+        self,
+        *,
+        goal: str,
+        mode: str,
+        minutes_remaining: Optional[float],
+        last_cycle_index: Optional[int],
+        domain: Optional[str] = None,
+        role: str = "agent",
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Persist high level run state for crash proof continuous mode.
+
+        This is a compact summary so the agent can resume a long run:
+            - what it was doing (goal, domain, role)
+            - how it was running (mode)
+            - how much time remained (approx minutes_remaining)
+            - which cycle index was last completed
+        """
+        state: Dict[str, Any] = {
+            "updated_at": _utc_now_iso(),
+            "goal": goal,
+            "mode": mode,
+            "domain": domain,
+            "role": role,
+            "minutes_remaining": minutes_remaining,
+            "last_cycle_index": last_cycle_index,
+        }
+        if extra:
+            state["extra"] = extra
+
+        self._data.setdefault("run_state", {})
+        self._data["run_state"] = state
+        self._save()
+
+    def load_run_state(self) -> Optional[Dict[str, Any]]:
+        """Return the last saved run state, if any."""
+        state = self._data.get("run_state") or {}
+        if not isinstance(state, dict) or not state:
+            return None
+        return dict(state)
+
+    def clear_run_state(self) -> None:
+        """Clear saved run state metadata."""
+        self._data["run_state"] = {}
+        self._save()
+
+    # ------------------------------------------------------------------
+    # Watchdog heartbeats for long runs
+    # ------------------------------------------------------------------
+    def heartbeat(self, label: str = "continuous_run") -> None:
+        """Record a watchdog heartbeat.
+
+        The agent can call this periodically so that:
+            - you can see if it is still alive
+            - a supervising process can measure downtime
+        """
+        wd = self._data.setdefault("watchdog", {})
+        now = _utc_now_iso()
+        entry = wd.get(label, {})
+        if isinstance(entry, dict):
+            count = int(entry.get("count", 0)) + 1
+        else:
+            count = 1
+        wd[label] = {
+            "last_beat": now,
+            "count": count,
+        }
+        self._save()
+
+    def get_watchdog_info(self, label: str = "continuous_run") -> Dict[str, Any]:
+        """Return watchdog data for a label.
+
+        The structure contains:
+            - last_beat: ISO timestamp or None
+            - count: how many beats were recorded
+            - seconds_since_last: float or None
+        """
+        wd = self._data.get("watchdog") or {}
+        if not isinstance(wd, dict):
+            wd = {}
+        entry = wd.get(label) or {}
+        last_beat = entry.get("last_beat")
+        count = entry.get("count", 0)
+
+        seconds_since_last: Optional[float] = None
+        if isinstance(last_beat, str):
+            try:
+                dt = datetime.fromisoformat(last_beat.replace("Z", "+00:00"))
+                seconds_since_last = (datetime.now(timezone.utc) - dt).total_seconds()
+            except Exception:
+                seconds_since_last = None
+
+        return {
+            "last_beat": last_beat,
+            "count": count,
+            "seconds_since_last": seconds_since_last,
+        }
+
+    # ------------------------------------------------------------------
     # Reporting helpers (for long autonomous runs)
     # ------------------------------------------------------------------
     def get_rye_stats(
@@ -349,11 +479,11 @@ class MemoryStore:
         return avg_rye, min_rye, max_rye, len(values)
 
     def build_text_report(self, goal: Optional[str] = None) -> str:
-        """Build a simple text/markdown report for a given goal or all goals.
+        """Build a simple text or markdown report for a goal or all goals.
 
         This is designed to be used by the UI after a long run:
         - You can show it directly in Streamlit
-        - Or offer it as a downloadable .txt / .md file
+        - Or offer it as a downloadable .txt or .md file
         """
         # Header
         if goal:
@@ -421,7 +551,7 @@ class MemoryStore:
                 src = c.get("source", "web")
                 c_title = c.get("title", "")
                 url = c.get("url", "")
-                title += f"- [{ts}] [{src}] {c_title} — {url}\n"
+                title += f"- [{ts}] [{src}] {c_title} - {url}\n"
 
         title += "\nEnd of report.\n"
         return title
