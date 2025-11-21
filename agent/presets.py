@@ -2,34 +2,79 @@
 
 """Domain presets for the Autonomous Research Agent.
 
-These presets are like "profiles" for different domains. Each preset is a
-small configuration bundle that can be used by the UI (Streamlit) and by
-the core agent / TGRM loop.
+Presets act as domain-specific "profiles" that define:
+- default goals
+- source controls
+- domain tags
+- query behavior
+- RYE weighting hints
+- reporting structure
+- runtime profiles for 1h / 8h / 24h / forever runs
 
-Nothing in here is required by the current code except:
-    - label
-    - default_goal
-    - source_controls
-    - domain
-
-Everything else (focus_keywords, min_citation_count, etc.) is "future
-power" that you can plug into TGRM and RYE scoring later without breaking
-the app today.
+These settings do NOT break existing code but unlock future power for:
+- continuous mode tuning
+- energy-aware TGRM behavior
+- long-run reporting and summaries
 """
 
 from __future__ import annotations
 from typing import Dict, Any
 
-# Top-level dictionary of presets. Keys are internal IDs
-# like "general", "longevity", "math".
+# ---------------------------------------------------------------------
+# Global Runtime Profiles (applies for all presets)
+# ---------------------------------------------------------------------
+RUNTIME_PROFILES = {
+    "1_hour": {
+        "label": "1 Hour Run",
+        "estimated_cycles": 40,
+        "rye_stop_threshold": None,
+        "energy_scaling": 1.0,
+        "report_frequency": 1,
+        "description": "Short diagnostic run: fast repair checks, sanity pass."
+    },
+    "8_hours": {
+        "label": "8 Hour Run",
+        "estimated_cycles": 200,
+        "rye_stop_threshold": 0.05,
+        "energy_scaling": 1.2,
+        "report_frequency": 1,
+        "description": "Medium autonomous session: stable equilibrium patterns emerge."
+    },
+    "24_hours": {
+        "label": "24 Hour Run",
+        "estimated_cycles": 600,
+        "rye_stop_threshold": 0.08,
+        "energy_scaling": 1.4,
+        "report_frequency": 2,
+        "description": "Full daily autonomous research loop: equilibrium + deep repairs."
+    },
+    "forever": {
+        "label": "Run Until Stopped",
+        "estimated_cycles": 10_000_000,
+        "rye_stop_threshold": None,
+        "energy_scaling": 1.0,
+        "report_frequency": 5,
+        "description": "Infinite autonomous operation until user manually stops."
+    }
+}
+
+# ---------------------------------------------------------------------
+# Domain Presets
+# ---------------------------------------------------------------------
 PRESETS: Dict[str, Dict[str, Any]] = {
+
+    # ================================================================
+    # GENERAL PRESET
+    # ================================================================
     "general": {
         "label": "General research",
+        "domain": "general",
+
         "default_goal": (
             "Research and summarize the concept of Reparodynamics, define RYE and TGRM, "
             "identify similar frameworks in the literature, and produce a structured comparison table."
         ),
-        # Which sources/tools should be enabled by default for this preset.
+
         "source_controls": {
             "web": True,
             "pubmed": False,
@@ -37,46 +82,61 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "pdf": True,
             "biomarkers": False,
         },
-        # Logical domain tag for later use in TGRM / RYE logic.
-        "domain": "general",
 
-        # ---------- Extra metadata (not yet required by other files) ----------
-        # Keywords that can be appended/boosted in queries for this domain.
         "focus_keywords": [
-            "reparodynamics",
-            "RYE",
-            "repair yield per energy",
-            "TGRM",
-            "self-repair",
-            "autonomous systems",
-            "stability",
-            "resilience",
+            "reparodynamics", "RYE", "repair yield per energy",
+            "TGRM", "self-repair", "autonomous systems",
+            "stability", "resilience"
         ],
-        # Minimum citation count when filtering Semantic Scholar results (if you decide to use this).
-        "min_citation_count": 0,
-        # Preferred source order for this preset.
+
         "preferred_sources": ["web", "semantic", "pdf"],
-        # Text structuring hint – how notes should ideally be organized.
+        "min_citation_count": 0,
+
         "note_structure_hint": [
             "High level summary",
             "Key definitions (Reparodynamics, RYE, TGRM)",
             "Similar frameworks",
             "Open questions / next steps",
         ],
-        # Optional weighting hints for future RYE enhancements.
+
         "rye_weights": {
             "issues_resolved": 1.0,
             "hypotheses_quality": 1.0,
             "citations_added": 0.5,
         },
+
+        # NEW: domain-level cycle tuning
+        "cycle_energy_multiplier": 1.0,
+        "cycle_length_hint": "short",
+        "repair_depth_bias": "balanced",
+
+        # NEW: report style
+        "report_sections": [
+            "summary",
+            "rye_statistics",
+            "notes",
+            "hypotheses",
+            "citations",
+        ],
+        "report_style": "narrative",
+        "report_frequency": 1,
+
+        # NEW universal runtime profiles
+        "runtime_profiles": RUNTIME_PROFILES,
     },
 
+    # ================================================================
+    # LONGEVITY PRESET
+    # ================================================================
     "longevity": {
         "label": "Longevity / Anti-aging",
+        "domain": "longevity",
+
         "default_goal": (
             "Identify and summarize interventions, biomarkers, and mechanisms that extend healthspan and longevity, "
-            "and relate them to reparodynamic efficiency (RYE) and self-repair stability across organs and systems."
+            "and relate them to RYE and reparodynamic stability across organs and systems."
         ),
+
         "source_controls": {
             "web": True,
             "pubmed": True,
@@ -84,99 +144,115 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "pdf": True,
             "biomarkers": True,
         },
-        "domain": "longevity",
 
-        # For building richer domain-aware queries.
         "focus_keywords": [
-            "longevity",
-            "healthspan",
-            "aging",
-            "senescence",
-            "autophagy",
-            "mTOR",
-            "NAD+",
-            "rapamycin",
-            "metformin",
-            "caloric restriction",
-            "clinical trial",
-            "biomarker",
+            "longevity", "healthspan", "aging", "senescence",
+            "autophagy", "mTOR", "NAD+", "rapamycin",
+            "metformin", "caloric restriction",
+            "clinical trial", "biomarker",
         ],
-        # For longevity you often want at least decently cited papers.
-        "min_citation_count": 20,
+
         "preferred_sources": ["pubmed", "semantic", "web", "pdf"],
+        "min_citation_count": 20,
+
         "note_structure_hint": [
-            "High level summary",
-            "Interventions (drug / lifestyle / protocol)",
+            "Interventions",
             "Mechanisms and pathways",
             "Biomarkers affected",
-            "Evidence strength (animal vs human, trial size)",
-            "Potential RYE interpretation (repair yield per energy / side effect cost)",
+            "Evidence strength",
+            "RYE interpretation",
         ],
+
         "rye_weights": {
-            # Reward resolving contradictions in the literature.
             "issues_resolved": 1.2,
-            # Reward generating good hypotheses about mechanisms / biomarkers.
             "hypotheses_quality": 1.5,
-            # Reward adding well-cited sources.
             "citations_added": 1.0,
         },
+
+        "cycle_energy_multiplier": 1.3,
+        "cycle_length_hint": "long",
+        "repair_depth_bias": "deep",
+
+        "report_sections": [
+            "summary",
+            "biomarkers",
+            "mechanisms",
+            "hypotheses",
+            "citations",
+            "rye_statistics"
+        ],
+        "report_style": "structured",
+        "report_frequency": 1,
+
+        "runtime_profiles": RUNTIME_PROFILES,
     },
 
+    # ================================================================
+    # MATH PRESET
+    # ================================================================
     "math": {
         "label": "Math / Theory",
+        "domain": "math",
+
         "default_goal": (
-            "Formalize Reparodynamics, RYE, and TGRM as a mathematical framework, including precise definitions, "
-            "axioms, theorems, and sketches of proofs, and compare them to existing control, information, and "
-            "stability theories in the literature."
+            "Formalize Reparodynamics, RYE, and TGRM mathematically: definitions, axioms, theorems, "
+            "proof sketches, and comparisons to control, information, and stability theories."
         ),
+
         "source_controls": {
             "web": True,
-            "pubmed": False,   # rarely needed for pure theory
-            "semantic": True,  # good for theoretical CS / math papers
+            "pubmed": False,
+            "semantic": True,
             "pdf": True,
             "biomarkers": False,
         },
-        "domain": "math",
 
         "focus_keywords": [
-            "mathematical",
-            "formalization",
-            "axiom",
-            "theorem",
-            "proof",
-            "stability theory",
-            "Lyapunov",
-            "control theory",
-            "information theory",
-            "Markov process",
-            "equilibrium",
+            "mathematical", "formalization", "axiom", "theorem",
+            "proof", "stability theory", "Lyapunov", "information theory",
+            "Markov process", "equilibrium",
         ],
-        # You might want stronger filtering here too.
-        "min_citation_count": 5,
+
         "preferred_sources": ["semantic", "pdf", "web"],
+        "min_citation_count": 5,
+
         "note_structure_hint": [
-            "Informal overview",
-            "Definitions (Reparodynamics, RYE, TGRM, equilibrium, damage, repair operator)",
+            "Definitions",
             "Core lemmas",
-            "Candidate theorems",
-            "Connections to existing theories",
-            "Open problems / conjectures",
+            "Theorems",
+            "Connections to existing theory",
+            "Open problems",
         ],
+
         "rye_weights": {
-            # In math, resolving contradictions and sharpening definitions is huge.
             "issues_resolved": 1.5,
-            # Hypotheses here are conjectures / theorems → high weight.
             "hypotheses_quality": 1.7,
-            # Citations still matter but less than the structure itself.
             "citations_added": 0.7,
         },
+
+        "cycle_energy_multiplier": 0.8,
+        "cycle_length_hint": "short",
+        "repair_depth_bias": "precision",
+
+        "report_sections": [
+            "summary",
+            "definitions",
+            "theorems",
+            "proof_sketches",
+            "citations",
+            "rye_statistics"
+        ],
+        "report_style": "technical",
+        "report_frequency": 1,
+
+        "runtime_profiles": RUNTIME_PROFILES,
     },
 }
 
 
+# ---------------------------------------------------------------------
+# Accessor
+# ---------------------------------------------------------------------
 def get_preset(name: str) -> Dict[str, Any]:
-    """Return a preset config, falling back to 'general' if unknown.
-
-    This keeps the rest of the app safe even if an invalid preset key is used.
-    """
+    """Return a preset config, falling back to 'general' if unknown."""
     return PRESETS.get(name, PRESETS["general"])
