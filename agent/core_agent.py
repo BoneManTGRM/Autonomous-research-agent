@@ -18,6 +18,13 @@ RYE (Repair Yield per Energy):
     For each cycle, TGRMLoop computes delta_R / E (improvement divided
     by effort). CoreAgent simply orchestrates cycles and exposes higher
     level methods like multi-agent runs and continuous mode.
+
+Multi-agent extension:
+    CoreAgent can now orchestrate multiple logical agent roles
+    (researcher, critic, planner, synthesizer, explorer) over the same
+    MemoryStore. This makes it possible to run:
+        - one cycle per role (multi-agent round), or
+        - long continuous runs where each “round” consists of many roles.
 """
 
 from __future__ import annotations
@@ -25,7 +32,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from .memory_store import MemoryStore
 from .tgrm_loop import TGRMLoop
@@ -68,6 +75,21 @@ class CoreAgent:
         # Whether continuous runs should try to auto resume from checkpoint
         self.auto_resume_enabled: bool = bool(self.config.get("auto_resume_enabled", True))
 
+        # ------------------------------------------------------------------
+        # Multi-agent configuration
+        # ------------------------------------------------------------------
+        # Logical agent “roles” that can be run in rounds.
+        # You can change or extend this list in config if desired:
+        #   config["agent_roles"] = ["researcher", "critic", "planner", "synthesizer", "explorer"]
+        default_roles: List[str] = [
+            "researcher",
+            "critic",
+            "planner",
+            "synthesizer",
+            "explorer",
+        ]
+        self.agent_roles: List[str] = list(self.config.get("agent_roles", default_roles))
+
     # ------------------------------------------------------------------
     # Internal helpers for crash proofing
     # ------------------------------------------------------------------
@@ -101,6 +123,71 @@ class CoreAgent:
                 self.checkpoint_path.unlink()
         except Exception:
             return
+
+    # ------------------------------------------------------------------
+    # Multi-agent utilities
+    # ------------------------------------------------------------------
+    def get_agent_roles(self) -> List[str]:
+        """Return the configured logical agent roles."""
+        return list(self.agent_roles)
+
+    def spawn_child_agent(self, extra_config: Optional[Dict[str, Any]] = None) -> "CoreAgent":
+        """Create a new CoreAgent that shares the same MemoryStore.
+
+        This is a light-weight way for agents to "create" agents.
+        Child agents share the same memory substrate but can have their
+        own configuration (for example different prompts, domains, etc.).
+        """
+        cfg = dict(self.config)
+        if extra_config:
+            cfg.update(extra_config)
+        return CoreAgent(memory_store=self.memory_store, config=cfg)
+
+    def run_multi_agent_round(
+        self,
+        goal: str,
+        base_cycle_index: int,
+        roles: Optional[Sequence[str]] = None,
+        source_controls: Optional[Dict[str, bool]] = None,
+        pdf_bytes: Optional[bytes] = None,
+        biomarker_snapshot: Optional[Dict[str, Any]] = None,
+        domain: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Run a single 'round' of multiple logical agents.
+
+        Example round (5 agents):
+            1. researcher   – primary gatherer and explainer
+            2. critic       – attacks weak points, flags gaps
+            3. planner      – proposes next experiments and steps
+            4. synthesizer  – condenses findings into coherent story
+            5. explorer     – searches for surprising / out-of-distribution angles
+
+        All agents share the same MemoryStore and TGRM engine, but run
+        with different `role` labels so you can distinguish their
+        contributions in the logs and RYE history.
+
+        Returns:
+            List of human-facing summaries (one per role).
+        """
+        if roles is None:
+            roles = self.agent_roles
+
+        summaries: List[Dict[str, Any]] = []
+
+        for idx, role in enumerate(roles):
+            ci = base_cycle_index + idx
+            result = self.run_cycle(
+                goal=goal,
+                cycle_index=ci,
+                role=role,
+                source_controls=source_controls,
+                pdf_bytes=pdf_bytes,
+                biomarker_snapshot=biomarker_snapshot,
+                domain=domain,
+            )
+            summaries.append(result.get("summary", {}))
+
+        return summaries
 
     # ------------------------------------------------------------------
     # Public API used by Streamlit and CLI
