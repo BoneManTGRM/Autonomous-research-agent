@@ -1,2 +1,16 @@
 streamlit
 pyyaml
+tavily-python
+requests
+beautifulsoup4
+pypdf
+pandas
+matplotlib
+plotly
+numpy
+scipy
+sentence-transformers
+scikit-learn
+faiss-cpu
+python-dateutil
+lxml
