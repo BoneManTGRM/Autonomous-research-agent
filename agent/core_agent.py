@@ -154,6 +154,8 @@ class CoreAgent:
         pdf_bytes: Optional[bytes] = None,
         biomarker_snapshot: Optional[Dict[str, Any]] = None,
         domain: Optional[str] = None,
+        max_minutes: Optional[float] = None,
+        forever: bool = False,
     ) -> List[Dict[str, Any]]:
         """Run multiple TGRM cycles in a row ("continuous mode").
 
@@ -165,8 +167,8 @@ class CoreAgent:
             goal:
                 Research goal to pursue over many cycles.
             max_cycles:
-                Hard cap on the number of cycles to prevent
-                infinite runs in hosted environments.
+                Hard cap on the number of cycles to prevent infinite runs
+                in hosted environments (used when `forever` is False).
             stop_rye:
                 Optional RYE threshold. If set, the loop stops
                 early once average RYE over recent cycles
@@ -184,11 +186,19 @@ class CoreAgent:
             domain:
                 Optional domain tag (e.g. "general", "longevity", "math")
                 forwarded into each cycle.
+            max_minutes:
+                Optional wall-clock time budget in minutes. If provided,
+                the loop will stop once this time has elapsed.
+            forever:
+                If True, ignore max_cycles and keep running until
+                stopped by `max_minutes`, `stop_rye`, or the environment.
 
         Returns:
             List[Dict[str, Any]]: List of human-facing summaries for
             each completed cycle.
         """
+        import time
+
         summaries: List[Dict[str, Any]] = []
         recent_rye: List[float] = []
 
@@ -196,7 +206,20 @@ class CoreAgent:
         history = self.memory_store.get_cycle_history()
         start_index = len(history)
 
-        for i in range(max_cycles):
+        start_time = time.monotonic()
+        i = 0
+
+        while True:
+            # Cycle-based stopping (unless in explicit forever mode)
+            if not forever and i >= max_cycles:
+                break
+
+            # Time-based stopping (for 1h / 8h / 24h presets if wired)
+            if max_minutes is not None:
+                elapsed_min = (time.monotonic() - start_time) / 60.0
+                if elapsed_min >= max_minutes:
+                    break
+
             ci = start_index + i
             result = self.run_cycle(
                 goal=goal,
@@ -226,5 +249,7 @@ class CoreAgent:
                     # has fallen below the target; further cycles are
                     # not energetically efficient, so we stop.
                     break
+
+            i += 1
 
         return summaries
