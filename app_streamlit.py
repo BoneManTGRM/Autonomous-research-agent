@@ -12,16 +12,16 @@ Reparodynamics:
     maintain and improve the quality of its internal knowledge over time.
 
 RYE (Repair Yield per Energy):
-    Each cycle computes ΔR / E, where ΔR is the improvement in detected
+    Each cycle computes delta_R / E, where delta_R is the improvement in detected
     issues and E is an approximate effort cost (number of actions).
-    Higher RYE means more efficient self-repair.
+    Higher RYE means more efficient self repair.
 
-TGRM (Test–Detect–Repair–Verify):
+TGRM (Test, Detect, Repair, Verify):
     Each cycle in CoreAgent/TGRMLoop follows:
         Test   – evaluate current notes / state
         Detect – find gaps, TODOs, unanswered questions
-        Repair – perform targeted web/file/paper actions
-        Verify – re-test and compute ΔR and RYE
+        Repair – perform targeted web and paper actions
+        Verify – re test and compute delta_R and RYE
 """
 
 from __future__ import annotations
@@ -69,39 +69,25 @@ def init_agent(config_path: str = CONFIG_PATH_DEFAULT) -> Tuple[CoreAgent, Memor
 
 
 def tavily_status() -> Dict[str, Any]:
-    """Check whether a Tavily API key is available.
-
-    The WebResearchTool uses this key to perform REAL internet research.
-    If no key is present, the agent will fall back to stubbed results.
-    """
-    # Streamlit secrets (preferred on Streamlit Cloud)
-    key_from_secrets = None
+    """Check whether a Tavily API key is available."""
+    key = None
     try:
-        key_from_secrets = st.secrets.get("TAVILY_API_KEY", None)  # type: ignore[attr-defined]
+        key = st.secrets.get("TAVILY_API_KEY", None)  # type: ignore[attr-defined]
     except Exception:
-        # st.secrets might not exist outside Streamlit Cloud
-        key_from_secrets = None
+        key = None
 
-    # Environment variable (Streamlit also exposes secrets here)
-    key_from_env = os.getenv("TAVILY_API_KEY")
+    if not key:
+        key = os.getenv("TAVILY_API_KEY")
 
-    key = key_from_secrets or key_from_env
     if key:
-        # Never show the full key – just confirm presence + a short hash
         tail = key[-4:]
-        return {
-            "has_key": True,
-            "display": f"Tavily key detected (…{tail})",
-        }
-    return {
-        "has_key": False,
-        "display": "No Tavily API key found – web search will use stubbed results.",
-    }
+        return {"has_key": True, "display": f"Tavily key detected (...{tail})"}
+    return {"has_key": False, "display": "No Tavily API key found. Web search will use stubbed results."}
 
 
 def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
     """Pretty print one cycle summary inside Streamlit."""
-    st.markdown(f"### Cycle {cycle_summary['cycle'] + 1}")
+    st.markdown(f"### Cycle {cycle_summary['cycle'] + 1} ({cycle_summary.get('role', 'agent')})")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -130,6 +116,14 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
             for note in cycle_summary["notes_added"]:
                 st.write(f"- {note}")
 
+    if cycle_summary.get("citations"):
+        with st.expander("Citations for this cycle"):
+            for c in cycle_summary["citations"]:
+                src = c.get("source", "")
+                title = c.get("title", "")
+                url = c.get("url", "")
+                st.write(f"- [{src}] {title} ({url})")
+
 
 def main() -> None:
     st.title("Autonomous Research Agent")
@@ -137,22 +131,17 @@ def main() -> None:
 
     agent, memory = init_agent()
 
-    # ----- Sidebar: run settings + environment status -----
+    # Sidebar: settings and environment status
     st.sidebar.header("Run settings")
 
-    # Show Tavily / internet status
     status = tavily_status()
     st.sidebar.subheader("Internet research")
     if status["has_key"]:
         st.sidebar.success(status["display"])
-        st.sidebar.write(
-            "The agent will perform **real Tavily web searches** during Repair steps."
-        )
+        st.sidebar.write("The agent will perform real Tavily web searches during Repair steps.")
     else:
         st.sidebar.warning(status["display"])
-        st.sidebar.write(
-            "Add `TAVILY_API_KEY` to Streamlit secrets to enable real internet research."
-        )
+        st.sidebar.write("Add TAVILY_API_KEY to Streamlit Secrets to enable real internet research.")
 
     default_goal = (
         "Research and summarize the concept of Reparodynamics, define RYE and TGRM, "
@@ -160,29 +149,51 @@ def main() -> None:
     )
     goal = st.text_area("Research goal", value=default_goal, height=150)
 
+    multi_agent = st.sidebar.checkbox("Enable multi agent (researcher + critic)", value=False)
+
     cycles = st.number_input(
-        "Number of TGRM cycles to run",
+        "Number of TGRM cycles to run in this session",
         min_value=1,
-        max_value=20,
+        max_value=50,
         value=3,
         step=1,
     )
 
     run_button = st.button("Run agent")
 
-    # ----- Main area: cycle execution -----
+    # Main: run cycles
     if run_button:
         st.write("Running agent...")
+        history = memory.get_cycle_history()
+        next_index = len(history)
+
         cycle_results: List[Dict[str, Any]] = []
-        for i in range(int(cycles)):
-            result = agent.run_cycle(goal=goal, cycle_index=i)
-            cycle_results.append(result["summary"])
+
+        if not multi_agent:
+            # Single agent mode
+            for i in range(int(cycles)):
+                ci = next_index + i
+                result = agent.run_cycle(goal=goal, cycle_index=ci)
+                cycle_results.append(result["summary"])
+        else:
+            # Multi agent mode: researcher then critic for each logical cycle
+            for i in range(int(cycles)):
+                base_idx = next_index + 2 * i
+
+                # Primary researcher
+                res_researcher = agent.run_cycle(goal=goal, cycle_index=base_idx, role="researcher")
+                cycle_results.append(res_researcher["summary"])
+
+                # Critic agent refines existing notes
+                critic_goal = f"Critically review and refine notes for: {goal}"
+                res_critic = agent.run_cycle(goal=critic_goal, cycle_index=base_idx + 1, role="critic")
+                cycle_results.append(res_critic["summary"])
 
         st.subheader("Cycle summaries")
         for cs in cycle_results:
             render_cycle_summary(cs)
 
-    # ----- History section -----
+    # History section
     st.markdown("---")
     st.subheader("Cycle history")
 
@@ -190,12 +201,12 @@ def main() -> None:
     if not history:
         st.write("No past cycles logged yet.")
     else:
-        # Simple table of history for quick inspection
         simple_rows = []
         for entry in history:
             simple_rows.append(
                 {
                     "cycle": entry.get("cycle"),
+                    "role": entry.get("role", "agent"),
                     "goal": entry.get("goal", "")[:60]
                     + ("..." if len(entry.get("goal", "")) > 60 else ""),
                     "delta_R": entry.get("delta_R"),
@@ -205,6 +216,22 @@ def main() -> None:
                 }
             )
         st.dataframe(simple_rows, use_container_width=True)
+
+        # RYE and TGRM efficiency charts
+        st.markdown("### RYE and TGRM efficiency charts")
+
+        cycles_x = [r["cycle"] for r in simple_rows if r["cycle"] is not None]
+        rye_vals = [r["RYE"] for r in simple_rows]
+        delta_vals = [r["delta_R"] for r in simple_rows]
+        energy_vals = [r["energy_E"] for r in simple_rows]
+
+        if cycles_x:
+            st.line_chart({"RYE": rye_vals})
+            st.caption("RYE over cycles (higher is better repair yield per energy).")
+            st.line_chart({"delta_R": delta_vals})
+            st.caption("delta_R over cycles (how much improvement each cycle achieves).")
+            st.line_chart({"energy_E": energy_vals})
+            st.caption("Energy E over cycles (approximate effort per cycle).")
 
         with st.expander("Raw history JSON"):
             st.code(json.dumps(history, indent=2), language="json")
