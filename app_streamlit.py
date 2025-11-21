@@ -66,12 +66,21 @@ def init_agent(config_path: str = CONFIG_PATH_DEFAULT) -> Tuple[CoreAgent, Memor
 
 
 def tavily_status() -> Dict[str, Any]:
-    """Check whether a Tavily API key is available."""
-    key = None
-    try:
-        key = st.secrets.get("TAVILY_API_KEY", None)  # type: ignore[attr-defined]
-    except Exception:
+    """Check whether a Tavily API key is available (per-user or env)."""
+
+    # 1) Prefer per-user key stored in session state (from sidebar input)
+    key = st.session_state.get("tavily_key", None)
+
+    # 2) Fallback to environment variable (in case you set it on the server)
+    if not key:
         key = os.getenv("TAVILY_API_KEY")
+
+    # 3) Optional final fallback to secrets (owner-only use, can be empty)
+    if not key:
+        try:
+            key = st.secrets.get("TAVILY_API_KEY", None)  # type: ignore[attr-defined]
+        except Exception:
+            key = None
 
     if key:
         tail = key[-4:]
@@ -160,6 +169,27 @@ def main() -> None:
     # -----------------------------
     st.sidebar.header("Run settings")
 
+    # --- Tavily key input (per-user, replaces hard-wired secrets use) ---
+    st.sidebar.subheader("Tavily API key")
+    existing_key = st.session_state.get("tavily_key", "")
+    tavily_key_input = st.sidebar.text_input(
+        "Enter your Tavily key",
+        value=existing_key,
+        type="password",
+        help=(
+            "Each user should paste their own Tavily API key here. "
+            "If left empty, the agent will use stubbed (offline) web results."
+        ),
+    )
+    if tavily_key_input:
+        # Store in session state and mirror into environment
+        st.session_state["tavily_key"] = tavily_key_input
+        os.environ["TAVILY_API_KEY"] = tavily_key_input
+    else:
+        # If user clears the box, clear env var for this process
+        st.session_state["tavily_key"] = ""
+        os.environ.pop("TAVILY_API_KEY", None)
+
     # Preset selector (General, Longevity, Math, etc.)
     preset_keys = list(PRESETS.keys())
     preset_labels = [PRESETS[k]["label"] for k in preset_keys]
@@ -180,14 +210,14 @@ def main() -> None:
     preset = get_preset(selected_key)
     domain_tag = preset.get("domain", selected_key)
 
-    # Tavily status
+    # Tavily status (after handling key input)
     status = tavily_status()
     st.sidebar.subheader("Internet research")
     if status["has_key"]:
         st.sidebar.success(status["display"])
     else:
         st.sidebar.warning(status["display"])
-        st.sidebar.write("Add TAVILY_API_KEY in Streamlit Secrets to enable real web search.")
+        st.sidebar.write("Paste a Tavily key above to enable real web search. Otherwise, stubbed results are used.")
 
     # Multi-agent toggle
     multi_agent = st.sidebar.checkbox("Enable Multi Agent (Researcher + Critic)", value=False)
