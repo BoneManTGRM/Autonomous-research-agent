@@ -119,22 +119,7 @@ class MemoryStore:
         role: str = "agent",
         importance: float = 1.0,
     ) -> None:
-        """Add a note associated with a research goal.
-
-        Args:
-            goal:
-                Research goal or topic this note belongs to.
-            content:
-                Free-form text of the note.
-            tags:
-                Optional list of tags (e.g., ["reparodynamics", "hypothesis"]).
-            role:
-                Logical role that produced the note (agent, researcher,
-                critic, etc.).
-            importance:
-                A rough importance score. This can be used in the future
-                for prioritised retrieval.
-        """
+        """Add a note associated with a research goal."""
         note = {
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "goal": goal,
@@ -161,32 +146,14 @@ class MemoryStore:
                 pass
 
     def get_notes(self, goal: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Retrieve notes.
-
-        Args:
-            goal:
-                If provided, filter notes by this goal. If None, return
-                all notes.
-        """
+        """Retrieve notes. If goal is None, return all notes."""
         notes = self._data.get("notes", [])
         if goal is None:
             return list(notes)
         return [n for n in notes if n.get("goal") == goal]
 
     def search_notes(self, query: str, top_k: int = 5, goal: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Search notes either via vector memory (if available) or simple keyword search.
-
-        Args:
-            query:
-                Text query to search for.
-            top_k:
-                Maximum number of results to return.
-            goal:
-                Optional goal filter.
-
-        Returns:
-            List of note dicts, best-matching first.
-        """
+        """Search notes either via vector memory (if available) or simple keyword search."""
         if not query:
             return []
 
@@ -458,3 +425,38 @@ class MemoryStore:
 
         title += "\nEnd of report.\n"
         return title
+
+    # ------------------------------------------------------------------
+    # Convenience getters for report_generator and UI
+    # ------------------------------------------------------------------
+    def get_all_cycles(self) -> List[Dict[str, Any]]:
+        """Alias for getting all cycles (for report generators)."""
+        return self._data.get("cycles", [])
+
+    def get_cycles_for_goal(self, goal: str) -> List[Dict[str, Any]]:
+        """Return all cycles for a specific goal."""
+        return [c for c in self._data.get("cycles", []) if c.get("goal") == goal]
+
+    def get_all_notes(self) -> List[Dict[str, Any]]:
+        """Return all notes regardless of goal."""
+        return self._data.get("notes", [])
+
+    def get_notes_for_goal(self, goal: str) -> List[Dict[str, Any]]:
+        """Explicit alias for get_notes(goal=...)."""
+        return self.get_notes(goal=goal)
+
+    def get_all_hypotheses(self) -> List[Dict[str, Any]]:
+        """Return all hypotheses for all goals."""
+        return self._data.get("hypotheses", [])
+
+    def get_hypotheses_for_goal(self, goal: str) -> List[Dict[str, Any]]:
+        """Explicit alias for get_hypotheses(goal=...)."""
+        return self.get_hypotheses(goal=goal)
+
+    def get_all_citations(self) -> List[Dict[str, Any]]:
+        """Return all citation entries for all goals."""
+        return self._data.get("citations", [])
+
+    def get_citations_for_goal(self, goal: str) -> List[Dict[str, Any]]:
+        """Explicit alias for get_citations(goal=...)."""
+        return self.get_citations(goal=goal)
