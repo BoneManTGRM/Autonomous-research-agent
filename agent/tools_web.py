@@ -8,16 +8,20 @@ Features
 - Safe stubbed search when no key / client is available (agent never crashes).
 - Optional page fetch + HTML cleanup for deeper analysis.
 - Helper to convert search results into structured citation objects.
+- Normalised citation structure for use across PubMed / Semantic / Web.
 
-This is where the agent connects Reparodynamics / TGRM to the outside world:
-the Repair phase calls this tool to bring in new information which is then
-evaluated and logged against RYE (ΔR / E).
+Reparodynamics / TGRM:
+    The Repair phase calls this tool to bring in new information from
+    the environment. The quality and efficiency of these calls are
+    reflected in ΔR (issues resolved, contradictions clarified) and E
+    (energy cost) which together define RYE = ΔR / E.
 """
 
 from __future__ import annotations
 
 import os
-from typing import List, Dict
+from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse
 
 import requests
 
@@ -40,7 +44,7 @@ class WebResearchTool:
     def __init__(self) -> None:
         # Streamlit Secrets inject TAVILY_API_KEY into environment
         self.api_key = os.getenv("TAVILY_API_KEY", None)
-        self.client = None
+        self.client: Optional[TavilyClient] = None  # type: ignore[type-arg]
 
         if self.api_key and TavilyClient is not None:
             try:
@@ -58,7 +62,6 @@ class WebResearchTool:
         If Tavily is not configured, return a stub result so the
         agent can still complete cycles gracefully.
         """
-
         if not self.client:
             # STUB FALLBACK MODE
             return [
@@ -170,9 +173,58 @@ class WebResearchTool:
         return text.strip()
 
     # ------------------------------------------------------------------
+    # INTERNAL HELPERS FOR CITATIONS
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _infer_source_label(url: str) -> str:
+        """Infer a short source label from a URL domain."""
+        if not url:
+            return "web"
+        try:
+            parsed = urlparse(url)
+            host = parsed.netloc.lower()
+            if "pubmed" in host or "ncbi.nlm.nih.gov" in host:
+                return "pubmed"
+            if "semanticscholar.org" in host:
+                return "semantic-scholar"
+            if "arxiv.org" in host:
+                return "arxiv"
+            if "doi.org" in host:
+                return "doi"
+            # Fallback: use the hostname
+            return host or "web"
+        except Exception:
+            return "web"
+
+    @staticmethod
+    def normalize_result(result: Dict[str, Any]) -> Dict[str, str]:
+        """Normalize a generic search result into a citation-like structure.
+
+        This makes it easier to merge Tavily, PubMed, and Semantic Scholar
+        into a single citation format in the TGRM loop.
+        """
+        title = result.get("title", "") or result.get("name", "") or "Untitled"
+        url = result.get("url", "") or result.get("link", "")
+        snippet = (
+            result.get("snippet")
+            or result.get("content")
+            or result.get("abstract")
+            or ""
+        )
+
+        source = result.get("source") or WebResearchTool._infer_source_label(url)
+
+        return {
+            "source": str(source),
+            "title": str(title),
+            "url": str(url),
+            "snippet": str(snippet),
+        }
+
+    # ------------------------------------------------------------------
     # CITATION EXTRACTION
     # ------------------------------------------------------------------
-    def to_citations(self, results: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    def to_citations(self, results: List[Dict[str, Any]]) -> List[Dict[str, str]]:
         """Convert search results into structured citation objects.
 
         Each citation is a simple dict:
@@ -183,12 +235,5 @@ class WebResearchTool:
         """
         citations: List[Dict[str, str]] = []
         for r in results:
-            citations.append(
-                {
-                    "source": "web",
-                    "title": r.get("title", ""),
-                    "url": r.get("url", ""),
-                    "snippet": r.get("snippet", ""),
-                }
-            )
+            citations.append(self.normalize_result(r))
         return citations
