@@ -61,6 +61,8 @@ class TGRMLoop:
         role: str = "agent",
         source_controls: Optional[Dict[str, bool]] = None,
         pdf_bytes: Optional[bytes] = None,
+        biomarker_snapshot: Optional[Dict[str, Any]] = None,
+        domain: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run one TGRM cycle for a given research goal.
 
@@ -84,6 +86,14 @@ class TGRMLoop:
             pdf_bytes:
                 Optional PDF content (uploaded file) that can be ingested
                 as part of the Repair phase if "pdf" is enabled.
+            biomarker_snapshot:
+                Optional dict of biomarker / lab values for future
+                longevity analysis (currently not used directly here,
+                but included for forward compatibility).
+            domain:
+                Optional domain tag (e.g. "general", "longevity", "math")
+                from presets. Not yet used to change logic here, but
+                preserved in the log for future domain-specific behavior.
 
         Returns:
             Dict with:
@@ -150,6 +160,7 @@ class TGRMLoop:
             "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
             "goal": goal,
             "role": role,
+            "domain": domain,
             "issues_detected": issue_descriptions,
             "issues_after": issues_after,
             "repairs_applied": repair_actions,
@@ -168,6 +179,7 @@ class TGRMLoop:
         human_summary = {
             "cycle": cycle_index,
             "role": role,
+            "domain": domain,
             "issues_before": issue_descriptions,
             "repairs": [a["description"] for a in repair_actions],
             "delta_R": delta_r,
