@@ -12,7 +12,7 @@ TGRM loop (implemented in TGRMLoop):
     - Test   : evaluate current notes / state
     - Detect : find gaps, TODOs, unanswered questions or contradictions
     - Repair : perform targeted actions (web, PubMed, PDFs, biomarkers)
-    - Verify : re-test, compute ΔR and RYE, and log the cycle
+    - Verify : re-test, compute delta_R and RYE, and log the cycle
 
 RYE (Repair Yield per Energy):
     For each cycle, TGRMLoop computes delta_R / E (improvement divided
@@ -31,22 +31,23 @@ from .tgrm_loop import TGRMLoop
 class CoreAgent:
     """High-level controller for the autonomous research agent.
 
-    This class is intentionally thin: it wires UI / CLI controls
+    This class is intentionally thin: it wires UI or CLI controls
     (multi-agent, continuous mode, source preferences, PDF uploads)
     into the lower-level TGRMLoop which performs the actual
-    Reparodynamic TGRM cycles and RYE computation.
+    reparodynamic TGRM cycles and RYE computation.
     """
 
     def __init__(self, memory_store: MemoryStore, config: Optional[Dict[str, Any]] = None) -> None:
         self.memory_store = memory_store
         self.config = config or {}
 
-        # Underlying TGRM loop that actually performs Test–Detect–Repair–Verify
+        # Underlying TGRM loop that actually performs Test, Detect, Repair, Verify
         self.tgrm_loop = TGRMLoop(memory_store, self.config)
 
-        # Source controls are set from the UI (Streamlit) at runtime.
+        # Source controls can be set by the UI at runtime.
         # Example:
         #   {
+        #       "web": True,
         #       "pubmed": True,
         #       "semantic": False,
         #       "pdf": True,
@@ -61,7 +62,7 @@ class CoreAgent:
     # Public API used by Streamlit and CLI
     # ------------------------------------------------------------------
     def attach_pdf(self, uploaded_file: Any) -> None:
-        """Attach a PDF (uploaded via Streamlit) for the next cycles.
+        """Attach a PDF (uploaded via Streamlit) for later cycles.
 
         The TGRM loop can then ingest this PDF as part of its REPAIR
         actions. If `uploaded_file` is None, this does nothing.
@@ -79,31 +80,54 @@ class CoreAgent:
         goal: str,
         cycle_index: int,
         role: str = "agent",
+        source_controls: Optional[Dict[str, bool]] = None,
+        pdf_bytes: Optional[bytes] = None,
+        biomarker_snapshot: Optional[Dict[str, Any]] = None,  # reserved for future biomarker engine
     ) -> Dict[str, Any]:
         """Run a single cycle of research using the TGRM loop.
 
         Args:
-            goal: Research goal for this cycle.
-            cycle_index: Global cycle index (used for logging / history).
-            role: Logical role for this cycle: "agent", "researcher",
-                  "critic", etc. This is recorded in the logs and
-                  allows multi-agent setups (researcher + critic).
+            goal:
+                Research goal for this cycle.
+            cycle_index:
+                Global cycle index (used for logging and history).
+            role:
+                Logical role for this cycle: "agent", "researcher",
+                "critic", etc. This is recorded in the logs and
+                allows multi-agent setups (researcher + critic).
+            source_controls:
+                Optional override for which sources to use in this cycle.
+                If None, falls back to self.source_controls.
+            pdf_bytes:
+                Optional PDF bytes for this cycle. If None, falls back
+                to any previously attached PDF stored in self._attached_pdf_bytes.
+            biomarker_snapshot:
+                Placeholder for a future biomarker or lab value payload.
+                Currently not forwarded but kept for API stability.
 
         Returns:
             Dict[str, Any]: Dictionary containing the human-facing
             summary and the raw log of the cycle.
         """
-        # Forward source preferences and optional PDF into the loop.
-        # We use a TypeError-safe wrapper so this stays compatible
-        # even if TGRMLoop still has the older (goal, cycle_index)
-        # signature in your repo while you are upgrading.
+        # Merge source_controls: explicit argument overrides stored default
+        effective_source_controls: Dict[str, bool] = {}
+        if self.source_controls:
+            effective_source_controls.update(self.source_controls)
+        if source_controls:
+            effective_source_controls.update(source_controls)
+
+        # Choose PDF bytes: per-call bytes override attached PDF
+        effective_pdf_bytes: Optional[bytes] = pdf_bytes if pdf_bytes is not None else self._attached_pdf_bytes
+
+        # Forward into the TGRM loop.
+        # Use a TypeError-safe wrapper for compatibility with older signatures.
         try:
             return self.tgrm_loop.run_cycle(
                 goal=goal,
                 cycle_index=cycle_index,
                 role=role,
-                source_controls=self.source_controls,
-                pdf_bytes=self._attached_pdf_bytes,
+                source_controls=effective_source_controls,
+                pdf_bytes=effective_pdf_bytes,
             )
         except TypeError:
             # Backwards compatibility: older TGRMLoop.run_cycle
@@ -115,21 +139,37 @@ class CoreAgent:
         goal: str,
         max_cycles: int = 100,
         stop_rye: Optional[float] = None,
+        role: str = "agent",
+        source_controls: Optional[Dict[str, bool]] = None,
+        pdf_bytes: Optional[bytes] = None,
+        biomarker_snapshot: Optional[Dict[str, Any]] = None,
     ) -> List[Dict[str, Any]]:
         """Run multiple TGRM cycles in a row ("continuous mode").
 
-        This is the long-running Reparodynamic mode where the agent
-        repeatedly applies Test–Detect–Repair–Verify to gradually
+        This is the long-running reparodynamic mode where the agent
+        repeatedly applies Test, Detect, Repair, Verify to gradually
         improve its internal state under a fixed goal.
 
         Args:
-            goal: Research goal to pursue over many cycles.
-            max_cycles: Hard cap on the number of cycles to prevent
-                        infinite loops in hosted environments.
-            stop_rye: Optional RYE threshold. If set, the loop stops
-                      early once average RYE over recent cycles
-                      falls below this value (indicating diminishing
-                      returns on additional repair actions).
+            goal:
+                Research goal to pursue over many cycles.
+            max_cycles:
+                Hard cap on the number of cycles to prevent
+                infinite runs in hosted environments.
+            stop_rye:
+                Optional RYE threshold. If set, the loop stops
+                early once average RYE over recent cycles
+                falls below this value (indicating diminishing
+                returns on additional repair actions).
+            role:
+                Logical role for the continuous runner, usually "agent".
+            source_controls:
+                Optional source configuration applied to every cycle.
+            pdf_bytes:
+                Optional PDF bytes shared across cycles.
+            biomarker_snapshot:
+                Optional biomarker or lab value payload shared for
+                future biomarker-aware logic.
 
         Returns:
             List[Dict[str, Any]]: List of human-facing summaries for
@@ -144,7 +184,14 @@ class CoreAgent:
 
         for i in range(max_cycles):
             ci = start_index + i
-            result = self.run_cycle(goal=goal, cycle_index=ci, role="agent")
+            result = self.run_cycle(
+                goal=goal,
+                cycle_index=ci,
+                role=role,
+                source_controls=source_controls,
+                pdf_bytes=pdf_bytes,
+                biomarker_snapshot=biomarker_snapshot,
+            )
             summary = result.get("summary", {})
             summaries.append(summary)
 
@@ -160,9 +207,9 @@ class CoreAgent:
                 avg_rye = sum(recent_rye) / len(recent_rye)
                 if avg_rye < stop_rye:
                     # Reparodynamic interpretation:
-                    #   The system's marginal repair yield per energy
-                    #   has fallen below the target; further cycles are
-                    #   not energetically efficient, so we stop.
+                    # The system's marginal repair yield per energy
+                    # has fallen below the target; further cycles are
+                    # not energetically efficient, so we stop.
                     break
 
         return summaries
