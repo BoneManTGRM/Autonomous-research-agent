@@ -60,12 +60,20 @@ class MemoryStore:
     In-memory (non-persistent) vector memory may also be attached to
     support semantic search and time-decayed retrieval if the optional
     VectorMemory class is available.
+
+    This implementation is hardened for 24–90 day autonomous runs:
+        - safe directory handling even for plain filenames (e.g. "memory.json")
+        - atomic write strategy to greatly reduce corruption risk
+        - goal_index streaming stats for fast RYE summaries
     """
 
     def __init__(self, memory_file: str) -> None:
         self.memory_file = memory_file
-        # Ensure the directory exists
-        os.makedirs(os.path.dirname(self.memory_file), exist_ok=True)
+
+        # Ensure the directory exists (support plain filenames like "memory.json")
+        dirpath = os.path.dirname(os.path.abspath(self.memory_file))
+        if dirpath and not os.path.exists(dirpath):
+            os.makedirs(dirpath, exist_ok=True)
 
         # Core JSON-backed data
         self._data: Dict[str, Any] = {
@@ -137,9 +145,32 @@ class MemoryStore:
                 }
 
     def _save(self) -> None:
-        """Persist memory to disk."""
-        with open(self.memory_file, "w", encoding="utf-8") as f:
-            json.dump(self._data, f, ensure_ascii=False, indent=2)
+        """Persist memory to disk using an atomic write pattern.
+
+        Atomic pattern (write-then-replace) greatly reduces the chance of
+        corrupting the JSON file during very long autonomous runs, where
+        the process might be interrupted mid-write.
+        """
+        tmp_path = self.memory_file + ".tmp"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, ensure_ascii=False, indent=2)
+            # os.replace is atomic on POSIX and Windows for normal files
+            os.replace(tmp_path, self.memory_file)
+        except Exception:
+            # If anything goes wrong, we do not raise, to avoid killing the agent.
+            # On next run, _load will attempt to read the last good file.
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
+    # Public helper if you ever want to force a flush from outside
+    def flush(self) -> None:
+        """Force a disk flush of current in-memory state."""
+        self._ensure_keys()
+        self._save()
 
     # ------------------------------------------------------------------
     # Internal helpers for goal index
