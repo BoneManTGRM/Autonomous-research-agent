@@ -55,12 +55,15 @@ SWARM_ROLES: List[Tuple[str, str]] = [
     ("integrator", "Synthesizer that integrates and summarizes"),
 ]
 
-# Safe upper bound for swarm size on typical Render / Streamlit setups.
+# Safe upper bound for swarm size on typical Render or Streamlit setups.
 # All swarm agents are still run sequentially in a single process.
 MAX_SWARM_AGENTS: int = 32
 
 # Limit points in charts so the frontend does not hit RangeError on very long runs.
 MAX_POINTS_FOR_CHARTS: int = 1000
+
+# Where UI and worker coordinate long runs
+CONTROL_STATE_PATH = Path("logs/control_state.json")
 
 
 # -------------------------------------------------------------------
@@ -82,6 +85,32 @@ def ensure_directories() -> None:
     sessions_path.mkdir(exist_ok=True)
 
 
+def load_control_state() -> Dict[str, Any]:
+    """Load the shared control state used by the background worker."""
+    ensure_directories()
+    if not CONTROL_STATE_PATH.exists():
+        return {}
+    try:
+        with CONTROL_STATE_PATH.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        return {}
+    except Exception:
+        return {}
+
+
+def save_control_state(state: Dict[str, Any]) -> None:
+    """Persist the shared control state for the background worker."""
+    ensure_directories()
+    try:
+        with CONTROL_STATE_PATH.open("w", encoding="utf-8") as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception:
+        # Control state failure should not crash the UI
+        return
+
+
 @st.cache_resource
 def init_agent(config_path: str = CONFIG_PATH_DEFAULT) -> Tuple[CoreAgent, MemoryStore]:
     """Create a single CoreAgent instance for the Streamlit app."""
@@ -94,16 +123,16 @@ def init_agent(config_path: str = CONFIG_PATH_DEFAULT) -> Tuple[CoreAgent, Memor
 
 
 def tavily_status() -> Dict[str, Any]:
-    """Check whether a Tavily API key is available (per-user or env)."""
+    """Check whether a Tavily API key is available (per user or env)."""
 
-    # 1) Prefer per-user key stored in session state (from sidebar input)
+    # 1) Prefer per user key stored in session state (from sidebar input)
     key = st.session_state.get("tavily_key", None)
 
     # 2) Fallback to environment variable (in case you set it on the server)
     if not key:
         key = os.getenv("TAVILY_API_KEY")
 
-    # 3) Optional final fallback to secrets (owner-only use, can be empty)
+    # 3) Optional final fallback to secrets (owner only use, can be empty)
     if not key:
         try:
             key = st.secrets.get("TAVILY_API_KEY", None)  # type: ignore[attr-defined]
@@ -187,8 +216,8 @@ def build_swarm_roles(enabled: bool, swarm_size: int) -> List[Tuple[str, str]]:
     """Return the active swarm roles (name, description) given total swarm agents.
 
     If swarm_size <= len(SWARM_ROLES), we just take the first N base roles.
-    If swarm_size > len(SWARM_ROLES), we create multiple agents per base role,
-    with role names like 'researcher_1', 'critic_2', etc.
+    If swarm_size > len(SWARM_ROLES), we create multiple agents per base role
+    with role names like researcher_1, critic_2, etc.
     """
     if not enabled or swarm_size <= 1:
         return []
@@ -214,7 +243,7 @@ def role_specific_goal(base_goal: str, role: str) -> str:
     """Specialize the goal text slightly for each swarm role."""
     base_goal = base_goal.strip()
 
-    # Strip any clone suffix like "_3" so we map back to the archetype
+    # Strip any clone suffix like _3 so we map back to the archetype
     archetype = role.split("_", 1)[0] if "_" in role else role
 
     if archetype == "researcher":
@@ -341,7 +370,7 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
             "from notes, repairs, and hypotheses. This is a raw list to review, not medical advice."
         )
         for f in unique_findings:
-            # Keep bullets short-ish
+            # Keep bullets short
             if len(f) > 400:
                 f = f[:400] + "..."
             lines.append(f"- {f}")
@@ -354,7 +383,7 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
 # -------------------------------------------------------------------
 def main() -> None:
     st.title("Autonomous Research Agent")
-    st.caption("Reparodynamics, RYE, and TGRM powered research loop (with swarm mode)")
+    st.caption("Reparodynamics, RYE, and TGRM powered research loop (with swarm mode and background worker)")
 
     agent, memory = init_agent()
 
@@ -363,7 +392,7 @@ def main() -> None:
     # -----------------------------
     st.sidebar.header("Run settings")
 
-    # Tavily key input (per-user)
+    # Tavily key input (per user)
     st.sidebar.subheader("Tavily API key")
     existing_key = st.session_state.get("tavily_key", "")
     tavily_key_input = st.sidebar.text_input(
@@ -439,14 +468,14 @@ def main() -> None:
         for name, desc in swarm_roles:
             st.sidebar.write(f"- **{name}**: {desc}")
 
-    # Multi-agent toggle (classic researcher + critic)
+    # Multi agent toggle (classic researcher plus critic)
     # Disabled when swarm is on, because swarm already includes critic logic.
     multi_agent = False
     if not enable_swarm:
         multi_agent = st.sidebar.checkbox(
             "Enable classic Multi Agent (Researcher + Critic)",
             value=False,
-            help="If swarm is disabled, you can still run a simple researcher+critic pair.",
+            help="If swarm is disabled, you can still run a simple researcher plus critic pair.",
         )
     else:
         st.sidebar.info("Classic Multi Agent is disabled when Swarm is enabled.")
@@ -488,7 +517,7 @@ def main() -> None:
             "Forever (until stopped)",
         ],
         index=0,
-        help="Timed modes respect real wall-clock minutes via the agent's time budget.",
+        help="Timed modes respect real wall clock minutes via the agent time budget.",
     )
 
     # Optional RYE stop for continuous modes
@@ -522,21 +551,21 @@ def main() -> None:
 
     # Cycles only matter in manual mode
     cycles = st.number_input(
-        "Number of TGRM cycles to run (manual mode)",
+        "Number of TGRM cycles to run (manual mode, UI only)",
         min_value=1,
         max_value=200,
         value=3,
         step=1,
-        help="Used when Run mode is 'Manual (finite cycles)'. Timed modes ignore this and rely on minutes.",
+        help="Used when Run mode is Manual. Timed modes rely on the background worker.",
     )
 
-    run_button = st.button("Run agent")
+    run_button = st.button("Run agent (manual or configure worker)")
 
     # ------------------------------
-       # Run cycles
+    # Run cycles or configure worker
     # ------------------------------
     if run_button:
-        st.write(f"Running agent with preset: {preset.get('label', selected_label)} (domain: {domain_tag})")
+        st.write(f"Running or configuring agent with preset: {preset.get('label', selected_label)} (domain: {domain_tag})")
         history = memory.get_cycle_history()
         next_index = len(history)
         results: List[Dict[str, Any]] = []
@@ -558,14 +587,14 @@ def main() -> None:
             except Exception:
                 pdf_bytes = None
 
-        # Manual finite mode
+        # Manual finite mode stays inside Streamlit for quick tests.
         if run_mode == "Manual (finite cycles)":
             # Swarm manual mode
             if enable_swarm and swarm_roles:
                 total_cycles = len(swarm_roles) * int(cycles)
                 st.info(
                     f"Manual Swarm mode: {len(swarm_roles)} agents x {int(cycles)} cycles "
-                    f"(total {total_cycles} mini-cycles)."
+                    f"(total {total_cycles} mini cycles)."
                 )
                 for i in range(int(cycles)):
                     base_index = next_index + i * len(swarm_roles)
@@ -583,7 +612,7 @@ def main() -> None:
                         )
                         results.append(out["summary"])
             else:
-                # Classic single or researcher+critic manual mode
+                # Classic single or researcher plus critic manual mode
                 if not multi_agent:
                     for i in range(int(cycles)):
                         ci = next_index + i
@@ -625,96 +654,128 @@ def main() -> None:
                             domain=domain_tag,
                         )
                         results.append(c["summary"])
+
+            # Show cycle summaries for manual runs
+            st.subheader("Cycle Summaries (manual)")
+            for cs in results:
+                render_cycle_summary(cs)
+
         else:
-            # Continuous modes with real time budget via max_minutes
-            # Map run_mode to minutes
+            # Continuous modes no longer run inside Streamlit.
+            # Instead, we configure control_state for the background worker.
             max_minutes: Optional[float] = None
             forever_flag: bool = False
+            runtime_profile: Optional[str] = None
 
             if run_mode == "1 hour (real clock)":
                 max_minutes = 60.0
+                runtime_profile = "1_hour"
             elif run_mode == "8 hours (real clock)":
                 max_minutes = 8 * 60.0
+                runtime_profile = "8_hours"
             elif run_mode == "24 hours (real clock)":
                 max_minutes = 24 * 60.0
+                runtime_profile = "24_hours"
             elif run_mode == "90 days (real clock)":
                 max_minutes = 90.0 * 24.0 * 60.0
+                runtime_profile = "90_days"
             elif run_mode == "Forever (until stopped)":
                 max_minutes = None
                 forever_flag = True
+                runtime_profile = "forever"
 
-            # Cycles are now a safety cap. Use a large upper bound.
-            if forever_flag:
-                effective_max_cycles = 10_000_000
+            # Worker will use its own safety caps on cycles.
+            control_state = load_control_state()
+            new_state: Dict[str, Any] = dict(control_state)
+
+            # Base fields
+            new_state.update(
+                {
+                    "status": "running",
+                    "mode": "swarm" if enable_swarm else ("multi" if multi_agent else "single"),
+                    "run_profile": runtime_profile,
+                    "goal": goal,
+                    "domain": domain_tag,
+                    "max_minutes": max_minutes,
+                    "forever": forever_flag,
+                    "stop_rye": stop_rye_threshold,
+                    "source_controls": source_controls,
+                    "use_biomarkers": bool(use_biomarkers),
+                    "timestamp_utc": datetime.utcnow().isoformat(),
+                }
+            )
+
+            # Swarm configuration for the worker
+            if enable_swarm and swarm_roles:
+                new_state["swarm"] = {
+                    "enabled": True,
+                    "roles": [name for name, _ in swarm_roles],
+                    "size": len(swarm_roles),
+                }
             else:
-                effective_max_cycles = 10_000_000
+                new_state["swarm"] = {"enabled": False, "roles": [], "size": 0}
 
-            # Swarm + Forever is ambiguous in a single-threaded UI, so we
-            # treat it as a single agent run when Forever is selected.
-            if enable_swarm and forever_flag:
-                st.warning(
-                    "Swarm mode with 'Forever' is not supported in this UI. "
-                    "Running as a single continuous agent instead."
-                )
-                swarm_roles = []
+            # Classic multi agent flag
+            new_state["multi_agent_pair"] = bool(multi_agent)
 
-            # Show what the agent will try to do
+            # Optional attached pdf flag (worker can decide whether to re ingests files)
+            new_state["has_pdf"] = bool(use_pdf and uploaded_pdf is not None)
+
+            save_control_state(new_state)
+
             if max_minutes is not None:
-                st.info(
-                    f"Continuous mode: target {run_mode} "
-                    f"(time budget ~ {max_minutes:.1f} minutes total, up to {effective_max_cycles} cycles). "
-                    f"RYE stop condition: {'disabled' if stop_rye_threshold is None else stop_rye_threshold}."
+                st.success(
+                    f"Configured background worker for continuous mode {run_mode} "
+                    f"with time budget ~ {max_minutes:.1f} minutes. "
+                    "The worker will now run cycles and update history while this UI just monitors."
                 )
             else:
-                st.info(
-                    "Continuous mode: Forever (until stopped by environment or RYE threshold). "
-                    f"Cycle safety cap: {effective_max_cycles}. "
-                    f"RYE stop condition: {'disabled' if stop_rye_threshold is None else stop_rye_threshold}."
+                st.success(
+                    "Configured background worker for continuous mode Forever. "
+                    "The worker will run until stopped by status or environment limits."
                 )
 
-            # Continuous swarm: split time budget across roles
-            if enable_swarm and swarm_roles and max_minutes is not None:
-                minutes_per_agent = max_minutes / float(len(swarm_roles))
-                st.info(
-                    f"Swarm continuous mode: {len(swarm_roles)} agents, "
-                    f"~{minutes_per_agent:.1f} minutes per agent."
-                )
-                for idx, (role_name, _) in enumerate(swarm_roles, start=1):
-                    st.write(f"Starting swarm agent {idx}/{len(swarm_roles)} (role: {role_name})...")
-                    role_goal = role_specific_goal(goal, role_name)
-                    summaries = agent.run_continuous(
-                        goal=role_goal,
-                        max_cycles=int(effective_max_cycles),
-                        stop_rye=stop_rye_threshold,
-                        role=role_name,
-                        source_controls=source_controls,
-                        pdf_bytes=pdf_bytes,
-                        biomarker_snapshot=None,
-                        domain=domain_tag,
-                        max_minutes=minutes_per_agent,
-                        forever=False,
-                    )
-                    results.extend(summaries)
-            else:
-                # Single-agent or classic continuous run
-                summaries = agent.run_continuous(
-                    goal=goal,
-                    max_cycles=int(effective_max_cycles),
-                    stop_rye=stop_rye_threshold,
-                    role="agent",
-                    source_controls=source_controls,
-                    pdf_bytes=pdf_bytes,
-                    biomarker_snapshot=None,
-                    domain=domain_tag,
-                    max_minutes=max_minutes,
-                    forever=forever_flag,
-                )
-                results.extend(summaries)
+    # ------------------------------
+    # Engine control panel (for worker)
+    # ------------------------------
+    st.markdown("---")
+    st.subheader("Engine control panel (for background worker)")
 
-        # Show cycle summaries
-        st.subheader("Cycle Summaries")
-        for cs in results:
-            render_cycle_summary(cs)
+    control_state = load_control_state()
+    current_status = control_state.get("status", "idle")
+    st.write(f"Current engine status: **{current_status}**")
+
+    if control_state:
+        with st.expander("Raw control state"):
+            st.code(json.dumps(control_state, indent=2), language="json")
+    else:
+        st.write("No control state file yet. Configure a timed run to create one.")
+
+    col_start, col_pause, col_stop = st.columns(3)
+
+    with col_start:
+        if st.button("Set status: running"):
+            new_state = load_control_state()
+            new_state["status"] = "running"
+            new_state["timestamp_utc"] = datetime.utcnow().isoformat()
+            save_control_state(new_state)
+            st.success("Engine status set to running.")
+
+    with col_pause:
+        if st.button("Set status: paused"):
+            new_state = load_control_state()
+            new_state["status"] = "paused"
+            new_state["timestamp_utc"] = datetime.utcnow().isoformat()
+            save_control_state(new_state)
+            st.info("Engine status set to paused.")
+
+    with col_stop:
+        if st.button("Set status: stopped"):
+            new_state = load_control_state()
+            new_state["status"] = "stopped"
+            new_state["timestamp_utc"] = datetime.utcnow().isoformat()
+            save_control_state(new_state)
+            st.warning("Engine status set to stopped. Worker should halt after the current cycle.")
 
     # ------------------------------
     # History + Charts
@@ -769,7 +830,7 @@ def main() -> None:
             st.code(json.dumps(history, indent=2), language="json")
 
     # ------------------------------
-    # Run diagnostics (continuous mode support)
+    # Run diagnostics (continuous mode support from MemoryStore)
     # ------------------------------
     st.markdown("---")
     st.subheader("Run diagnostics")
@@ -777,7 +838,7 @@ def main() -> None:
     col_state, col_watchdog = st.columns(2)
 
     with col_state:
-        st.markdown("**Last saved run state**")
+        st.markdown("**Last saved run state (MemoryStore)**")
         state = memory.load_run_state()
         if not state:
             st.write("No saved run state yet.")
@@ -785,10 +846,10 @@ def main() -> None:
             st.json(state)
             if st.button("Clear saved run state", key="clear_run_state_btn"):
                 memory.clear_run_state()
-                st.success("Saved run state cleared. It will be rebuilt on the next continuous run.")
+                st.success("Saved run state cleared. It will be rebuilt on the next continuous run by the worker.")
 
     with col_watchdog:
-        st.markdown("**Watchdog heartbeat**")
+        st.markdown("**Watchdog heartbeat (MemoryStore)**")
         info = memory.get_watchdog_info()
         last_beat = info.get("last_beat")
         count = info.get("count", 0)
@@ -809,7 +870,7 @@ def main() -> None:
 
     st.caption(
         "Build summarized reports from the current cycle history. "
-        "You can re-run these after long autonomous sessions."
+        "You can re run these after long autonomous sessions."
     )
 
     col_rep1, col_rep2 = st.columns(2)
