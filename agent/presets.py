@@ -10,6 +10,7 @@ Presets act as domain-specific "profiles" that define:
 - RYE weighting hints
 - reporting structure
 - runtime profiles for 1h / 8h / 24h / 90-day / forever runs
+- swarm role contracts and intelligence hints for multi-agent operation
 
 These settings do NOT break existing code but unlock future power for:
 - continuous mode tuning
@@ -17,6 +18,7 @@ These settings do NOT break existing code but unlock future power for:
 - long run reporting and summaries
 - swarm aware behavior (many coordinated logical agents)
 - cure or treatment extraction pipelines
+- stricter verification and smarter hypothesis selection
 """
 
 from __future__ import annotations
@@ -32,7 +34,7 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "rye_stop_threshold": None,
         "energy_scaling": 1.0,
         "report_frequency": 1,
-        "description": "Short diagnostic run: fast repair checks and sanity pass.",
+        "description": "Short diagnostic run for fast repair checks and a sanity pass.",
     },
     "8_hours": {
         "label": "8 Hour Run",
@@ -50,7 +52,7 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "report_frequency": 2,
         "description": "Full daily autonomous research loop for equilibrium and deep repairs.",
     },
-    # New long horizon profile for Reparodynamics style experiments
+    # Long horizon profile for Reparodynamics style experiments
     "90_days": {
         "label": "90 Day Run",
         "estimated_cycles": 20_000,
@@ -102,6 +104,12 @@ CONTINUOUS_MODE_DEFAULTS: Dict[str, Any] = {
     # Default runtime profile used when none is specified explicitly
     "default_runtime_profile_single": "8_hours",
     "default_runtime_profile_swarm": "24_hours",
+    # Hints for exact time stop handling (optional, engine may ignore)
+    "exact_time_stop_hints": {
+        "single_default": False,
+        "swarm_default": True,
+        "wrap_up_buffer_minutes": 3.0,
+    },
 }
 
 # ---------------------------------------------------------------------
@@ -109,30 +117,138 @@ CONTINUOUS_MODE_DEFAULTS: Dict[str, Any] = {
 # ---------------------------------------------------------------------
 # This describes what a "swarm" means at the preset level.
 # The Streamlit app and CoreAgent can read these hints but are not forced to.
+
+# Global, domain-agnostic role templates with contracts
 SWARM_ROLES: List[Dict[str, Any]] = [
     {
         "name": "researcher",
         "description": "Primary deep literature and web researcher that gathers facts and writes detailed notes.",
+        "mission": (
+            "Continuously search, ingest, and summarize high value sources that are directly relevant to the goal. "
+            "Prioritize primary literature and structured data over blogs or opinion pieces."
+        ),
+        "expected_inputs": [
+            "current_goal",
+            "open_questions",
+            "source_controls",
+        ],
+        "expected_outputs": [
+            "source_summaries",
+            "key_mechanisms",
+            "candidate_interventions",
+        ],
+        "forbidden_behaviors": [
+            "rephrasing the prompt without adding new information",
+            "inventing fake citations or journals",
+        ],
     },
     {
         "name": "critic",
         "description": "Methodology critic and refiner that attacks weak points, gaps, and overclaims.",
+        "mission": (
+            "Stress test claims, mechanisms, and interventions produced by other roles. "
+            "Identify logical gaps, unsupported leaps, confounders, and low quality evidence."
+        ),
+        "expected_inputs": [
+            "draft_hypotheses",
+            "mechanism_maps",
+            "evidence_summaries",
+        ],
+        "expected_outputs": [
+            "explicit_criticisms",
+            "risk_flags",
+            "required_repairs",
+        ],
+        "forbidden_behaviors": [
+            "adding new hypotheses instead of critiquing existing ones",
+            "ignoring obvious methodological flaws",
+        ],
     },
     {
         "name": "planner",
         "description": "Planner that proposes next experiments, queries, and high value repair actions.",
+        "mission": (
+            "Transform gaps and open questions into concrete next steps: new queries, data needs, "
+            "simulation plans, or experimental designs that would most increase RYE."
+        ),
+        "expected_inputs": [
+            "open_questions",
+            "critic_feedback",
+            "current_state_summary",
+        ],
+        "expected_outputs": [
+            "prioritized_action_list",
+            "next_queries",
+            "experiment_suggestions",
+        ],
+        "forbidden_behaviors": [
+            "repeating actions that have already been tried with no gain in RYE",
+        ],
     },
     {
         "name": "synthesizer",
         "description": "Synthesizer that condenses findings into clear narratives, tables, and summaries.",
+        "mission": (
+            "Compress the current state of knowledge into human readable summaries that preserve nuance. "
+            "Highlight what is known, what is uncertain, and where RYE looks strongest."
+        ),
+        "expected_inputs": [
+            "mechanism_maps",
+            "source_summaries",
+            "critic_feedback",
+        ],
+        "expected_outputs": [
+            "structured_summary",
+            "tables_or_bullets",
+            "candidate_master_paths",
+        ],
+        "forbidden_behaviors": [
+            "overstating confidence",
+            "dropping important caveats",
+        ],
     },
     {
         "name": "explorer",
         "description": "Out of distribution explorer that searches for unusual angles, analogies, and adjacent fields.",
+        "mission": (
+            "Look for analogies, cross domain patterns, and adjacent literatures that may improve RYE. "
+            "Propose unconventional but plausible directions that other roles can then test or critique."
+        ),
+        "expected_inputs": [
+            "current_goal",
+            "high_level_summary",
+        ],
+        "expected_outputs": [
+            "cross_domain_links",
+            "unusual_hypotheses",
+            "adjacent_frameworks",
+        ],
+        "forbidden_behaviors": [
+            "drifting into unrelated topics",
+            "repeating obvious mainstream facts",
+        ],
     },
     {
         "name": "integrator",
         "description": "Integrator that reconciles conflicting notes and hypotheses into a coherent picture.",
+        "mission": (
+            "Take outputs from researcher, critic, planner, synthesizer, and explorer and reconcile them into "
+            "a coherent state. Resolve contradictions when possible, and document irreducible uncertainties."
+        ),
+        "expected_inputs": [
+            "structured_summary",
+            "critic_feedback",
+            "candidate_paths",
+        ],
+        "expected_outputs": [
+            "integrated_model",
+            "ranked_paths",
+            "final_hypothesis_set",
+        ],
+        "forbidden_behaviors": [
+            "silencing disagreement without justification",
+            "introducing new claims not supported by any role",
+        ],
     },
 ]
 
@@ -146,6 +262,8 @@ SWARM_GLOBAL_HINTS: Dict[str, Any] = {
     "time_split_strategy": "equal",  # equal, weighted, or custom
     # Roles available for the swarm orchestration layer.
     "roles": SWARM_ROLES,
+    # Versioning for richer role contracts (future engines can check this)
+    "contracts_version": 1,
 }
 
 # ---------------------------------------------------------------------
@@ -205,6 +323,14 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "cycle_length_hint": "short",
         "repair_depth_bias": "balanced",
 
+        # Domain specific TGRM intelligence hints
+        "tgrm_hints": {
+            "strict_verify": "medium",
+            "allow_prompt_echo": False,
+            "min_novelty_fraction": 0.15,
+            "max_redundant_cycles": 8,
+        },
+
         # Default runtime and RYE behavior for continuous mode
         "default_runtime_profile": "8_hours",
         "default_rye_stop_threshold": None,
@@ -238,8 +364,34 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "default_agents": 4,
             "time_split_strategy": "equal",
             "roles": SWARM_ROLES,
-            "role_bias": "balanced",  # no domain specific emphasis
-            "notes": "General swarm is balanced and good for exploratory research across many topics.",
+            "role_bias": "balanced",
+            "notes": (
+                "General swarm is balanced and good for exploratory research across many topics. "
+                "Roles should behave as broad but disciplined specialists rather than narrow domain experts."
+            ),
+            # Optional smarter role templates (future engines can use these instead of the generic roles)
+            "role_templates": [
+                {
+                    "name": "general_researcher",
+                    "inherits_from": "researcher",
+                    "domain_focus": "broad",
+                },
+                {
+                    "name": "general_critic",
+                    "inherits_from": "critic",
+                    "domain_focus": "methods_and_logic",
+                },
+                {
+                    "name": "general_explorer",
+                    "inherits_from": "explorer",
+                    "domain_focus": "cross_domain",
+                },
+                {
+                    "name": "general_integrator",
+                    "inherits_from": "integrator",
+                    "domain_focus": "summary_and_equilibrium",
+                },
+            ],
         },
 
         # UI hints for the dashboard
@@ -306,6 +458,16 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "cycle_length_hint": "long",
         "repair_depth_bias": "deep",
 
+        # Domain specific TGRM intelligence hints for longevity
+        "tgrm_hints": {
+            "strict_verify": "high",
+            "allow_prompt_echo": False,
+            "min_novelty_fraction": 0.25,
+            "max_redundant_cycles": 5,
+            "prefer_clinical_evidence": True,
+            "penalize_hype_language": True,
+        },
+
         # Default runtime and RYE behavior for continuous mode
         "default_runtime_profile": "24_hours",
         "default_rye_stop_threshold": 0.08,
@@ -318,8 +480,8 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                 "interventions",
                 "treatments",
                 "protocols",
-                "drug combinations",
-                "lifestyle stacks",
+                "drug_combinations",
+                "lifestyle_stacks",
             ],
             "notes": (
                 "Longevity preset enables cure or treatment extraction to track candidate "
@@ -348,11 +510,68 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "default_agents": 5,
             "time_split_strategy": "equal",
             "roles": SWARM_ROLES,
-            "role_bias": "deep",  # emphasize deep repair and evidence
+            "role_bias": "deep",
             "notes": (
-                "Longevity swarms are tuned for deep evidence gathering, "
-                "biomarker interpretation, and critical review of clinical data."
+                "Longevity swarms are tuned for deep evidence gathering, biomarker interpretation, "
+                "and critical review of clinical data. Each role should behave like a specialized scientist."
             ),
+            # Specific 5-role longevity swarm template for highly intelligent runs
+            "role_templates": [
+                {
+                    "name": "mitochondria_metabolism_specialist",
+                    "inherits_from": "researcher",
+                    "domain_focus": "mitochondria_and_energy",
+                    "mechanism_focus": [
+                        "NAD+",
+                        "mitophagy",
+                        "OXPHOS",
+                        "mitochondrial_biogenesis",
+                    ],
+                },
+                {
+                    "name": "dna_epigenetic_repair_specialist",
+                    "inherits_from": "researcher",
+                    "domain_focus": "dna_and_epigenetics",
+                    "mechanism_focus": [
+                        "DNA_repair",
+                        "sirtuins",
+                        "partial_reprogramming",
+                        "epigenetic_drift",
+                    ],
+                },
+                {
+                    "name": "senescence_inflammation_specialist",
+                    "inherits_from": "researcher",
+                    "domain_focus": "senescence_and_inflammation",
+                    "mechanism_focus": [
+                        "senolytics",
+                        "SASP",
+                        "inflammaging",
+                        "immune_clearance",
+                    ],
+                },
+                {
+                    "name": "proteostasis_autophagy_specialist",
+                    "inherits_from": "researcher",
+                    "domain_focus": "proteostasis_and_autophagy",
+                    "mechanism_focus": [
+                        "protein_quality_control",
+                        "chaperones",
+                        "autophagy",
+                        "UPR",
+                    ],
+                },
+                {
+                    "name": "systems_integrator_and_planner",
+                    "inherits_from": "integrator",
+                    "domain_focus": "stack_design_and_equilibrium",
+                    "mechanism_focus": [
+                        "stack_design",
+                        "RYE_tradeoffs",
+                        "equilibrium_windows",
+                    ],
+                },
+            ],
         },
 
         "ui_hints": {
@@ -416,6 +635,15 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "cycle_length_hint": "short",
         "repair_depth_bias": "precision",
 
+        # Domain specific TGRM intelligence hints for math
+        "tgrm_hints": {
+            "strict_verify": "very_high",
+            "allow_prompt_echo": False,
+            "min_novelty_fraction": 0.2,
+            "max_redundant_cycles": 3,
+            "require_formal_structures": True,
+        },
+
         # Default runtime and RYE behavior for continuous mode
         "default_runtime_profile": "8_hours",
         "default_rye_stop_threshold": 0.05,
@@ -424,7 +652,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         # Math preset does not extract cures, but can still extract structures
         "cure_extraction": {
             "enabled": False,
-            "targets": ["frameworks", "theorems", "formal models"],
+            "targets": ["frameworks", "theorems", "formal_models"],
             "notes": (
                 "Math preset focuses on formal structures rather than biomedical treatments. "
                 "Extraction is about definitions and theorems, not therapies."
@@ -455,8 +683,25 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "role_bias": "precision",
             "notes": (
                 "Math swarms are tuned for precision and coherence. "
-                "Researcher, critic, and theorist style roles are most important here."
+                "Researcher, critic, and theorist style behaviors are most important here."
             ),
+            "role_templates": [
+                {
+                    "name": "formalizer",
+                    "inherits_from": "researcher",
+                    "domain_focus": "definitions_and_axioms",
+                },
+                {
+                    "name": "proof_critic",
+                    "inherits_from": "critic",
+                    "domain_focus": "proof_validity_and_gaps",
+                },
+                {
+                    "name": "theory_integrator",
+                    "inherits_from": "integrator",
+                    "domain_focus": "unifying_existing_theories",
+                },
+            ],
         },
 
         "ui_hints": {
