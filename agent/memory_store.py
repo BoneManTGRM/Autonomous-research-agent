@@ -8,6 +8,7 @@ This module provides a JSON-based persistent storage layer. It stores:
 - cycle logs
 - run_state metadata (for long continuous runs and auto resume)
 - watchdog information (heartbeats for crash diagnostics)
+- goal_index summaries (lightweight per goal stats for swarms)
 
 The memory store acts as a lightweight knowledge base for the agent and is
 referenced each cycle to retrieve prior context and to persist new findings.
@@ -18,9 +19,10 @@ Reparodynamics interpretation:
     from it to reduce energy cost. When combined with VectorMemory, this
     becomes a semantic, time-aware repair substrate.
 
-    The run_state and watchdog sections act as a meta-layer:
+    The run_state, watchdog, and goal_index sections act as a meta-layer:
     they record how the system itself is running so that the agent
-    can restart and continue repair with minimal extra energy.
+    can restart and continue repair with minimal extra energy and
+    give swarm level analytics (per role and per goal).
 """
 
 from __future__ import annotations
@@ -53,10 +55,11 @@ class MemoryStore:
         - "biomarkers":  placeholder for anti-aging / lab data
         - "run_state":   metadata for long-running autonomous sessions
         - "watchdog":    timestamps and counters for heartbeats
+        - "goal_index":  compact per goal stats, including per role counts
 
     In-memory (non-persistent) vector memory may also be attached to
     support semantic search and time-decayed retrieval if the optional
-    `VectorMemory` class is available.
+    VectorMemory class is available.
     """
 
     def __init__(self, memory_file: str) -> None:
@@ -71,8 +74,9 @@ class MemoryStore:
             "hypotheses": [],
             "citations": [],
             "biomarkers": [],
-            "run_state": {},  # crash proof run metadata
-            "watchdog": {},   # heartbeat and last seen info
+            "run_state": {},   # crash proof run metadata
+            "watchdog": {},    # heartbeat and last seen info
+            "goal_index": {},  # compact goal wise stats
         }
         self._load()
         self._ensure_keys()
@@ -99,6 +103,7 @@ class MemoryStore:
             "biomarkers": [],
             "run_state": {},
             "watchdog": {},
+            "goal_index": {},
         }
         for key, default in defaults.items():
             if key not in self._data:
@@ -128,12 +133,88 @@ class MemoryStore:
                     "biomarkers": [],
                     "run_state": {},
                     "watchdog": {},
+                    "goal_index": {},
                 }
 
     def _save(self) -> None:
         """Persist memory to disk."""
         with open(self.memory_file, "w", encoding="utf-8") as f:
             json.dump(self._data, f, ensure_ascii=False, indent=2)
+
+    # ------------------------------------------------------------------
+    # Internal helpers for goal index
+    # ------------------------------------------------------------------
+    def _touch_goal_index(
+        self,
+        goal: str,
+        *,
+        last_event_type: str,
+        role: Optional[str] = None,
+        delta_notes: int = 0,
+        delta_cycles: int = 0,
+        rye_value: Optional[float] = None,
+        domain: Optional[str] = None,
+    ) -> None:
+        """Update compact per goal stats for swarms and analytics."""
+        gi = self._data.setdefault("goal_index", {})
+        entry = gi.get(goal) or {}
+        if not isinstance(entry, dict):
+            entry = {}
+
+        now = _utc_now_iso()
+        entry.setdefault("created_at", now)
+        entry["last_updated"] = now
+        entry["last_event_type"] = last_event_type
+
+        if domain is not None:
+            entry.setdefault("domain", domain)
+
+        # Note counts
+        note_count = int(entry.get("note_count", 0)) + int(delta_notes)
+        entry["note_count"] = note_count
+
+        # Cycle counts
+        cycle_count = int(entry.get("cycle_count", 0)) + int(delta_cycles)
+        entry["cycle_count"] = cycle_count
+
+        # Per role counters for swarms
+        roles_dict = entry.get("roles") or {}
+        if not isinstance(roles_dict, dict):
+            roles_dict = {}
+        if role:
+            r_stats = roles_dict.get(role) or {}
+            if not isinstance(r_stats, dict):
+                r_stats = {}
+            r_stats["note_count"] = int(r_stats.get("note_count", 0)) + int(delta_notes)
+            r_stats["cycle_count"] = int(r_stats.get("cycle_count", 0)) + int(delta_cycles)
+            if rye_value is not None:
+                # Simple streaming average for RYE per role
+                prev_avg = r_stats.get("avg_rye")
+                prev_n = int(r_stats.get("rye_count", 0))
+                if isinstance(prev_avg, (int, float)) and prev_n > 0:
+                    new_avg = (prev_avg * prev_n + float(rye_value)) / float(prev_n + 1)
+                    r_stats["avg_rye"] = new_avg
+                    r_stats["rye_count"] = prev_n + 1
+                else:
+                    r_stats["avg_rye"] = float(rye_value)
+                    r_stats["rye_count"] = 1
+            roles_dict[role] = r_stats
+        entry["roles"] = roles_dict
+
+        # Goal level RYE stats (streaming) for fast summary
+        if rye_value is not None:
+            prev_avg = entry.get("avg_rye")
+            prev_n = int(entry.get("rye_count", 0))
+            if isinstance(prev_avg, (int, float)) and prev_n > 0:
+                new_avg = (prev_avg * prev_n + float(rye_value)) / float(prev_n + 1)
+                entry["avg_rye"] = new_avg
+                entry["rye_count"] = prev_n + 1
+            else:
+                entry["avg_rye"] = float(rye_value)
+                entry["rye_count"] = 1
+
+        gi[goal] = entry
+        self._data["goal_index"] = gi
 
     # ------------------------------------------------------------------
     # Notes
@@ -146,6 +227,7 @@ class MemoryStore:
         tags: Optional[List[str]] = None,
         role: str = "agent",
         importance: float = 1.0,
+        domain: Optional[str] = None,
     ) -> None:
         """Add a note associated with a research goal."""
         note = {
@@ -156,7 +238,19 @@ class MemoryStore:
             "role": role,
             "importance": float(importance),
         }
+        if domain is not None:
+            note["domain"] = domain
+
         self._data.setdefault("notes", []).append(note)
+        self._touch_goal_index(
+            goal,
+            last_event_type="note",
+            role=role,
+            delta_notes=1,
+            delta_cycles=0,
+            rye_value=None,
+            domain=domain,
+        )
         self._save()
 
         # Also store in vector memory if available, for semantic retrieval
@@ -168,6 +262,8 @@ class MemoryStore:
                     "role": role,
                     "importance": float(importance),
                 }
+                if domain is not None:
+                    meta["domain"] = domain
                 self.vector_memory.add_item(text=content, metadata=meta)
             except Exception:
                 # Vector memory is optional; ignore failures
@@ -316,6 +412,32 @@ class MemoryStore:
     def log_cycle(self, cycle_data: Dict[str, Any]) -> None:
         """Append cycle data to the cycle log."""
         self._data.setdefault("cycles", []).append(cycle_data)
+
+        # Update compact goal index for swarms
+        goal = str(cycle_data.get("goal", ""))
+        role = str(cycle_data.get("role", "agent"))
+        domain = cycle_data.get("domain")
+        rye_val = cycle_data.get("RYE")
+        if goal:
+            try:
+                rye_float: Optional[float]
+                if isinstance(rye_val, (int, float)):
+                    rye_float = float(rye_val)
+                else:
+                    rye_float = None
+                self._touch_goal_index(
+                    goal,
+                    last_event_type="cycle",
+                    role=role,
+                    delta_notes=0,
+                    delta_cycles=1,
+                    rye_value=rye_float,
+                    domain=domain,
+                )
+            except Exception:
+                # Any goal_index failure must not kill logging
+                pass
+
         self._save()
 
     def get_cycle_history(self) -> List[Dict[str, Any]]:
@@ -454,15 +576,20 @@ class MemoryStore:
     def get_rye_stats(
         self,
         goal: Optional[str] = None,
+        role: Optional[str] = None,
     ) -> Tuple[Optional[float], Optional[float], Optional[float], int]:
-        """Compute basic RYE statistics for a goal or for all cycles.
+        """Compute basic RYE statistics.
 
+        If goal is provided, restrict to that goal.
+        If role is also provided, restrict to that logical role.
         Returns:
             (avg_rye, min_rye, max_rye, count)
         """
         history = self._data.get("cycles", [])
         if goal is not None:
             history = [c for c in history if c.get("goal") == goal]
+        if role is not None:
+            history = [c for c in history if c.get("role") == role]
 
         values: List[float] = []
         for c in history:
@@ -590,3 +717,25 @@ class MemoryStore:
     def get_citations_for_goal(self, goal: str) -> List[Dict[str, Any]]:
         """Explicit alias for get_citations(goal=...)."""
         return self.get_citations(goal=goal)
+
+    # ------------------------------------------------------------------
+    # Goal index accessors for swarm analytics
+    # ------------------------------------------------------------------
+    def list_goals(self) -> List[str]:
+        """Return a sorted list of known goals from goal_index."""
+        gi = self._data.get("goal_index") or {}
+        if not isinstance(gi, dict):
+            return []
+        return sorted(gi.keys())
+
+    def get_goal_index(self, goal: Optional[str] = None) -> Dict[str, Any]:
+        """Return compact goal index entry or the full index.
+
+        If goal is None, return the entire goal_index dict.
+        """
+        gi = self._data.get("goal_index") or {}
+        if not isinstance(gi, dict):
+            return {}
+        if goal is None:
+            return dict(gi)
+        return dict(gi.get(goal, {}))
