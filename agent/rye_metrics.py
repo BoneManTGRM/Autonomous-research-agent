@@ -15,16 +15,20 @@ This upgraded module introduces:
 • Stability Index (NEW)
 • Recovery Momentum (NEW)
 • Repair Efficiency Signature (NEW)
+
+Backwards compatibility:
+    Existing callers that only pass the original arguments still work:
+    - compute_delta_r(...) can be called without novelty_score / coherence_gain.
+    - compute_energy(...) can be called without swarm_size / swarm_layering.
 """
 
 from __future__ import annotations
 from typing import Any, Dict, List, Optional
-import math
 import statistics
 
 
 # ---------------------------------------------------------------------------
-# ΔR (Improvement) — Level 3
+# ΔR (Improvement) - Level 3
 # ---------------------------------------------------------------------------
 
 def compute_delta_r(
@@ -42,8 +46,10 @@ def compute_delta_r(
 
     New improvements:
     -----------------
-    • novelty_score      → reward discovering something new
-    • coherence_gain     → reward resolving contradictions cleanly
+    • novelty_score      -> reward discovering something new
+    • coherence_gain     -> reward resolving contradictions cleanly
+
+    All original parameters still work as before.
     """
 
     base = max(issues_before - issues_after, 0)
@@ -52,11 +58,12 @@ def compute_delta_r(
     hypothesis_gain = hypotheses_generated * 0.2
     source_gain = min(max(sources_used, 0), 20) * 0.05
 
-    bonus = max(novelty_score * 0.4, 0) + max(coherence_gain * 0.3, 0)
+    # Extra signal channels
+    bonus = max(novelty_score * 0.4, 0.0) + max(coherence_gain * 0.3, 0.0)
 
     delta = float(base + contradiction_gain + hypothesis_gain + source_gain + bonus)
 
-    # Maintenance credit
+    # Maintenance credit (avoid ΔR = 0 with real work)
     if issues_before == 0 and delta == 0 and repairs_applied > 0:
         delta = repairs_applied * 0.1
 
@@ -64,7 +71,7 @@ def compute_delta_r(
 
 
 # ---------------------------------------------------------------------------
-# E (Effort) — Level 3 Swarm-Aware
+# E (Effort) - Level 3 Swarm-Aware
 # ---------------------------------------------------------------------------
 
 def compute_energy(
@@ -82,8 +89,10 @@ def compute_energy(
 
     New fields:
     -----------
-    swarm_size     → number of active agents
-    swarm_layering → depth (roles × agents × branches)
+    swarm_size     -> number of active agents
+    swarm_layering -> depth (roles x agents x branches)
+
+    Existing calls that do not pass these fields still behave as before.
     """
 
     base_cost = float(len(actions_taken)) if actions_taken else 1.0
@@ -95,13 +104,15 @@ def compute_energy(
 
     total = base_cost + cost_web + cost_pubmed + cost_sem + cost_pdf
 
-    if tokens_estimate:
+    # Soft token-costing
+    if tokens_estimate is not None and tokens_estimate > 0:
         total += float(tokens_estimate) / 1000.0
 
-    # Swarm penalty (prevents cheating via infinite agent spawning)
-    swarm_penalty = 1.0 + ((swarm_size - 1) * 0.05) + ((swarm_layering - 1) * 0.1)
+    # Swarm penalty (prevents "cheating" via infinite agent spawning)
+    swarm_penalty = 1.0 + ((max(swarm_size, 1) - 1) * 0.05) + ((max(swarm_layering, 1) - 1) * 0.1)
     total *= swarm_penalty
 
+    # Safety clamps
     if total <= 0:
         total = 1.0
     if total < 0.05:
@@ -126,12 +137,14 @@ def compute_rye(delta_r: float, energy_e: float) -> float:
 # ---------------------------------------------------------------------------
 
 def rolling_rye(history: List[Dict[str, Any]], window: int = 10) -> Optional[float]:
+    """Compute a simple rolling average of RYE over the last N cycles."""
     if not history:
         return None
 
     recent = history[-window:]
     vals = [
-        float(entry["RYE"]) for entry in recent
+        float(entry["RYE"])
+        for entry in recent
         if isinstance(entry.get("RYE"), (int, float))
     ]
 
@@ -142,12 +155,14 @@ def rolling_rye(history: List[Dict[str, Any]], window: int = 10) -> Optional[flo
 
 
 # ---------------------------------------------------------------------------
-# Median RYE — Noise-Resistant
+# Median RYE - Noise-Resistant
 # ---------------------------------------------------------------------------
 
 def median_rye(history: List[Dict[str, Any]]) -> Optional[float]:
+    """Median RYE across all cycles, robust to outliers."""
     vals = [
-        float(e["RYE"]) for e in history
+        float(e["RYE"])
+        for e in history
         if isinstance(e.get("RYE"), (int, float))
     ]
     if not vals:
@@ -160,6 +175,13 @@ def median_rye(history: List[Dict[str, Any]]) -> Optional[float]:
 # ---------------------------------------------------------------------------
 
 def efficiency_trend(history: List[Dict[str, Any]]) -> Optional[float]:
+    """
+    Simple trend: average RYE in the second half minus average RYE in the first half.
+
+    Positive  -> improving efficiency
+    Negative  -> declining efficiency
+    Near zero -> flat or noisy
+    """
     n = len(history)
     if n < 4:
         return None
@@ -168,7 +190,7 @@ def efficiency_trend(history: List[Dict[str, Any]]) -> Optional[float]:
     old = history[:mid]
     recent = history[mid:]
 
-    def _avg(h):
+    def _avg(h: List[Dict[str, Any]]) -> Optional[float]:
         vals = [float(e["RYE"]) for e in h if isinstance(e.get("RYE"), (int, float))]
         return sum(vals) / len(vals) if vals else None
 
@@ -182,12 +204,18 @@ def efficiency_trend(history: List[Dict[str, Any]]) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
-# Regression-Based Trend — Best for Long Runs
+# Regression-Based Trend - Best for Long Runs
 # ---------------------------------------------------------------------------
 
 def regression_rye_slope(history: List[Dict[str, Any]]) -> Optional[float]:
-    xs = []
-    ys = []
+    """
+    Linear regression slope of RYE over cycles.
+
+    Returns:
+        slope (float) or None if not enough data.
+    """
+    xs: List[float] = []
+    ys: List[float] = []
 
     for i, entry in enumerate(history):
         v = entry.get("RYE")
@@ -217,7 +245,8 @@ def regression_rye_slope(history: List[Dict[str, Any]]) -> Optional[float]:
 
 def stability_index(history: List[Dict[str, Any]]) -> Optional[float]:
     """
-    Measures variance-normalized stability.
+    Measures variance-normalized stability of RYE values.
+
     1.0 = perfectly stable improvements
     0.0 = chaotic swings
     """
@@ -231,7 +260,9 @@ def stability_index(history: List[Dict[str, Any]]) -> Optional[float]:
     if var == 0:
         return 1.0
 
-    return min(max(mean / (var + 1e-6), 0.0), 1.0)
+    # Normalize mean by variance and clamp to [0, 1]
+    score = mean / (var + 1e-6)
+    return min(max(score, 0.0), 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -241,12 +272,15 @@ def stability_index(history: List[Dict[str, Any]]) -> Optional[float]:
 def recovery_momentum(history: List[Dict[str, Any]]) -> Optional[float]:
     """
     Measures upward acceleration in late-stage runs.
-    Great for 90-day missions.
+
+    Good for long missions (weeks to 90-day runs) where you want to know
+    if the system is picking up momentum or stalling.
     """
     slope = regression_rye_slope(history)
     if slope is None:
         return None
-    return max(slope * 10, 0.0)
+    # Simple scaling to make the value more interpretable
+    return max(slope * 10.0, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +288,17 @@ def recovery_momentum(history: List[Dict[str, Any]]) -> Optional[float]:
 # ---------------------------------------------------------------------------
 
 def apply_domain_weight(rye_value: float, domain: Optional[str] = None) -> float:
+    """
+    Optional domain-specific multiplier for RYE.
+
+    This allows you to treat certain domains as slightly higher value
+    per unit RYE, for example:
+        general   -> 1.00
+        math      -> 1.10
+        longevity -> 1.15
+        ai        -> 1.08
+        biology   -> 1.12
+    """
     if domain is None:
         return rye_value
 
