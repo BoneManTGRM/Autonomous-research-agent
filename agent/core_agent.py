@@ -42,6 +42,12 @@ Runtime profiles:
     When a runtime_profile is selected, CoreAgent will:
         - adjust max_minutes and max_cycles for continuous runs
         - auto-apply a stop_rye threshold where appropriate
+
+Domain presets:
+    CoreAgent also uses domain presets (via presets.get_preset) to:
+        - pick sensible default runtime profiles per domain
+        - suggest RYE stop thresholds
+        - keep behavior aligned with longevity / math / general modes
 """
 
 from __future__ import annotations
@@ -53,7 +59,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .memory_store import MemoryStore
 from .tgrm_loop import TGRMLoop
-from .presets import RUNTIME_PROFILES
+from .presets import RUNTIME_PROFILES, CONTINUOUS_MODE_DEFAULTS, get_preset
 
 
 class CoreAgent:
@@ -526,7 +532,8 @@ class CoreAgent:
                 Optional domain tag forwarded into each cycle.
             max_minutes:
                 Optional wall-clock time budget in minutes. If provided,
-                the loop stops once this time has elapsed.
+                the loop stops once this time has elapsed (up to per-cycle
+                granularity).
             forever:
                 If True, ignore max_cycles and keep running until
                 stopped by max_minutes, stop_rye, or the environment.
@@ -549,12 +556,30 @@ class CoreAgent:
         summaries: List[Dict[str, Any]] = []
         recent_rye: List[float] = []
 
+        # Enforce a global failsafe on max_cycles
+        max_cycles_failsafe = int(CONTINUOUS_MODE_DEFAULTS.get("max_cycles_failsafe", 10_000_000))
+        if max_cycles > max_cycles_failsafe:
+            max_cycles = max_cycles_failsafe
+
+        # Domain-aware preset defaults
+        effective_domain = domain or "general"
+        preset_cfg = get_preset(effective_domain)
+
+        # Watchdog interval default from global config if caller did not override
+        default_watchdog = float(CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes))
+        if watchdog_interval_minutes == 5.0:
+            watchdog_interval_minutes = default_watchdog
+
+        # Default runtime profile from domain preset if not provided
+        if runtime_profile is None:
+            runtime_profile = preset_cfg.get("default_runtime_profile")
+
         # Apply runtime profile hints if requested
         profile_cfg: Optional[Dict[str, Any]] = None
         if runtime_profile:
             profile_cfg = RUNTIME_PROFILES.get(runtime_profile)
+
         if profile_cfg is not None:
-            # Only override if caller did not set a stronger preference
             est_cycles = profile_cfg.get("estimated_cycles")
             profile_stop_rye = profile_cfg.get("rye_stop_threshold")
 
@@ -566,6 +591,9 @@ class CoreAgent:
                     max_minutes = 8 * 60.0
                 elif runtime_profile == "24_hours":
                     max_minutes = 24 * 60.0
+                elif runtime_profile == "90_days":
+                    # 90 days in minutes, if ever used in single mode
+                    max_minutes = 90 * 24 * 60.0
                 elif runtime_profile == "forever":
                     forever = True
 
@@ -580,6 +608,12 @@ class CoreAgent:
             if stop_rye is None and isinstance(profile_stop_rye, (int, float)):
                 stop_rye = float(profile_stop_rye)
 
+        # If still no explicit stop_rye and preset defines a default
+        if stop_rye is None:
+            preset_stop = preset_cfg.get("default_rye_stop_threshold")
+            if isinstance(preset_stop, (int, float)):
+                stop_rye = float(preset_stop)
+
         # Detect and adapt hour presets from older app versions if
         # max_minutes is still None.
         if max_minutes is None:
@@ -592,9 +626,9 @@ class CoreAgent:
             elif max_cycles == 2880:
                 max_minutes = 1440.0
                 max_cycles = 1_000_000
-            elif max_cycles >= 10_000_000:
+            elif max_cycles >= max_cycles_failsafe:
                 forever = True
-                max_cycles = 10_000_000
+                max_cycles = max_cycles_failsafe
 
         # Try to resume from a previous interrupted continuous run
         checkpoint = None
@@ -604,12 +638,12 @@ class CoreAgent:
                 if (
                     checkpoint.get("goal") == goal
                     and checkpoint.get("role") == role
-                    and checkpoint.get("domain") == (domain or "general")
+                    and checkpoint.get("domain") == effective_domain
                     and checkpoint.get("mode", "single") == "single"
                 ):
                     remaining = checkpoint.get("remaining_minutes")
                     if isinstance(remaining, (int, float)) and remaining > 0:
-                        # Treat remaining minutes as the new budget
+                        # Treat remaining minutes as the new budget if tighter
                         if max_minutes is None or max_minutes > float(remaining):
                             max_minutes = float(remaining)
 
@@ -622,6 +656,9 @@ class CoreAgent:
 
         i = 0
         stop_reason: str = "completed"
+
+        # Heartbeat label for single-agent runs
+        heartbeat_label = CONTINUOUS_MODE_DEFAULTS.get("heartbeat_labels", {}).get("single", "continuous_single")
 
         while True:
             # Cycle-based stopping (unless in explicit forever mode)
@@ -649,7 +686,7 @@ class CoreAgent:
                     "mode": "single",
                     "goal": goal,
                     "role": role,
-                    "domain": domain or "general",
+                    "domain": effective_domain,
                     "max_cycles": max_cycles,
                     "max_minutes": max_minutes,
                     "elapsed_minutes": elapsed_min,
@@ -665,7 +702,7 @@ class CoreAgent:
                 self._save_checkpoint(checkpoint_state)
                 # Use MemoryStore watchdog as an additional heartbeat
                 try:
-                    self.memory_store.heartbeat(label="continuous_run")
+                    self.memory_store.heartbeat(label=heartbeat_label)
                 except Exception:
                     pass
                 last_watchdog_update = now
@@ -678,7 +715,7 @@ class CoreAgent:
                 source_controls=source_controls,
                 pdf_bytes=pdf_bytes,
                 biomarker_snapshot=biomarker_snapshot,
-                domain=domain,
+                domain=effective_domain,
             )
             summary = result.get("summary", {})
             summaries.append(summary)
@@ -708,7 +745,7 @@ class CoreAgent:
             "mode": "single",
             "goal": goal,
             "role": role,
-            "domain": domain or "general",
+            "domain": effective_domain,
             "elapsed_minutes": total_elapsed_min,
             "max_minutes": max_minutes,
             "max_cycles": max_cycles,
@@ -794,6 +831,10 @@ class CoreAgent:
         all_summaries: List[Dict[str, Any]] = []
         recent_round_rye: List[float] = []
 
+        # Domain-aware preset defaults
+        effective_domain = domain or "general"
+        preset_cfg = get_preset(effective_domain)
+
         # Determine swarm role set
         if roles is None:
             roles_seq: Sequence[str] = self.agent_roles
@@ -801,10 +842,20 @@ class CoreAgent:
             roles_seq = roles
         roles_list: List[str] = [str(r) for r in roles_seq][: self.max_agents]
 
+        # Watchdog interval default from global config if caller did not override
+        default_watchdog = float(CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes))
+        if watchdog_interval_minutes == 5.0:
+            watchdog_interval_minutes = default_watchdog
+
+        # Default runtime profile from domain preset if not provided
+        if runtime_profile is None:
+            runtime_profile = preset_cfg.get("default_runtime_profile")
+
         # Apply runtime profile hints if requested
         profile_cfg: Optional[Dict[str, Any]] = None
         if runtime_profile:
             profile_cfg = RUNTIME_PROFILES.get(runtime_profile)
+
         if profile_cfg is not None:
             est_cycles = profile_cfg.get("estimated_cycles")
             profile_stop_rye = profile_cfg.get("rye_stop_threshold")
@@ -826,11 +877,19 @@ class CoreAgent:
                     max_minutes = 8 * 60.0
                 elif runtime_profile == "24_hours":
                     max_minutes = 24 * 60.0
+                elif runtime_profile == "90_days":
+                    max_minutes = 90 * 24 * 60.0
                 elif runtime_profile == "forever":
                     forever = True
 
             if stop_rye is None and isinstance(profile_stop_rye, (int, float)):
                 stop_rye = float(profile_stop_rye)
+
+        # If still no explicit stop_rye and preset defines a default
+        if stop_rye is None:
+            preset_stop = preset_cfg.get("default_rye_stop_threshold")
+            if isinstance(preset_stop, (int, float)):
+                stop_rye = float(preset_stop)
 
         # Try to resume from a previous swarm run
         checkpoint = None
@@ -840,7 +899,7 @@ class CoreAgent:
                 if (
                     checkpoint.get("goal") == goal
                     and checkpoint.get("mode") == "swarm"
-                    and checkpoint.get("domain") == (domain or "general")
+                    and checkpoint.get("domain") == effective_domain
                 ):
                     remaining = checkpoint.get("remaining_minutes")
                     if isinstance(remaining, (int, float)) and remaining > 0:
@@ -856,6 +915,9 @@ class CoreAgent:
 
         round_idx = 0
         stop_reason: str = "completed"
+
+        # Heartbeat label for swarm runs
+        heartbeat_label = CONTINUOUS_MODE_DEFAULTS.get("heartbeat_labels", {}).get("swarm", "continuous_swarm")
 
         while True:
             # Round-based stopping (unless in explicit forever mode)
@@ -882,7 +944,7 @@ class CoreAgent:
                     "in_progress": True,
                     "mode": "swarm",
                     "goal": goal,
-                    "domain": domain or "general",
+                    "domain": effective_domain,
                     "roles": list(roles_list),
                     "max_rounds": max_rounds,
                     "max_minutes": max_minutes,
@@ -898,13 +960,13 @@ class CoreAgent:
                 }
                 self._save_checkpoint(checkpoint_state)
                 try:
-                    self.memory_store.heartbeat(label="swarm_run")
+                    self.memory_store.heartbeat(label=heartbeat_label)
                 except Exception:
                     pass
                 last_watchdog_update = now
 
             # Compute base cycle index for this round (each role gets a unique cycle index)
-            base_ci = start_index + round_idx * len(roles_list or [None])
+            base_ci = start_index + round_idx * max(1, len(roles_list))
 
             round_summaries = self.run_multi_agent_round(
                 goal=goal,
@@ -913,7 +975,7 @@ class CoreAgent:
                 source_controls=source_controls,
                 pdf_bytes=pdf_bytes,
                 biomarker_snapshot=biomarker_snapshot,
-                domain=domain,
+                domain=effective_domain,
             )
 
             all_summaries.extend(round_summaries)
@@ -948,7 +1010,7 @@ class CoreAgent:
             "mode": "swarm",
             "goal": goal,
             "roles": list(roles_list),
-            "domain": domain or "general",
+            "domain": effective_domain,
             "elapsed_minutes": total_elapsed_min,
             "max_minutes": max_minutes,
             "max_rounds": max_rounds,
