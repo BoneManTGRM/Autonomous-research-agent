@@ -8,7 +8,7 @@ Key ideas:
 - Uses the same CoreAgent and MemoryStore as the Streamlit UI.
 - Runs continuous mode (single agent or swarm) without any Streamlit session.
 - Uses environment variables to control goal, domain, runtime, and swarm.
-- Relies on CoreAgent checkpoints and watchdog for crash recovery.
+- Relies on CoreAgent presets, checkpoints, and watchdog for crash recovery.
 
 You can start it with commands like:
     WORKER_GOAL="Long run test on reparodynamics" \
@@ -31,7 +31,7 @@ import yaml
 
 from agent.core_agent import CoreAgent
 from agent.memory_store import MemoryStore
-from agent.presets import PRESETS  # only to get default goals
+from agent.presets import PRESETS, get_preset  # PRESETS for backward compat defaults
 
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
@@ -157,10 +157,15 @@ def build_goal_and_domain() -> Tuple[str, str]:
     """
     Decide which goal and domain to use for this worker.
 
-    Priority:
+    Priority for GOAL:
     1. WORKER_GOAL env
     2. config["default_worker_goal"]
     3. Preset default goal (longevity if available, else general reparodynamics)
+
+    Priority for DOMAIN:
+    1. WORKER_DOMAIN env
+    2. config["default_worker_domain"]
+    3. "longevity" if longevity preset exists, else "general"
     """
     config = load_settings(CONFIG_PATH_DEFAULT)
 
@@ -171,16 +176,18 @@ def build_goal_and_domain() -> Tuple[str, str]:
     elif isinstance(config.get("default_worker_goal"), str):
         goal = config["default_worker_goal"]
     else:
-        # Try to use the longevity preset first if it exists
+        # Prefer longevity preset goal if available
         if "longevity" in PRESETS:
-            goal = PRESETS["longevity"].get(
+            longevity_preset = get_preset("longevity")
+            goal = longevity_preset.get(
                 "default_goal",
                 "Long run autonomous research on anti aging, longevity, and reparodynamics.",
             )
         else:
-            goal = (
-                "Long run autonomous research on reparodynamics, RYE, TGRM, "
-                "and similar stability or repair frameworks."
+            general_preset = get_preset("general")
+            goal = general_preset.get(
+                "default_goal",
+                "Long run autonomous research on reparodynamics, RYE, TGRM, and related stability frameworks.",
             )
 
     # Domain
@@ -190,7 +197,7 @@ def build_goal_and_domain() -> Tuple[str, str]:
     elif isinstance(config.get("default_worker_domain"), str):
         domain = config["default_worker_domain"]
     else:
-        domain = "general"
+        domain = "longevity" if "longevity" in PRESETS else "general"
 
     return goal, domain
 
@@ -221,11 +228,12 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     Controlled by:
     - WORKER_MAX_MINUTES (optional)
     - WORKER_STOP_RYE (optional)
-    - WORKER_RUNTIME_PROFILE (optional: 1_hour, 8_hours, 24_hours, forever)
+    - WORKER_RUNTIME_PROFILE (optional: 1_hour, 8_hours, 24_hours, 90_days, forever)
     - WORKER_ROLE (default 'agent')
     - WORKER_SOURCES (optional, comma separated)
     - WORKER_RESUME (bool, default True)
     - WORKER_WATCHDOG_MINUTES (float, default 5.0)
+    - WORKER_FOREVER (bool, default False)
     """
     goal, domain = build_goal_and_domain()
 
@@ -250,9 +258,9 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
     print(f"Role: {role}")
-    print(f"Runtime profile: {runtime_profile or 'none'}")
-    print(f"Max minutes: {max_minutes if max_minutes is not None else 'None (profile/forever)'}")
-    print(f"Stop RYE threshold: {stop_rye if stop_rye is not None else 'disabled'}")
+    print(f"Runtime profile (requested): {runtime_profile or 'none (use preset default)'}")
+    print(f"Max minutes (explicit): {max_minutes if max_minutes is not None else 'None (profile/preset/forever)'}")
+    print(f"Stop RYE threshold (explicit): {stop_rye if stop_rye is not None else 'None (preset/profile)'}")
     print(f"Forever mode: {forever}")
     print(f"Resume from checkpoint: {resume}")
     print(f"Watchdog interval (min): {watchdog_minutes}")
@@ -261,6 +269,10 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
     _heartbeat(agent, label="worker_single_start")
 
+    # max_cycles here is effectively unbounded; CoreAgent will apply:
+    # - runtime profile estimated_cycles hints
+    # - preset stop thresholds
+    # - global failsafe max_cycles
     summaries = agent.run_continuous(
         goal=goal,
         max_cycles=10_000_000,
@@ -297,10 +309,11 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     - WORKER_SWARM_ROLES (comma separated, optional)
     - WORKER_MAX_MINUTES (optional)
     - WORKER_STOP_RYE (optional)
-    - WORKER_RUNTIME_PROFILE (optional: 1_hour, 8_hours, 24_hours, forever)
+    - WORKER_RUNTIME_PROFILE (optional: 1_hour, 8_hours, 24_hours, 90_days, forever)
     - WORKER_SOURCES (optional, comma separated)
     - WORKER_RESUME (bool, default True)
     - WORKER_WATCHDOG_MINUTES (float, default 5.0)
+    - WORKER_FOREVER (bool, default False)
     """
     goal, domain = build_goal_and_domain()
 
@@ -329,9 +342,9 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
     print(f"Roles: {roles_list}")
-    print(f"Runtime profile: {runtime_profile or 'none'}")
-    print(f"Max minutes: {max_minutes if max_minutes is not None else 'None (profile/forever)'}")
-    print(f"Stop RYE threshold: {stop_rye if stop_rye is not None else 'disabled'}")
+    print(f"Runtime profile (requested): {runtime_profile or 'none (use preset default)'}")
+    print(f"Max minutes (explicit): {max_minutes if max_minutes is not None else 'None (profile/preset/forever)'}")
+    print(f"Stop RYE threshold (explicit): {stop_rye if stop_rye is not None else 'None (preset/profile)'}")
     print(f"Forever mode: {forever}")
     print(f"Resume from checkpoint: {resume}")
     print(f"Watchdog interval (min): {watchdog_minutes}")
@@ -340,6 +353,10 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
     _heartbeat(agent, label="worker_swarm_start")
 
+    # max_rounds is effectively unbounded here; CoreAgent will interpret:
+    # - runtime profile estimated_cycles into rounds
+    # - preset RYE thresholds
+    # - internal safety limits
     summaries = agent.run_swarm_continuous(
         goal=goal,
         max_rounds=10_000_000,
