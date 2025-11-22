@@ -191,56 +191,206 @@ class CoreAgent:
             cfg.update(extra_config)
         return CoreAgent(memory_store=self.memory_store, config=cfg)
 
-    def run_multi_agent_round(
+    # ------------------------------------------------------------------
+    # Persistence helpers for background workers
+    # ------------------------------------------------------------------
+    def load_state_from_storage(self) -> Dict[str, Any]:
+        """Load the latest engine run state from persistent storage.
+
+        Priority:
+            1. MemoryStore.load_run_state() if available.
+            2. JSON checkpoint file (used as a fallback).
+
+        Returns:
+            A dict representing the last known engine state.
+            Returns {} if nothing valid is found.
+        """
+        # Prefer MemoryStore-based state if implemented
+        try:
+            if hasattr(self.memory_store, "load_run_state"):
+                state = self.memory_store.load_run_state()  # type: ignore[attr-defined]
+            else:
+                state = self._load_checkpoint()
+        except Exception:
+            state = None
+
+        if not isinstance(state, dict):
+            return {}
+        return state
+
+    def save_state_to_storage(self, state: Dict[str, Any]) -> None:
+        """Save engine run state to persistent storage.
+
+        Priority:
+            1. MemoryStore.save_run_state() if available.
+            2. JSON checkpoint file (fallback).
+        """
+        if not isinstance(state, dict):
+            return
+
+        # Defensive copy so callers can hold their own reference
+        payload: Dict[str, Any] = dict(state)
+
+        # Try MemoryStore first
+        try:
+            if hasattr(self.memory_store, "save_run_state"):
+                self.memory_store.save_run_state(payload)  # type: ignore[attr-defined]
+                return
+        except Exception:
+            # If MemoryStore persistence fails, fall back to checkpoint file.
+            pass
+
+        # Fallback: store minimal state in the checkpoint file
+        try:
+            checkpoint_state: Dict[str, Any] = {
+                "version": 1,
+                "in_progress": bool(payload.get("in_progress", True)),
+                "mode": payload.get("mode", "single"),
+                "goal": payload.get("goal"),
+                "role": payload.get("role", "agent"),
+                "domain": payload.get("domain", "general"),
+                "cycle_index": payload.get("cycle_index"),
+                "cycles_completed": payload.get("cycles_completed"),
+                "last_rye": payload.get("last_rye"),
+                "last_update_ts": payload.get("last_update_ts", time.time()),
+                "runtime_profile": payload.get("runtime_profile"),
+                "raw_state": payload,
+            }
+            self._save_checkpoint(checkpoint_state)
+        except Exception:
+            return
+
+    def run_one_cycle_and_return_state(
         self,
-        goal: str,
-        base_cycle_index: int,
-        roles: Optional[Sequence[str]] = None,
+        state: Optional[Dict[str, Any]] = None,
+        *,
+        goal: Optional[str] = None,
+        role: str = "agent",
+        domain: Optional[str] = None,
         source_controls: Optional[Dict[str, bool]] = None,
         pdf_bytes: Optional[bytes] = None,
         biomarker_snapshot: Optional[Dict[str, Any]] = None,
-        domain: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """Run a single round of multiple logical agents.
+    ) -> Dict[str, Any]:
+        """Run exactly one TGRM cycle and return updated state + summary.
 
-        Example round (5 agents, but can go up to 32):
-            1. researcher   - primary gatherer and explainer
-            2. critic       - attacks weak points, flags gaps
-            3. planner      - proposes next experiments and steps
-            4. synthesizer  - condenses findings into coherent story
-            5. explorer     - searches for surprising or out-of-distribution angles
+        This is the primary entry point for `engine_worker.py`:
 
-        All agents share the same MemoryStore and TGRM engine, but run
-        with different role labels so you can distinguish their
-        contributions in the logs and RYE history.
+            1. Load state from storage (or start with None).
+            2. Call run_one_cycle_and_return_state(...)
+            3. Persist the returned `state` using save_state_to_storage()
+            4. Sleep 1–5 seconds and repeat.
 
-        The number of roles actually run is capped by self.max_agents
-        (default 32).
+        Args:
+            state:
+                Existing engine state dict, or None to initialize from scratch.
+            goal:
+                Optional override of the research goal. If not provided, reads from state["goal"].
+            role:
+                Logical role label for this cycle ("agent", "researcher", "critic", etc.).
+            domain:
+                Optional domain tag ("general", "longevity", "math", ...). Overrides state["domain"] if provided.
+            source_controls:
+                Optional per-cycle source configuration. If not provided, falls back to:
+                    state["source_controls"] or self.source_controls.
+            pdf_bytes:
+                Optional PDF payload for this cycle (for worker mode).
+            biomarker_snapshot:
+                Optional biomarker payload for future longevity-aware logic.
+
+        Returns:
+            Dict with keys:
+                - "state": updated engine state dict
+                - "summary": human-facing cycle summary dict
         """
-        if roles is None:
-            roles_seq: Sequence[str] = self.agent_roles
+        # Start from existing state or initialize a new one
+        if state is None:
+            history = self.memory_store.get_cycle_history()
+            next_index = len(history)
+            state = {
+                "mode": "single",
+                "goal": goal or "",
+                "role": role,
+                "domain": domain or "general",
+                "cycle_index": next_index,
+                "cycles_completed": 0,
+                "created_at_ts": time.time(),
+                "last_update_ts": time.time(),
+                "last_rye": None,
+                "in_progress": True,
+            }
+            if source_controls is not None:
+                state["source_controls"] = dict(source_controls)
         else:
-            roles_seq = roles
+            # Make a shallow copy so we don't mutate caller's dict in-place
+            state = dict(state)
 
-        # Enforce max agent count for safety
-        roles_list: List[str] = [str(r) for r in roles_seq][: self.max_agents]
+        # Resolve goal / role / domain from parameters or state
+        effective_goal: str = (goal or state.get("goal") or "").strip()
+        state["goal"] = effective_goal
 
-        summaries: List[Dict[str, Any]] = []
+        effective_role: str = role or state.get("role", "agent")
+        state["role"] = effective_role
 
-        for idx, role in enumerate(roles_list):
-            ci = base_cycle_index + idx
-            result = self.run_cycle(
-                goal=goal,
-                cycle_index=ci,
-                role=role,
-                source_controls=source_controls,
-                pdf_bytes=pdf_bytes,
-                biomarker_snapshot=biomarker_snapshot,
-                domain=domain,
-            )
-            summaries.append(result.get("summary", {}))
+        effective_domain: str = domain or state.get("domain", "general")
+        state["domain"] = effective_domain
 
-        return summaries
+        # Resolve source controls:
+        # parameter > state["source_controls"] > self.source_controls
+        if source_controls is not None:
+            effective_sources: Dict[str, bool] = dict(source_controls)
+            state["source_controls"] = dict(source_controls)
+        else:
+            stored_sc = state.get("source_controls")
+            if isinstance(stored_sc, dict):
+                effective_sources = dict(stored_sc)
+            else:
+                effective_sources = dict(self.source_controls)
+
+        # Determine cycle index
+        try:
+            ci = int(state.get("cycle_index", 0))
+            if ci < 0:
+                ci = 0
+        except Exception:
+            history = self.memory_store.get_cycle_history()
+            ci = len(history)
+        state["cycle_index"] = ci
+
+        # Choose PDF bytes: if not passed in, we fall back to attached PDF
+        if pdf_bytes is None:
+            effective_pdf_bytes = self._attached_pdf_bytes
+        else:
+            effective_pdf_bytes = pdf_bytes
+
+        # Run a single cycle
+        result = self.run_cycle(
+            goal=effective_goal,
+            cycle_index=ci,
+            role=effective_role,
+            source_controls=effective_sources,
+            pdf_bytes=effective_pdf_bytes,
+            biomarker_snapshot=biomarker_snapshot,
+            domain=effective_domain,
+        )
+        summary = result.get("summary", {})
+
+        # Update engine state with result metadata
+        state["last_update_ts"] = time.time()
+        state["cycles_completed"] = int(state.get("cycles_completed", 0)) + 1
+        state["cycle_index"] = ci + 1
+        state["last_summary"] = summary
+
+        rye_val = summary.get("RYE")
+        if isinstance(rye_val, (int, float)):
+            state["last_rye"] = float(rye_val)
+
+        # Mark as still in progress; the worker or UI can toggle this off if needed
+        state["in_progress"] = True
+
+        return {
+            "state": state,
+            "summary": summary,
+        }
 
     # ------------------------------------------------------------------
     # Public API used by Streamlit and CLI
