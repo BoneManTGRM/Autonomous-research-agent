@@ -25,10 +25,23 @@ Multi-agent extension:
     a total of 32 agents) over the same MemoryStore. This makes it
     possible to run:
         - one cycle per role (multi-agent round), or
-        - long continuous runs where each “round” consists of many roles.
+        - long continuous runs where each "round" consists of many roles.
 
     The maximum number of logical agents is capped at 32 for safety,
     and can be configured via config["max_agents"] (1–32).
+
+Runtime profiles:
+    CoreAgent understands runtime profiles defined in presets.RUNTIME_PROFILES,
+    such as "1_hour", "8_hours", "24_hours", and "forever". These profiles
+    provide:
+        - estimated_cycles
+        - rye_stop_threshold
+        - energy_scaling (for future use)
+        - report_frequency (for UI reporting)
+
+    When a runtime_profile is selected, CoreAgent will:
+        - adjust max_minutes and max_cycles for continuous runs
+        - auto-apply a stop_rye threshold where appropriate
 """
 
 from __future__ import annotations
@@ -40,6 +53,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from .memory_store import MemoryStore
 from .tgrm_loop import TGRMLoop
+from .presets import RUNTIME_PROFILES
 
 
 class CoreAgent:
@@ -90,7 +104,7 @@ class CoreAgent:
         if self.max_agents > 32:
             self.max_agents = 32
 
-        # Logical “base” roles. Additional generic roles are generated
+        # Logical "base" roles. Additional generic roles are generated
         # as agent_01, agent_02, ... up to self.max_agents.
         base_roles: List[str] = [
             "researcher",
@@ -187,7 +201,7 @@ class CoreAgent:
         biomarker_snapshot: Optional[Dict[str, Any]] = None,
         domain: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run a single 'round' of multiple logical agents.
+        """Run a single "round" of multiple logical agents.
 
         Example round (5 agents, but can go up to 32):
             1. researcher   – primary gatherer and explainer
@@ -314,6 +328,9 @@ class CoreAgent:
             except TypeError:
                 return self.tgrm_loop.run_cycle(goal, cycle_index)
 
+    # ------------------------------------------------------------------
+    # Single-agent continuous mode
+    # ------------------------------------------------------------------
     def run_continuous(
         self,
         goal: str,
@@ -328,8 +345,9 @@ class CoreAgent:
         forever: bool = False,
         resume_from_checkpoint: bool = True,
         watchdog_interval_minutes: float = 5.0,
+        runtime_profile: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run multiple TGRM cycles in a row ("continuous mode").
+        """Run multiple TGRM cycles in a row ("continuous mode") for a single role.
 
         This is the long-running reparodynamic mode where the agent
         repeatedly applies Test, Detect, Repair, Verify to gradually
@@ -367,13 +385,48 @@ class CoreAgent:
                 the checkpoint file and adjust the remaining time budget.
             watchdog_interval_minutes:
                 How often to update the checkpoint heartbeat at minimum.
-
+            runtime_profile:
+                Optional name of a runtime profile from presets.RUNTIME_PROFILES,
+                for example "1_hour", "8_hours", "24_hours", or "forever".
+                When provided, this can adjust max_minutes, max_cycles,
+                and stop_rye, unless the caller has explicitly set them.
         Returns:
             List[Dict[str, Any]]: List of human-facing summaries for
             each completed cycle.
         """
         summaries: List[Dict[str, Any]] = []
         recent_rye: List[float] = []
+
+        # Apply runtime profile hints if requested
+        profile_cfg: Optional[Dict[str, Any]] = None
+        if runtime_profile:
+            profile_cfg = RUNTIME_PROFILES.get(runtime_profile)
+        if profile_cfg is not None:
+            # Only override if caller did not set a stronger preference
+            est_cycles = profile_cfg.get("estimated_cycles")
+            profile_stop_rye = profile_cfg.get("rye_stop_threshold")
+
+            # Map profile name to a default time budget if not set
+            if max_minutes is None:
+                if runtime_profile == "1_hour":
+                    max_minutes = 60.0
+                elif runtime_profile == "8_hours":
+                    max_minutes = 8 * 60.0
+                elif runtime_profile == "24_hours":
+                    max_minutes = 24 * 60.0
+                elif runtime_profile == "forever":
+                    forever = True
+
+            # Use profile estimated cycles when max_cycles is still at a small default
+            if isinstance(est_cycles, (int, float)) and max_cycles <= 100:
+                try:
+                    max_cycles = max(1, int(est_cycles))
+                except Exception:
+                    pass
+
+            # Automatically set stop_rye if not provided
+            if stop_rye is None and isinstance(profile_stop_rye, (int, float)):
+                stop_rye = float(profile_stop_rye)
 
         # Detect and adapt hour presets from older app versions if
         # max_minutes is still None.
@@ -400,6 +453,7 @@ class CoreAgent:
                     checkpoint.get("goal") == goal
                     and checkpoint.get("role") == role
                     and checkpoint.get("domain") == (domain or "general")
+                    and checkpoint.get("mode", "single") == "single"
                 ):
                     remaining = checkpoint.get("remaining_minutes")
                     if isinstance(remaining, (int, float)) and remaining > 0:
@@ -437,6 +491,7 @@ class CoreAgent:
                 checkpoint_state: Dict[str, Any] = {
                     "version": 1,
                     "in_progress": True,
+                    "mode": "single",
                     "goal": goal,
                     "role": role,
                     "domain": domain or "general",
@@ -450,8 +505,14 @@ class CoreAgent:
                     "local_cycle_index": i,
                     "recent_rye": recent_rye[-10:],
                     "last_heartbeat_ts": time.time(),
+                    "runtime_profile": runtime_profile,
                 }
                 self._save_checkpoint(checkpoint_state)
+                # Use MemoryStore watchdog as an additional heartbeat
+                try:
+                    self.memory_store.heartbeat(label="continuous_run")
+                except Exception:
+                    pass
                 last_watchdog_update = now
 
             ci = start_index + i
@@ -485,3 +546,217 @@ class CoreAgent:
         # Continuous run finished cleanly
         self._clear_checkpoint()
         return summaries
+
+    # ------------------------------------------------------------------
+    # Swarm-aware continuous mode (multi-agent rounds)
+    # ------------------------------------------------------------------
+    def run_swarm_continuous(
+        self,
+        goal: str,
+        max_rounds: int = 50,
+        stop_rye: Optional[float] = None,
+        roles: Optional[Sequence[str]] = None,
+        source_controls: Optional[Dict[str, bool]] = None,
+        pdf_bytes: Optional[bytes] = None,
+        biomarker_snapshot: Optional[Dict[str, Any]] = None,
+        domain: Optional[str] = None,
+        max_minutes: Optional[float] = None,
+        forever: bool = False,
+        resume_from_checkpoint: bool = True,
+        watchdog_interval_minutes: float = 5.0,
+        runtime_profile: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Run continuous multi-agent "swarm" rounds.
+
+        Each round runs one TGRM cycle per logical agent role (up to 32),
+        sharing a single MemoryStore. This is the hybrid swarm mode:
+
+            - Each role has a different function (researcher, critic, planner, etc.).
+            - All roles write to the same MemoryStore and RYE history.
+            - The system measures average RYE across the swarm per round.
+
+        Args:
+            goal:
+                Research goal for the entire swarm.
+            max_rounds:
+                Hard cap on number of swarm rounds (each round may include
+                up to 32 logical agents).
+            stop_rye:
+                Optional threshold on average swarm RYE. If the rolling
+                average over recent rounds drops below this, the run stops.
+            roles:
+                Optional explicit list of roles. If None, uses self.agent_roles.
+                Capped at self.max_agents (default 32).
+            source_controls:
+                Source configuration shared by all roles.
+            pdf_bytes:
+                Optional PDF bytes shared across all agents and rounds.
+            biomarker_snapshot:
+                Optional biomarker payload for future longevity-aware logic.
+            domain:
+                Optional domain tag ("general", "longevity", "math", etc.).
+            max_minutes:
+                Optional wall-clock time budget in minutes for the whole swarm run.
+            forever:
+                If True, ignore max_rounds and keep running until stopped
+                by max_minutes, stop_rye, or environment limits.
+            resume_from_checkpoint:
+                If True, try to resume a previous swarm run (mode="swarm")
+                that was interrupted.
+            watchdog_interval_minutes:
+                Minimum frequency of checkpoint and watchdog heartbeats.
+            runtime_profile:
+                Optional runtime profile name from presets.RUNTIME_PROFILES.
+                Adjusts max_minutes, max_rounds (via estimated_cycles),
+                and stop_rye when not explicitly set.
+        Returns:
+            Flat list of summaries produced by all roles across all rounds.
+            Each summary includes the role label, cycle index, and RYE.
+        """
+        all_summaries: List[Dict[str, Any]] = []
+        recent_round_rye: List[float] = []
+
+        # Determine swarm role set
+        if roles is None:
+            roles_seq: Sequence[str] = self.agent_roles
+        else:
+            roles_seq = roles
+        roles_list: List[str] = [str(r) for r in roles_seq][: self.max_agents]
+
+        # Apply runtime profile hints if requested
+        profile_cfg: Optional[Dict[str, Any]] = None
+        if runtime_profile:
+            profile_cfg = RUNTIME_PROFILES.get(runtime_profile)
+        if profile_cfg is not None:
+            est_cycles = profile_cfg.get("estimated_cycles")
+            profile_stop_rye = profile_cfg.get("rye_stop_threshold")
+
+            # For swarm: treat estimated_cycles as approximate total
+            # agent-cycles. Convert to rounds by dividing by number of roles.
+            if isinstance(est_cycles, (int, float)) and max_rounds <= 50:
+                try:
+                    per_round = max(1, len(roles_list) or 1)
+                    approx_rounds = max(1, int(est_cycles / per_round))
+                    max_rounds = approx_rounds
+                except Exception:
+                    pass
+
+            if max_minutes is None:
+                if runtime_profile == "1_hour":
+                    max_minutes = 60.0
+                elif runtime_profile == "8_hours":
+                    max_minutes = 8 * 60.0
+                elif runtime_profile == "24_hours":
+                    max_minutes = 24 * 60.0
+                elif runtime_profile == "forever":
+                    forever = True
+
+            if stop_rye is None and isinstance(profile_stop_rye, (int, float)):
+                stop_rye = float(profile_stop_rye)
+
+        # Try to resume from a previous swarm run
+        checkpoint = None
+        if resume_from_checkpoint and self.auto_resume_enabled:
+            checkpoint = self._load_checkpoint()
+            if checkpoint and checkpoint.get("in_progress"):
+                if (
+                    checkpoint.get("goal") == goal
+                    and checkpoint.get("mode") == "swarm"
+                    and checkpoint.get("domain") == (domain or "general")
+                ):
+                    remaining = checkpoint.get("remaining_minutes")
+                    if isinstance(remaining, (int, float)) and remaining > 0:
+                        if max_minutes is None or max_minutes > float(remaining):
+                            max_minutes = float(remaining)
+
+        # Start cycle indexing after existing history
+        history = self.memory_store.get_cycle_history()
+        start_index = len(history)
+
+        start_time = time.monotonic()
+        last_watchdog_update = start_time
+
+        round_idx = 0
+
+        while True:
+            # Round-based stopping (unless in explicit forever mode)
+            if not forever and round_idx >= max_rounds:
+                break
+
+            # Time-based stopping
+            elapsed_min = (time.monotonic() - start_time) / 60.0
+            if max_minutes is not None and elapsed_min >= max_minutes:
+                break
+
+            # Watchdog and checkpoint
+            now = time.monotonic()
+            since_last_heartbeat = (now - last_watchdog_update) / 60.0
+            if since_last_heartbeat >= min(watchdog_interval_minutes, max(1.0, watchdog_interval_minutes)):
+                remaining_minutes = None
+                if max_minutes is not None:
+                    remaining_minutes = max(max_minutes - elapsed_min, 0.0)
+
+                checkpoint_state: Dict[str, Any] = {
+                    "version": 1,
+                    "in_progress": True,
+                    "mode": "swarm",
+                    "goal": goal,
+                    "domain": domain or "general",
+                    "roles": list(roles_list),
+                    "max_rounds": max_rounds,
+                    "max_minutes": max_minutes,
+                    "elapsed_minutes": elapsed_min,
+                    "remaining_minutes": remaining_minutes,
+                    "stop_rye": stop_rye,
+                    "forever": forever,
+                    "cycle_history_length": len(history),
+                    "local_round_index": round_idx,
+                    "recent_round_rye": recent_round_rye[-10:],
+                    "last_heartbeat_ts": time.time(),
+                    "runtime_profile": runtime_profile,
+                }
+                self._save_checkpoint(checkpoint_state)
+                try:
+                    self.memory_store.heartbeat(label="swarm_run")
+                except Exception:
+                    pass
+                last_watchdog_update = now
+
+            # Compute base cycle index for this round (each role gets a unique cycle index)
+            base_ci = start_index + round_idx * len(roles_list or [None])
+
+            round_summaries = self.run_multi_agent_round(
+                goal=goal,
+                base_cycle_index=base_ci,
+                roles=roles_list,
+                source_controls=source_controls,
+                pdf_bytes=pdf_bytes,
+                biomarker_snapshot=biomarker_snapshot,
+                domain=domain,
+            )
+
+            all_summaries.extend(round_summaries)
+
+            # Compute average RYE across roles for this round
+            round_ryes: List[float] = []
+            for s in round_summaries:
+                rv = s.get("RYE")
+                if isinstance(rv, (int, float)):
+                    round_ryes.append(float(rv))
+
+            if round_ryes:
+                avg_round_rye = sum(round_ryes) / len(round_ryes)
+                recent_round_rye.append(avg_round_rye)
+                if len(recent_round_rye) > 10:
+                    recent_round_rye.pop(0)
+
+                if stop_rye is not None and recent_round_rye:
+                    avg_recent = sum(recent_round_rye) / len(recent_round_rye)
+                    if avg_recent < stop_rye:
+                        break
+
+            round_idx += 1
+
+        # Swarm run finished cleanly
+        self._clear_checkpoint()
+        return all_summaries
