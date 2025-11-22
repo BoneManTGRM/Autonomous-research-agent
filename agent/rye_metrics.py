@@ -1,25 +1,27 @@
 """
-RYE Metrics (Level-3, Swarm-Aware, 90-Day Safe)
+RYE Metrics (Level 3, Swarm Aware, 90 Day Safe)
 
 This upgraded module introduces:
 --------------------------------
 • ΔR with deeper signal components
-• E with RYE-aware cost fields for swarms + multi-agent parallelization
-• Noise-resistant RYE
+• E with RYE aware cost fields for swarms and multi agent parallelization
+• Noise resistant RYE
 • Rolling RYE (windowed)
 • Robust trend detection
 • Regression slope
-• Outlier-robust median RYE
-• Domain-weighted RYE (math, longevity, general)
-• Multi-agent energy normalization
+• Outlier robust median RYE
+• Domain weighted RYE (math, longevity, general)
+• Multi agent energy normalization
 • Stability Index (NEW)
 • Recovery Momentum (NEW)
 • Repair Efficiency Signature (NEW)
+• Per cycle RYE summaries (NEW)
+• Run level diagnostics bundle (NEW)
 
 Backwards compatibility:
     Existing callers that only pass the original arguments still work:
-    - compute_delta_r(...) can be called without novelty_score / coherence_gain.
-    - compute_energy(...) can be called without swarm_size / swarm_layering.
+    - compute_delta_r(...) can be called without novelty_score or coherence_gain.
+    - compute_energy(...) can be called without swarm_size or swarm_layering.
 """
 
 from __future__ import annotations
@@ -42,12 +44,11 @@ def compute_delta_r(
     coherence_gain: float = 0.0,
 ) -> float:
     """
-    Compute ΔR using Level-3 multi-signal improvement analysis.
+    Compute ΔR using Level 3 multi signal improvement analysis.
 
     New improvements:
-    -----------------
-    • novelty_score      -> reward discovering something new
-    • coherence_gain     -> reward resolving contradictions cleanly
+    - novelty_score      -> reward discovering something new
+    - coherence_gain     -> reward resolving contradictions cleanly
 
     All original parameters still work as before.
     """
@@ -71,7 +72,7 @@ def compute_delta_r(
 
 
 # ---------------------------------------------------------------------------
-# E (Effort) - Level 3 Swarm-Aware
+# E (Effort) - Level 3 Swarm Aware
 # ---------------------------------------------------------------------------
 
 def compute_energy(
@@ -85,12 +86,11 @@ def compute_energy(
     swarm_layering: int = 1,
 ) -> float:
     """
-    Compute energy cost with swarm-layer normalization.
+    Compute energy cost with swarm layer normalization.
 
     New fields:
-    -----------
-    swarm_size     -> number of active agents
-    swarm_layering -> depth (roles x agents x branches)
+    - swarm_size     -> number of active agents
+    - swarm_layering -> depth (roles x agents x branches)
 
     Existing calls that do not pass these fields still behave as before.
     """
@@ -104,12 +104,14 @@ def compute_energy(
 
     total = base_cost + cost_web + cost_pubmed + cost_sem + cost_pdf
 
-    # Soft token-costing
+    # Soft token costing
     if tokens_estimate is not None and tokens_estimate > 0:
         total += float(tokens_estimate) / 1000.0
 
-    # Swarm penalty (prevents "cheating" via infinite agent spawning)
-    swarm_penalty = 1.0 + ((max(swarm_size, 1) - 1) * 0.05) + ((max(swarm_layering, 1) - 1) * 0.1)
+    # Swarm penalty (prevents cheating via infinite agent spawning)
+    swarm_size_eff = max(swarm_size, 1)
+    swarm_layer_eff = max(swarm_layering, 1)
+    swarm_penalty = 1.0 + ((swarm_size_eff - 1) * 0.05) + ((swarm_layer_eff - 1) * 0.1)
     total *= swarm_penalty
 
     # Safety clamps
@@ -138,7 +140,7 @@ def compute_rye(delta_r: float, energy_e: float) -> float:
 
 def rolling_rye(history: List[Dict[str, Any]], window: int = 10) -> Optional[float]:
     """Compute a simple rolling average of RYE over the last N cycles."""
-    if not history:
+    if not history or window <= 0:
         return None
 
     recent = history[-window:]
@@ -155,7 +157,7 @@ def rolling_rye(history: List[Dict[str, Any]], window: int = 10) -> Optional[flo
 
 
 # ---------------------------------------------------------------------------
-# Median RYE - Noise-Resistant
+# Median RYE - Noise Resistant
 # ---------------------------------------------------------------------------
 
 def median_rye(history: List[Dict[str, Any]]) -> Optional[float]:
@@ -204,7 +206,7 @@ def efficiency_trend(history: List[Dict[str, Any]]) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
-# Regression-Based Trend - Best for Long Runs
+# Regression Based Trend - Best for Long Runs
 # ---------------------------------------------------------------------------
 
 def regression_rye_slope(history: List[Dict[str, Any]]) -> Optional[float]:
@@ -245,7 +247,7 @@ def regression_rye_slope(history: List[Dict[str, Any]]) -> Optional[float]:
 
 def stability_index(history: List[Dict[str, Any]]) -> Optional[float]:
     """
-    Measures variance-normalized stability of RYE values.
+    Measures variance normalized stability of RYE values.
 
     1.0 = perfectly stable improvements
     0.0 = chaotic swings
@@ -258,10 +260,12 @@ def stability_index(history: List[Dict[str, Any]]) -> Optional[float]:
     var = statistics.pvariance(vals)
 
     if var == 0:
-        return 1.0
+        # Perfectly flat. If mean is positive, treat as fully stable.
+        return 1.0 if mean >= 0 else 0.0
 
-    # Normalize mean by variance and clamp to [0, 1]
     score = mean / (var + 1e-6)
+    # Soft scaling into [0, 1]
+    score *= 0.25
     return min(max(score, 0.0), 1.0)
 
 
@@ -271,9 +275,9 @@ def stability_index(history: List[Dict[str, Any]]) -> Optional[float]:
 
 def recovery_momentum(history: List[Dict[str, Any]]) -> Optional[float]:
     """
-    Measures upward acceleration in late-stage runs.
+    Measures upward acceleration in late stage runs.
 
-    Good for long missions (weeks to 90-day runs) where you want to know
+    Good for long missions (weeks to 90 day runs) where you want to know
     if the system is picking up momentum or stalling.
     """
     slope = regression_rye_slope(history)
@@ -289,7 +293,7 @@ def recovery_momentum(history: List[Dict[str, Any]]) -> Optional[float]:
 
 def apply_domain_weight(rye_value: float, domain: Optional[str] = None) -> float:
     """
-    Optional domain-specific multiplier for RYE.
+    Optional domain specific multiplier for RYE.
 
     This allows you to treat certain domains as slightly higher value
     per unit RYE, for example:
@@ -299,8 +303,11 @@ def apply_domain_weight(rye_value: float, domain: Optional[str] = None) -> float
         ai        -> 1.08
         biology   -> 1.12
     """
+    if not isinstance(rye_value, (int, float)):
+        return 0.0
+
     if domain is None:
-        return rye_value
+        return float(rye_value)
 
     multipliers = {
         "general": 1.0,
@@ -310,4 +317,165 @@ def apply_domain_weight(rye_value: float, domain: Optional[str] = None) -> float
         "biology": 1.12,
     }
 
-    return rye_value * multipliers.get(domain, 1.0)
+    factor = multipliers.get(domain.lower(), 1.0)
+    result = float(rye_value) * factor
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Per cycle helper: full RYE summary with domain weighting
+# ---------------------------------------------------------------------------
+
+def build_cycle_rye_summary(
+    *,
+    delta_r: float,
+    energy_e: float,
+    domain: Optional[str] = None,
+    role: Optional[str] = None,
+    cycle_index: Optional[int] = None,
+    extra_signals: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Build a structured per cycle RYE summary used by TGRM and CoreAgent.
+
+    This helper is the canonical place to:
+    - compute raw RYE
+    - apply domain weighting
+    - attach basic metadata (domain, role, cycle_index)
+    - carry forward any extra signals (novelty, coherence, biomarkers, etc)
+    """
+    rye_raw = compute_rye(delta_r, energy_e)
+    rye_weighted = apply_domain_weight(rye_raw, domain)
+
+    summary: Dict[str, Any] = {
+        "RYE": rye_raw,
+        "RYE_weighted": rye_weighted,
+        "delta_r": float(delta_r),
+        "energy_e": float(energy_e),
+    }
+
+    if domain is not None:
+        summary["domain"] = domain
+    if role is not None:
+        summary["role"] = role
+    if cycle_index is not None:
+        summary["cycle_index"] = int(cycle_index)
+
+    if extra_signals:
+        for k, v in extra_signals.items():
+            summary[k] = v
+
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# Swarm aggregation helper
+# ---------------------------------------------------------------------------
+
+def aggregate_swarm_round(
+    role_summaries: List[Dict[str, Any]],
+    domain: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Aggregate per role summaries into a swarm round signature.
+
+    This is useful in run_swarm_continuous, where a round consists of
+    multiple logical agents writing summaries.
+
+    Returns a dict with:
+        - avg_rye
+        - avg_rye_weighted
+        - max_rye
+        - min_rye
+        - roles_count
+    """
+    rye_vals: List[float] = []
+    rye_weighted_vals: List[float] = []
+
+    for s in role_summaries:
+        v = s.get("RYE")
+        if isinstance(v, (int, float)):
+            rye_vals.append(float(v))
+
+        vw = s.get("RYE_weighted")
+        if isinstance(vw, (int, float)):
+            rye_weighted_vals.append(float(vw))
+        elif isinstance(v, (int, float)) and domain is not None:
+            rye_weighted_vals.append(apply_domain_weight(float(v), domain))
+
+    result: Dict[str, Any] = {
+        "roles_count": len(role_summaries),
+    }
+
+    if rye_vals:
+        result["avg_rye"] = sum(rye_vals) / len(rye_vals)
+        result["max_rye"] = max(rye_vals)
+        result["min_rye"] = min(rye_vals)
+
+    if rye_weighted_vals:
+        result["avg_rye_weighted"] = sum(rye_weighted_vals) / len(rye_weighted_vals)
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Run level diagnostics bundle (Repair Efficiency Signature)
+# ---------------------------------------------------------------------------
+
+def build_run_diagnostics(
+    history: List[Dict[str, Any]],
+    *,
+    domain: Optional[str] = None,
+    window: int = 10,
+) -> Dict[str, Any]:
+    """
+    Build a compact diagnostics bundle over a full run.
+
+    This is the main Repair Efficiency Signature object for a session.
+    It is safe to compute at any time, including long 24 hour or 90 day runs.
+
+    Returns:
+        {
+          "count": int,
+          "rye_avg": Optional[float],
+          "rye_median": Optional[float],
+          "rye_last": Optional[float],
+          "rolling_rye": Optional[float],
+          "trend_simple": Optional[float],
+          "trend_slope": Optional[float],
+          "stability_index": Optional[float],
+          "recovery_momentum": Optional[float],
+          "domain": Optional[str],
+        }
+    """
+    count = len(history)
+    rolling_val = rolling_rye(history, window=window)
+    med_val = median_rye(history)
+    trend_val = efficiency_trend(history)
+    slope_val = regression_rye_slope(history)
+    stab_val = stability_index(history)
+    rec_val = recovery_momentum(history)
+
+    rye_vals = [float(e["RYE"]) for e in history if isinstance(e.get("RYE"), (int, float))]
+    rye_avg = sum(rye_vals) / len(rye_vals) if rye_vals else None
+    rye_last = rye_vals[-1] if rye_vals else None
+
+    diagnostics: Dict[str, Any] = {
+        "count": count,
+        "rye_avg": rye_avg,
+        "rye_median": med_val,
+        "rye_last": rye_last,
+        "rolling_rye": rolling_val,
+        "trend_simple": trend_val,
+        "trend_slope": slope_val,
+        "stability_index": stab_val,
+        "recovery_momentum": rec_val,
+    }
+
+    if domain is not None:
+        diagnostics["domain"] = domain
+
+    if rye_avg is not None and domain is not None:
+        diagnostics["rye_avg_weighted"] = apply_domain_weight(rye_avg, domain)
+
+    return diagnostics
