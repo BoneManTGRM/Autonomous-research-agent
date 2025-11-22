@@ -15,10 +15,11 @@ These settings do NOT break existing code but unlock future power for:
 - continuous mode tuning
 - energy-aware TGRM behavior
 - long-run reporting and summaries
+- swarm-aware behavior (many coordinated logical agents)
 """
 
 from __future__ import annotations
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 # ---------------------------------------------------------------------
 # Global Runtime Profiles (applies for all presets)
@@ -30,7 +31,7 @@ RUNTIME_PROFILES = {
         "rye_stop_threshold": None,
         "energy_scaling": 1.0,
         "report_frequency": 1,
-        "description": "Short diagnostic run: fast repair checks, sanity pass."
+        "description": "Short diagnostic run: fast repair checks and sanity pass."
     },
     "8_hours": {
         "label": "8 Hour Run",
@@ -38,7 +39,7 @@ RUNTIME_PROFILES = {
         "rye_stop_threshold": 0.05,
         "energy_scaling": 1.2,
         "report_frequency": 1,
-        "description": "Medium autonomous session: stable equilibrium patterns emerge."
+        "description": "Medium autonomous session where stable equilibrium patterns can emerge."
     },
     "24_hours": {
         "label": "24 Hour Run",
@@ -46,7 +47,7 @@ RUNTIME_PROFILES = {
         "rye_stop_threshold": 0.08,
         "energy_scaling": 1.4,
         "report_frequency": 2,
-        "description": "Full daily autonomous research loop: equilibrium + deep repairs."
+        "description": "Full daily autonomous research loop for equilibrium and deep repairs."
     },
     "forever": {
         "label": "Run Until Stopped",
@@ -54,9 +55,54 @@ RUNTIME_PROFILES = {
         "rye_stop_threshold": None,
         "energy_scaling": 1.0,
         "report_frequency": 5,
-        "description": "Infinite autonomous operation until user manually stops."
-    }
+        "description": "Unbounded autonomous operation until the user or environment stops it."
+    },
 }
+
+# ---------------------------------------------------------------------
+# Swarm defaults (shared across presets)
+# ---------------------------------------------------------------------
+# This describes what a "swarm" means at the preset level.
+# The Streamlit app and CoreAgent can read these hints but are not forced to.
+SWARM_ROLES: List[Dict[str, Any]] = [
+    {
+        "name": "researcher",
+        "description": "Primary deep literature and web researcher that gathers facts and writes detailed notes.",
+    },
+    {
+        "name": "critic",
+        "description": "Methodology critic and refiner that attacks weak points, gaps, and overclaims.",
+    },
+    {
+        "name": "planner",
+        "description": "Planner that proposes next experiments, queries, and high-value repair actions.",
+    },
+    {
+        "name": "synthesizer",
+        "description": "Synthesizer that condenses findings into clear narratives, tables, and summaries.",
+    },
+    {
+        "name": "explorer",
+        "description": "Out-of-distribution explorer that searches for unusual angles, analogies, and adjacent fields.",
+    },
+    {
+        "name": "integrator",
+        "description": "Integrator that reconciles conflicting notes and hypotheses into a coherent picture.",
+    },
+]
+
+SWARM_GLOBAL_HINTS: Dict[str, Any] = {
+    # Hard safety ceiling for platform resources.
+    # App and core can still choose a lower local limit.
+    "max_agents_safe": 32,
+    # Good default for most presets when user clicks "swarm".
+    "default_agents": 5,
+    # How time should be split in continuous mode for swarms.
+    "time_split_strategy": "equal",  # equal, weighted, or custom
+    # Roles available for the swarm orchestration layer.
+    "roles": SWARM_ROLES,
+}
+
 
 # ---------------------------------------------------------------------
 # Domain Presets
@@ -86,7 +132,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "focus_keywords": [
             "reparodynamics", "RYE", "repair yield per energy",
             "TGRM", "self-repair", "autonomous systems",
-            "stability", "resilience"
+            "stability", "resilience",
         ],
 
         "preferred_sources": ["web", "semantic", "pdf"],
@@ -96,7 +142,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "High level summary",
             "Key definitions (Reparodynamics, RYE, TGRM)",
             "Similar frameworks",
-            "Open questions / next steps",
+            "Open questions and next steps",
         ],
 
         "rye_weights": {
@@ -105,12 +151,12 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "citations_added": 0.5,
         },
 
-        # NEW: domain-level cycle tuning
+        # Domain-level cycle tuning
         "cycle_energy_multiplier": 1.0,
         "cycle_length_hint": "short",
         "repair_depth_bias": "balanced",
 
-        # NEW: report style
+        # Report style
         "report_sections": [
             "summary",
             "rye_statistics",
@@ -121,8 +167,19 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "report_style": "narrative",
         "report_frequency": 1,
 
-        # NEW universal runtime profiles
+        # Universal runtime profiles
         "runtime_profiles": RUNTIME_PROFILES,
+
+        # Swarm hints for general research
+        "swarm": {
+            "enabled_by_default": False,
+            "max_agents": SWARM_GLOBAL_HINTS["max_agents_safe"],
+            "default_agents": 4,
+            "time_split_strategy": "equal",
+            "roles": SWARM_ROLES,
+            "role_bias": "balanced",  # no domain-specific emphasis
+            "notes": "General swarm is balanced and good for exploratory research across many topics.",
+        },
     },
 
     # ================================================================
@@ -179,12 +236,27 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "mechanisms",
             "hypotheses",
             "citations",
-            "rye_statistics"
+            "rye_statistics",
         ],
         "report_style": "structured",
         "report_frequency": 1,
 
         "runtime_profiles": RUNTIME_PROFILES,
+
+        # Swarm hints for longevity research
+        "swarm": {
+            "enabled_by_default": False,
+            "max_agents": SWARM_GLOBAL_HINTS["max_agents_safe"],
+            # Longevity benefits from more roles (researcher, critic, planner, synthesizer, integrator).
+            "default_agents": 5,
+            "time_split_strategy": "equal",
+            "roles": SWARM_ROLES,
+            "role_bias": "deep",  # emphasize deep repair and evidence
+            "notes": (
+                "Longevity swarms are tuned for deep evidence gathering, "
+                "biomarker interpretation, and critical review of clinical data."
+            ),
+        },
     },
 
     # ================================================================
@@ -240,12 +312,27 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "theorems",
             "proof_sketches",
             "citations",
-            "rye_statistics"
+            "rye_statistics",
         ],
         "report_style": "technical",
         "report_frequency": 1,
 
         "runtime_profiles": RUNTIME_PROFILES,
+
+        # Swarm hints for math and theory
+        "swarm": {
+            "enabled_by_default": False,
+            "max_agents": SWARM_GLOBAL_HINTS["max_agents_safe"],
+            # Math work often benefits from a slightly smaller, high precision swarm.
+            "default_agents": 3,
+            "time_split_strategy": "equal",
+            "roles": SWARM_ROLES,
+            "role_bias": "precision",
+            "notes": (
+                "Math swarms are tuned for precision and coherence: "
+                "researcher, critic, and theorist style roles are most important here."
+            ),
+        },
     },
 }
 
