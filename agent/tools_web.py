@@ -11,6 +11,8 @@ Features
 - Normalised citation structure for use across PubMed, Semantic Scholar, and web.
 - Multi-level search depth (Level 1 / 2 / 3) for cost vs depth control.
 - In-memory caching to avoid repeated API calls in long autonomous runs.
+- Swarm-aware metadata tags (agent_role, swarm_id) so multi agent runs
+  can track which role or swarm requested which results.
 
 Reparodynamics / TGRM:
     The Repair phase calls this tool to bring in new information from
@@ -67,7 +69,14 @@ except ImportError:
 
 
 class WebResearchTool:
-    """Web research tool powered by Tavily Search API with multi-level depth."""
+    """Web research tool powered by Tavily Search API with multi-level depth.
+
+    This class is designed to be:
+        - RYE aware: cheap by default, deeper when explicitly requested.
+        - Swarm aware: can tag results with agent_role and swarm_id so
+          multi agent and multi swarm runs can attribute work and cost.
+        - Safe by default: stub behavior if Tavily is not configured.
+    """
 
     def __init__(self, api_key: Optional[str] = None) -> None:
         """Create a WebResearchTool.
@@ -111,6 +120,25 @@ class WebResearchTool:
             self._cache_size_limit = 256
 
     # ------------------------------------------------------------------
+    # CAPABILITY INTROSPECTION
+    # ------------------------------------------------------------------
+    def describe_capabilities(self) -> Dict[str, Any]:
+        """Return a small dict describing this tool's current capabilities.
+
+        This is useful for UI panels, debug readouts, or swarm level
+        orchestration that wants to know:
+            - is Tavily live or in stub mode
+            - what max_level is allowed by environment
+            - what cache size is configured
+        """
+        return {
+            "tavily_live": bool(self.client is not None),
+            "max_level": int(self.max_level),
+            "cache_size_limit": int(self._cache_size_limit),
+            "stub_mode": bool(self.client is None),
+        }
+
+    # ------------------------------------------------------------------
     # INTERNAL: CACHE HELPERS
     # ------------------------------------------------------------------
     def _make_cache_key(
@@ -120,6 +148,9 @@ class WebResearchTool:
         max_results: int,
         topic: str,
     ) -> Tuple[str, int, int, str]:
+        # Note: agent_role and swarm_id are not part of the cache key
+        # on purpose so that all roles swarms can reuse the same result
+        # for the same (query, level, topic).
         return (query.strip(), int(level), int(max_results), topic.strip().lower())
 
     def _get_from_cache(
@@ -142,7 +173,33 @@ class WebResearchTool:
         self._cache[key] = [dict(r) for r in results]
 
     # ------------------------------------------------------------------
-    # REAL INTERNET SEARCH (WITH LEVELS)
+    # SIMPLE ENERGY COST ESTIMATE
+    # ------------------------------------------------------------------
+    @staticmethod
+    def estimate_energy_cost(level: int, max_results: int) -> float:
+        """Estimate relative energy cost for a query.
+
+        This is a rough heuristic that can be plugged into RYE
+        accounting if desired. It does not affect behavior inside
+        this tool.
+
+        Example:
+            level 1, max_results 3  -> low cost
+            level 2, max_results 5  -> medium cost
+            level 3, max_results 10 -> higher cost
+        """
+        base = 1.0
+        if level <= 1:
+            base = 0.5
+        elif level == 2:
+            base = 1.0
+        else:
+            base = 1.7
+        # Results scale cost a bit
+        return base * (0.5 + 0.1 * max(1, max_results))
+
+    # ------------------------------------------------------------------
+    # REAL INTERNET SEARCH (WITH LEVELS AND SWARM TAGS)
     # ------------------------------------------------------------------
     def search(
         self,
@@ -150,6 +207,9 @@ class WebResearchTool:
         level: int = 2,
         max_results: int = 5,
         topic: str = "general",
+        *,
+        agent_role: Optional[str] = None,
+        swarm_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Perform a REAL web search using Tavily, if available.
 
@@ -165,10 +225,19 @@ class WebResearchTool:
                 Maximum results to request from Tavily (upper bound).
             topic:
                 Tavily topic hint, e.g. "general", "science", etc.
+            agent_role:
+                Optional logical role label, such as "researcher",
+                "critic", "planner", etc. Added to each result for
+                swarm level attribution.
+            swarm_id:
+                Optional swarm id or run id. Added to each result so
+                multi user or multi run swarms can be separated.
 
         Returns:
-            List of dicts with keys: title, snippet, url, and optionally
-            page_text for level 3 deep results.
+            List of dicts with keys: title, snippet, url, and optionally:
+                - page_text  (for level 3 deep results)
+                - agent_role (if provided)
+                - swarm_id   (if provided)
 
         If Tavily is not configured, return a stub result so the
         agent can still complete cycles gracefully.
@@ -197,8 +266,17 @@ class WebResearchTool:
         cache_key = self._make_cache_key(query, safe_level, effective_max_results, topic)
         cached = self._get_from_cache(cache_key)
         if cached is not None:
-            # Return a copy to avoid mutation from callers
-            return [dict(r) for r in cached]
+            # Return a copy to avoid mutation from callers and tag
+            # with current role swarm if provided.
+            results_copy: List[Dict[str, Any]] = []
+            for r in cached:
+                rr = dict(r)
+                if agent_role is not None:
+                    rr["agent_role"] = agent_role
+                if swarm_id is not None:
+                    rr["swarm_id"] = swarm_id
+                results_copy.append(rr)
+            return results_copy
 
         # STUB FALLBACK MODE
         if not self.client:
@@ -212,6 +290,10 @@ class WebResearchTool:
                     "url": "",
                 }
             ]
+            if agent_role is not None:
+                stub[0]["agent_role"] = agent_role
+            if swarm_id is not None:
+                stub[0]["swarm_id"] = swarm_id
             self._store_in_cache(cache_key, stub)
             return stub
 
@@ -237,31 +319,49 @@ class WebResearchTool:
                 if deep_fetch and res["url"]:
                     res["page_text"] = self.fetch_page_text(res["url"], max_chars=4000)
 
+                if agent_role is not None:
+                    res["agent_role"] = agent_role
+                if swarm_id is not None:
+                    res["swarm_id"] = swarm_id
+
                 results.append(res)
 
             if not results:
-                results = [
-                    {
-                        "title": "No results found",
-                        "snippet": "Tavily returned no results for this query.",
-                        "url": "",
-                    }
-                ]
+                res: Dict[str, Any] = {
+                    "title": "No results found",
+                    "snippet": "Tavily returned no results for this query.",
+                    "url": "",
+                }
+                if agent_role is not None:
+                    res["agent_role"] = agent_role
+                if swarm_id is not None:
+                    res["swarm_id"] = swarm_id
+                results = [res]
 
-            self._store_in_cache(cache_key, results)
+            # Store version without role swarm tags so cache is reusable
+            cache_safe_results = []
+            for r in results:
+                r_copy = dict(r)
+                r_copy.pop("agent_role", None)
+                r_copy.pop("swarm_id", None)
+                cache_safe_results.append(r_copy)
+            self._store_in_cache(cache_key, cache_safe_results)
+
             return results
 
         except Exception as e:
             # Safe fallback on API errors
-            err = [
-                {
-                    "title": "Tavily Search Error",
-                    "snippet": str(e),
-                    "url": "",
-                }
-            ]
-            self._store_in_cache(cache_key, err)
-            return err
+            err: Dict[str, Any] = {
+                "title": "Tavily Search Error",
+                "snippet": str(e),
+                "url": "",
+            }
+            if agent_role is not None:
+                err["agent_role"] = agent_role
+            if swarm_id is not None:
+                err["swarm_id"] = swarm_id
+            self._store_in_cache(cache_key, [err])
+            return [err]
 
     # ------------------------------------------------------------------
     # SUMMARISATION
