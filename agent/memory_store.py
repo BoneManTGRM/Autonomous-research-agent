@@ -9,20 +9,24 @@ This module provides a JSON-based persistent storage layer. It stores:
 - run_state metadata (for long continuous runs and auto resume)
 - watchdog information (heartbeats for crash diagnostics)
 - goal_index summaries (lightweight per goal stats for swarms)
+- events (streaming logs and partial updates)
+- discoveries (cure, treatment, mechanism, and other key findings)
 
 The memory store acts as a lightweight knowledge base for the agent and is
 referenced each cycle to retrieve prior context and to persist new findings.
 
 Reparodynamics interpretation:
-    MemoryStore is the long-term substrate where repairs accumulate.
+    MemoryStore is the long term substrate where repairs accumulate.
     Each TGRM cycle writes its improvements here, and future cycles read
     from it to reduce energy cost. When combined with VectorMemory, this
-    becomes a semantic, time-aware repair substrate.
+    becomes a semantic, time aware repair substrate.
 
-    The run_state, watchdog, and goal_index sections act as a meta-layer:
+    The run_state, worker_state, watchdog, goal_index, events, and
+    discoveries sections act as a meta layer:
     they record how the system itself is running so that the agent
     can restart and continue repair with minimal extra energy and
-    give swarm level analytics (per role and per goal).
+    give swarm level analytics (per role and per goal), plus a
+    running log of key cure and treatment candidates.
 """
 
 from __future__ import annotations
@@ -47,24 +51,28 @@ def _utc_now_iso() -> str:
 class MemoryStore:
     """A lightweight persistent memory store using a JSON file.
 
-    The JSON file is structured with several top-level keys:
-        - "notes":       free-form text notes with metadata
-        - "cycles":      logs of each research cycle
-        - "hypotheses":  generated hypotheses for each goal
-        - "citations":   structured citation objects from web/papers
-        - "biomarkers":  placeholder for anti-aging / lab data
-        - "run_state":   metadata for long-running autonomous sessions
-        - "watchdog":    timestamps and counters for heartbeats
-        - "goal_index":  compact per goal stats, including per role counts
+    The JSON file is structured with several top level keys:
+        - "notes":        free form text notes with metadata
+        - "cycles":       logs of each research cycle
+        - "hypotheses":   generated hypotheses for each goal
+        - "citations":    structured citation objects from web/papers
+        - "biomarkers":   placeholder for anti aging or lab data
+        - "run_state":    metadata for long running autonomous sessions
+        - "worker_state": live background worker status
+        - "watchdog":     timestamps and counters for heartbeats
+        - "goal_index":   compact per goal stats, including per role counts
+        - "events":       streaming event log (UI, worker, partial runs)
+        - "discoveries":  cure, treatment, mechanism, and other key finds
 
-    In-memory (non-persistent) vector memory may also be attached to
-    support semantic search and time-decayed retrieval if the optional
+    In memory (non persistent) vector memory may also be attached to
+    support semantic search and time decayed retrieval if the optional
     VectorMemory class is available.
 
-    This implementation is hardened for 24–90 day autonomous runs:
-        - safe directory handling even for plain filenames (e.g. "memory.json")
+    This implementation is hardened for 24-90 day autonomous runs:
+        - safe directory handling even for plain filenames (for example "memory.json")
         - atomic write strategy to greatly reduce corruption risk
         - goal_index streaming stats for fast RYE summaries
+        - worker_state and events for live status and debugging
     """
 
     def __init__(self, memory_file: str) -> None:
@@ -75,21 +83,24 @@ class MemoryStore:
         if dirpath and not os.path.exists(dirpath):
             os.makedirs(dirpath, exist_ok=True)
 
-        # Core JSON-backed data
+        # Core JSON backed data
         self._data: Dict[str, Any] = {
             "notes": [],
             "cycles": [],
             "hypotheses": [],
             "citations": [],
             "biomarkers": [],
-            "run_state": {},   # crash proof run metadata
-            "watchdog": {},    # heartbeat and last seen info
-            "goal_index": {},  # compact goal wise stats
+            "run_state": {},     # crash proof run metadata
+            "worker_state": {},  # live worker mode and status
+            "watchdog": {},      # heartbeat and last seen info
+            "goal_index": {},    # compact goal wise stats
+            "events": [],        # streaming event log
+            "discoveries": [],   # cure, treatment, mechanism candidates
         }
         self._load()
         self._ensure_keys()
 
-        # Optional vector memory for semantic, time-decayed retrieval
+        # Optional vector memory for semantic, time decayed retrieval
         if VectorMemory is not None:
             try:
                 self.vector_memory: Optional[VectorMemory] = VectorMemory()
@@ -102,7 +113,7 @@ class MemoryStore:
     # Internal JSON persistence
     # ------------------------------------------------------------------
     def _ensure_keys(self) -> None:
-        """Ensure all expected top-level keys exist in _data."""
+        """Ensure all expected top level keys exist in _data."""
         defaults = {
             "notes": [],
             "cycles": [],
@@ -110,15 +121,18 @@ class MemoryStore:
             "citations": [],
             "biomarkers": [],
             "run_state": {},
+            "worker_state": {},
             "watchdog": {},
             "goal_index": {},
+            "events": [],
+            "discoveries": [],
         }
         for key, default in defaults.items():
             if key not in self._data:
                 self._data[key] = default
             else:
                 # Make sure types are reasonable
-                if key in ("notes", "cycles", "hypotheses", "citations", "biomarkers"):
+                if key in ("notes", "cycles", "hypotheses", "citations", "biomarkers", "events", "discoveries"):
                     if not isinstance(self._data.get(key), list):
                         self._data[key] = []
                 else:
@@ -140,16 +154,19 @@ class MemoryStore:
                     "citations": [],
                     "biomarkers": [],
                     "run_state": {},
+                    "worker_state": {},
                     "watchdog": {},
                     "goal_index": {},
+                    "events": [],
+                    "discoveries": [],
                 }
 
     def _save(self) -> None:
         """Persist memory to disk using an atomic write pattern.
 
-        Atomic pattern (write-then-replace) greatly reduces the chance of
+        Atomic pattern (write then replace) greatly reduces the chance of
         corrupting the JSON file during very long autonomous runs, where
-        the process might be interrupted mid-write.
+        the process might be interrupted mid write.
         """
         tmp_path = self.memory_file + ".tmp"
         try:
@@ -168,7 +185,7 @@ class MemoryStore:
 
     # Public helper if you ever want to force a flush from outside
     def flush(self) -> None:
-        """Force a disk flush of current in-memory state."""
+        """Force a disk flush of current in memory state."""
         self._ensure_keys()
         self._save()
 
@@ -320,7 +337,7 @@ class MemoryStore:
                 results: List[Dict[str, Any]] = []
                 for it in items:
                     meta = dict(it.metadata)
-                    # Reconstruct minimal note-like structure
+                    # Reconstruct minimal note like structure
                     meta.setdefault("content", it.text)
                     meta.setdefault("timestamp", _utc_now_iso())
                     if goal is None or meta.get("goal") == goal:
@@ -330,7 +347,7 @@ class MemoryStore:
                 # Fall back to keyword search if vector memory fails
                 pass
 
-        # Keyword-based fallback
+        # Keyword based fallback
         notes = self.get_notes(goal)
         query_lower = query.lower()
         matched = [n for n in notes if query_lower in str(n.get("content", "")).lower()]
@@ -418,10 +435,10 @@ class MemoryStore:
         return [e for e in entries if e.get("goal") == goal]
 
     # ------------------------------------------------------------------
-    # Biomarkers (placeholder for anti-aging / lab data)
+    # Biomarkers (placeholder for anti aging or lab data)
     # ------------------------------------------------------------------
     def add_biomarker_snapshot(self, goal: str, data: Dict[str, Any]) -> None:
-        """Store a biomarker snapshot (anti-aging / health metrics)."""
+        """Store a biomarker snapshot (anti aging or health metrics)."""
         entry = {
             "timestamp": _utc_now_iso(),
             "goal": goal,
@@ -451,9 +468,8 @@ class MemoryStore:
         rye_val = cycle_data.get("RYE")
         if goal:
             try:
-                rye_float: Optional[float]
                 if isinstance(rye_val, (int, float)):
-                    rye_float = float(rye_val)
+                    rye_float: Optional[float] = float(rye_val)
                 else:
                     rye_float = None
                 self._touch_goal_index(
@@ -484,7 +500,7 @@ class MemoryStore:
 
         Args:
             goal:
-                If provided, only cycles whose 'goal' matches are returned.
+                If provided, only cycles whose "goal" matches are returned.
             limit:
                 Maximum number of cycles to return (most recent first).
         """
@@ -520,6 +536,12 @@ class MemoryStore:
             - how it was running (mode)
             - how much time remained (approx minutes_remaining)
             - which cycle index was last completed
+
+        The "extra" dict can hold additional metadata such as:
+            - runtime_profile
+            - swarm roles
+            - stop_reason
+            - custom flags used by engine_worker or the UI
         """
         state: Dict[str, Any] = {
             "updated_at": _utc_now_iso(),
@@ -548,6 +570,55 @@ class MemoryStore:
         """Clear saved run state metadata."""
         self._data["run_state"] = {}
         self._save()
+
+    # ------------------------------------------------------------------
+    # Worker state (live status for engine_worker)
+    # ------------------------------------------------------------------
+    def update_worker_state(
+        self,
+        *,
+        status: str,
+        mode: str,
+        goal: str,
+        domain: Optional[str] = None,
+        roles: Optional[List[str]] = None,
+        runtime_profile: Optional[str] = None,
+        stop_rye: Optional[float] = None,
+        max_minutes: Optional[float] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record live worker status for monitoring and UI.
+
+        Example statuses:
+            - "starting"
+            - "running"
+            - "paused"
+            - "stopped"
+            - "error"
+        """
+        state: Dict[str, Any] = {
+            "updated_at": _utc_now_iso(),
+            "status": status,
+            "mode": mode,
+            "goal": goal,
+            "domain": domain,
+            "roles": roles or [],
+            "runtime_profile": runtime_profile,
+            "stop_rye": stop_rye,
+            "max_minutes": max_minutes,
+        }
+        if extra:
+            state["extra"] = extra
+
+        self._data["worker_state"] = state
+        self._save()
+
+    def get_worker_state(self) -> Optional[Dict[str, Any]]:
+        """Return current worker_state snapshot, if any."""
+        ws = self._data.get("worker_state") or {}
+        if not isinstance(ws, dict) or not ws:
+            return None
+        return dict(ws)
 
     # ------------------------------------------------------------------
     # Watchdog heartbeats for long runs
@@ -600,6 +671,161 @@ class MemoryStore:
             "count": count,
             "seconds_since_last": seconds_since_last,
         }
+
+    # ------------------------------------------------------------------
+    # Events: streaming log for worker and UI
+    # ------------------------------------------------------------------
+    def add_event(
+        self,
+        *,
+        kind: str,
+        message: str,
+        payload: Optional[Dict[str, Any]] = None,
+        level: str = "info",
+        goal: Optional[str] = None,
+        role: Optional[str] = None,
+    ) -> None:
+        """Append a generic event to the streaming log.
+
+        Examples:
+            kind = "worker_status", "partial_cycle", "ui_action"
+            level = "info", "warning", "error"
+        """
+        ev = {
+            "timestamp": _utc_now_iso(),
+            "kind": kind,
+            "level": level,
+            "message": message,
+            "payload": payload or {},
+        }
+        if goal is not None:
+            ev["goal"] = goal
+        if role is not None:
+            ev["role"] = role
+
+        self._data.setdefault("events", []).append(ev)
+
+        # Keep events bounded in size to avoid unbounded growth during 90 day runs
+        max_events = 5000
+        if len(self._data["events"]) > max_events:
+            self._data["events"] = self._data["events"][-max_events:]
+
+        self._save()
+
+    def get_events(
+        self,
+        *,
+        limit: int = 200,
+        kind: Optional[str] = None,
+        level: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve recent events filtered by kind and level."""
+        events = self._data.get("events", [])
+        if not isinstance(events, list):
+            return []
+
+        filtered: List[Dict[str, Any]] = []
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            if kind is not None and ev.get("kind") != kind:
+                continue
+            if level is not None and ev.get("level") != level:
+                continue
+            filtered.append(ev)
+
+        # Most recent first
+        filtered_sorted = sorted(
+            filtered,
+            key=lambda e: e.get("timestamp", ""),
+            reverse=True,
+        )
+        return filtered_sorted[:limit]
+
+    # ------------------------------------------------------------------
+    # Discoveries: cure, treatment, mechanism, etc.
+    # ------------------------------------------------------------------
+    def add_discovery(
+        self,
+        *,
+        goal: str,
+        kind: str,
+        label: str,
+        evidence_summary: str,
+        score: Optional[float] = None,
+        tags: Optional[List[str]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
+        domain: Optional[str] = None,
+    ) -> None:
+        """Record a key discovery, such as a treatment or mechanism candidate.
+
+        Example kinds:
+            - "treatment"
+            - "cure_candidate"
+            - "mechanism"
+            - "biomarker"
+        """
+        entry = {
+            "timestamp": _utc_now_iso(),
+            "goal": goal,
+            "kind": kind,
+            "label": label,
+            "evidence_summary": evidence_summary,
+            "score": float(score) if score is not None else None,
+            "tags": tags or [],
+            "citations": citations or [],
+        }
+        if domain is not None:
+            entry["domain"] = domain
+
+        self._data.setdefault("discoveries", []).append(entry)
+
+        # Keep discoveries bounded but with a larger cap than events
+        max_disc = 2000
+        if len(self._data["discoveries"]) > max_disc:
+            self._data["discoveries"] = self._data["discoveries"][-max_disc:]
+
+        self._save()
+
+        # Also push into vector memory to make them easy to retrieve semantically
+        if self.vector_memory is not None:
+            try:
+                text_parts = [label, evidence_summary]
+                text = " ".join([p for p in text_parts if p])
+                if text:
+                    meta = {
+                        "goal": goal,
+                        "type": "discovery",
+                        "kind": kind,
+                        "score": entry["score"],
+                        "tags": entry["tags"],
+                    }
+                    if domain is not None:
+                        meta["domain"] = domain
+                    self.vector_memory.add_item(text=text, metadata=meta)
+            except Exception:
+                pass
+
+    def get_discoveries(
+        self,
+        goal: Optional[str] = None,
+        kind: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve discovery entries, optionally filtered by goal and kind."""
+        entries = self._data.get("discoveries", [])
+        if not isinstance(entries, list):
+            return []
+
+        result: List[Dict[str, Any]] = []
+        for e in entries:
+            if not isinstance(e, dict):
+                continue
+            if goal is not None and e.get("goal") != goal:
+                continue
+            if kind is not None and e.get("kind") != kind:
+                continue
+            result.append(e)
+        return result
 
     # ------------------------------------------------------------------
     # Reporting helpers (for long autonomous runs)
@@ -710,6 +936,22 @@ class MemoryStore:
                 c_title = c.get("title", "")
                 url = c.get("url", "")
                 title += f"- [{ts}] [{src}] {c_title} - {url}\n"
+
+        # Discoveries summary
+        disc = self.get_discoveries(goal=goal)
+        title += "\nKey discoveries recorded: "
+        title += f"{len(disc)}\n"
+        if disc:
+            title += "\nRecent discoveries:\n"
+            for d in disc[-5:]:
+                ts = d.get("timestamp", "")
+                kind = d.get("kind", "")
+                label = d.get("label", "")
+                score = d.get("score", None)
+                if isinstance(score, (int, float)):
+                    title += f"- [{ts}] [{kind}] ({score:.2f}) {label}\n"
+                else:
+                    title += f"- [{ts}] [{kind}] {label}\n"
 
         title += "\nEnd of report.\n"
         return title
