@@ -104,8 +104,8 @@ class CoreAgent:
         if self.max_agents > 32:
             self.max_agents = 32
 
-        # Logical "base" roles. Additional generic roles are generated
-        # as agent_01, agent_02, ... up to self.max_agents.
+        # Logical base roles. Additional generic roles are generated
+        # as agent_01, agent_02, up to self.max_agents.
         base_roles: List[str] = [
             "researcher",
             "critic",
@@ -179,9 +179,9 @@ class CoreAgent:
     def spawn_child_agent(self, extra_config: Optional[Dict[str, Any]] = None) -> "CoreAgent":
         """Create a new CoreAgent that shares the same MemoryStore.
 
-        This is a light-weight way for agents to "create" agents.
+        This is a light-weight way for agents to create agents.
         Child agents share the same memory substrate but can have their
-        own configuration (for example different prompts, domains, etc.).
+        own configuration (for example different prompts, domains, and so on).
 
         The child will inherit max_agents (capped at 32) unless overridden
         in extra_config["max_agents"].
@@ -201,17 +201,17 @@ class CoreAgent:
         biomarker_snapshot: Optional[Dict[str, Any]] = None,
         domain: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run a single "round" of multiple logical agents.
+        """Run a single round of multiple logical agents.
 
         Example round (5 agents, but can go up to 32):
             1. researcher   - primary gatherer and explainer
             2. critic       - attacks weak points, flags gaps
             3. planner      - proposes next experiments and steps
             4. synthesizer  - condenses findings into coherent story
-            5. explorer     - searches for surprising / out-of-distribution angles
+            5. explorer     - searches for surprising or out-of-distribution angles
 
         All agents share the same MemoryStore and TGRM engine, but run
-        with different `role` labels so you can distinguish their
+        with different role labels so you can distinguish their
         contributions in the logs and RYE history.
 
         The number of roles actually run is capped by self.max_agents
@@ -249,7 +249,7 @@ class CoreAgent:
         """Attach a PDF (uploaded via Streamlit) for later cycles.
 
         The TGRM loop can then ingest this PDF as part of its REPAIR
-        actions. If `uploaded_file` is None, this does nothing.
+        actions. If uploaded_file is None, this does nothing.
         """
         if uploaded_file is None:
             return
@@ -277,9 +277,9 @@ class CoreAgent:
             cycle_index:
                 Global cycle index (used for logging and history).
             role:
-                Logical role for this cycle: "agent", "researcher",
-                "critic", etc. This is recorded in the logs and
-                allows multi-agent setups (researcher + critic).
+                Logical role for this cycle such as "agent", "researcher",
+                or "critic". This is recorded in the logs and
+                allows multi-agent setups.
             source_controls:
                 Optional override for which sources to use in this cycle.
                 If None, falls back to self.source_controls.
@@ -289,7 +289,7 @@ class CoreAgent:
             biomarker_snapshot:
                 Placeholder for a future biomarker or lab value payload.
             domain:
-                Optional domain tag (for example "general", "longevity", "math")
+                Optional domain tag such as "general", "longevity", or "math"
                 to label this cycle in the logs.
 
         Returns:
@@ -309,7 +309,7 @@ class CoreAgent:
         )
 
         # Forward into the TGRM loop.
-        # Use a TypeError-safe wrapper for compatibility with older signatures.
+        # Use a TypeError safe wrapper for compatibility with older signatures.
         try:
             return self.tgrm_loop.run_cycle(
                 goal=goal,
@@ -347,7 +347,7 @@ class CoreAgent:
         watchdog_interval_minutes: float = 5.0,
         runtime_profile: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run multiple TGRM cycles in a row ("continuous mode") for a single role.
+        """Run multiple TGRM cycles in a row (continuous mode) for a single role.
 
         This is the long-running reparodynamic mode where the agent
         repeatedly applies Test, Detect, Repair, Verify to gradually
@@ -358,7 +358,7 @@ class CoreAgent:
                 Research goal to pursue over many cycles.
             max_cycles:
                 Hard cap on the number of cycles to prevent infinite runs
-                in hosted environments (used when `forever` is False).
+                in hosted environments (used when forever is False).
             stop_rye:
                 Optional RYE threshold. If set, the loop stops
                 early once average RYE over recent cycles
@@ -379,7 +379,7 @@ class CoreAgent:
                 the loop stops once this time has elapsed.
             forever:
                 If True, ignore max_cycles and keep running until
-                stopped by `max_minutes`, `stop_rye`, or the environment.
+                stopped by max_minutes, stop_rye, or the environment.
             resume_from_checkpoint:
                 If True, try to detect a previous interrupted continuous run from
                 the checkpoint file and adjust the remaining time budget.
@@ -390,9 +390,11 @@ class CoreAgent:
                 for example "1_hour", "8_hours", "24_hours", or "forever".
                 When provided, this can adjust max_minutes, max_cycles,
                 and stop_rye, unless the caller has explicitly set them.
+
         Returns:
             List[Dict[str, Any]]: List of human-facing summaries for
-            each completed cycle.
+            each completed cycle. Each summary includes run_metadata
+            indicating how long the run lasted and why it stopped.
         """
         summaries: List[Dict[str, Any]] = []
         recent_rye: List[float] = []
@@ -469,15 +471,18 @@ class CoreAgent:
         last_watchdog_update = start_time
 
         i = 0
+        stop_reason: str = "completed"
 
         while True:
             # Cycle-based stopping (unless in explicit forever mode)
             if not forever and i >= max_cycles:
+                stop_reason = "cycle_cap"
                 break
 
             # Time-based stopping
             elapsed_min = (time.monotonic() - start_time) / 60.0
             if max_minutes is not None and elapsed_min >= max_minutes:
+                stop_reason = "time_limit"
                 break
 
             # Watchdog heartbeat and checkpoint before starting the cycle
@@ -539,6 +544,7 @@ class CoreAgent:
             if stop_rye is not None and recent_rye:
                 avg_rye = sum(recent_rye) / len(recent_rye)
                 if avg_rye < stop_rye:
+                    stop_reason = "rye_threshold"
                     break
 
             i += 1
@@ -558,6 +564,7 @@ class CoreAgent:
             "max_cycles": max_cycles,
             "cycles_completed": len(summaries),
             "stop_rye": stop_rye,
+            "stop_reason": stop_reason,
             "runtime_profile": runtime_profile,
         }
         for s in summaries:
@@ -585,12 +592,12 @@ class CoreAgent:
         watchdog_interval_minutes: float = 5.0,
         runtime_profile: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run continuous multi-agent "swarm" rounds.
+        """Run continuous multi-agent swarm rounds.
 
         Each round runs one TGRM cycle per logical agent role (up to 32),
         sharing a single MemoryStore. This is the hybrid swarm mode:
 
-            - Each role has a different function (researcher, critic, planner, etc.).
+            - Each role has a different function such as researcher, critic, planner.
             - All roles write to the same MemoryStore and RYE history.
             - The system measures average RYE across the swarm per round.
 
@@ -613,7 +620,7 @@ class CoreAgent:
             biomarker_snapshot:
                 Optional biomarker payload for future longevity-aware logic.
             domain:
-                Optional domain tag ("general", "longevity", "math", etc.).
+                Optional domain tag such as "general", "longevity", or "math".
             max_minutes:
                 Optional wall-clock time budget in minutes for the whole swarm run.
             forever:
@@ -626,11 +633,13 @@ class CoreAgent:
                 Minimum frequency of checkpoint and watchdog heartbeats.
             runtime_profile:
                 Optional runtime profile name from presets.RUNTIME_PROFILES.
-                Adjusts max_minutes, max_rounds (via estimated_cycles),
+                Adjusts max_minutes, max_rounds via estimated_cycles,
                 and stop_rye when not explicitly set.
+
         Returns:
             Flat list of summaries produced by all roles across all rounds.
-            Each summary includes the role label, cycle index, and RYE.
+            Each summary includes run_metadata with swarm run duration
+            and stop_reason.
         """
         all_summaries: List[Dict[str, Any]] = []
         recent_round_rye: List[float] = []
@@ -696,15 +705,18 @@ class CoreAgent:
         last_watchdog_update = start_time
 
         round_idx = 0
+        stop_reason: str = "completed"
 
         while True:
             # Round-based stopping (unless in explicit forever mode)
             if not forever and round_idx >= max_rounds:
+                stop_reason = "round_cap"
                 break
 
             # Time-based stopping
             elapsed_min = (time.monotonic() - start_time) / 60.0
             if max_minutes is not None and elapsed_min >= max_minutes:
+                stop_reason = "time_limit"
                 break
 
             # Watchdog and checkpoint
@@ -772,6 +784,7 @@ class CoreAgent:
                 if stop_rye is not None and recent_round_rye:
                     avg_recent = sum(recent_round_rye) / len(recent_round_rye)
                     if avg_recent < stop_rye:
+                        stop_reason = "rye_threshold"
                         break
 
             round_idx += 1
@@ -791,6 +804,7 @@ class CoreAgent:
             "max_rounds": max_rounds,
             "rounds_completed": round_idx,
             "stop_rye": stop_rye,
+            "stop_reason": stop_reason,
             "runtime_profile": runtime_profile,
         }
         for s in all_summaries:
