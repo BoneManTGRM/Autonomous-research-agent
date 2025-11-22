@@ -9,13 +9,14 @@ Presets act as domain-specific "profiles" that define:
 - query behavior
 - RYE weighting hints
 - reporting structure
-- runtime profiles for 1h / 8h / 24h / forever runs
+- runtime profiles for 1h / 8h / 24h / 90-day / forever runs
 
 These settings do NOT break existing code but unlock future power for:
 - continuous mode tuning
-- energy-aware TGRM behavior
-- long-run reporting and summaries
-- swarm-aware behavior (many coordinated logical agents)
+- energy aware TGRM behavior
+- long run reporting and summaries
+- swarm aware behavior (many coordinated logical agents)
+- cure or treatment extraction pipelines
 """
 
 from __future__ import annotations
@@ -24,14 +25,14 @@ from typing import Dict, Any, List
 # ---------------------------------------------------------------------
 # Global Runtime Profiles (applies for all presets)
 # ---------------------------------------------------------------------
-RUNTIME_PROFILES = {
+RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
     "1_hour": {
         "label": "1 Hour Run",
         "estimated_cycles": 40,
         "rye_stop_threshold": None,
         "energy_scaling": 1.0,
         "report_frequency": 1,
-        "description": "Short diagnostic run: fast repair checks and sanity pass."
+        "description": "Short diagnostic run: fast repair checks and sanity pass.",
     },
     "8_hours": {
         "label": "8 Hour Run",
@@ -39,7 +40,7 @@ RUNTIME_PROFILES = {
         "rye_stop_threshold": 0.05,
         "energy_scaling": 1.2,
         "report_frequency": 1,
-        "description": "Medium autonomous session where stable equilibrium patterns can emerge."
+        "description": "Medium autonomous session where stable equilibrium patterns can emerge.",
     },
     "24_hours": {
         "label": "24 Hour Run",
@@ -47,7 +48,19 @@ RUNTIME_PROFILES = {
         "rye_stop_threshold": 0.08,
         "energy_scaling": 1.4,
         "report_frequency": 2,
-        "description": "Full daily autonomous research loop for equilibrium and deep repairs."
+        "description": "Full daily autonomous research loop for equilibrium and deep repairs.",
+    },
+    # New long horizon profile for Reparodynamics style experiments
+    "90_days": {
+        "label": "90 Day Run",
+        "estimated_cycles": 20_000,
+        "rye_stop_threshold": 0.10,
+        "energy_scaling": 1.6,
+        "report_frequency": 24,
+        "description": (
+            "Long horizon stability experiment for Reparodynamics. "
+            "Optimized for equilibrium, drift control, and repair efficiency over 90 days."
+        ),
     },
     "forever": {
         "label": "Run Until Stopped",
@@ -55,8 +68,40 @@ RUNTIME_PROFILES = {
         "rye_stop_threshold": None,
         "energy_scaling": 1.0,
         "report_frequency": 5,
-        "description": "Unbounded autonomous operation until the user or environment stops it."
+        "description": "Unbounded autonomous operation until the user or environment stops it.",
     },
+}
+
+# ---------------------------------------------------------------------
+# Default RYE threshold hints
+# These are soft guidelines for the engine and UI, not hard rules.
+# ---------------------------------------------------------------------
+DEFAULT_RYE_THRESHOLDS: Dict[str, float] = {
+    # Below this, the agent is probably still fixing basic defects
+    "low": 0.0,
+    # Around this and above, maintenance mode can be considered
+    "maintenance": 0.05,
+    # Good zone for stable long runs
+    "good": 0.10,
+    # High efficiency zone, usually reached after strong repair phases
+    "excellent": 0.20,
+}
+
+# ---------------------------------------------------------------------
+# Continuous mode defaults for single agent and swarm runs
+# These are read by CoreAgent and engine_worker to keep behavior aligned.
+# ---------------------------------------------------------------------
+CONTINUOUS_MODE_DEFAULTS: Dict[str, Any] = {
+    "watchdog_interval_minutes": 5.0,
+    "checkpoint_interval_cycles": 10,
+    "max_cycles_failsafe": 10_000_000,
+    "heartbeat_labels": {
+        "single": "continuous_single",
+        "swarm": "continuous_swarm",
+    },
+    # Default runtime profile used when none is specified explicitly
+    "default_runtime_profile_single": "8_hours",
+    "default_runtime_profile_swarm": "24_hours",
 }
 
 # ---------------------------------------------------------------------
@@ -75,7 +120,7 @@ SWARM_ROLES: List[Dict[str, Any]] = [
     },
     {
         "name": "planner",
-        "description": "Planner that proposes next experiments, queries, and high-value repair actions.",
+        "description": "Planner that proposes next experiments, queries, and high value repair actions.",
     },
     {
         "name": "synthesizer",
@@ -83,7 +128,7 @@ SWARM_ROLES: List[Dict[str, Any]] = [
     },
     {
         "name": "explorer",
-        "description": "Out-of-distribution explorer that searches for unusual angles, analogies, and adjacent fields.",
+        "description": "Out of distribution explorer that searches for unusual angles, analogies, and adjacent fields.",
     },
     {
         "name": "integrator",
@@ -102,7 +147,6 @@ SWARM_GLOBAL_HINTS: Dict[str, Any] = {
     # Roles available for the swarm orchestration layer.
     "roles": SWARM_ROLES,
 }
-
 
 # ---------------------------------------------------------------------
 # Domain Presets
@@ -130,9 +174,14 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         },
 
         "focus_keywords": [
-            "reparodynamics", "RYE", "repair yield per energy",
-            "TGRM", "self-repair", "autonomous systems",
-            "stability", "resilience",
+            "reparodynamics",
+            "RYE",
+            "repair yield per energy",
+            "TGRM",
+            "self repair",
+            "autonomous systems",
+            "stability",
+            "resilience",
         ],
 
         "preferred_sources": ["web", "semantic", "pdf"],
@@ -151,10 +200,22 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "citations_added": 0.5,
         },
 
-        # Domain-level cycle tuning
+        # Domain level cycle tuning
         "cycle_energy_multiplier": 1.0,
         "cycle_length_hint": "short",
         "repair_depth_bias": "balanced",
+
+        # Default runtime and RYE behavior for continuous mode
+        "default_runtime_profile": "8_hours",
+        "default_rye_stop_threshold": None,
+        "rye_thresholds": DEFAULT_RYE_THRESHOLDS,
+
+        # Cure or treatment extraction is generic here
+        "cure_extraction": {
+            "enabled": False,
+            "targets": [],
+            "notes": "General preset does not focus on treatments by default.",
+        },
 
         # Report style
         "report_sections": [
@@ -177,8 +238,15 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "default_agents": 4,
             "time_split_strategy": "equal",
             "roles": SWARM_ROLES,
-            "role_bias": "balanced",  # no domain-specific emphasis
+            "role_bias": "balanced",  # no domain specific emphasis
             "notes": "General swarm is balanced and good for exploratory research across many topics.",
+        },
+
+        # UI hints for the dashboard
+        "ui_hints": {
+            "show_biomarkers_tab": False,
+            "show_cure_treatment_tab": False,
+            "default_view": "summary",
         },
     },
 
@@ -186,7 +254,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
     # LONGEVITY PRESET
     # ================================================================
     "longevity": {
-        "label": "Longevity / Anti-aging",
+        "label": "Longevity / Anti aging",
         "domain": "longevity",
 
         "default_goal": (
@@ -203,10 +271,18 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         },
 
         "focus_keywords": [
-            "longevity", "healthspan", "aging", "senescence",
-            "autophagy", "mTOR", "NAD+", "rapamycin",
-            "metformin", "caloric restriction",
-            "clinical trial", "biomarker",
+            "longevity",
+            "healthspan",
+            "aging",
+            "senescence",
+            "autophagy",
+            "mTOR",
+            "NAD+",
+            "rapamycin",
+            "metformin",
+            "caloric restriction",
+            "clinical trial",
+            "biomarker",
         ],
 
         "preferred_sources": ["pubmed", "semantic", "web", "pdf"],
@@ -229,6 +305,27 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "cycle_energy_multiplier": 1.3,
         "cycle_length_hint": "long",
         "repair_depth_bias": "deep",
+
+        # Default runtime and RYE behavior for continuous mode
+        "default_runtime_profile": "24_hours",
+        "default_rye_stop_threshold": 0.08,
+        "rye_thresholds": DEFAULT_RYE_THRESHOLDS,
+
+        # Cure or treatment extraction is a primary goal for longevity
+        "cure_extraction": {
+            "enabled": True,
+            "targets": [
+                "interventions",
+                "treatments",
+                "protocols",
+                "drug combinations",
+                "lifestyle stacks",
+            ],
+            "notes": (
+                "Longevity preset enables cure or treatment extraction to track candidate "
+                "stacks, doses, and evidence links for healthspan and aging interventions."
+            ),
+        },
 
         "report_sections": [
             "summary",
@@ -257,6 +354,12 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                 "biomarker interpretation, and critical review of clinical data."
             ),
         },
+
+        "ui_hints": {
+            "show_biomarkers_tab": True,
+            "show_cure_treatment_tab": True,
+            "default_view": "biomarkers",
+        },
     },
 
     # ================================================================
@@ -280,9 +383,16 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         },
 
         "focus_keywords": [
-            "mathematical", "formalization", "axiom", "theorem",
-            "proof", "stability theory", "Lyapunov", "information theory",
-            "Markov process", "equilibrium",
+            "mathematical",
+            "formalization",
+            "axiom",
+            "theorem",
+            "proof",
+            "stability theory",
+            "Lyapunov",
+            "information theory",
+            "Markov process",
+            "equilibrium",
         ],
 
         "preferred_sources": ["semantic", "pdf", "web"],
@@ -305,6 +415,21 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "cycle_energy_multiplier": 0.8,
         "cycle_length_hint": "short",
         "repair_depth_bias": "precision",
+
+        # Default runtime and RYE behavior for continuous mode
+        "default_runtime_profile": "8_hours",
+        "default_rye_stop_threshold": 0.05,
+        "rye_thresholds": DEFAULT_RYE_THRESHOLDS,
+
+        # Math preset does not extract cures, but can still extract structures
+        "cure_extraction": {
+            "enabled": False,
+            "targets": ["frameworks", "theorems", "formal models"],
+            "notes": (
+                "Math preset focuses on formal structures rather than biomedical treatments. "
+                "Extraction is about definitions and theorems, not therapies."
+            ),
+        },
 
         "report_sections": [
             "summary",
@@ -329,17 +454,27 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "roles": SWARM_ROLES,
             "role_bias": "precision",
             "notes": (
-                "Math swarms are tuned for precision and coherence: "
-                "researcher, critic, and theorist style roles are most important here."
+                "Math swarms are tuned for precision and coherence. "
+                "Researcher, critic, and theorist style roles are most important here."
             ),
+        },
+
+        "ui_hints": {
+            "show_biomarkers_tab": False,
+            "show_cure_treatment_tab": False,
+            "default_view": "summary",
         },
     },
 }
 
-
 # ---------------------------------------------------------------------
-# Accessor
+# Accessors
 # ---------------------------------------------------------------------
 def get_preset(name: str) -> Dict[str, Any]:
     """Return a preset config, falling back to 'general' if unknown."""
     return PRESETS.get(name, PRESETS["general"])
+
+
+def get_runtime_profile(name: str) -> Dict[str, Any]:
+    """Return a runtime profile, falling back to 24_hours if unknown."""
+    return RUNTIME_PROFILES.get(name, RUNTIME_PROFILES["24_hours"])
