@@ -19,6 +19,32 @@ TGRM phases (implemented below)
     Detect : find gaps, TODOs, unanswered questions
     Repair : perform targeted web / PubMed / Semantic Scholar actions
     Verify : re-test, compute ΔR and RYE, and log a cycle entry
+
+Levels and Swarms
+-----------------
+The loop is now aware of:
+    - tgrm_level (1, 2, 3) via config["tgrm_level"] (default 3)
+        Level 1: basic defect detection + repair (current behavior).
+        Level 2: richer targeted research on questions and TODOs.
+        Level 3: domain-aware and role-aware logic for swarms.
+
+    - role: "agent", "researcher", "critic", "planner",
+            "synthesizer", "explorer", etc.
+      Roles are used to bias how many issues are repaired per cycle
+      and how aggressive the research is.
+
+Domain awareness
+----------------
+The loop now uses the `domain` tag ("general", "longevity", "math", ...)
+to surface higher-level issues such as:
+    - missing_biomarkers (longevity)
+    - missing_mechanisms (longevity)
+    - missing_formalism (math: definitions / theorems / proofs)
+    - missing_connections (math: links to existing theory)
+
+These appear as additional issue codes and pass through the same
+TGRM pipeline (Test → Detect → Repair → Verify) without breaking any
+existing behavior.
 """
 
 from __future__ import annotations
@@ -55,6 +81,13 @@ class TGRMLoop:
         # researched so we do not re-query the same text a thousand times
         # during 8h or 24h sessions.
         self._seen_questions: set[str] = set()
+
+        # TGRM level: 1 (basic), 2 (targeted), 3 (domain + swarm aware).
+        # If not set in config, we default to level 3 to unlock full power.
+        try:
+            self.tgrm_level: int = int(self.config.get("tgrm_level", 3))
+        except Exception:
+            self.tgrm_level = 3
 
     # ------------------------------------------------------------------
     # Main cycle
@@ -128,7 +161,12 @@ class TGRMLoop:
         # we avoid heavy repeated web/PubMed calls and focus on light
         # refinement. This keeps RYE high and cost low over 24h+ runs.
         maintenance_mode = False
-        if avg_rye is not None and total_cycles_for_goal >= 20 and avg_rye >= 0.8:
+        if (
+            self.tgrm_level >= 1
+            and avg_rye is not None
+            and total_cycles_for_goal >= 20
+            and avg_rye >= 0.8
+        ):
             maintenance_mode = True
 
         # TEST phase: evaluate current state
@@ -136,7 +174,7 @@ class TGRMLoop:
         status_report = self._test(goal, prior_notes)
 
         # DETECT phase: identify issues to repair
-        issues, issue_descriptions = self._detect(status_report)
+        issues, issue_descriptions = self._detect(status_report, domain=domain_tag)
 
         # REPAIR phase: apply targeted repairs
         (
@@ -152,15 +190,18 @@ class TGRMLoop:
             source_controls=src_ctrl,
             pdf_bytes=pdf_bytes,
             maintenance_mode=maintenance_mode,
+            domain=domain_tag,
         )
 
         # VERIFY phase: re-evaluate state after repair
         new_notes = self.memory_store.get_notes(goal)
         new_status_report = self._test(goal, new_notes)
-        issues_after, _ = self._detect(new_status_report)
+        issues_after, _ = self._detect(new_status_report, domain=domain_tag)
 
         # Hypothesis generation (optional improvement targets)
-        hypotheses = generate_hypotheses(goal, new_notes, citations, max_hypotheses=5)
+        # At higher TGRM levels we allow more hypotheses; at level 1 we keep it minimal.
+        max_h = 3 if self.tgrm_level == 1 else 5
+        hypotheses = generate_hypotheses(goal, new_notes, citations, max_hypotheses=max_h)
         for h in hypotheses:
             self.memory_store.add_hypothesis(goal, h["text"], score=h.get("confidence"))
 
@@ -189,6 +230,7 @@ class TGRMLoop:
             "goal": goal,
             "role": role,
             "domain": domain_tag,
+            "tgrm_level": self.tgrm_level,
             # Issues before and after
             "issues_before": issue_descriptions,
             "issues_after": issues_after,
@@ -227,6 +269,7 @@ class TGRMLoop:
             "citations": citations,
             "hypotheses": hypotheses,
             "maintenance_mode": maintenance_mode,
+            "tgrm_level": self.tgrm_level,
         }
 
         return {"summary": human_summary, "log": cycle_summary}
@@ -235,19 +278,59 @@ class TGRMLoop:
     # TGRM phases
     # ------------------------------------------------------------------
     def _test(self, goal: str, notes: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Evaluate the current state of research for this goal."""
-        return {
+        """Evaluate the current state of research for this goal.
+
+        Level 1:
+            - Count notes only.
+        Level 2:
+            - Also track approximate citation density.
+        Level 3:
+            - Keep room for per-domain diagnostic stats (future extension).
+        """
+        known_notes_count = len(notes)
+
+        # Basic diagnostics: citation markers inside notes
+        citation_markers = 0
+        if self.tgrm_level >= 2:
+            for note in notes:
+                content = note.get("content", "")
+                if "[" in content and "]" in content:
+                    citation_markers += 1
+
+        report: Dict[str, Any] = {
             "goal": goal,
-            "known_notes_count": len(notes),
+            "known_notes_count": known_notes_count,
             "notes": notes,
         }
+        if self.tgrm_level >= 2:
+            report["approx_citation_markers"] = citation_markers
 
-    def _detect(self, status_report: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-        """Identify issues or gaps to be repaired."""
+        return report
+
+    def _detect(
+        self,
+        status_report: Dict[str, Any],
+        domain: Optional[str] = None,
+    ) -> Tuple[List[str], List[str]]:
+        """Identify issues or gaps to be repaired.
+
+        Base (Level 1) behavior:
+            - no_notes
+            - question_mark
+            - todo_item
+            - contradiction
+
+        Level 2:
+            - can react to low citation density (few citation markers).
+
+        Level 3:
+            - domain-aware issues for longevity and math.
+        """
         issues: List[str] = []
         descriptions: List[str] = []
         notes = status_report.get("notes", [])
 
+        # --- Core generic issues (Level 1) ---
         if not notes:
             issues.append("no_notes")
             descriptions.append("No prior notes found; initial research required.")
@@ -265,7 +348,100 @@ class TGRMLoop:
                     issues.append("contradiction")
                     descriptions.append("Marked contradiction in notes; needs resolution.")
 
+        # --- Level 2: citation-level diagnostics ---
+        if self.tgrm_level >= 2 and notes:
+            citation_markers = status_report.get("approx_citation_markers", 0)
+            # Very rough heuristic: under-cited if fewer markers than notes
+            if citation_markers < len(notes):
+                issues.append("under_cited")
+                descriptions.append(
+                    "Evidence base may be thin: fewer citation markers than notes; "
+                    "prioritize finding stronger primary sources."
+                )
+
+        # --- Level 3: domain-aware issues ---
+        if self.tgrm_level >= 3 and notes and domain:
+            dom = domain.lower()
+            if dom == "longevity":
+                self._detect_longevity_issues(notes, issues, descriptions)
+            elif dom == "math":
+                self._detect_math_issues(notes, issues, descriptions)
+
         return issues, descriptions
+
+    def _detect_longevity_issues(
+        self,
+        notes: List[Dict[str, Any]],
+        issues: List[str],
+        descriptions: List[str],
+    ) -> None:
+        """Add extra issue types for longevity / anti-aging research."""
+        text = "\n".join(n.get("content", "") for n in notes)
+
+        # Missing explicit biomarker discussion
+        if all(
+            kw.lower() not in text.lower()
+            for kw in ["biomarker", "blood", "lab value", "marker", "hdl", "ldl", "triglyceride"]
+        ):
+            issues.append("missing_biomarkers")
+            descriptions.append(
+                "Longevity notes lack explicit biomarker discussion; "
+                "identify concrete measurable markers and how interventions affect them."
+            )
+
+        # Missing mechanisms / pathways
+        if all(
+            kw.lower() not in text.lower()
+            for kw in [
+                "mechanism",
+                "pathway",
+                "mTOR",
+                "autophagy",
+                "senescence",
+                "NAD+",
+                "hallmarks of aging",
+            ]
+        ):
+            issues.append("missing_mechanisms")
+            descriptions.append(
+                "Mechanisms of action are underspecified; map interventions to pathways and aging hallmarks."
+            )
+
+    def _detect_math_issues(
+        self,
+        notes: List[Dict[str, Any]],
+        issues: List[str],
+        descriptions: List[str],
+    ) -> None:
+        """Add extra issue types for math / theory research."""
+        text = "\n".join(n.get("content", "") for n in notes)
+
+        # Missing formal definitions / theorems
+        has_definition = "definition" in text.lower()
+        has_theorem = "theorem" in text.lower() or "lemma" in text.lower()
+        if not (has_definition and has_theorem):
+            issues.append("missing_formalism")
+            descriptions.append(
+                "Mathematical formalism is incomplete; add explicit definitions and at least one theorem or lemma."
+            )
+
+        # Missing links to existing theory
+        if all(
+            kw.lower() not in text.lower()
+            for kw in [
+                "lyapunov",
+                "markov",
+                "information theory",
+                "control theory",
+                "stability theory",
+                "ergodic",
+            ]
+        ):
+            issues.append("missing_connections")
+            descriptions.append(
+                "Connections to existing mathematical frameworks are thin; "
+                "relate Reparodynamics to known stability / control / information theories."
+            )
 
     def _repair(
         self,
@@ -276,6 +452,7 @@ class TGRMLoop:
         source_controls: Dict[str, bool],
         pdf_bytes: Optional[bytes],
         maintenance_mode: bool = False,
+        domain: Optional[str] = None,
     ):
         """Apply repairs to address detected issues.
 
@@ -290,6 +467,11 @@ class TGRMLoop:
               processed per cycle to avoid hammering web APIs.
             - Even in normal mode, we cap issues per cycle so that 24h
               runs do not explode in cost.
+
+        Swarm / role awareness:
+            - researcher / explorer: allowed to handle more issues per cycle.
+            - critic: fewer issues, more focused.
+            - synthesizer / planner: often do low-cost notes-only passes.
         """
         repair_actions: List[Dict[str, str]] = []
         notes_added: List[str] = []
@@ -305,11 +487,23 @@ class TGRMLoop:
             "sources_used": 0,
         }
 
-        # Process only a bounded number of issues per cycle
+        # Base cap per cycle
         if maintenance_mode:
-            max_issues = 2
+            base_max_issues = 2
         else:
-            max_issues = 5  # plenty for progress, but bounded for 24h runs
+            base_max_issues = 5  # plenty for progress, but bounded for 24h runs
+
+        # Role-based adjustment (swarm-friendly)
+        role_lower = (role or "agent").lower()
+        if role_lower in {"researcher", "explorer"}:
+            max_issues = base_max_issues + 2
+        elif role_lower in {"critic", "planner"}:
+            max_issues = max(1, base_max_issues - 2)
+        elif role_lower in {"synthesizer", "integrator"}:
+            # Synthesizers often focus on summarizing; limit expensive repairs.
+            max_issues = max(1, base_max_issues - 3)
+        else:
+            max_issues = base_max_issues
 
         issues_to_handle = issues[:max_issues]
         descriptions_to_handle = descriptions[:max_issues]
@@ -360,7 +554,10 @@ class TGRMLoop:
                 repair_actions.append(
                     {
                         "issue": issue,
-                        "description": f"[{role}] Performed targeted research for open items (maintenance_mode={maintenance_mode}).",
+                        "description": (
+                            f"[{role}] Performed targeted research for open items "
+                            f"(maintenance_mode={maintenance_mode})."
+                        ),
                     }
                 )
                 notes_added.append(note_text)
@@ -386,6 +583,87 @@ class TGRMLoop:
                 )
                 notes_added.append(note)
                 stats["contradictions_resolved"] += 0  # not resolved yet
+
+            elif issue == "under_cited":
+                # Level 2+: strengthen the evidence base with more primary sources.
+                note_text, new_cites, issue_stats = self._strengthen_citations(
+                    goal=goal,
+                    role=role,
+                    source_controls=source_controls,
+                )
+                self.memory_store.add_note(goal, note_text, role=role)
+                repair_actions.append(
+                    {
+                        "issue": issue,
+                        "description": f"[{role}] Searched for additional primary sources to strengthen citations.",
+                    }
+                )
+                notes_added.append(note_text)
+                citations.extend(new_cites)
+                _log_citations(new_cites)
+                for k, v in issue_stats.items():
+                    stats[k] = stats.get(k, 0) + v
+
+            elif issue in {"missing_biomarkers", "missing_mechanisms"}:
+                # Longevity-focused gap filling
+                note_text, new_cites, issue_stats = self._domain_gap_research(
+                    goal=goal,
+                    role=role,
+                    issue=issue,
+                    description=desc,
+                    source_controls=source_controls,
+                    domain=domain,
+                )
+                self.memory_store.add_note(goal, note_text, role=role)
+                repair_actions.append(
+                    {
+                        "issue": issue,
+                        "description": f"[{role}] Filled longevity gap: {desc}",
+                    }
+                )
+                notes_added.append(note_text)
+                citations.extend(new_cites)
+                _log_citations(new_cites)
+                for k, v in issue_stats.items():
+                    stats[k] = stats.get(k, 0) + v
+
+            elif issue in {"missing_formalism", "missing_connections"}:
+                # Math-focused gap filling
+                note_text, new_cites, issue_stats = self._domain_gap_research(
+                    goal=goal,
+                    role=role,
+                    issue=issue,
+                    description=desc,
+                    source_controls=source_controls,
+                    domain=domain,
+                )
+                self.memory_store.add_note(goal, note_text, role=role)
+                repair_actions.append(
+                    {
+                        "issue": issue,
+                        "description": f"[{role}] Filled math gap: {desc}",
+                    }
+                )
+                notes_added.append(note_text)
+                citations.extend(new_cites)
+                _log_citations(new_cites)
+                for k, v in issue_stats.items():
+                    stats[k] = stats.get(k, 0) + v
+
+            else:
+                # Unknown / future issue types: low-cost note so we do not silently drop it.
+                note = (
+                    f"[{role}] Encountered issue '{issue}' with description: {desc}. "
+                    "This issue type is not yet fully handled; marking as TODO for future cycles."
+                )
+                self.memory_store.add_note(goal, note, role=role)
+                repair_actions.append(
+                    {
+                        "issue": issue,
+                        "description": f"[{role}] Recorded unhandled issue type for future logic.",
+                    }
+                )
+                notes_added.append(note)
 
         # Count unique sources used for this cycle
         unique_sources = set()
@@ -502,7 +780,7 @@ class TGRMLoop:
         Long run optimization:
             - We also track which exact lines have already been used as
               questions in previous cycles, so we do not repeatedly
-              hammer the web for the same text.
+            hammer the web for the same text.
         """
         notes = self.memory_store.get_notes(goal)
         candidates: List[str] = []
@@ -636,6 +914,180 @@ class TGRMLoop:
                 for r in sem_results:
                     note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
                 note_lines.append("")
+
+        note_text = "\n".join(note_lines)
+        return note_text, citations, stats
+
+    def _strengthen_citations(
+        self,
+        goal: str,
+        role: str,
+        source_controls: Dict[str, bool],
+    ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
+        """Specialized repair step for 'under_cited' issues.
+
+        Focused on finding stronger primary sources (trials, math papers,
+        benchmark studies, etc.) to raise the evidence density.
+        """
+        citations: List[Dict[str, str]] = []
+        stats = {
+            "web_calls": 0,
+            "pubmed_calls": 0,
+            "semantic_calls": 0,
+            "pdf_ingestions": 0,
+            "contradictions_resolved": 0,
+            "sources_used": 0,
+        }
+
+        note_lines: List[str] = []
+        note_lines.append(f"[{role}] Strengthening citations for goal:")
+        note_lines.append(goal)
+        note_lines.append("")
+
+        query = f"{goal} primary sources randomized trial benchmark formal paper"
+        note_lines.append(f"Search query for stronger evidence: {query}")
+        note_lines.append("")
+
+        # Web search
+        if source_controls.get("web", True):
+            web_results = self.web_tool.search(query)
+            stats["web_calls"] += 1
+            web_summary = self.web_tool.summarize_results(web_results)
+            web_cites = self.web_tool.to_citations(web_results)
+            citations.extend(web_cites)
+
+            note_lines.append("Web summary (stronger evidence focus):")
+            note_lines.append(web_summary)
+            note_lines.append("Web sources:")
+            for c in web_cites:
+                note_lines.append(f"- {c.get('title', '')} ({c.get('url', '')})")
+            note_lines.append("")
+
+        # PubMed
+        if source_controls.get("pubmed", False):
+            pubmed_results = self.pubmed_tool.search(query, max_results=10)
+            stats["pubmed_calls"] += 1
+            citations.extend(pubmed_results)
+            note_lines.append("PubMed sources (stronger evidence):")
+            for r in pubmed_results:
+                note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+            note_lines.append("")
+
+        # Semantic Scholar
+        if source_controls.get("semantic", False):
+            sem_results = self.semantic_tool.search(query, max_results=10)
+            stats["semantic_calls"] += 1
+            citations.extend(sem_results)
+            note_lines.append("Semantic Scholar sources (stronger evidence):")
+            for r in sem_results:
+                note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+            note_lines.append("")
+
+        note_text = "\n".join(note_lines)
+        return note_text, citations, stats
+
+    def _domain_gap_research(
+        self,
+        goal: str,
+        role: str,
+        issue: str,
+        description: str,
+        source_controls: Dict[str, bool],
+        domain: Optional[str],
+    ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
+        """Generic helper to fill domain-specific gaps.
+
+        For longevity:
+            - missing_biomarkers → search for key biomarkers and lab panels.
+            - missing_mechanisms → search for pathways, hallmarks, mechanisms.
+
+        For math:
+            - missing_formalism → search for definitions, theorems, formal models.
+            - missing_connections → search for links to existing stability / control theories.
+        """
+        dom = (domain or "general").lower()
+        citations: List[Dict[str, str]] = []
+        stats = {
+            "web_calls": 0,
+            "pubmed_calls": 0,
+            "semantic_calls": 0,
+            "pdf_ingestions": 0,
+            "contradictions_resolved": 0,
+            "sources_used": 0,
+        }
+
+        note_lines: List[str] = []
+        note_lines.append(f"[{role}] Domain-specific gap repair for goal:")
+        note_lines.append(goal)
+        note_lines.append("")
+        note_lines.append(f"Issue: {issue}")
+        note_lines.append(description)
+        note_lines.append("")
+
+        # Build a focused query
+        if dom == "longevity":
+            if issue == "missing_biomarkers":
+                query = (
+                    f"biomarkers panel clinical endpoints for {goal} healthspan longevity all-cause mortality"
+                )
+            elif issue == "missing_mechanisms":
+                query = (
+                    f"mechanisms pathways hallmarks of aging for interventions related to {goal}"
+                )
+            else:
+                query = f"{goal} biomarkers mechanisms healthspan longevity"
+        elif dom == "math":
+            if issue == "missing_formalism":
+                query = (
+                    f"formal definition theorem stability framework similar to reparodynamics and RYE"
+                )
+            elif issue == "missing_connections":
+                query = (
+                    f"connections between stability theory Lyapunov control Markov processes and repair dynamics"
+                )
+            else:
+                query = f"{goal} mathematical stability formalization"
+        else:
+            # Generic fallback
+            query = f"{goal} {issue} {description}"
+
+        note_lines.append(f"Focused query used for gap repair: {query}")
+        note_lines.append("")
+
+        # Web search
+        if source_controls.get("web", True):
+            web_results = self.web_tool.search(query)
+            stats["web_calls"] += 1
+            web_summary = self.web_tool.summarize_results(web_results)
+            web_cites = self.web_tool.to_citations(web_results)
+            citations.extend(web_cites)
+
+            note_lines.append("Web summary (gap repair):")
+            note_lines.append(web_summary)
+            note_lines.append("Web sources:")
+            for c in web_cites:
+                note_lines.append(f"- {c.get('title', '')} ({c.get('url', '')})")
+            note_lines.append("")
+
+        # PubMed (especially useful in longevity)
+        if dom == "longevity" and source_controls.get("pubmed", False):
+            pubmed_results = self.pubmed_tool.search(query, max_results=10)
+            stats["pubmed_calls"] += 1
+            citations.extend(pubmed_results)
+            note_lines.append("PubMed sources (gap repair):")
+            for r in pubmed_results:
+                note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+            note_lines.append("")
+
+        # Semantic Scholar (useful in both longevity and math)
+        if source_controls.get("semantic", False):
+            sem_results = self.semantic_tool.search(query, max_results=10)
+            stats["semantic_calls"] += 1
+            citations.extend(sem_results)
+            note_lines.append("Semantic Scholar sources (gap repair):")
+            for r in sem_results:
+                note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+            note_lines.append("")
 
         note_text = "\n".join(note_lines)
         return note_text, citations, stats
