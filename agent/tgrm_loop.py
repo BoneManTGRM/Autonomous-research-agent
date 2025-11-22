@@ -519,7 +519,12 @@ class TGRMLoop:
                 # Even in maintenance mode, first cycle for a goal should do
                 # a proper initial pass.
                 note_text, new_cites, issue_stats = self._initial_research(
-                    goal, role, source_controls, pdf_bytes
+                    goal=goal,
+                    role=role,
+                    source_controls=source_controls,
+                    pdf_bytes=pdf_bytes,
+                    domain=domain,
+                    maintenance_mode=maintenance_mode,
                 )
                 self.memory_store.add_note(goal, note_text, role=role)
                 repair_actions.append(
@@ -548,6 +553,7 @@ class TGRMLoop:
                     source_controls=source_controls,
                     questions=questions,
                     maintenance_mode=maintenance_mode,
+                    domain=domain,
                 )
 
                 self.memory_store.add_note(goal, note_text, role=role)
@@ -590,6 +596,7 @@ class TGRMLoop:
                     goal=goal,
                     role=role,
                     source_controls=source_controls,
+                    domain=domain,
                 )
                 self.memory_store.add_note(goal, note_text, role=role)
                 repair_actions.append(
@@ -692,12 +699,76 @@ class TGRMLoop:
         merged.update({k: bool(v) for k, v in source_controls.items()})
         return merged
 
+    def _select_web_search_params(
+        self,
+        role: str,
+        maintenance_mode: bool,
+        domain: Optional[str],
+        purpose: str,
+    ) -> Dict[str, Any]:
+        """Hybrid-mode selection of Tavily search level / size / topic.
+
+        purpose ∈ {"initial", "targeted", "strengthen", "gap_repair"}
+        """
+        role_lower = (role or "agent").lower()
+        dom = (domain or "general").lower()
+
+        # Topic routing
+        if dom in {"longevity", "biology", "medicine", "health"}:
+            topic = "science"
+        elif dom in {"math", "physics", "chemistry"}:
+            topic = "science"
+        else:
+            topic = "general"
+
+        # Base level from global TGRM level (1–3)
+        base_level = max(1, min(self.tgrm_level, 3))
+
+        # Start with base level, then adjust
+        level = base_level
+
+        # Maintenance tends to downshift one level if possible
+        if maintenance_mode and base_level > 1:
+            level = base_level - 1
+
+        # Purpose-specific nudges
+        if purpose in {"initial", "gap_repair", "strengthen"}:
+            # Let researcher / explorer go deepest when allowed
+            if not maintenance_mode and base_level == 3 and role_lower in {"researcher", "explorer"}:
+                level = 3
+        elif purpose == "targeted":
+            if not maintenance_mode and base_level >= 2 and role_lower in {"researcher", "explorer"}:
+                level = min(3, base_level)
+            elif role_lower in {"critic", "planner", "synthesizer", "integrator"}:
+                # Critics / planners often need focused but not super deep pulls
+                level = max(1, min(base_level, 2))
+
+        # Max results tuned by purpose
+        if purpose == "initial":
+            base_max = 5 if not maintenance_mode else 3
+        elif purpose == "targeted":
+            base_max = 6 if not maintenance_mode else 4
+        elif purpose in {"strengthen", "gap_repair"}:
+            base_max = 8 if not maintenance_mode else 4
+        else:
+            base_max = 5
+
+        # Respect level 1 constraints: keep it very cheap
+        if level == 1:
+            max_results = min(base_max, 3)
+        else:
+            max_results = base_max
+
+        return {"level": level, "max_results": max_results, "topic": topic}
+
     def _initial_research(
         self,
         goal: str,
         role: str,
         source_controls: Dict[str, bool],
         pdf_bytes: Optional[bytes],
+        domain: Optional[str],
+        maintenance_mode: bool,
     ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
         """Perform the initial multi-source research when there are no notes."""
         citations: List[Dict[str, str]] = []
@@ -717,7 +788,13 @@ class TGRMLoop:
 
         # Web search
         if source_controls.get("web", True):
-            web_results = self.web_tool.search(goal)
+            web_params = self._select_web_search_params(
+                role=role,
+                maintenance_mode=maintenance_mode,
+                domain=domain,
+                purpose="initial",
+            )
+            web_results = self.web_tool.search(goal, **web_params)
             stats["web_calls"] += 1
             web_summary = self.web_tool.summarize_results(web_results)
             web_cites = self.web_tool.to_citations(web_results)
@@ -780,7 +857,7 @@ class TGRMLoop:
         Long run optimization:
             - We also track which exact lines have already been used as
               questions in previous cycles, so we do not repeatedly
-            hammer the web for the same text.
+              hammer the web for the same text.
         """
         notes = self.memory_store.get_notes(goal)
         candidates: List[str] = []
@@ -811,8 +888,9 @@ class TGRMLoop:
                 self._seen_questions.add(q)
                 fresh_questions.append(q)
 
-        # Limit to the first few to control cost
-        return fresh_questions[:5]
+        # Limit to the first few to control cost; higher TGRM levels can afford a bit more.
+        max_q = 3 if self.tgrm_level == 1 else 5
+        return fresh_questions[:max_q]
 
     def _targeted_research(
         self,
@@ -823,6 +901,7 @@ class TGRMLoop:
         source_controls: Dict[str, bool],
         questions: Optional[List[str]] = None,
         maintenance_mode: bool = False,
+        domain: Optional[str] = None,
     ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
         """Perform focused multi-source research on open questions or TODOs.
 
@@ -882,7 +961,13 @@ class TGRMLoop:
 
             # Web search
             if source_controls.get("web", True):
-                web_results = self.web_tool.search(q)
+                web_params = self._select_web_search_params(
+                    role=role,
+                    maintenance_mode=maintenance_mode,
+                    domain=domain,
+                    purpose="targeted",
+                )
+                web_results = self.web_tool.search(q, **web_params)
                 stats["web_calls"] += 1
                 web_summary = self.web_tool.summarize_results(web_results)
                 web_cites = self.web_tool.to_citations(web_results)
@@ -923,6 +1008,7 @@ class TGRMLoop:
         goal: str,
         role: str,
         source_controls: Dict[str, bool],
+        domain: Optional[str],
     ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
         """Specialized repair step for 'under_cited' issues.
 
@@ -950,7 +1036,13 @@ class TGRMLoop:
 
         # Web search
         if source_controls.get("web", True):
-            web_results = self.web_tool.search(query)
+            web_params = self._select_web_search_params(
+                role=role,
+                maintenance_mode=False,
+                domain=domain,
+                purpose="strengthen",
+            )
+            web_results = self.web_tool.search(query, **web_params)
             stats["web_calls"] += 1
             web_summary = self.web_tool.summarize_results(web_results)
             web_cites = self.web_tool.to_citations(web_results)
@@ -1056,7 +1148,13 @@ class TGRMLoop:
 
         # Web search
         if source_controls.get("web", True):
-            web_results = self.web_tool.search(query)
+            web_params = self._select_web_search_params(
+                role=role,
+                maintenance_mode=False,
+                domain=domain,
+                purpose="gap_repair",
+            )
+            web_results = self.web_tool.search(query, **web_params)
             stats["web_calls"] += 1
             web_summary = self.web_tool.summarize_results(web_results)
             web_cites = self.web_tool.to_citations(web_results)
