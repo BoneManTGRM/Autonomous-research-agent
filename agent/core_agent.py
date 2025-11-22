@@ -11,16 +11,17 @@ Reparodynamics view:
 TGRM loop (implemented in TGRMLoop):
     - Test   : evaluate current notes / state
     - Detect : find gaps, TODOs, unanswered questions or contradictions
-    - Repair : perform targeted actions (web, PubMed, PDFs, biomarkers)
+    - Repair : perform targeted actions (web, PubMed, PDFs, biomarkers,
+               browser tools, code sandbox, and data pipelines)
     - Verify : re-test, compute delta_R and RYE, and log the cycle
 
 RYE (Repair Yield per Energy):
     For each cycle, TGRMLoop computes delta_R / E (improvement divided
-    by effort). CoreAgent simply orchestrates cycles and exposes higher
-    level methods like multi-agent runs and continuous mode.
+    by effort). CoreAgent orchestrates cycles, multi-agent runs, and
+    continuous modes while the TGRM loop integrates tool usage into E.
 
 Multi-agent extension:
-    CoreAgent can now orchestrate multiple logical agent roles
+    CoreAgent can orchestrate multiple logical agent roles
     (researcher, critic, planner, synthesizer, explorer, plus up to
     a total of 32 agents) over the same MemoryStore. This makes it
     possible to run:
@@ -29,6 +30,15 @@ Multi-agent extension:
 
     The maximum number of logical agents is capped at 32 for safety,
     and can be configured via config["max_agents"] (1–32).
+
+Toolbelt:
+    CoreAgent owns a Toolbelt instance which aggregates:
+        - BrowserTool (headless browser + scraping hybrid)
+        - CodeSandbox (safe Python snippet execution)
+        - DataPipelines (CSV / Excel / SQLite, etc.)
+
+    TGRMLoop can use this Toolbelt to perform actions and track tool
+    usage for energy accounting.
 
 Runtime profiles:
     CoreAgent understands runtime profiles defined in presets.RUNTIME_PROFILES,
@@ -60,23 +70,40 @@ from typing import Any, Dict, List, Optional, Sequence
 from .memory_store import MemoryStore
 from .tgrm_loop import TGRMLoop
 from .presets import RUNTIME_PROFILES, CONTINUOUS_MODE_DEFAULTS, get_preset
+from .tools import Toolbelt  # NEW: tooling layer for browser / sandbox / data
 
 
 class CoreAgent:
     """High-level controller for the autonomous research agent.
 
-    This class is intentionally thin: it wires UI or CLI controls
-    (multi-agent, continuous mode, source preferences, PDF uploads)
-    into the lower-level TGRMLoop which performs the actual
-    reparodynamic TGRM cycles and RYE computation.
+    This class wires UI or CLI controls (multi-agent, continuous mode,
+    source preferences, PDF uploads, swarm roles) into the lower-level
+    TGRMLoop which performs the actual reparodynamic TGRM cycles and
+    RYE computation.
+
+    It also owns a Toolbelt instance that TGRMLoop can use for:
+        - headless browser actions
+        - code execution sandbox
+        - data pipelines (CSV / Excel / SQLite)
     """
 
     def __init__(self, memory_store: MemoryStore, config: Optional[Dict[str, Any]] = None) -> None:
         self.memory_store = memory_store
         self.config = config or {}
 
-        # Underlying TGRM loop that actually performs Test, Detect, Repair, Verify
-        self.tgrm_loop = TGRMLoop(memory_store, self.config)
+        # ------------------------------------------------------------------
+        # Toolbelt: browser + sandbox + data pipelines
+        # ------------------------------------------------------------------
+        # A single Toolbelt instance is shared across all cycles and modes.
+        self.tools = Toolbelt()
+
+        # Underlying TGRM loop that actually performs Test, Detect, Repair, Verify.
+        # Prefer the newer signature that accepts tools=..., but keep a
+        # backwards-compatible fallback for older TGRMLoop implementations.
+        try:
+            self.tgrm_loop = TGRMLoop(memory_store, self.config, tools=self.tools)  # type: ignore[call-arg]
+        except TypeError:
+            self.tgrm_loop = TGRMLoop(memory_store, self.config)
 
         # Source controls can be set by the UI at runtime.
         # Example:
@@ -368,7 +395,7 @@ class CoreAgent:
         else:
             effective_pdf_bytes = pdf_bytes
 
-        # Run a single cycle
+        # Run a single cycle (TGRM + tools + RYE)
         result = self.run_cycle(
             goal=effective_goal,
             cycle_index=ci,
@@ -1024,3 +1051,60 @@ class CoreAgent:
                 s["run_metadata"] = run_metadata
 
         return all_summaries
+
+    # ------------------------------------------------------------------
+    # Multi-agent round helper
+    # ------------------------------------------------------------------
+    def run_multi_agent_round(
+        self,
+        goal: str,
+        base_cycle_index: int,
+        roles: Sequence[str],
+        source_controls: Optional[Dict[str, bool]] = None,
+        pdf_bytes: Optional[bytes] = None,
+        biomarker_snapshot: Optional[Dict[str, Any]] = None,
+        domain: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Run one multi-agent round: one cycle per role, sharing MemoryStore.
+
+        This is used by swarm continuous mode, but can also be called
+        directly if a caller wants to orchestrate a single swarm round.
+
+        Args:
+            goal:
+                High-level research goal shared by all roles.
+            base_cycle_index:
+                Global cycle index for the first role in this round.
+                Subsequent roles use base_cycle_index + i.
+            roles:
+                Sequence of role names (e.g. ["researcher", "critic", ...]).
+            source_controls:
+                Shared source configuration for all roles.
+            pdf_bytes:
+                Optional PDF bytes available to each role.
+            biomarker_snapshot:
+                Optional biomarker snapshot shared across roles.
+            domain:
+                Optional domain tag such as "general", "longevity", or "math".
+
+        Returns:
+            List of summary dicts, one per role.
+        """
+        summaries: List[Dict[str, Any]] = []
+        effective_domain = domain or "general"
+
+        for i, role in enumerate(roles):
+            ci = base_cycle_index + i
+            result = self.run_cycle(
+                goal=goal,
+                cycle_index=ci,
+                role=str(role),
+                source_controls=source_controls,
+                pdf_bytes=pdf_bytes,
+                biomarker_snapshot=biomarker_snapshot,
+                domain=effective_domain,
+            )
+            summary = result.get("summary", {})
+            summaries.append(summary)
+
+        return summaries
