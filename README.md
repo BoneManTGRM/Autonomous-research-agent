@@ -1,222 +1,176 @@
 # Autonomous Research Agent  
-_Reparodynamics • TGRM • RYE • Swarm Mode_  
-**Live App:** https://autonomous-research-agent-hqby.onrender.com  
-**⚠️ IMPORTANT:** You MUST provide **your own Tavily API key** inside the app sidebar or the agent will not run.
+Reparodynamics • TGRM • RYE • Swarm Mode  
+**Live Production Research Agent:** https://autonomous-research-agent-hqby.onrender.com  
+
+⚠️ IMPORTANT: You must provide your own Tavily API key inside the app sidebar or the agent will not run.
 
 ---
 
 ## 🔥 Overview
 
-The **Autonomous Research Agent** is a fully self-contained TGRM-powered system capable of:
+The Autonomous Research Agent is a fully operational, long-run TGRM-powered system capable of:
 
-- Running **continuous scientific research** using the Reparodynamics framework  
-- Computing **RYE (Repair Yield per Energy)** every cycle  
+- Running continuous scientific research using the Reparodynamics framework  
+- Computing RYE (Repair Yield per Energy) every cycle  
 - Detecting contradictions, gaps, issues, and repairing them  
-- Running for **90 days safely** with watchdog, checkpointed run_state, crash-proof resume  
-- Operating as a **single agent**, **multi-agent duo**, or **full swarm (2–32 agents)**  
-- Executing **Test → Detect → Repair → Verify** autonomously  
-- Ingesting papers, datasets, PDFs, CSVs, semantic queries, biomarker datasets, and more  
-- Scaling to millions of cycles with stability guards
-
----
-
-## 🚀 Live Demo (Render + Streamlit)
-
-The app is hosted using **Render + Streamlit**:
-
-👉 **https://autonomous-research-agent-hqby.onrender.com**
-
-⚠️ **The app will not run unless you provide your own Tavily API key.**  
-You can add it in the left sidebar under **“Tavily API Key”**.
+- Running for extended periods with watchdog, checkpointed run_state, and crash-proof resume  
+- Operating as a single agent, duo, or full swarm (2–32 agents)  
+- Executing Test → Detect → Repair → Verify autonomously  
+- Ingesting papers, datasets, PDFs, CSVs, biomarkers, and more  
+- Scaling to millions of cycles with stability guards  
+- Functioning as a true autonomous research environment, not a demo
 
 ---
 
 ## ⚙️ Major Features
 
-### **1. Full TGRM Loop Implementation**
-- Automated issue detection  
+### 1. Full TGRM Loop  
+- Issue detection  
 - Repair actions  
-- Verification passes  
-- RYE computation (`ΔR / E`)  
-- Supports domain weighting (math / longevity / general)
+- Verification  
+- RYE computation (ΔR / E)  
+- Domain-weighted behavior  
 
----
+### 2. Multi-Format Ingestion  
+Reads: TXT, PDF, CSV, JSON, Markdown, HTML, DOCX, XLSX, ZIP (recursive)
 
-### **2. Multi-Format Ingestion Engine**
-Your agent can read:
+### 3. Real Literature Search  
+Supports PubMed, Semantic Scholar, Tavily web search, and PDF ingestion.
 
-- TXT  
-- PDF (real extraction)  
-- CSV → DataFrame summaries  
-- JSON  
-- Markdown  
-- HTML  
-- DOCX  
-- XLSX  
-- ZIP (recursive extraction)
+### 4. Swarm Mode (2–32 Agents)  
+Includes roles: Researcher, Critic, Explorer, Theorist, Integrator.  
+All share memory and run coordinated TGRM cycles.
 
----
-
-### **3. Real Literature Search**
-Includes:
-
-- PubMed ingestion  
-- Semantic Scholar ingestion  
-- Web search via Tavily (requires your key)  
-- PDF ingestion (remote or uploaded)
-
-All returned in normalized citation format for RYE scoring.
-
----
-
-### **4. Swarm Mode (2–32 Agents)**  
-Roles include:
-
-- **Researcher**  
-- **Critic**  
-- **Explorer**  
-- **Theorist**  
-- **Integrator**
-
-Each performs specialized TGRM cycles with shared memory.
-
----
-
-### **5. 90-Day Safe Continuous Operation**
-Includes:
-
-- Checkpointed `run_state`  
+### 5. Continuous Long-Run Operation  
+- Checkpointed state  
 - Watchdog heartbeat  
 - Crash-proof resume  
-- 10M-cycle safety cap  
-- Real wall-clock control using `max_minutes`
+- Wall-clock runtime control  
+- 10M-cycle safety ceiling  
 
----
+### 6. Domain Presets  
+Includes:  
+- General Research  
+- Longevity / Anti-aging  
+- Math / Theory  
 
-### **6. Domain Presets**
-Presets include:
-
-- **General Research**  
-- **Longevity / Anti-aging**  
-- **Math / Theory**  
-
-Each preset defines:
-
-- Default goal  
-- Source usage rules  
-- Role bias  
-- RYE weighting  
-- Reporting style  
-- Cycle tuning  
-- Runtime profiles (1h, 8h, 24h, 90 days, Forever)
-
----
-
-## 📂 Project Structure
-
-```
-autonomous-research-agent/
-├── agent/
-│   ├── core_agent.py
-│   ├── memory_store.py
-│   ├── presets.py
-│   ├── hypothesis_engine.py
-│   ├── rye_metrics.py
-│   ├── tools_papers.py
-│   ├── tools_files.py
-│   ├── tools_semantic_scholar.py
-│   ├── vector_memory.py   (optional)
-│   └── report_generator.py
-├── app.py  (or streamlit_app.py)
-├── requirements.txt
-├── config/
-│   └── settings.yaml
-├── logs/
-│   └── sessions/
-├── README.md
-└── .env (your Tavily key if using locally)
-```
-
----
-
-## 🔑 Required API Keys
-
-### **Tavily**
-Required for real web research.
-
-The app will not run without it.
-
-Place it in either:
-
-- Streamlit sidebar text box  
-- `.env` file  
-- Render environment variable panel  
-
-Example:
-
-```
-TAVILY_API_KEY=your_key_here
-```
+Each preset defines goals, source rules, RYE weighting, role bias, output style, and runtime profiles.
 
 ---
 
 ## 🧠 How the Agent Works
 
-Each cycle performs:
+Each TGRM cycle:
 
-1. **TEST** → Detect issues, contradictions, missing info  
-2. **DETECT** → Identify targets for repair  
-3. **REPAIR** → Apply transformations, corrections, ingestion, citations, hypotheses  
-4. **VERIFY** → Compute ΔR, Energy, and RYE  
-5. **LOG** → Save cycle history + run_state + watchdog  
-6. **LOOP** → Continue until minutes or RYE threshold stops it
+1. TEST — detect contradictions, missing info  
+2. DETECT — identify targets for correction  
+3. REPAIR — apply transformations, ingestion, citations, refinements  
+4. VERIFY — compute ΔR, E, RYE  
+5. LOG — save cycle history + run_state  
+6. LOOP — continue until time or RYE threshold ends run  
+
+---
+
+## 📂 Project Structure
+
+autonomous-research-agent/  
+├── agent/  
+│   ├── core_agent.py  
+│   ├── memory_store.py  
+│   ├── presets.py  
+│   ├── hypothesis_engine.py  
+│   ├── rye_metrics.py  
+│   ├── tools_papers.py  
+│   ├── tools_files.py  
+│   ├── tools_semantic_scholar.py  
+│   ├── vector_memory.py  
+│   └── report_generator.py  
+├── app.py  
+├── requirements.txt  
+├── config/  
+│   └── settings.yaml  
+├── logs/  
+│   └── sessions/  
+└── .env   (Tavily key for local use)
+
+---
+
+## 🔑 Required API Keys
+
+### Tavily (Required)  
+Add via:  
+- Sidebar input  
+- `.env` file  
+- Render environment variables  
+
+Example:  
+TAVILY_API_KEY=your_key_here
 
 ---
 
 ## 📊 Reports
 
-The agent generates structured markdown reports including:
-
+Generates structured markdown including:  
 - Summary  
-- RYE statistics  
+- RYE metrics  
 - Hypotheses  
 - Citations  
 - Notes  
-- Biomarkers (longevity preset)
+- Biomarkers (longevity mode)
 
-You can download the report directly from the app.
+Download directly from the app.
 
 ---
 
 ## 🧪 Local Installation
 
-```
-git clone https://github.com/your-repo/autonomous-research-agent.git
-cd autonomous-research-agent
-pip install -r requirements.txt
+git clone https://github.com/your-repo/autonomous-research-agent.git  
+cd autonomous-research-agent  
+pip install -r requirements.txt  
 streamlit run app.py
-```
 
-Add your Tavily key before running.
+Add your Tavily key before launching.
 
 ---
 
 ## 🌐 Deployment
 
-This app runs on:
+Supports:  
+- Render (recommended)  
+- Streamlit Cloud  
 
-- **Render** (hosted server)  
-- **Streamlit Cloud** (UI runtime)
-
-The version you are using live is deployed on **Render**.
+This is a production-grade autonomous agent, not a demo.
 
 ---
 
-## 📜 License
-MIT or your custom license.
+# 📜 Licensing
+
+This project uses a dual-license model to maximize adoption while protecting commercial value.
+
+## Apache 2.0 (Open Core)
+
+The core system — TGRM loop, RYE computation, ingestion engine, and single-agent mode — is licensed under Apache License 2.0.  
+This encourages collaboration, research, and unrestricted use of the open components.
+
+## Commercial License (Silt Pro / Enterprise / Swarm)
+
+The following ARE NOT covered under Apache 2.0 and require a paid commercial license from Reparodynamics:
+
+- Multi-agent swarm mode  
+- Long-run background worker engine  
+- Advanced presets and domain packs  
+- Equilibrium and survival analytics  
+- Anti-aging and longevity premium packs  
+- Hosted cloud versions  
+- Team and enterprise deployments  
+- Proprietary optimizations  
+- Any feature labeled “Pro”, “Enterprise”, or “Commercial”  
+
+See the included LICENSE (Apache 2.0) and COMMERCIAL_LICENSE files.
 
 ---
 
 ## 🎉 Credits
+
 Created by Cody R. Jenkins  
 Reparodynamics • RYE • TGRM
