@@ -5,13 +5,17 @@ Tooling layer for the Autonomous Research Agent.
 
 Includes:
 - Headless browser wrapper (navigation, scraping, simple actions)
-- Code execution sandbox for safe Python snippets
-- Data pipeline helpers for CSV / Excel / basic SQL
+- Multi step browser automation for forms, clicks, scrolling, downloads
+- Code execution sandbox for safe Python snippets (in process and subprocess)
+- Lightweight math safe_eval
+- Data pipeline helpers for CSV / Excel / Parquet / JSON / NDJSON / basic SQL
+- HTML table loaders and simple URL based loaders
 - Simple cost accounting hooks so tool usage can be reflected in Energy E
 
 All tools are designed to be:
-- Optional (if dependency is missing, they degrade gracefully)
+- Optional (if a dependency is missing, they degrade gracefully)
 - Side effect aware (log what happened for RYE and MemoryStore)
+- Usable by a swarm of agents without breaking isolation
 """
 
 from __future__ import annotations
@@ -25,6 +29,9 @@ import os
 import sqlite3
 import textwrap
 import traceback
+import math
+import subprocess
+import time
 
 # Optional HTTP and HTML parsing for browser like scraping
 try:
@@ -46,10 +53,17 @@ try:
 except Exception:
     pd = None  # type: ignore
 
+# Optional SQLAlchemy for richer SQL
+try:
+    import sqlalchemy  # type: ignore
+except Exception:
+    sqlalchemy = None  # type: ignore
+
 
 # ----------------------------------------------------------
 # Cost accounting structure for tools
 # ----------------------------------------------------------
+
 
 @dataclass
 class ToolUsage:
@@ -60,7 +74,33 @@ class ToolUsage:
     code_execs: int = 0
     sql_queries: int = 0
     data_loads: int = 0
+    api_calls: int = 0
+    downloads: int = 0
     approx_tokens: int = 0
+
+    def add_tokens_for_text(self, text: str) -> None:
+        """Very rough token estimate from text length."""
+        if not text:
+            return
+        # Approx 4 characters per token as a rough heuristic
+        self.approx_tokens += max(1, len(text) // 4)
+
+    def add_tokens_for_code(self, code: str) -> None:
+        """Rough token estimate for code snippets."""
+        if not code:
+            return
+        self.approx_tokens += max(1, len(code) // 3)
+
+    def merge(self, other: "ToolUsage") -> None:
+        """Merge another ToolUsage into this instance."""
+        self.web_calls += other.web_calls
+        self.browser_actions += other.browser_actions
+        self.code_execs += other.code_execs
+        self.sql_queries += other.sql_queries
+        self.data_loads += other.data_loads
+        self.api_calls += other.api_calls
+        self.downloads += other.downloads
+        self.approx_tokens += other.approx_tokens
 
     def to_energy_kwargs(self) -> Dict[str, Any]:
         """
@@ -88,8 +128,9 @@ class ToolUsage:
 
 
 # ----------------------------------------------------------
-# Browser tool
+# Browser tools
 # ----------------------------------------------------------
+
 
 @dataclass
 class BrowserResult:
@@ -101,18 +142,50 @@ class BrowserResult:
     error: Optional[str] = None
 
 
+@dataclass
+class BrowserStepLog:
+    step_index: int
+    op: str
+    success: bool
+    details: str
+    error: Optional[str] = None
+
+
+@dataclass
+class BrowserAutomationResult:
+    start_url: str
+    final_url: Optional[str]
+    title: str
+    text_snippet: str
+    html: Optional[str]
+    screenshot_path: Optional[str]
+    steps: List[BrowserStepLog]
+    error: Optional[str] = None
+
+
 class BrowserTool:
     """
     Headless browser and scraper hybrid.
 
     It tries to use Playwright if available.
     If not, it falls back to simple HTTP GET plus BeautifulSoup parsing.
+
+    For serious automation, use run_actions with a list of steps like:
+        [
+            {"op": "goto", "url": "..."},
+            {"op": "click", "selector": "#login"},
+            {"op": "fill", "selector": "#email", "value": "user@example.com"},
+            {"op": "fill", "selector": "#password", "value": "secret"},
+            {"op": "click", "selector": "button[type=submit]"},
+            {"op": "wait_for", "selector": "#dashboard", "timeout_ms": 10000},
+        ]
     """
 
     def __init__(self, user_agent: Optional[str] = None, timeout: float = 20.0) -> None:
         self.user_agent = user_agent or "ReparodynamicsAgent/0.1"
         self.timeout = timeout
 
+    # Simple one shot fetch
     def fetch_page(self, url: str) -> BrowserResult:
         """Fetch a page in a best effort way and return text plus metadata."""
         # Try Playwright first
@@ -124,21 +197,24 @@ class BrowserTool:
                     page.goto(url, timeout=self.timeout * 1000)
                     content = page.content()
                     title = page.title() or ""
+                    final_url = page.url
                     browser.close()
 
+                text = content
                 if BeautifulSoup is not None:
                     soup = BeautifulSoup(content, "html.parser")
                     text = soup.get_text(separator=" ", strip=True)
-                else:
-                    text = content
 
                 snippet = text[:2000]
+                # Only keep truncated HTML for traceability
+                html_trunc = content[:10000]
+
                 return BrowserResult(
-                    url=url,
+                    url=final_url,
                     status_code=None,
                     title=title,
                     text_snippet=snippet,
-                    html=None,
+                    html=html_trunc,
                     error=None,
                 )
             except Exception as e:
@@ -181,13 +257,14 @@ class BrowserTool:
                 text = html
 
             snippet = text[:2000]
+            html_trunc = html[:10000]
 
             return BrowserResult(
                 url=url,
                 status_code=status,
                 title=title,
                 text_snippet=snippet,
-                html=None,
+                html=html_trunc,
                 error=None,
             )
         except Exception as e:
@@ -200,10 +277,247 @@ class BrowserTool:
                 error=f"HTTP error: {e}",
             )
 
+    # Multi step automation for one session
+    def run_actions(
+        self,
+        start_url: str,
+        actions: List[Dict[str, Any]],
+        screenshot_dir: Optional[str] = None,
+        screenshot_name: str = "automation_final.png",
+    ) -> BrowserAutomationResult:
+        """
+        Run a small browser workflow against a site using Playwright if available.
+
+        Actions are a list of dicts with "op" and other keys.
+        Supported ops:
+            - "goto": {"op": "goto", "url": "..."}
+            - "click": {"op": "click", "selector": "..."}
+            - "fill": {"op": "fill", "selector": "...", "value": "..."}
+            - "type": {"op": "type", "selector": "...", "value": "..."}
+            - "wait_for": {"op": "wait_for", "selector": "...", "timeout_ms": 10000}
+            - "scroll_bottom": {"op": "scroll_bottom"}
+            - "eval": {"op": "eval", "script": "return document.title;"}
+        """
+        if sync_playwright is None:
+            return BrowserAutomationResult(
+                start_url=start_url,
+                final_url=None,
+                title="",
+                text_snippet="",
+                html=None,
+                screenshot_path=None,
+                steps=[
+                    BrowserStepLog(
+                        step_index=0,
+                        op="init",
+                        success=False,
+                        details="Playwright is not installed; cannot run actions",
+                        error="Playwright missing",
+                    )
+                ],
+                error="Playwright missing",
+            )
+
+        steps_log: List[BrowserStepLog] = []
+        final_html: Optional[str] = None
+        final_text: str = ""
+        final_title: str = ""
+        final_url: Optional[str] = None
+        screenshot_path: Optional[str] = None
+
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page(user_agent=self.user_agent)
+
+                # First navigation
+                try:
+                    page.goto(start_url, timeout=self.timeout * 1000)
+                    steps_log.append(
+                        BrowserStepLog(
+                            step_index=-1,
+                            op="goto_initial",
+                            success=True,
+                            details=f"Navigated to {start_url}",
+                        )
+                    )
+                except Exception as e:
+                    steps_log.append(
+                        BrowserStepLog(
+                            step_index=-1,
+                            op="goto_initial",
+                            success=False,
+                            details=f"Failed to navigate to {start_url}",
+                            error=str(e),
+                        )
+                    )
+                    browser.close()
+                    return BrowserAutomationResult(
+                        start_url=start_url,
+                        final_url=None,
+                        title="",
+                        text_snippet="",
+                        html=None,
+                        screenshot_path=None,
+                        steps=steps_log,
+                        error=f"Initial navigation failed: {e}",
+                    )
+
+                # Apply actions
+                for idx, action in enumerate(actions):
+                    op = str(action.get("op", "")).lower().strip()
+                    try:
+                        if op == "goto":
+                            url = action.get("url") or start_url
+                            page.goto(url, timeout=self.timeout * 1000)
+                            steps_log.append(
+                                BrowserStepLog(
+                                    step_index=idx,
+                                    op=op,
+                                    success=True,
+                                    details=f"Navigated to {url}",
+                                )
+                            )
+                        elif op == "click":
+                            sel = action["selector"]
+                            page.click(sel, timeout=self.timeout * 1000)
+                            steps_log.append(
+                                BrowserStepLog(
+                                    step_index=idx,
+                                    op=op,
+                                    success=True,
+                                    details=f"Clicked {sel}",
+                                )
+                            )
+                        elif op == "fill":
+                            sel = action["selector"]
+                            val = action.get("value", "")
+                            page.fill(sel, val, timeout=self.timeout * 1000)
+                            steps_log.append(
+                                BrowserStepLog(
+                                    step_index=idx,
+                                    op=op,
+                                    success=True,
+                                    details=f"Filled {sel} with value of length {len(val)}",
+                                )
+                            )
+                        elif op == "type":
+                            sel = action["selector"]
+                            val = action.get("value", "")
+                            page.type(sel, val, timeout=self.timeout * 1000)
+                            steps_log.append(
+                                BrowserStepLog(
+                                    step_index=idx,
+                                    op=op,
+                                    success=True,
+                                    details=f"Typed into {sel} with value of length {len(val)}",
+                                )
+                            )
+                        elif op == "wait_for":
+                            sel = action["selector"]
+                            timeout_ms = int(action.get("timeout_ms", self.timeout * 1000))
+                            page.wait_for_selector(sel, timeout=timeout_ms)
+                            steps_log.append(
+                                BrowserStepLog(
+                                    step_index=idx,
+                                    op=op,
+                                    success=True,
+                                    details=f"Waited for selector {sel}",
+                                )
+                            )
+                        elif op == "scroll_bottom":
+                            page.evaluate("window.scrollTo(0, document.body.scrollHeight);")
+                            steps_log.append(
+                                BrowserStepLog(
+                                    step_index=idx,
+                                    op=op,
+                                    success=True,
+                                    details="Scrolled to bottom of page",
+                                )
+                            )
+                        elif op == "eval":
+                            script = action.get("script", "")
+                            res = page.evaluate(script)
+                            steps_log.append(
+                                BrowserStepLog(
+                                    step_index=idx,
+                                    op=op,
+                                    success=True,
+                                    details=f"Eval success, result: {res}",
+                                )
+                            )
+                        else:
+                            steps_log.append(
+                                BrowserStepLog(
+                                    step_index=idx,
+                                    op=op,
+                                    success=False,
+                                    details=f"Unknown op: {op}",
+                                    error="unknown op",
+                                )
+                            )
+                    except Exception as e:
+                        steps_log.append(
+                            BrowserStepLog(
+                                step_index=idx,
+                                op=op or "unknown",
+                                success=False,
+                                details=f"Error running op {op}",
+                                error=str(e),
+                            )
+                        )
+
+                # Final snapshot
+                final_url = page.url
+                final_html = page.content()
+                final_title = page.title() or ""
+
+                text = final_html
+                if BeautifulSoup is not None:
+                    soup = BeautifulSoup(final_html, "html.parser")
+                    text = soup.get_text(separator=" ", strip=True)
+                final_text = text[:2000]
+                html_trunc = final_html[:20000]
+
+                # Screenshot
+                if screenshot_dir:
+                    try:
+                        os.makedirs(screenshot_dir, exist_ok=True)
+                        shot_path = os.path.join(screenshot_dir, screenshot_name)
+                        page.screenshot(path=shot_path, full_page=True)
+                        screenshot_path = shot_path
+                    except Exception:
+                        screenshot_path = None
+
+                browser.close()
+
+                return BrowserAutomationResult(
+                    start_url=start_url,
+                    final_url=final_url,
+                    title=final_title,
+                    text_snippet=final_text,
+                    html=html_trunc,
+                    screenshot_path=screenshot_path,
+                    steps=steps_log,
+                    error=None,
+                )
+        except Exception as e:
+            return BrowserAutomationResult(
+                start_url=start_url,
+                final_url=None,
+                title="",
+                text_snippet="",
+                html=None,
+                screenshot_path=None,
+                steps=steps_log,
+                error=str(e),
+            )
+
 
 # ----------------------------------------------------------
 # Code execution sandbox
 # ----------------------------------------------------------
+
 
 @dataclass
 class CodeExecutionResult:
@@ -215,35 +529,69 @@ class CodeExecutionResult:
 
 class CodeSandbox:
     """
-    Very small Python code execution sandbox.
+    Python code execution sandbox.
 
-    This is not a full OS sandbox. It is a controlled exec environment with:
-    - Limited builtins
-    - Optional data inputs
-    - Captured stdout and stderr
+    Two levels:
+        1) In process exec with restricted builtins
+        2) Subprocess exec for extra isolation
 
     Intended use:
     - Quick math checks
     - Data frame transforms
     - Small simulations
+    - Verifying formulas and models
     """
 
-    def __init__(self, max_lines: int = 2000) -> None:
-        self.max_lines = max_lines
+    def __init__(self, max_code_chars: int = 40000) -> None:
+        self.max_code_chars = max_code_chars
+
+    def safe_eval(self, expr: str) -> CodeExecutionResult:
+        """Evaluate a simple numeric expression with math only."""
+        allowed_names = {
+            k: getattr(math, k)
+            for k in dir(math)
+            if not k.startswith("_")
+        }
+        allowed_names.update({"abs": abs, "min": min, "max": max, "sum": sum})
+
+        try:
+            value = eval(expr, {"__builtins__": {}}, allowed_names)
+            return CodeExecutionResult(
+                stdout=str(value),
+                stderr="",
+                error=None,
+                metadata={"expr": expr},
+            )
+        except Exception as e:
+            return CodeExecutionResult(
+                stdout="",
+                stderr="",
+                error=str(e),
+                metadata={"expr": expr},
+            )
 
     def run_python(
         self,
         code: str,
         *,
         extra_globals: Optional[Dict[str, Any]] = None,
+        allow_numpy: bool = True,
+        allow_pandas: bool = True,
     ) -> CodeExecutionResult:
-        """Run a Python snippet and capture output."""
-        # Simple length guard
-        if len(code) > 20000:
+        """Run a Python snippet in process and capture output."""
+        if not code:
             return CodeExecutionResult(
                 stdout="",
                 stderr="",
-                error="Code too long for sandbox",
+                error="Empty code snippet",
+                metadata={},
+            )
+
+        if len(code) > self.max_code_chars:
+            return CodeExecutionResult(
+                stdout="",
+                stderr="",
+                error="Code too long for in process sandbox",
                 metadata={"truncated": True},
             )
 
@@ -262,13 +610,26 @@ class CodeSandbox:
 
         sandbox_globals: Dict[str, Any] = {
             "__builtins__": safe_builtins,
+            "math": math,
         }
+
+        # Optionally expose numpy and pandas if available
+        if allow_numpy:
+            try:
+                import numpy as _np  # type: ignore
+
+                sandbox_globals["np"] = _np
+            except Exception:
+                pass
+
+        if allow_pandas and pd is not None:
+            sandbox_globals["pd"] = pd  # type: ignore
+
         if extra_globals:
             sandbox_globals.update(extra_globals)
 
         sandbox_locals: Dict[str, Any] = {}
 
-        # Capture stdout and stderr
         import contextlib
         import io as _io
         import sys
@@ -293,10 +654,72 @@ class CodeSandbox:
             metadata={"locals_keys": list(sandbox_locals.keys())},
         )
 
+    def run_python_subprocess(
+        self,
+        code: str,
+        *,
+        timeout_sec: int = 30,
+        python_executable: str = "python",
+    ) -> CodeExecutionResult:
+        """
+        Run code in a separate Python process for extra isolation.
+
+        This loses direct access to extra_globals but gains:
+        - process level timeout
+        - separation from the main agent interpreter
+        """
+        if not code:
+            return CodeExecutionResult(
+                stdout="",
+                stderr="",
+                error="Empty code snippet",
+                metadata={"mode": "subprocess"},
+            )
+
+        if len(code) > self.max_code_chars:
+            return CodeExecutionResult(
+                stdout="",
+                stderr="",
+                error="Code too long for subprocess sandbox",
+                metadata={"mode": "subprocess", "truncated": True},
+            )
+
+        try:
+            proc = subprocess.run(
+                [python_executable, "-c", code],
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+            err = None
+            if proc.returncode != 0:
+                err = f"Non zero return code {proc.returncode}"
+            return CodeExecutionResult(
+                stdout=proc.stdout,
+                stderr=proc.stderr,
+                error=err,
+                metadata={"mode": "subprocess", "returncode": proc.returncode},
+            )
+        except subprocess.TimeoutExpired:
+            return CodeExecutionResult(
+                stdout="",
+                stderr="",
+                error=f"Timeout after {timeout_sec} seconds",
+                metadata={"mode": "subprocess", "timeout": timeout_sec},
+            )
+        except Exception as e:
+            return CodeExecutionResult(
+                stdout="",
+                stderr="",
+                error=str(e),
+                metadata={"mode": "subprocess"},
+            )
+
 
 # ----------------------------------------------------------
 # Data pipelines
 # ----------------------------------------------------------
+
 
 @dataclass
 class DataLoadResult:
@@ -305,23 +728,34 @@ class DataLoadResult:
     cols: int
     preview: List[Dict[str, Any]]
     error: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class DataPipelines:
     """
-    Data loading helpers for CSV, Excel, and simple SQL.
+    Data loading helpers for CSV, Excel, Parquet, JSON, and simple SQL.
 
     These are used for:
     - Loading experiment datasets
     - Feeding time series into RYE analysis
     - Pulling lab or biomarker tables
+    - Inspecting SQL tables via SQLite or optional SQLAlchemy
     """
 
     def __init__(self) -> None:
-        if pd is None:
-            self.has_pandas = False
-        else:
-            self.has_pandas = True
+        self.has_pandas = pd is not None
+
+    # Core frame helper
+    def _df_to_result(self, df: "pd.DataFrame", name: str) -> DataLoadResult:  # type: ignore[name-defined]
+        preview = df.head(10).to_dict(orient="records")  # type: ignore
+        return DataLoadResult(
+            name=name,
+            rows=int(df.shape[0]),
+            cols=int(df.shape[1]),
+            preview=preview,
+            error=None,
+            metadata={},
+        )
 
     def load_csv(self, file_bytes: bytes, name: str = "uploaded.csv") -> DataLoadResult:
         if not self.has_pandas:
@@ -335,14 +769,7 @@ class DataPipelines:
         try:
             buf = io.BytesIO(file_bytes)
             df = pd.read_csv(buf)  # type: ignore
-            preview = df.head(10).to_dict(orient="records")  # type: ignore
-            return DataLoadResult(
-                name=name,
-                rows=int(df.shape[0]),
-                cols=int(df.shape[1]),
-                preview=preview,
-                error=None,
-            )
+            return self._df_to_result(df, name)
         except Exception as e:
             return DataLoadResult(
                 name=name,
@@ -364,17 +791,222 @@ class DataPipelines:
         try:
             buf = io.BytesIO(file_bytes)
             df = pd.read_excel(buf)  # type: ignore
-            preview = df.head(10).to_dict(orient="records")  # type: ignore
-            return DataLoadResult(
-                name=name,
-                rows=int(df.shape[0]),
-                cols=int(df.shape[1]),
-                preview=preview,
-                error=None,
-            )
+            return self._df_to_result(df, name)
         except Exception as e:
             return DataLoadResult(
                 name=name,
+                rows=0,
+                cols=0,
+                preview=[],
+                error=str(e),
+            )
+
+    def load_parquet(self, file_bytes: bytes, name: str = "uploaded.parquet") -> DataLoadResult:
+        if not self.has_pandas:
+            return DataLoadResult(
+                name=name,
+                rows=0,
+                cols=0,
+                preview=[],
+                error="pandas is not installed",
+            )
+        try:
+            buf = io.BytesIO(file_bytes)
+            df = pd.read_parquet(buf)  # type: ignore
+            return self._df_to_result(df, name)
+        except Exception as e:
+            return DataLoadResult(
+                name=name,
+                rows=0,
+                cols=0,
+                preview=[],
+                error=str(e),
+            )
+
+    def load_json(self, file_bytes: bytes, name: str = "uploaded.json") -> DataLoadResult:
+        if not self.has_pandas:
+            # Fallback: simple JSON parse without DataFrame
+            try:
+                text = file_bytes.decode("utf-8")
+                data = json.loads(text)
+                if isinstance(data, list):
+                    preview = data[:10]
+                else:
+                    preview = [data]
+                return DataLoadResult(
+                    name=name,
+                    rows=len(preview),
+                    cols=len(preview[0]) if preview and isinstance(preview[0], dict) else 0,
+                    preview=preview,
+                    error=None,
+                    metadata={"raw_json": True},
+                )
+            except Exception as e:
+                return DataLoadResult(
+                    name=name,
+                    rows=0,
+                    cols=0,
+                    preview=[],
+                    error=str(e),
+                )
+        try:
+            text = file_bytes.decode("utf-8")
+            data = json.loads(text)
+            if isinstance(data, list):
+                df = pd.DataFrame(data)  # type: ignore
+            else:
+                df = pd.json_normalize(data)  # type: ignore
+            return self._df_to_result(df, name)
+        except Exception as e:
+            return DataLoadResult(
+                name=name,
+                rows=0,
+                cols=0,
+                preview=[],
+                error=str(e),
+            )
+
+    def load_ndjson(self, file_bytes: bytes, name: str = "uploaded.ndjson") -> DataLoadResult:
+        if not self.has_pandas:
+            return DataLoadResult(
+                name=name,
+                rows=0,
+                cols=0,
+                preview=[],
+                error="pandas is not installed",
+            )
+        try:
+            text = file_bytes.decode("utf-8")
+            lines = [ln for ln in text.splitlines() if ln.strip()]
+            records = []
+            for ln in lines:
+                try:
+                    records.append(json.loads(ln))
+                except Exception:
+                    continue
+            df = pd.DataFrame(records)  # type: ignore
+            return self._df_to_result(df, name)
+        except Exception as e:
+            return DataLoadResult(
+                name=name,
+                rows=0,
+                cols=0,
+                preview=[],
+                error=str(e),
+            )
+
+    def load_html_table_from_url(
+        self,
+        url: str,
+        table_index: int = 0,
+        name: Optional[str] = None,
+    ) -> DataLoadResult:
+        if not self.has_pandas:
+            return DataLoadResult(
+                name=name or f"html:{url}",
+                rows=0,
+                cols=0,
+                preview=[],
+                error="pandas is not installed",
+            )
+        if requests is None:
+            return DataLoadResult(
+                name=name or f"html:{url}",
+                rows=0,
+                cols=0,
+                preview=[],
+                error="requests is not installed",
+            )
+        try:
+            resp = requests.get(url, timeout=20)
+            resp.raise_for_status()
+            html = resp.text
+            tables = pd.read_html(html)  # type: ignore
+            if not tables:
+                return DataLoadResult(
+                    name=name or f"html:{url}",
+                    rows=0,
+                    cols=0,
+                    preview=[],
+                    error="No tables found in HTML",
+                )
+            index = max(0, min(table_index, len(tables) - 1))
+            df = tables[index]
+            return self._df_to_result(df, name or f"html_table_{index}")
+        except Exception as e:
+            return DataLoadResult(
+                name=name or f"html:{url}",
+                rows=0,
+                cols=0,
+                preview=[],
+                error=str(e),
+            )
+
+    def load_from_url(self, url: str) -> DataLoadResult:
+        """
+        Convenience helper:
+            - If URL ends with .csv, .json, .parquet, .xlsx, try those decoders
+            - Otherwise, try HTML table extraction
+        """
+        lower = url.lower()
+        try:
+            if any(lower.endswith(ext) for ext in [".csv", ".tsv"]):
+                if requests is None:
+                    return DataLoadResult(
+                        name=url,
+                        rows=0,
+                        cols=0,
+                        preview=[],
+                        error="requests is not installed",
+                    )
+                resp = requests.get(url, timeout=20)
+                resp.raise_for_status()
+                return self.load_csv(resp.content, name=os.path.basename(url))
+
+            if lower.endswith(".json"):
+                if requests is None:
+                    return DataLoadResult(
+                        name=url,
+                        rows=0,
+                        cols=0,
+                        preview=[],
+                        error="requests is not installed",
+                    )
+                resp = requests.get(url, timeout=20)
+                resp.raise_for_status()
+                return self.load_json(resp.content, name=os.path.basename(url))
+
+            if any(lower.endswith(ext) for ext in [".parquet"]):
+                if requests is None:
+                    return DataLoadResult(
+                        name=url,
+                        rows=0,
+                        cols=0,
+                        preview=[],
+                        error="requests is not installed",
+                    )
+                resp = requests.get(url, timeout=20)
+                resp.raise_for_status()
+                return self.load_parquet(resp.content, name=os.path.basename(url))
+
+            if any(lower.endswith(ext) for ext in [".xlsx", ".xls"]):
+                if requests is None:
+                    return DataLoadResult(
+                        name=url,
+                        rows=0,
+                        cols=0,
+                        preview=[],
+                        error="requests is not installed",
+                    )
+                resp = requests.get(url, timeout=20)
+                resp.raise_for_status()
+                return self.load_excel(resp.content, name=os.path.basename(url))
+
+            # Fallback to HTML table extraction
+            return self.load_html_table_from_url(url, table_index=0, name=url)
+        except Exception as e:
+            return DataLoadResult(
+                name=url,
                 rows=0,
                 cols=0,
                 preview=[],
@@ -417,10 +1049,47 @@ class DataPipelines:
                 error=str(e),
             )
 
+    def query_sqlalchemy(
+        self,
+        conn_str: str,
+        sql: str,
+        params: Optional[Dict[str, Any]] = None,
+        name: Optional[str] = None,
+    ) -> DataLoadResult:
+        """
+        Optional richer SQL via SQLAlchemy.
+
+        conn_str example:
+            "sqlite:///mydb.sqlite"
+            "postgresql://user:pass@host:5432/dbname"
+        """
+        if sqlalchemy is None or not self.has_pandas:
+            return DataLoadResult(
+                name=name or f"sqlalchemy:{conn_str}",
+                rows=0,
+                cols=0,
+                preview=[],
+                error="sqlalchemy or pandas is not installed",
+            )
+        try:
+            engine = sqlalchemy.create_engine(conn_str)  # type: ignore
+            with engine.connect() as conn:
+                df = pd.read_sql(sql, conn, params=params)  # type: ignore
+            return self._df_to_result(df, name or f"sqlalchemy:{conn_str}")
+        except Exception as e:
+            return DataLoadResult(
+                name=name or f"sqlalchemy:{conn_str}",
+                rows=0,
+                cols=0,
+                preview=[],
+                error=str(e),
+            )
+
 
 # ----------------------------------------------------------
 # Toolbelt facade for CoreAgent
 # ----------------------------------------------------------
+
 
 class Toolbelt:
     """
@@ -428,12 +1097,15 @@ class Toolbelt:
 
     Example usage inside CoreAgent:
 
-        tool_usage = ToolUsage()
+        tool_usage = self.tools.new_usage_tracker()
+
         page = self.tools.browser.fetch_page(url)
         tool_usage.web_calls += 1
+        tool_usage.add_tokens_for_text(page.text_snippet or "")
 
         code_res = self.tools.sandbox.run_python(code)
         tool_usage.code_execs += 1
+        tool_usage.add_tokens_for_code(code)
 
         energy_e = compute_energy(
             actions_taken=actions,
