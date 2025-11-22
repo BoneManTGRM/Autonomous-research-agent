@@ -13,6 +13,7 @@ Features
 - In-memory caching to avoid repeated API calls in long autonomous runs.
 - Swarm-aware metadata tags (agent_role, swarm_id) so multi agent runs
   can track which role or swarm requested which results.
+- Backoff and retry logic for 24 to 90 day autonomous sessions.
 
 Reparodynamics / TGRM:
     The Repair phase calls this tool to bring in new information from
@@ -43,13 +44,17 @@ Search levels (for 50x value):
         - Best when you really care about one question
 
 Environment safety controls:
-    - WEB_TOOL_MAX_LEVEL  : cap the maximum allowed level (default 3)
-    - WEB_TOOL_CACHE_SIZE : max cached queries before eviction (default 256)
+    - WEB_TOOL_MAX_LEVEL       : cap the maximum allowed level (default 3)
+    - WEB_TOOL_CACHE_SIZE      : max cached queries before eviction (default 256)
+    - WEB_TOOL_MAX_RETRIES     : max retry attempts for Tavily (default 3)
+    - WEB_TOOL_BASE_BACKOFF_S  : base backoff seconds for retries (default 2.0)
 """
 
 from __future__ import annotations
 
 import os
+import time
+import random
 from typing import List, Dict, Any, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -75,6 +80,7 @@ class WebResearchTool:
         - RYE aware: cheap by default, deeper when explicitly requested.
         - Swarm aware: can tag results with agent_role and swarm_id so
           multi agent and multi swarm runs can attribute work and cost.
+        - Long run safe: caching plus retry and backoff for 24 to 90 day runs.
         - Safe by default: stub behavior if Tavily is not configured.
     """
 
@@ -119,6 +125,19 @@ class WebResearchTool:
         except ValueError:
             self._cache_size_limit = 256
 
+        # Retry and backoff configuration for long autonomous runs
+        try:
+            self.max_retries: int = max(0, int(os.getenv("WEB_TOOL_MAX_RETRIES", "3")))
+        except ValueError:
+            self.max_retries = 3
+
+        try:
+            self.base_backoff_s: float = max(
+                0.5, float(os.getenv("WEB_TOOL_BASE_BACKOFF_S", "2.0"))
+            )
+        except ValueError:
+            self.base_backoff_s = 2.0
+
     # ------------------------------------------------------------------
     # CAPABILITY INTROSPECTION
     # ------------------------------------------------------------------
@@ -130,12 +149,15 @@ class WebResearchTool:
             - is Tavily live or in stub mode
             - what max_level is allowed by environment
             - what cache size is configured
+            - retry parameters for long runs
         """
         return {
             "tavily_live": bool(self.client is not None),
             "max_level": int(self.max_level),
             "cache_size_limit": int(self._cache_size_limit),
             "stub_mode": bool(self.client is None),
+            "max_retries": int(self.max_retries),
+            "base_backoff_s": float(self.base_backoff_s),
         }
 
     # ------------------------------------------------------------------
@@ -149,7 +171,7 @@ class WebResearchTool:
         topic: str,
     ) -> Tuple[str, int, int, str]:
         # Note: agent_role and swarm_id are not part of the cache key
-        # on purpose so that all roles swarms can reuse the same result
+        # on purpose so that all roles and swarms can reuse the same result
         # for the same (query, level, topic).
         return (query.strip(), int(level), int(max_results), topic.strip().lower())
 
@@ -188,7 +210,6 @@ class WebResearchTool:
             level 2, max_results 5  -> medium cost
             level 3, max_results 10 -> higher cost
         """
-        base = 1.0
         if level <= 1:
             base = 0.5
         elif level == 2:
@@ -197,6 +218,55 @@ class WebResearchTool:
             base = 1.7
         # Results scale cost a bit
         return base * (0.5 + 0.1 * max(1, max_results))
+
+    # ------------------------------------------------------------------
+    # INTERNAL: TAVILY WITH RETRIES
+    # ------------------------------------------------------------------
+    def _tavily_search_with_retries(
+        self,
+        query: str,
+        max_results: int,
+        topic: str,
+        search_depth: str,
+    ) -> Dict[str, Any]:
+        """Call Tavily with retry and exponential backoff.
+
+        Designed for 24 to 90 day autonomous runs where transient
+        network errors and rate limits are expected.
+        """
+        # If client is not available, this should never be called,
+        # but we guard anyway.
+        if self.client is None:
+            raise RuntimeError("Tavily client not initialised")
+
+        last_error: Optional[Exception] = None
+
+        # Zero retries means a single attempt
+        attempts = max(1, self.max_retries)
+
+        for attempt in range(1, attempts + 1):
+            try:
+                return self.client.search(
+                    query=query,
+                    max_results=max_results,
+                    topic=topic,
+                    search_depth=search_depth,
+                )
+            except Exception as e:
+                last_error = e
+                if attempt >= attempts:
+                    break
+
+                # Exponential backoff with jitter
+                sleep_time = (self.base_backoff_s * (2 ** (attempt - 1))) + random.uniform(
+                    0.1, 0.9
+                )
+                time.sleep(sleep_time)
+
+        # If we exit the loop, raise the last error for outer handler
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Unknown Tavily error without exception")
 
     # ------------------------------------------------------------------
     # REAL INTERNET SEARCH (WITH LEVELS AND SWARM TAGS)
@@ -220,11 +290,11 @@ class WebResearchTool:
                 Depth level:
                     1 = cheap/fast scan
                     2 = standard research (default)
-                    3 = deep dive + optional page fetch
+                    3 = deep dive plus optional page fetch
             max_results:
                 Maximum results to request from Tavily (upper bound).
             topic:
-                Tavily topic hint, e.g. "general", "science", etc.
+                Tavily topic hint, for example "general", "science", etc.
             agent_role:
                 Optional logical role label, such as "researcher",
                 "critic", "planner", etc. Added to each result for
@@ -267,7 +337,7 @@ class WebResearchTool:
         cached = self._get_from_cache(cache_key)
         if cached is not None:
             # Return a copy to avoid mutation from callers and tag
-            # with current role swarm if provided.
+            # with current role and swarm if provided.
             results_copy: List[Dict[str, Any]] = []
             for r in cached:
                 rr = dict(r)
@@ -280,26 +350,24 @@ class WebResearchTool:
 
         # STUB FALLBACK MODE
         if not self.client:
-            stub = [
-                {
-                    "title": f"[STUB] No Tavily key: query='{query}'",
-                    "snippet": (
-                        "Tavily API key missing or Tavily client not initialised. "
-                        f"Using placeholder result at level={safe_level} instead of real web search."
-                    ),
-                    "url": "",
-                }
-            ]
+            stub: Dict[str, Any] = {
+                "title": f"[STUB] No Tavily key: query='{query}'",
+                "snippet": (
+                    "Tavily API key missing or Tavily client not initialised. "
+                    f"Using placeholder result at level={safe_level} instead of real web search."
+                ),
+                "url": "",
+            }
             if agent_role is not None:
-                stub[0]["agent_role"] = agent_role
+                stub["agent_role"] = agent_role
             if swarm_id is not None:
-                stub[0]["swarm_id"] = swarm_id
-            self._store_in_cache(cache_key, stub)
-            return stub
+                stub["swarm_id"] = swarm_id
+            self._store_in_cache(cache_key, [stub])
+            return [stub]
 
-        # REAL Tavily API call
+        # REAL Tavily API call with retries
         try:
-            response = self.client.search(
+            response = self._tavily_search_with_retries(
                 query=query,
                 max_results=effective_max_results,
                 topic=topic,
@@ -327,19 +395,19 @@ class WebResearchTool:
                 results.append(res)
 
             if not results:
-                res: Dict[str, Any] = {
+                res2: Dict[str, Any] = {
                     "title": "No results found",
                     "snippet": "Tavily returned no results for this query.",
                     "url": "",
                 }
                 if agent_role is not None:
-                    res["agent_role"] = agent_role
+                    res2["agent_role"] = agent_role
                 if swarm_id is not None:
-                    res["swarm_id"] = swarm_id
-                results = [res]
+                    res2["swarm_id"] = swarm_id
+                results = [res2]
 
-            # Store version without role swarm tags so cache is reusable
-            cache_safe_results = []
+            # Store version without role and swarm tags so cache is reusable
+            cache_safe_results: List[Dict[str, Any]] = []
             for r in results:
                 r_copy = dict(r)
                 r_copy.pop("agent_role", None)
