@@ -1,45 +1,55 @@
-"""Paper tools: PDF ingestion, summarisation, and Semantic Scholar search.
+"""Paper Tool — 90-Day Safe PDF + Paper Engine
+Swarm-aware • Long-run hardened • Cached • Retry-capable
 
-This module gives the agent real paper handling ability:
-- Download PDFs from URLs
-- Extract text from PDFs
-- Summarise the text
-- Search Semantic Scholar for relevant papers
+Capabilities:
+    - Robust PDF ingestion from URL or local file
+    - Retry + backoff for long autonomous runs (24h–90d)
+    - In-memory caching to avoid re-parsing same PDFs
+    - Summarisation with adjustable limits
+    - Semantic Scholar search with structured fallback
+    - Swarm-aware metadata tagging
 """
+
+from __future__ import annotations
 
 import io
 import os
-from typing import Dict, List
+import time
+import random
+from typing import Dict, List, Tuple, Optional
 
 import requests
 from PyPDF2 import PdfReader
 
 
 class PaperTool:
-    """Tools for working with scientific papers and documents."""
+    """High-reliability scientific document ingestion tool."""
 
+    # Cache for long runs: (url_or_path) -> extracted_text
+    _cache: Dict[str, str] = {}
+
+    # Retry settings for long runs
+    max_retries = 3
+
+    # Semantic Scholar endpoint
+    SEM_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+
+    # ------------------------------------------------------------------
+    # PDF / FILE INGESTION
+    # ------------------------------------------------------------------
     def ingest(self, source: str) -> str:
-        """Ingest a document from a local file or URL.
+        """Ingest a document from URL or local path safely."""
 
-        If the source looks like a URL and ends in .pdf, we download and parse
-        the PDF. Otherwise we try to treat it as a local text file.
-        """
         source = source.strip()
+        if source in self._cache:
+            return self._cache[source]
 
         # Remote PDF
         if source.lower().startswith("http") and source.lower().endswith(".pdf"):
             try:
-                resp = requests.get(source, timeout=20)
-                resp.raise_for_status()
-                pdf_bytes = io.BytesIO(resp.content)
-                reader = PdfReader(pdf_bytes)
-                text_chunks: List[str] = []
-                for page in reader.pages:
-                    try:
-                        text_chunks.append(page.extract_text() or "")
-                    except Exception:
-                        continue
-                return "\n".join(text_chunks)
+                text = self._download_pdf_with_retries(source)
+                self._cache[source] = text
+                return text
             except Exception as e:
                 return f"[Error downloading or parsing PDF: {e}]"
 
@@ -47,76 +57,148 @@ class PaperTool:
         if os.path.exists(source):
             try:
                 with open(source, "r", encoding="utf-8", errors="ignore") as f:
-                    return f.read()
+                    text = f.read()
+                self._cache[source] = text
+                return text
             except Exception as e:
                 return f"[Error reading local file: {e}]"
 
-        # Fallback
         return f"[Could not ingest source: {source}]"
 
-    def summarise(self, text: str, max_chars: int = 800) -> str:
-        """Produce a simple summary of the document.
+    def _download_pdf_with_retries(self, url: str) -> str:
+        """Long-run hardened download method with retry + backoff."""
 
-        This is a naive heuristic: we take the first max_chars, trying to
-        preserve line breaks. You can later plug in an LLM here.
-        """
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                resp = requests.get(url, timeout=25)
+                resp.raise_for_status()
+
+                pdf_bytes = io.BytesIO(resp.content)
+                reader = PdfReader(pdf_bytes)
+                text_chunks: List[str] = []
+
+                for page in reader.pages:
+                    try:
+                        text_chunks.append(page.extract_text() or "")
+                    except Exception:
+                        continue
+
+                return "\n".join(text_chunks)
+
+            except Exception:
+                if attempt == self.max_retries:
+                    raise
+                time.sleep((2 ** attempt) + random.uniform(0.1, 1.3))
+
+        return "[PDF download failed]"
+
+    # ------------------------------------------------------------------
+    # SUMMARISATION
+    # ------------------------------------------------------------------
+    def summarise(self, text: str, max_chars: int = 1200) -> str:
+        """Long-run safe summarization for PDF or document text."""
+
         if not text:
             return "[Empty document]"
 
         if len(text) <= max_chars:
             return text.strip()
 
-        summary = text[:max_chars].strip()
-        return summary + " ..."
+        return text[:max_chars].strip() + " ..."
 
-    def search_semantic_scholar(self, query: str, limit: int = 5) -> List[Dict[str, str]]:
-        """Search Semantic Scholar for papers related to a query.
+    # ------------------------------------------------------------------
+    # SEMANTIC SCHOLAR SEARCH
+    # ------------------------------------------------------------------
+    # Cache identical queries
+    _sem_cache: Dict[Tuple[str, int], List[Dict[str, str]]] = {}
 
-        Uses the public Semantic Scholar API (no key required).
-        """
-        url = "https://api.semanticscholar.org/graph/v1/paper/search"
+    def search_semantic_scholar(
+        self,
+        query: str,
+        limit: int = 5,
+        *,
+        agent_role: Optional[str] = None,
+        swarm_id: Optional[str] = None,
+    ) -> List[Dict[str, str]]:
+        """Swarm-aware Semantic Scholar search."""
+
+        if not query:
+            return []
+
+        cache_key = (query, limit)
+        if cache_key in self._sem_cache:
+            return self._tag_sem_results(self._sem_cache[cache_key], agent_role, swarm_id)
+
+        url = self.SEM_URL
         params = {
             "query": query,
             "limit": limit,
-            "fields": "title,url,year,venue"
+            "fields": "title,url,year,venue,abstract"
         }
+
         try:
             resp = requests.get(url, params=params, timeout=15)
+            resp.raise_for_status()
             data = resp.json()
         except Exception as e:
-            return [
-                {
-                    "title": "Semantic Scholar error",
-                    "url": "",
-                    "snippet": str(e),
-                }
-            ]
+            stub = [{
+                "title": f"[STUB] Semantic Scholar error for '{query}'",
+                "url": "",
+                "snippet": str(e),
+                "year": "",
+                "venue": "",
+            }]
+            self._sem_cache[cache_key] = stub
+            return self._tag_sem_results(stub, agent_role, swarm_id)
 
         results: List[Dict[str, str]] = []
-        for paper in data.get("data", []):
-            title = paper.get("title", "No title")
-            paper_url = paper.get("url", "")
-            year = paper.get("year", "")
-            venue = paper.get("venue", "")
+        for p in data.get("data", []):
             snippet_parts = []
-            if year:
-                snippet_parts.append(f"Year: {year}")
-            if venue:
-                snippet_parts.append(f"Venue: {venue}")
-            snippet = " | ".join(snippet_parts) if snippet_parts else ""
+            if p.get("year"):
+                snippet_parts.append(f"Year: {p.get('year')}")
+            if p.get("venue"):
+                snippet_parts.append(f"Venue: {p.get('venue')}")
+
+            snippet = " | ".join(snippet_parts)
+
             results.append(
                 {
-                    "title": title,
-                    "url": paper_url,
+                    "title": p.get("title", "No title"),
+                    "url": p.get("url", ""),
                     "snippet": snippet,
+                    "year": p.get("year", ""),
+                    "venue": p.get("venue", ""),
                 }
             )
+
         if not results:
-            results.append(
-                {
-                    "title": "No Semantic Scholar results",
-                    "url": "",
-                    "snippet": "",
-                }
-            )
-        return results
+            results = [{
+                "title": "No Semantic Scholar results found",
+                "url": "",
+                "snippet": "",
+                "year": "",
+                "venue": "",
+            }]
+
+        self._sem_cache[cache_key] = results
+        return self._tag_sem_results(results, agent_role, swarm_id)
+
+    def _tag_sem_results(
+        self,
+        results: List[Dict[str, str]],
+        agent_role: Optional[str],
+        swarm_id: Optional[str],
+    ) -> List[Dict[str, str]]:
+        """Attach swarm metadata (not stored in cache)."""
+
+        final: List[Dict[str, str]] = []
+
+        for r in results:
+            rr = dict(r)
+            if agent_role:
+                rr["agent_role"] = agent_role
+            if swarm_id:
+                rr["swarm_id"] = swarm_id
+            final.append(rr)
+
+        return final
