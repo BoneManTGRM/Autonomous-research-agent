@@ -30,6 +30,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
+from datetime import datetime
 
 import streamlit as st
 import yaml
@@ -57,6 +58,9 @@ SWARM_ROLES: List[Tuple[str, str]] = [
 # Safe upper bound for swarm size on typical Render / Streamlit setups.
 # All swarm agents are still run sequentially in a single process.
 MAX_SWARM_AGENTS: int = 32
+
+# Limit points in charts so the frontend does not hit RangeError on very long runs.
+MAX_POINTS_FOR_CHARTS: int = 1000
 
 
 # -------------------------------------------------------------------
@@ -176,7 +180,6 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
                 src = c.get("source", "")
                 title = c.get("title", "")
                 url = c.get("url", "")
-                # Replaced em dash with simple hyphen for user preference
                 st.write(f"- [{src}] {title} - {url}")
 
 
@@ -244,6 +247,109 @@ def role_specific_goal(base_goal: str, role: str) -> str:
 
 
 # -------------------------------------------------------------------
+# Outcome focused summary helper
+# -------------------------------------------------------------------
+def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
+    """Create a markdown summary focused on outcomes and run time."""
+    if not history:
+        return "# Outcome summary\n\nNo cycles have been recorded yet."
+
+    total_cycles = len(history)
+    roles = sorted({str(e.get("role", "agent")) for e in history})
+    domains = sorted({str(e.get("domain", "general")) for e in history})
+
+    # Parse timestamps if possible
+    timestamps: List[datetime] = []
+    for e in history:
+        ts = e.get("timestamp")
+        if isinstance(ts, str):
+            try:
+                timestamps.append(datetime.fromisoformat(ts))
+            except Exception:
+                continue
+
+    runtime_text = "Runtime not available"
+    if len(timestamps) >= 2:
+        start = min(timestamps)
+        end = max(timestamps)
+        delta = end - start
+        total_seconds = int(delta.total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        runtime_text = f"Approx runtime: {hours} hours {minutes} minutes (from first to last cycle)."
+
+    # RYE stats
+    rye_vals: List[float] = []
+    for e in history:
+        v = e.get("RYE")
+        if isinstance(v, (int, float)):
+            rye_vals.append(float(v))
+    rye_text = "RYE statistics not available."
+    if rye_vals:
+        avg_rye = sum(rye_vals) / len(rye_vals)
+        rye_text = (
+            f"RYE statistics:\n"
+            f"- Min RYE: {min(rye_vals):.3f}\n"
+            f"- Max RYE: {max(rye_vals):.3f}\n"
+            f"- Average RYE: {avg_rye:.3f}"
+        )
+
+    # Collect candidate findings from notes, repairs, and hypotheses
+    findings: List[str] = []
+    for e in history:
+        for n in e.get("notes_added", []) or []:
+            findings.append(str(n))
+        for r in e.get("repairs", []) or []:
+            findings.append(str(r))
+        for h in e.get("hypotheses", []) or []:
+            if isinstance(h, dict):
+                txt = h.get("text", "")
+            else:
+                txt = str(h)
+            if txt:
+                findings.append(txt)
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique_findings: List[str] = []
+    for f in findings:
+        f_clean = f.strip()
+        if not f_clean:
+            continue
+        if f_clean in seen:
+            continue
+        seen.add(f_clean)
+        unique_findings.append(f_clean)
+        if len(unique_findings) >= 80:
+            break
+
+    lines: List[str] = []
+    lines.append("# Outcome summary\n")
+    lines.append("## Run overview\n")
+    lines.append(f"- Total cycles: {total_cycles}")
+    lines.append(f"- Roles used: {', '.join(roles) if roles else 'None recorded'}")
+    lines.append(f"- Domains used: {', '.join(domains) if domains else 'None recorded'}")
+    lines.append(f"- {runtime_text}\n")
+    lines.append("## RYE and efficiency\n")
+    lines.append(rye_text + "\n")
+    lines.append("## Candidate findings\n")
+    if not unique_findings:
+        lines.append("No candidate findings extracted from notes, repairs, or hypotheses.")
+    else:
+        lines.append(
+            "Below are candidate interventions, mechanisms, treatments, or key ideas extracted "
+            "from notes, repairs, and hypotheses. This is a raw list to review, not medical advice."
+        )
+        for f in unique_findings:
+            # Keep bullets short-ish
+            if len(f) > 400:
+                f = f[:400] + "..."
+            lines.append(f"- {f}")
+
+    return "\n".join(lines)
+
+
+# -------------------------------------------------------------------
 # Main UI
 # -------------------------------------------------------------------
 def main() -> None:
@@ -280,7 +386,7 @@ def main() -> None:
     preset_keys = list(PRESETS.keys())
     preset_labels = [PRESETS[k]["label"] for k in preset_keys]
 
-    default_preset_index = 0    # default to first key
+    default_preset_index = 0  # default to first key
     if "general" in preset_keys:
         default_preset_index = preset_keys.index("general")
 
@@ -427,7 +533,7 @@ def main() -> None:
     run_button = st.button("Run agent")
 
     # ------------------------------
-    # Run cycles
+       # Run cycles
     # ------------------------------
     if run_button:
         st.write(f"Running agent with preset: {preset.get('label', selected_label)} (domain: {domain_tag})")
@@ -458,7 +564,7 @@ def main() -> None:
             if enable_swarm and swarm_roles:
                 total_cycles = len(swarm_roles) * int(cycles)
                 st.info(
-                    f"Manual Swarm mode: {len(swarm_roles)} agents × {int(cycles)} cycles "
+                    f"Manual Swarm mode: {len(swarm_roles)} agents x {int(cycles)} cycles "
                     f"(total {total_cycles} mini-cycles)."
                 )
                 for i in range(int(cycles)):
@@ -541,8 +647,6 @@ def main() -> None:
             if forever_flag:
                 effective_max_cycles = 10_000_000
             else:
-                # For timed runs, cycles are not the primary limiter,
-                # so we pick a large cap so time is the real stop condition.
                 effective_max_cycles = 10_000_000
 
             # Swarm + Forever is ambiguous in a single-threaded UI, so we
@@ -622,7 +726,7 @@ def main() -> None:
     if not history:
         st.write("No cycles yet.")
     else:
-        rows = []
+        rows: List[Dict[str, Any]] = []
         for entry in history:
             goal_text = entry.get("goal", "") or ""
             rows.append(
@@ -642,10 +746,14 @@ def main() -> None:
 
         st.markdown("### Efficiency Charts")
 
-        cycles_x = [r["cycle"] for r in rows if r["cycle"] is not None]
-        rye_y = [r["RYE"] for r in rows]
-        delta_y = [r["delta_R"] for r in rows]
-        energy_y = [r["energy_E"] for r in rows]
+        # To avoid frontend RangeError on very long runs,
+        # only send the most recent MAX_POINTS_FOR_CHARTS points to the charts.
+        plot_rows = rows[-MAX_POINTS_FOR_CHARTS:]
+
+        cycles_x = [r["cycle"] for r in plot_rows if r["cycle"] is not None]
+        rye_y = [r["RYE"] for r in plot_rows]
+        delta_y = [r["delta_R"] for r in plot_rows]
+        energy_y = [r["energy_E"] for r in plot_rows]
 
         if cycles_x:
             st.line_chart({"RYE": rye_y})
@@ -700,20 +808,33 @@ def main() -> None:
     st.subheader("Generate report")
 
     st.caption(
-        "Build a summarized report from the current cycle history. "
-        "You can re-run this after long autonomous sessions."
+        "Build summarized reports from the current cycle history. "
+        "You can re-run these after long autonomous sessions."
     )
 
-    if st.button("Generate report from full history"):
-        report_md = generate_report(memory_store=memory, goal=None)
-        st.markdown(report_md)
+    col_rep1, col_rep2 = st.columns(2)
 
-        st.download_button(
-            "Download report as Markdown",
-            data=report_md,
-            file_name="autonomous_research_report.md",
-            mime="text/markdown",
-        )
+    with col_rep1:
+        if st.button("Generate full history report"):
+            report_md = generate_report(memory_store=memory, goal=None)
+            st.markdown(report_md)
+            st.download_button(
+                "Download report as Markdown",
+                data=report_md,
+                file_name="autonomous_research_report.md",
+                mime="text/markdown",
+            )
+
+    with col_rep2:
+        if st.button("Generate outcome focused summary"):
+            outcome_md = build_outcome_summary(memory.get_cycle_history())
+            st.markdown(outcome_md)
+            st.download_button(
+                "Download outcome summary",
+                data=outcome_md,
+                file_name="autonomous_outcome_summary.md",
+                mime="text/markdown",
+            )
 
 
 if __name__ == "__main__":
