@@ -38,7 +38,17 @@ import yaml
 from agent.core_agent import CoreAgent
 from agent.memory_store import MemoryStore
 from agent.presets import PRESETS, get_preset  # domain presets
-from agent.report_generator import generate_report  # report builder
+from agent.report_generator import (
+    generate_report,
+    generate_findings_report,
+)  # report builders
+from agent.rye_metrics import (
+    rolling_rye,
+    efficiency_trend,
+    regression_rye_slope,
+    stability_index,
+    recovery_momentum,
+)
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
@@ -370,7 +380,6 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
             "from notes, repairs, and hypotheses. This is a raw list to review, not medical advice."
         )
         for f in unique_findings:
-            # Keep bullets short
             if len(f) > 400:
                 f = f[:400] + "..."
             lines.append(f"- {f}")
@@ -469,7 +478,6 @@ def main() -> None:
             st.sidebar.write(f"- **{name}**: {desc}")
 
     # Multi agent toggle (classic researcher plus critic)
-    # Disabled when swarm is on, because swarm already includes critic logic.
     multi_agent = False
     if not enable_swarm:
         multi_agent = st.sidebar.checkbox(
@@ -777,6 +785,14 @@ def main() -> None:
             save_control_state(new_state)
             st.warning("Engine status set to stopped. Worker should halt after the current cycle.")
 
+    # Live worker_state snapshot from MemoryStore
+    st.markdown("#### Worker live status (from MemoryStore)")
+    worker_state = memory.get_worker_state()
+    if worker_state:
+        st.json(worker_state)
+    else:
+        st.write("No worker_state saved yet.")
+
     # ------------------------------
     # History + Charts
     # ------------------------------
@@ -826,6 +842,27 @@ def main() -> None:
             st.line_chart({"energy_E": energy_y})
             st.caption("Energy per cycle (approximate effort cost).")
 
+        # Advanced RYE diagnostics from rye_metrics
+        st.markdown("### Advanced RYE diagnostics")
+
+        adv_cols = st.columns(5)
+        roll_val = rolling_rye(history, window=10)
+        trend_val = efficiency_trend(history)
+        slope_val = regression_rye_slope(history)
+        stability_val = stability_index(history)
+        momentum_val = recovery_momentum(history)
+
+        with adv_cols[0]:
+            st.metric("Rolling RYE (10)", f"{roll_val:.3f}" if roll_val is not None else "n/a")
+        with adv_cols[1]:
+            st.metric("RYE trend", f"{trend_val:.3f}" if trend_val is not None else "n/a")
+        with adv_cols[2]:
+            st.metric("RYE slope", f"{slope_val:.4f}" if slope_val is not None else "n/a")
+        with adv_cols[3]:
+            st.metric("Stability index", f"{stability_val:.3f}" if stability_val is not None else "n/a")
+        with adv_cols[4]:
+            st.metric("Recovery momentum", f"{momentum_val:.3f}" if momentum_val is not None else "n/a")
+
         with st.expander("Raw JSON"):
             st.code(json.dumps(history, indent=2), language="json")
 
@@ -870,30 +907,41 @@ def main() -> None:
 
     st.caption(
         "Build summarized reports from the current cycle history. "
-        "You can re run these after long autonomous sessions."
+        "You can rerun these after long autonomous sessions."
     )
 
-    col_rep1, col_rep2 = st.columns(2)
+    col_rep1, col_rep2, col_rep3 = st.columns(3)
 
     with col_rep1:
-        if st.button("Generate full history report"):
+        if st.button("Full history report"):
             report_md = generate_report(memory_store=memory, goal=None)
             st.markdown(report_md)
             st.download_button(
-                "Download report as Markdown",
+                "Download full report",
                 data=report_md,
                 file_name="autonomous_research_report.md",
                 mime="text/markdown",
             )
 
     with col_rep2:
-        if st.button("Generate outcome focused summary"):
+        if st.button("Outcome focused summary"):
             outcome_md = build_outcome_summary(memory.get_cycle_history())
             st.markdown(outcome_md)
             st.download_button(
                 "Download outcome summary",
                 data=outcome_md,
                 file_name="autonomous_outcome_summary.md",
+                mime="text/markdown",
+            )
+
+    with col_rep3:
+        if st.button("Findings report (cures, treatments)"):
+            findings_md = generate_findings_report(memory_store=memory, goal=None)
+            st.markdown(findings_md)
+            st.download_button(
+                "Download findings report",
+                data=findings_md,
+                file_name="autonomous_findings_report.md",
                 mime="text/markdown",
             )
 
