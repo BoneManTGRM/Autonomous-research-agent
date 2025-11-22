@@ -45,6 +45,17 @@ to surface higher-level issues such as:
 These appear as additional issue codes and pass through the same
 TGRM pipeline (Test → Detect → Repair → Verify) without breaking any
 existing behavior.
+
+Engine-worker / 90-day architecture
+-----------------------------------
+This module is designed to be called by:
+    - CoreAgent.run_cycle(...) for single cycles
+    - A long-running engine_worker that orchestrates many cycles
+
+To support that:
+    - Each run_cycle returns both a machine log and a human summary.
+    - Both carry delta_R, energy_E, RYE, hypotheses, citations, and
+      candidate_interventions for cure/treatment-style reports.
 """
 
 from __future__ import annotations
@@ -205,6 +216,14 @@ class TGRMLoop:
         for h in hypotheses:
             self.memory_store.add_hypothesis(goal, h["text"], score=h.get("confidence"))
 
+        # Candidate interventions / cures / treatments (lightweight extractor)
+        candidate_interventions = self._extract_candidate_interventions(
+            goal=goal,
+            domain=domain_tag,
+            notes=new_notes,
+            citations=citations,
+        )
+
         # Compute metrics (Reparodynamics: ΔR / E)
         delta_r = compute_delta_r(
             issues_before=len(issues),
@@ -239,6 +258,7 @@ class TGRMLoop:
             "notes_added": notes_added,
             "citations": citations,
             "hypotheses": hypotheses,
+            "candidate_interventions": candidate_interventions,
             # Raw stats and metrics
             "stats": stats,
             "delta_R": delta_r,
@@ -253,7 +273,7 @@ class TGRMLoop:
         # Log cycle into memory
         self.memory_store.log_cycle(cycle_summary)
 
-        # Human-readable summary (what Streamlit shows per cycle)
+        # Human-readable summary (what Streamlit / engine_worker shows per cycle)
         human_summary = {
             "cycle": cycle_index,
             "role": role,
@@ -268,6 +288,7 @@ class TGRMLoop:
             "notes_added": notes_added,
             "citations": citations,
             "hypotheses": hypotheses,
+            "candidate_interventions": candidate_interventions,
             "maintenance_mode": maintenance_mode,
             "tgrm_level": self.tgrm_level,
         }
@@ -1189,3 +1210,44 @@ class TGRMLoop:
 
         note_text = "\n".join(note_lines)
         return note_text, citations, stats
+
+    # ------------------------------------------------------------------
+    # Candidate intervention extractor
+    # ------------------------------------------------------------------
+    def _extract_candidate_interventions(
+        self,
+        goal: str,
+        domain: str,
+        notes: List[Dict[str, Any]],
+        citations: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Lightweight extractor for candidate interventions / cures / treatments.
+
+        This does NOT try to be medically authoritative. It simply:
+            - scans citations for unique titles
+            - returns them as candidate entries tagged with goal + domain
+
+        The real filtering / ranking / safety checks can be done later
+        in report_generator.py or in downstream human review.
+        """
+        candidates: List[Dict[str, Any]] = []
+        seen_titles: set[str] = set()
+
+        for c in citations:
+            title = (c.get("title") or "").strip()
+            if not title:
+                continue
+            if title in seen_titles:
+                continue
+            seen_titles.add(title)
+
+            entry = {
+                "label": title,
+                "source": c.get("source"),
+                "url": c.get("url"),
+                "goal": goal,
+                "domain": domain or "general",
+            }
+            candidates.append(entry)
+
+        return candidates
