@@ -1,18 +1,21 @@
-"""Report generator for the Autonomous Research Agent.
+"""Extended Report Generator for the Autonomous Research Agent.
 
-Builds a human-readable markdown report from the logged cycle history.
-Uses RYE metrics as a core efficiency lens (Reparodynamics view).
+Outputs:
+1. Full Reparodynamics Report (original format)
+2. Targeted Findings Report (cures/treatments/interventions only)
 """
 
 from __future__ import annotations
-
 from typing import Any, Dict, List, Optional
 
 from .rye_metrics import rolling_rye, efficiency_trend
 
 
+# ---------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------
 def _safe_float(x: Any, default: float = 0.0) -> float:
-    """Best-effort conversion to float, without throwing."""
+    """Best-effort conversion to float."""
     try:
         if isinstance(x, (int, float)):
             return float(x)
@@ -23,21 +26,32 @@ def _safe_float(x: Any, default: float = 0.0) -> float:
         return default
 
 
+def _extract_session_runtime(timestamps: List[str]) -> Optional[str]:
+    """Return human-readable runtime if timestamps exist."""
+    if not timestamps:
+        return None
+
+    from datetime import datetime
+
+    try:
+        fmt = "%Y-%m-%dT%H:%M:%S.%fZ"
+        first = datetime.strptime(sorted(timestamps)[0], fmt)
+        last = datetime.strptime(sorted(timestamps)[-1], fmt)
+        diff = last - first
+        hours = diff.total_seconds() / 3600
+        minutes = diff.total_seconds() / 60
+
+        return f"{hours:.2f} hours ({minutes:.1f} minutes)"
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------
+# FULL REPORT (Original)
+# ---------------------------------------------------------
 def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
-    """Generate a markdown report from the agent's history.
+    """Generate full Reparodynamics markdown report."""
 
-    Args:
-        memory_store:
-            The MemoryStore instance used by the agent.
-        goal:
-            Optional filter by goal string. If provided, only cycles
-            matching that goal are considered. If None, the full history
-            is used.
-
-    Returns:
-        str: Markdown-formatted report text.
-    """
-    # For now we only rely on get_cycle_history(), which you already have.
     all_cycles: List[Dict[str, Any]] = memory_store.get_cycle_history()
 
     if goal:
@@ -48,27 +62,18 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     n_cycles = len(cycles)
 
     if n_cycles == 0:
-        return "# Autonomous Research Agent Report\n\nNo cycles have been logged yet."
+        return "# Autonomous Research Agent Report\n\nNo cycles logged."
 
-    # Aggregate basic stats
-    rye_values: List[float] = []
-    delta_values: List[float] = []
-    energy_values: List[float] = []
-
-    domains = set()
-    goals_seen = set()
-    timestamps: List[str] = []
-
-    all_hypotheses: List[Dict[str, Any]] = []
-    all_citations: List[Dict[str, Any]] = []
+    # Metric stores
+    rye_values, delta_values, energy_values = [], [], []
+    domains, goals_seen, timestamps = set(), set(), []
+    all_hypotheses, all_citations = [], []
 
     for c in cycles:
-        # Metrics (robust to weird types)
         rye_values.append(_safe_float(c.get("RYE"), 0.0))
         delta_values.append(_safe_float(c.get("delta_R"), 0.0))
         energy_values.append(_safe_float(c.get("energy_E"), 0.0))
 
-        # Meta
         domains.add(c.get("domain", "general"))
         goals_seen.add(c.get("goal", ""))
 
@@ -76,11 +81,10 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
         if isinstance(ts, str) and ts:
             timestamps.append(ts)
 
-        # Hypotheses + citations
+        # Hypotheses and citations
         hyps = c.get("hypotheses") or []
         cits = c.get("citations") or []
 
-        # Normalize hypotheses to dicts for display
         for h in hyps:
             if isinstance(h, dict):
                 all_hypotheses.append(h)
@@ -91,30 +95,30 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
             if isinstance(ct, dict):
                 all_citations.append(ct)
 
-    # Strip zeros if they were all defaulted
-    rye_values = [v for v in rye_values if v != 0.0] or [0.0]
-    delta_values = [v for v in delta_values if v != 0.0] or [0.0]
-    energy_values = [v for v in energy_values if v != 0.0] or [0.0]
-
+    # Compute aggregates
     avg_rye = sum(rye_values) / len(rye_values) if rye_values else 0.0
     avg_delta = sum(delta_values) / len(delta_values) if delta_values else 0.0
     avg_energy = sum(energy_values) / len(energy_values) if energy_values else 0.0
 
     roll = rolling_rye(cycles, window=10)
     trend = efficiency_trend(cycles)
+    runtime = _extract_session_runtime(timestamps)
 
-    # Build report lines
-    lines: List[str] = []
-    lines.append("# Autonomous Research Agent Report")
-    lines.append("")
+    # Build report
+    lines = []
+    lines.append("# Autonomous Research Agent Report\n")
 
+    # Runtime
+    if runtime:
+        lines.append(f"**Session runtime:** {runtime}\n")
+
+    # Goals
     if goal:
-        lines.append(f"**Filtered goal:** {goal}")
+        lines.append(f"**Filtered goal:** {goal}\n")
     else:
-        # Summarize distinct goals briefly
         goals_list = [g for g in goals_seen if g]
         if goals_list:
-            lines.append("**Goals touched in this session:**")
+            lines.append("**Goals touched during session:**")
             for g in goals_list[:10]:
                 trimmed = g if len(g) <= 100 else g[:97] + "..."
                 lines.append(f"- {trimmed}")
@@ -122,66 +126,58 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
                 lines.append(f"- ... and {len(goals_list) - 10} more")
         lines.append("")
 
-    # Session time span (best effort from timestamps)
+    # Timestamps
     if timestamps:
         first_ts = sorted(timestamps)[0]
         last_ts = sorted(timestamps)[-1]
-        lines.append("**Session time span (UTC, best-effort from logs):**")
+        lines.append("**Time span (UTC):**")
         lines.append(f"- First cycle: `{first_ts}`")
-        lines.append(f"- Last cycle: `{last_ts}`")
-        lines.append("")
+        lines.append(f"- Last cycle: `{last_ts}`\n")
 
-    # Core stats
-    lines.append("## Overall statistics")
-    lines.append("")
+    # Stats
+    lines.append("## Overall statistics\n")
     lines.append(f"- Total cycles: **{n_cycles}**")
-    lines.append(f"- Domains involved: **{', '.join(sorted(domains))}**")
-    lines.append(f"- Average RYE: **{avg_rye:.3f}**")
-    lines.append(f"- Average ΔR per cycle: **{avg_delta:.3f}**")
-    lines.append(f"- Average energy per cycle: **{avg_energy:.3f}**")
+    lines.append(f"- Domains: **{', '.join(sorted(domains))}**")
+    lines.append(f"- Avg RYE: **{avg_rye:.3f}**")
+    lines.append(f"- Avg ΔR: **{avg_delta:.3f}**")
+    lines.append(f"- Avg Energy: **{avg_energy:.3f}**")
+
     if roll is not None:
-        lines.append(f"- Rolling RYE (last 10 cycles): **{roll:.3f}**")
+        lines.append(f"- Rolling RYE (last 10): **{roll:.3f}**")
+
     if trend is not None:
         direction = "improving" if trend > 0 else "declining" if trend < 0 else "flat"
-        lines.append(f"- RYE trend (recent - old): **{trend:.3f}** ({direction} efficiency)")
+        lines.append(f"- RYE trend: **{trend:.3f}** ({direction})")
+
     lines.append("")
 
-    # Hypotheses section
-    lines.append("## Generated hypotheses")
-    lines.append("")
+    # Hypotheses
+    lines.append("## Generated hypotheses\n")
     if not all_hypotheses:
-        lines.append("No hypotheses were logged in this session.")
+        lines.append("No hypotheses generated.\n")
     else:
-        for i, h in enumerate(all_hypotheses[:50], start=1):
-            text = h.get("text", "")
+        for i, h in enumerate(all_hypotheses[:60], start=1):
+            t = h.get("text", "")
             conf = h.get("confidence")
             if conf is not None:
-                lines.append(f"{i}. {text} _(confidence ~ {conf})_")
+                lines.append(f"{i}. {t} _(confidence {conf})_")
             else:
-                lines.append(f"{i}. {text}")
-        if len(all_hypotheses) > 50:
-            lines.append(f"... and {len(all_hypotheses) - 50} more hypotheses.")
-    lines.append("")
+                lines.append(f"{i}. {t}")
+        if len(all_hypotheses) > 60:
+            lines.append(f"... and {len(all_hypotheses) - 60} more.\n")
 
-    # Citations section
-    lines.append("## Key citations (sources used)")
-    lines.append("")
+    # Citations
+    lines.append("\n## Key citations\n")
     if not all_citations:
-        lines.append("No external citations were recorded.")
+        lines.append("No citations recorded.\n")
     else:
-        # Collapse duplicates by (source, title, url)
         seen = set()
-        unique_cites: List[Dict[str, Any]] = []
+        unique_cites = []
         for ct in all_citations:
-            key = (
-                str(ct.get("source", "")),
-                str(ct.get("title", "")),
-                str(ct.get("url", "")),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            unique_cites.append(ct)
+            key = (ct.get("source"), ct.get("title"), ct.get("url"))
+            if key not in seen:
+                seen.add(key)
+                unique_cites.append(ct)
 
         for i, ct in enumerate(unique_cites[:50], start=1):
             src = ct.get("source", "web")
@@ -191,23 +187,81 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
             if url:
                 lines.append(f"   - {url}")
         if len(unique_cites) > 50:
-            lines.append(f"... and {len(unique_cites) - 50} more sources.")
-    lines.append("")
+            lines.append(f"... and {len(unique_cites) - 50} more.\n")
 
-    # Reparodynamic interpretation
-    lines.append("## Reparodynamic interpretation")
-    lines.append("")
+    # Interpretation
+    lines.append("\n## Reparodynamics interpretation\n")
     lines.append(
-        "From a Reparodynamics perspective, this session represents a sequence of TGRM cycles "
-        "(Test → Detect → Repair → Verify) where the agent attempted to reduce defects "
-        "(gaps, TODOs, contradictions) while minimizing effort."
+        "This session reflects a sequence of TGRM cycles (Test → Detect → Repair → Verify). "
+        "RYE expresses how much verified improvement (ΔR) occurred per unit energy (E). "
+        "Trend > 0 indicates increasing repair efficiency."
     )
-    lines.append(
-        f"The average RYE of **{avg_rye:.3f}** captures how much verified improvement (ΔR) "
-        "was achieved per unit of energy (E). A positive RYE trend suggests that the system "
-        "is learning to repair itself more efficiently over time, while a negative trend "
-        "indicates diminishing returns or increasing repair difficulty."
-    )
-    lines.append("")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------
+# TARGETED FINDINGS REPORT
+# ---------------------------------------------------------
+def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> str:
+    """
+    NEW: Extracts actionable findings such as:
+    - Possible cures
+    - Potential treatments
+    - Interventions
+    - Mechanisms
+    - Priority-ranked items
+    """
+
+    all_cycles = memory_store.get_cycle_history()
+
+    if goal:
+        cycles = [c for c in all_cycles if (c.get("goal") or "") == goal]
+    else:
+        cycles = list(all_cycles)
+
+    if not cycles:
+        return "# Findings Report\n\nNo cycles found."
+
+    findings = []
+    timestamps = []
+
+    KEYWORDS = [
+        "treatment", "cure", "therapy",
+        "intervention", "mechanism",
+        "pathway", "target", "biomarker",
+        "drug", "compound", "protocol",
+        "longevity", "anti-aging"
+    ]
+
+    for c in cycles:
+        ts = c.get("timestamp")
+        if ts:
+            timestamps.append(ts)
+
+        hyps = c.get("hypotheses") or []
+        for h in hyps:
+            text = h["text"] if isinstance(h, dict) else str(h)
+            if any(k.lower() in text.lower() for k in KEYWORDS):
+                findings.append(text)
+
+    runtime = _extract_session_runtime(timestamps)
+
+    lines = []
+    lines.append("# Targeted Findings Report\n")
+
+    if runtime:
+        lines.append(f"**Session runtime:** {runtime}\n")
+
+    lines.append("## Extracted actionable findings\n")
+
+    if not findings:
+        lines.append("No cure/treatment/intervention findings detected.\n")
+    else:
+        for i, f in enumerate(findings[:80], start=1):
+            lines.append(f"{i}. {f}")
+
+        if len(findings) > 80:
+            lines.append(f"... and {len(findings) - 80} more.\n")
 
     return "\n".join(lines)
