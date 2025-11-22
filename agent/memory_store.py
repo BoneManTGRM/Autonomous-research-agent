@@ -42,6 +42,12 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     VectorMemory = None  # type: ignore[assignment]
 
+# Optional advanced RYE metrics integration
+try:
+    from . import rye_metrics as _rye_metrics  # type: ignore[import]
+except Exception:  # pragma: no cover
+    _rye_metrics = None  # type: ignore[assignment]
+
 
 def _utc_now_iso() -> str:
     """Return current UTC time in ISO 8601 with Z suffix."""
@@ -862,6 +868,59 @@ class MemoryStore:
         max_rye = max(values)
         return avg_rye, min_rye, max_rye, len(values)
 
+    def get_advanced_rye_metrics(
+        self,
+        goal: Optional[str] = None,
+        role: Optional[str] = None,
+    ) -> Dict[str, Optional[float]]:
+        """Return advanced RYE metrics for a goal or role using rye_metrics.
+
+        Keys:
+            rolling_rye_10
+            rolling_rye_50
+            median_rye
+            efficiency_trend
+            regression_slope
+            stability_index
+            recovery_momentum
+        """
+        # Start with basic defaults
+        metrics: Dict[str, Optional[float]] = {
+            "rolling_rye_10": None,
+            "rolling_rye_50": None,
+            "median_rye": None,
+            "efficiency_trend": None,
+            "regression_slope": None,
+            "stability_index": None,
+            "recovery_momentum": None,
+        }
+
+        if _rye_metrics is None:
+            return metrics
+
+        history = self._data.get("cycles", [])
+        if goal is not None:
+            history = [c for c in history if c.get("goal") == goal]
+        if role is not None:
+            history = [c for c in history if c.get("role") == role]
+
+        if not history:
+            return metrics
+
+        try:
+            metrics["rolling_rye_10"] = _rye_metrics.rolling_rye(history, window=10)
+            metrics["rolling_rye_50"] = _rye_metrics.rolling_rye(history, window=50)
+            metrics["median_rye"] = _rye_metrics.median_rye(history)
+            metrics["efficiency_trend"] = _rye_metrics.efficiency_trend(history)
+            metrics["regression_slope"] = _rye_metrics.regression_rye_slope(history)
+            metrics["stability_index"] = _rye_metrics.stability_index(history)
+            metrics["recovery_momentum"] = _rye_metrics.recovery_momentum(history)
+        except Exception:
+            # Metrics are optional, so failures should not crash reporting
+            pass
+
+        return metrics
+
     def build_text_report(self, goal: Optional[str] = None) -> str:
         """Build a simple text or markdown report for a goal or all goals.
 
@@ -893,6 +952,26 @@ class MemoryStore:
         else:
             title += "RYE: no data available\n"
         title += "\n"
+
+        # Advanced RYE metrics
+        adv = self.get_advanced_rye_metrics(goal=goal)
+        if any(v is not None for v in adv.values()):
+            title += "Advanced RYE metrics:\n"
+            if adv.get("rolling_rye_10") is not None:
+                title += f"- Rolling RYE (last 10): {adv['rolling_rye_10']:.3f}\n"
+            if adv.get("rolling_rye_50") is not None:
+                title += f"- Rolling RYE (last 50): {adv['rolling_rye_50']:.3f}\n"
+            if adv.get("median_rye") is not None:
+                title += f"- Median RYE: {adv['median_rye']:.3f}\n"
+            if adv.get("efficiency_trend") is not None:
+                title += f"- Efficiency trend (recent minus early): {adv['efficiency_trend']:.3f}\n"
+            if adv.get("regression_slope") is not None:
+                title += f"- Regression slope of RYE: {adv['regression_slope']:.4f}\n"
+            if adv.get("stability_index") is not None:
+                title += f"- Stability index: {adv['stability_index']:.3f}\n"
+            if adv.get("recovery_momentum") is not None:
+                title += f"- Recovery momentum: {adv['recovery_momentum']:.3f}\n"
+            title += "\n"
 
         # Notes
         notes = self.get_notes(goal=goal)
