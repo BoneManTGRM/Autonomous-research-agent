@@ -1,187 +1,222 @@
 # Autonomous Research Agent  
-Reparodynamics • RYE • TGRM • Swarm Agents • 90-Day Autonomous Runs
-
-The Autonomous Research Agent is a next-generation self-repairing research engine designed using the principles of **Reparodynamics**, including  
-**RYE (Repair Yield per Energy)** and **TGRM (Targeted Gradient Repair Mechanism)**.
-
-It performs:
-- Literature research (web, PDF, Semantic Scholar, PubMed)
-- Automatic hypothesis generation
-- Multi-agent reasoning (Researcher + Critic)
-- Full Swarm Mode (up to 32 specialized agents)
-- 24h, 8h, 1h, 90-day, and Forever autonomous runs
-- Continuous RYE-based adaptive repair
-- Long-term memory + semantic vector memory
-- Full Streamlit UI
+_Reparodynamics • TGRM • RYE • Swarm Mode_  
+**Live App:** https://autonomous-research-agent-hqby.onrender.com  
+**⚠️ IMPORTANT:** You MUST provide **your own Tavily API key** inside the app sidebar or the agent will not run.
 
 ---
 
-# 🚀 **Live App (Render + Streamlit)**
+## 🔥 Overview
 
-### 👉 **https://autonomous-research-agent-hqby.onrender.com**
+The **Autonomous Research Agent** is a fully self-contained TGRM-powered system capable of:
 
-The app runs fully in the cloud on **Render + Streamlit**.
-
-## ❗ IMPORTANT — You MUST Supply Your Own Tavily API Key
-
-Without a Tavily key:
-- **The app will not run**
-- The "Run Agent" button will not execute cycles
-- Web search & ingestion will fail
-
-Enter your key in the sidebar under **“Tavily API Key”**.
-
-Get a free key here:  
-https://app.tavily.com
+- Running **continuous scientific research** using the Reparodynamics framework  
+- Computing **RYE (Repair Yield per Energy)** every cycle  
+- Detecting contradictions, gaps, issues, and repairing them  
+- Running for **90 days safely** with watchdog, checkpointed run_state, crash-proof resume  
+- Operating as a **single agent**, **multi-agent duo**, or **full swarm (2–32 agents)**  
+- Executing **Test → Detect → Repair → Verify** autonomously  
+- Ingesting papers, datasets, PDFs, CSVs, semantic queries, biomarker datasets, and more  
+- Scaling to millions of cycles with stability guards
 
 ---
 
-# 🧬 Key Concepts
+## 🚀 Live Demo (Render + Streamlit)
 
-### **Reparodynamics**
-A universal science of stability and self-repair.
+The app is hosted using **Render + Streamlit**:
 
-### **RYE – Repair Yield per Energy**
-RYE = ΔR / E  
-How much improvement is produced per unit of effort.
+👉 **https://autonomous-research-agent-hqby.onrender.com**
 
-### **TGRM – Targeted Gradient Repair Mechanism**
-The 4-phase repair loop:
-1. Test  
-2. Detect  
-3. Repair  
-4. Verify  
-
-### **Swarm Mode**
-The agent can run dozens of coordinated roles:
-- Researcher  
-- Critic  
-- Explorer  
-- Theorist  
-- Integrator  
-
-Each writes repairs into shared memory.
+⚠️ **The app will not run unless you provide your own Tavily API key.**  
+You can add it in the left sidebar under **“Tavily API Key”**.
 
 ---
 
-# 🌐 Major Features
+## ⚙️ Major Features
 
-### ✔ Real PDF ingestion  
-### ✔ Semantic Scholar search  
-### ✔ PubMed ingestion  
-### ✔ Web research  
-### ✔ DOCX / XLSX / HTML / ZIP support  
-### ✔ 90-day safe autonomous mode  
-### ✔ Continuous memory with repair indexing  
-### ✔ Rolling RYE metrics, regression slope, efficiency charts  
-### ✔ Full Markdown report generator  
-### ✔ Upload your own papers for analysis  
-### ✔ Multi-role or Swarm execution  
+### **1. Full TGRM Loop Implementation**
+- Automated issue detection  
+- Repair actions  
+- Verification passes  
+- RYE computation (`ΔR / E`)  
+- Supports domain weighting (math / longevity / general)
 
 ---
 
-# 📁 Project Structure
+### **2. Multi-Format Ingestion Engine**
+Your agent can read:
 
-Below is the recommended folder structure for the repository:
+- TXT  
+- PDF (real extraction)  
+- CSV → DataFrame summaries  
+- JSON  
+- Markdown  
+- HTML  
+- DOCX  
+- XLSX  
+- ZIP (recursive extraction)
+
+---
+
+### **3. Real Literature Search**
+Includes:
+
+- PubMed ingestion  
+- Semantic Scholar ingestion  
+- Web search via Tavily (requires your key)  
+- PDF ingestion (remote or uploaded)
+
+All returned in normalized citation format for RYE scoring.
+
+---
+
+### **4. Swarm Mode (2–32 Agents)**  
+Roles include:
+
+- **Researcher**  
+- **Critic**  
+- **Explorer**  
+- **Theorist**  
+- **Integrator**
+
+Each performs specialized TGRM cycles with shared memory.
+
+---
+
+### **5. 90-Day Safe Continuous Operation**
+Includes:
+
+- Checkpointed `run_state`  
+- Watchdog heartbeat  
+- Crash-proof resume  
+- 10M-cycle safety cap  
+- Real wall-clock control using `max_minutes`
+
+---
+
+### **6. Domain Presets**
+Presets include:
+
+- **General Research**  
+- **Longevity / Anti-aging**  
+- **Math / Theory**  
+
+Each preset defines:
+
+- Default goal  
+- Source usage rules  
+- Role bias  
+- RYE weighting  
+- Reporting style  
+- Cycle tuning  
+- Runtime profiles (1h, 8h, 24h, 90 days, Forever)
+
+---
+
+## 📂 Project Structure
 
 ```
 autonomous-research-agent/
-│
 ├── agent/
 │   ├── core_agent.py
 │   ├── memory_store.py
-│   ├── rye_metrics.py
-│   ├── hypothesis_engine.py
-│   ├── tools_files.py
-│   ├── tools_papers.py
 │   ├── presets.py
-│   └── vector_memory.py   (optional)
-│
-├── ui/
-│   └── app_streamlit.py
-│
-├── logs/
-│   └── sessions/
-│
+│   ├── hypothesis_engine.py
+│   ├── rye_metrics.py
+│   ├── tools_papers.py
+│   ├── tools_files.py
+│   ├── tools_semantic_scholar.py
+│   ├── vector_memory.py   (optional)
+│   └── report_generator.py
+├── app.py  (or streamlit_app.py)
+├── requirements.txt
 ├── config/
 │   └── settings.yaml
-│
+├── logs/
+│   └── sessions/
 ├── README.md
-└── requirements.txt
+└── .env (your Tavily key if using locally)
 ```
 
 ---
 
-# 🖼 Project Structure Diagram  
-*(Your uploaded image will appear here on GitHub)*
+## 🔑 Required API Keys
 
-![Project Structure](EC99A08B-1FBC-48A0-9F9D-B9EF643FC881.jpeg)
+### **Tavily**
+Required for real web research.
 
----
+The app will not run without it.
 
-# 🔑 Environment Variables
+Place it in either:
 
-You only need **one**:
+- Streamlit sidebar text box  
+- `.env` file  
+- Render environment variable panel  
+
+Example:
 
 ```
 TAVILY_API_KEY=your_key_here
 ```
 
-You can set it in:
+---
 
-- `.env`
-- Render dashboard → Environment Variables
-- Directly in the Streamlit sidebar (per-user secret)
+## 🧠 How the Agent Works
+
+Each cycle performs:
+
+1. **TEST** → Detect issues, contradictions, missing info  
+2. **DETECT** → Identify targets for repair  
+3. **REPAIR** → Apply transformations, corrections, ingestion, citations, hypotheses  
+4. **VERIFY** → Compute ΔR, Energy, and RYE  
+5. **LOG** → Save cycle history + run_state + watchdog  
+6. **LOOP** → Continue until minutes or RYE threshold stops it
 
 ---
 
-# 🏁 Running Locally
+## 📊 Reports
 
-```
-pip install -r requirements.txt
-streamlit run ui/app_streamlit.py
-```
+The agent generates structured markdown reports including:
 
-Then open:
-
-```
-http://localhost:8501
-```
-
----
-
-# 📄 Generating Reports
-
-The UI includes:
-- Full-cycle history export  
-- Markdown report generator  
-- Download button  
-
-Reports include:
+- Summary  
 - RYE statistics  
-- Notes  
 - Hypotheses  
 - Citations  
-- Trend lines  
+- Notes  
+- Biomarkers (longevity preset)
+
+You can download the report directly from the app.
 
 ---
 
-# 🔮 Vision
+## 🧪 Local Installation
 
-The agent demonstrates the first working **software implementation of Reparodynamics**:
+```
+git clone https://github.com/your-repo/autonomous-research-agent.git
+cd autonomous-research-agent
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-- RYE as a live metric  
-- TGRM as a self-repair loop  
-- Swarms as coordinated stability systems  
-- Continuous 90-day autonomous operation  
+Add your Tavily key before running.
 
-This is the foundation of a fully general, self-repairing scientific engine.
+---
+
+## 🌐 Deployment
+
+This app runs on:
+
+- **Render** (hosted server)  
+- **Streamlit Cloud** (UI runtime)
+
+The version you are using live is deployed on **Render**.
 
 ---
 
-# 📬 Contact
-
-For collaboration, extensions, validation studies, or research partnerships:
-**Cody R. Jenkins – Reparodynamics Open Science Initiative**
+## 📜 License
+MIT or your custom license.
 
 ---
+
+## 🎉 Credits
+Created by Cody R. Jenkins  
+Reparodynamics • RYE • TGRM
