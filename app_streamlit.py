@@ -176,7 +176,8 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
                 src = c.get("source", "")
                 title = c.get("title", "")
                 url = c.get("url", "")
-                st.write(f"- [{src}] {title} — {url}")
+                # Replaced em dash with simple hyphen for user preference
+                st.write(f"- [{src}] {title} - {url}")
 
 
 def build_swarm_roles(enabled: bool, swarm_size: int) -> List[Tuple[str, str]]:
@@ -279,7 +280,7 @@ def main() -> None:
     preset_keys = list(PRESETS.keys())
     preset_labels = [PRESETS[k]["label"] for k in preset_keys]
 
-    default_preset_index = 0
+    default_preset_index = 0    # default to first key
     if "general" in preset_keys:
         default_preset_index = preset_keys.index("general")
 
@@ -658,6 +659,39 @@ def main() -> None:
 
         with st.expander("Raw JSON"):
             st.code(json.dumps(history, indent=2), language="json")
+
+    # ------------------------------
+    # Run diagnostics (continuous mode support)
+    # ------------------------------
+    st.markdown("---")
+    st.subheader("Run diagnostics")
+
+    col_state, col_watchdog = st.columns(2)
+
+    with col_state:
+        st.markdown("**Last saved run state**")
+        state = memory.load_run_state()
+        if not state:
+            st.write("No saved run state yet.")
+        else:
+            st.json(state)
+            if st.button("Clear saved run state", key="clear_run_state_btn"):
+                memory.clear_run_state()
+                st.success("Saved run state cleared. It will be rebuilt on the next continuous run.")
+
+    with col_watchdog:
+        st.markdown("**Watchdog heartbeat**")
+        info = memory.get_watchdog_info()
+        last_beat = info.get("last_beat")
+        count = info.get("count", 0)
+        seconds_since = info.get("seconds_since_last")
+
+        st.write(f"Last beat: {last_beat if last_beat else 'None recorded'}")
+        st.write(f"Heartbeat count: {count}")
+        if isinstance(seconds_since, (int, float)):
+            st.write(f"Seconds since last beat: {seconds_since:.1f}")
+        else:
+            st.write("Seconds since last beat: not available")
 
     # ------------------------------
     # Report generation
