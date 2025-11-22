@@ -204,11 +204,11 @@ class CoreAgent:
         """Run a single "round" of multiple logical agents.
 
         Example round (5 agents, but can go up to 32):
-            1. researcher   – primary gatherer and explainer
-            2. critic       – attacks weak points, flags gaps
-            3. planner      – proposes next experiments and steps
-            4. synthesizer  – condenses findings into coherent story
-            5. explorer     – searches for surprising / out-of-distribution angles
+            1. researcher   - primary gatherer and explainer
+            2. critic       - attacks weak points, flags gaps
+            3. planner      - proposes next experiments and steps
+            4. synthesizer  - condenses findings into coherent story
+            5. explorer     - searches for surprising / out-of-distribution angles
 
         All agents share the same MemoryStore and TGRM engine, but run
         with different `role` labels so you can distinguish their
@@ -545,6 +545,25 @@ class CoreAgent:
 
         # Continuous run finished cleanly
         self._clear_checkpoint()
+
+        # Attach run-level metadata (including how long it actually ran)
+        total_elapsed_min = (time.monotonic() - start_time) / 60.0
+        run_metadata: Dict[str, Any] = {
+            "mode": "single",
+            "goal": goal,
+            "role": role,
+            "domain": domain or "general",
+            "elapsed_minutes": total_elapsed_min,
+            "max_minutes": max_minutes,
+            "max_cycles": max_cycles,
+            "cycles_completed": len(summaries),
+            "stop_rye": stop_rye,
+            "runtime_profile": runtime_profile,
+        }
+        for s in summaries:
+            if isinstance(s, dict):
+                s["run_metadata"] = run_metadata
+
         return summaries
 
     # ------------------------------------------------------------------
@@ -759,4 +778,23 @@ class CoreAgent:
 
         # Swarm run finished cleanly
         self._clear_checkpoint()
+
+        # Attach run-level metadata (including how long it actually ran)
+        total_elapsed_min = (time.monotonic() - start_time) / 60.0
+        run_metadata: Dict[str, Any] = {
+            "mode": "swarm",
+            "goal": goal,
+            "roles": list(roles_list),
+            "domain": domain or "general",
+            "elapsed_minutes": total_elapsed_min,
+            "max_minutes": max_minutes,
+            "max_rounds": max_rounds,
+            "rounds_completed": round_idx,
+            "stop_rye": stop_rye,
+            "runtime_profile": runtime_profile,
+        }
+        for s in all_summaries:
+            if isinstance(s, dict):
+                s["run_metadata"] = run_metadata
+
         return all_summaries
