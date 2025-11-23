@@ -11,6 +11,9 @@ This module provides a JSON-based persistent storage layer. It stores:
 - goal_index summaries (lightweight per goal stats for swarms)
 - events (streaming logs and partial updates)
 - discoveries (cure, treatment, mechanism, and other key findings)
+- run_manifests (compact summaries of long runs)
+- tool_events (per tool usage events)
+- milestones (key run milestones)
 
 The memory store acts as a lightweight knowledge base for the agent and is
 referenced each cycle to retrieve prior context and to persist new findings.
@@ -21,12 +24,12 @@ Reparodynamics interpretation:
     from it to reduce energy cost. When combined with VectorMemory, this
     becomes a semantic, time aware repair substrate.
 
-    The run_state, worker_state, watchdog, goal_index, events, and
-    discoveries sections act as a meta layer:
+    The run_state, worker_state, watchdog, goal_index, events, discoveries,
+    run_manifests, tool_events, and milestones sections act as a meta layer:
     they record how the system itself is running so that the agent
     can restart and continue repair with minimal extra energy and
     give swarm level analytics (per role and per goal), plus a
-    running log of key cure and treatment candidates.
+    running log of key cure and treatment candidates and tool behavior.
 """
 
 from __future__ import annotations
@@ -50,8 +53,8 @@ except Exception:  # pragma: no cover
 
 
 # ----------------------------------------------------------------------
-# Hard but generous caps for 24–90 day / "forever" runs
-# These mirror the events / discoveries bounding you already had.
+# Hard but generous caps for 24-90 day or long runs
+# These mirror the events and discoveries bounding you already had.
 # They are global caps; older items are dropped first.
 # ----------------------------------------------------------------------
 MAX_NOTES = 50_000
@@ -59,8 +62,11 @@ MAX_CYCLES = 50_000
 MAX_HYPOTHESES = 20_000
 MAX_CITATIONS = 20_000
 MAX_BIOMARKERS = 20_000
-MAX_EVENTS = 5_000        # already used below, kept as constant
-MAX_DISCOVERIES = 2_000   # already used below, kept as constant
+MAX_EVENTS = 5_000
+MAX_DISCOVERIES = 2_000
+MAX_TOOL_EVENTS = 20_000
+MAX_RUN_MANIFESTS = 2_000
+MAX_MILESTONES = 5_000
 
 
 def _utc_now_iso() -> str:
@@ -72,28 +78,32 @@ class MemoryStore:
     """A lightweight persistent memory store using a JSON file.
 
     The JSON file is structured with several top level keys:
-        - "notes":        free form text notes with metadata
-        - "cycles":       logs of each research cycle
-        - "hypotheses":   generated hypotheses for each goal
-        - "citations":    structured citation objects from web/papers
-        - "biomarkers":   placeholder for anti aging or lab data
-        - "run_state":    metadata for long running autonomous sessions
-        - "worker_state": live background worker status
-        - "watchdog":     timestamps and counters for heartbeats
-        - "goal_index":   compact per goal stats, including per role counts
-        - "events":       streaming event log (UI, worker, partial runs)
-        - "discoveries":  cure, treatment, mechanism, and other key finds
+        - "notes":         free form text notes with metadata
+        - "cycles":        logs of each research cycle
+        - "hypotheses":    generated hypotheses for each goal
+        - "citations":     structured citation objects from web or papers
+        - "biomarkers":    placeholder for anti aging or lab data
+        - "run_state":     metadata for long running autonomous sessions
+        - "worker_state":  live background worker status
+        - "watchdog":      timestamps and counters for heartbeats
+        - "goal_index":    compact per goal stats, including per role counts
+        - "events":        streaming event log
+        - "discoveries":   cure, treatment, mechanism, and other key finds
+        - "run_manifests": compact per run summaries for reports
+        - "tool_events":   low level tool usage events
+        - "milestones":    key run milestones
 
     In memory (non persistent) vector memory may also be attached to
     support semantic search and time decayed retrieval if the optional
     VectorMemory class is available.
 
-    This implementation is hardened for 24-90 day autonomous runs:
+    This implementation is hardened for long autonomous runs:
         - safe directory handling even for plain filenames (for example "memory.json")
         - atomic write strategy to greatly reduce corruption risk
         - goal_index streaming stats for fast RYE summaries
         - worker_state and events for live status and debugging
-        - bounded growth of logs (notes, cycles, hypotheses, citations, events)
+        - bounded growth of logs (notes, cycles, hypotheses, citations, events, tool_events)
+        - per run manifests and milestones for report generation
     """
 
     def __init__(self, memory_file: str) -> None:
@@ -111,12 +121,15 @@ class MemoryStore:
             "hypotheses": [],
             "citations": [],
             "biomarkers": [],
-            "run_state": {},     # crash proof run metadata
-            "worker_state": {},  # live worker mode and status
-            "watchdog": {},      # heartbeat and last seen info
-            "goal_index": {},    # compact goal wise stats
-            "events": [],        # streaming event log
-            "discoveries": [],   # cure, treatment, mechanism candidates
+            "run_state": {},      # crash proof run metadata
+            "worker_state": {},   # live worker mode and status
+            "watchdog": {},       # heartbeat and last seen info
+            "goal_index": {},     # compact goal wise stats
+            "events": [],         # streaming event log
+            "discoveries": [],    # cure, treatment, mechanism candidates
+            "run_manifests": {},  # run_id -> manifest dict
+            "tool_events": [],    # per tool usage events
+            "milestones": [],     # milestones over long runs
         }
         self._load()
         self._ensure_keys()
@@ -147,16 +160,18 @@ class MemoryStore:
             "goal_index": {},
             "events": [],
             "discoveries": [],
+            "run_manifests": {},
+            "tool_events": [],
+            "milestones": [],
         }
         for key, default in defaults.items():
             if key not in self._data:
                 self._data[key] = default
             else:
-                # Make sure types are reasonable
-                if key in ("notes", "cycles", "hypotheses", "citations", "biomarkers", "events", "discoveries"):
+                if key in ("notes", "cycles", "hypotheses", "citations", "biomarkers", "events", "discoveries", "tool_events", "milestones"):
                     if not isinstance(self._data.get(key), list):
                         self._data[key] = []
-                else:
+                elif key in ("run_manifests", "run_state", "worker_state", "watchdog", "goal_index"):
                     if not isinstance(self._data.get(key), dict):
                         self._data[key] = {}
 
@@ -180,6 +195,9 @@ class MemoryStore:
                     "goal_index": {},
                     "events": [],
                     "discoveries": [],
+                    "run_manifests": {},
+                    "tool_events": [],
+                    "milestones": [],
                 }
 
     def _save(self) -> None:
@@ -193,11 +211,8 @@ class MemoryStore:
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, ensure_ascii=False, indent=2)
-            # os.replace is atomic on POSIX and Windows for normal files
             os.replace(tmp_path, self.memory_file)
         except Exception:
-            # If anything goes wrong, we do not raise, to avoid killing the agent.
-            # On next run, _load will attempt to read the last good file.
             try:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
@@ -233,14 +248,12 @@ class MemoryStore:
             if snapshot_dir and not os.path.exists(snapshot_dir):
                 os.makedirs(snapshot_dir, exist_ok=True)
         except Exception:
-            # Best effort; if directory fails, writing will fail below
             pass
 
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, ensure_ascii=False, indent=2)
         except Exception:
-            # Do not raise in long runs; just return the intended path
             return path
 
         return path
@@ -292,7 +305,6 @@ class MemoryStore:
             r_stats["note_count"] = int(r_stats.get("note_count", 0)) + int(delta_notes)
             r_stats["cycle_count"] = int(r_stats.get("cycle_count", 0)) + int(delta_cycles)
             if rye_value is not None:
-                # Simple streaming average for RYE per role
                 prev_avg = r_stats.get("avg_rye")
                 prev_n = int(r_stats.get("rye_count", 0))
                 if isinstance(prev_avg, (int, float)) and prev_n > 0:
@@ -347,7 +359,7 @@ class MemoryStore:
 
         self._data.setdefault("notes", []).append(note)
 
-        # Keep notes bounded for ultra-long runs
+        # Keep notes bounded for ultra long runs
         if len(self._data["notes"]) > MAX_NOTES:
             self._data["notes"] = self._data["notes"][-MAX_NOTES:]
 
@@ -375,7 +387,6 @@ class MemoryStore:
                     meta["domain"] = domain
                 self.vector_memory.add_item(text=content, metadata=meta)
             except Exception:
-                # Vector memory is optional; ignore failures
                 pass
 
     def get_notes(self, goal: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -394,18 +405,15 @@ class MemoryStore:
         if self.vector_memory is not None:
             try:
                 items = self.vector_memory.search(query=query, top_k=top_k)
-                # Each item.metadata should contain at least "goal" and "content" keys
                 results: List[Dict[str, Any]] = []
                 for it in items:
                     meta = dict(it.metadata)
-                    # Reconstruct minimal note like structure
                     meta.setdefault("content", it.text)
                     meta.setdefault("timestamp", _utc_now_iso())
                     if goal is None or meta.get("goal") == goal:
                         results.append(meta)
                 return results
             except Exception:
-                # Fall back to keyword search if vector memory fails
                 pass
 
         # Keyword based fallback
@@ -561,7 +569,6 @@ class MemoryStore:
                     domain=domain,
                 )
             except Exception:
-                # Any goal_index failure must not kill logging
                 pass
 
         self._save()
@@ -586,7 +593,6 @@ class MemoryStore:
         history = self._data.get("cycles", [])
         if goal is not None:
             history = [c for c in history if c.get("goal") == goal]
-        # Most recent first
         history_sorted = sorted(
             history,
             key=lambda c: c.get("timestamp", ""),
@@ -599,30 +605,61 @@ class MemoryStore:
     # ------------------------------------------------------------------
     def save_run_state(
         self,
+        state: Optional[Dict[str, Any]] = None,
         *,
-        goal: str,
-        mode: str,
-        minutes_remaining: Optional[float],
-        last_cycle_index: Optional[int],
+        goal: Optional[str] = None,
+        mode: Optional[str] = None,
+        minutes_remaining: Optional[float] = None,
+        last_cycle_index: Optional[int] = None,
         domain: Optional[str] = None,
         role: str = "agent",
+        run_id: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Persist high level run state for crash proof continuous mode.
 
-        This is a compact summary so the agent can resume a long run:
-            - what it was doing (goal, domain, role)
-            - how it was running (mode)
-            - how much time remained (approx minutes_remaining)
-            - which cycle index was last completed
+        Two usage patterns are supported:
 
-        The "extra" dict can hold additional metadata such as:
-            - runtime_profile
-            - swarm roles
-            - stop_reason
-            - custom flags used by engine_worker or the UI
+            1) New style (from CoreAgent.save_state_to_storage):
+                save_run_state(state_dict)
+
+               In this case, the given dict is stored as is, with an
+               updated_at timestamp added if missing.
+
+            2) Legacy style:
+                save_run_state(
+                    goal=...,
+                    mode=...,
+                    minutes_remaining=...,
+                    last_cycle_index=...,
+                    domain=...,
+                    role=...,
+                    run_id=...,
+                    extra=...
+                )
+
+        In both cases, run_state is kept as a compact summary so the agent
+        can resume a long run.
         """
-        state: Dict[str, Any] = {
+        if state is not None and isinstance(state, dict) and not any(
+            v is not None for v in (goal, mode, minutes_remaining, last_cycle_index, domain, extra, run_id)
+        ):
+            payload = dict(state)
+            payload.setdefault("updated_at", _utc_now_iso())
+            self._data.setdefault("run_state", {})
+            self._data["run_state"] = payload
+            self._save()
+            return
+
+        # Legacy keyword style
+        if goal is None and isinstance(state, dict):
+            goal = str(state.get("goal", "")) or None
+        if mode is None and isinstance(state, dict):
+            mode = str(state.get("mode", "")) or None
+        if run_id is None and isinstance(state, dict):
+            run_id = state.get("run_id")
+
+        legacy_state: Dict[str, Any] = {
             "updated_at": _utc_now_iso(),
             "goal": goal,
             "mode": mode,
@@ -630,12 +667,13 @@ class MemoryStore:
             "role": role,
             "minutes_remaining": minutes_remaining,
             "last_cycle_index": last_cycle_index,
+            "run_id": run_id,
         }
         if extra:
-            state["extra"] = extra
+            legacy_state["extra"] = extra
 
         self._data.setdefault("run_state", {})
-        self._data["run_state"] = state
+        self._data["run_state"] = legacy_state
         self._save()
 
     def load_run_state(self) -> Optional[Dict[str, Any]]:
@@ -664,6 +702,8 @@ class MemoryStore:
         runtime_profile: Optional[str] = None,
         stop_rye: Optional[float] = None,
         max_minutes: Optional[float] = None,
+        run_id: Optional[str] = None,
+        experiment_mode: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Record live worker status for monitoring and UI.
@@ -685,6 +725,8 @@ class MemoryStore:
             "runtime_profile": runtime_profile,
             "stop_rye": stop_rye,
             "max_minutes": max_minutes,
+            "run_id": run_id,
+            "experiment_mode": experiment_mode,
         }
         if extra:
             state["extra"] = extra
@@ -702,7 +744,7 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # Watchdog heartbeats for long runs
     # ------------------------------------------------------------------
-    def heartbeat(self, label: str = "continuous_run") -> None:
+    def heartbeat(self, label: str = "continuous_run", run_id: Optional[str] = None) -> None:
         """Record a watchdog heartbeat.
 
         The agent can call this periodically so that:
@@ -719,6 +761,7 @@ class MemoryStore:
         wd[label] = {
             "last_beat": now,
             "count": count,
+            "run_id": run_id or entry.get("run_id"),
         }
         self._save()
 
@@ -729,6 +772,7 @@ class MemoryStore:
             - last_beat: ISO timestamp or None
             - count: how many beats were recorded
             - seconds_since_last: float or None
+            - run_id: last associated run identifier, if any
         """
         wd = self._data.get("watchdog") or {}
         if not isinstance(wd, dict):
@@ -736,6 +780,7 @@ class MemoryStore:
         entry = wd.get(label) or {}
         last_beat = entry.get("last_beat")
         count = entry.get("count", 0)
+        run_id = entry.get("run_id")
 
         seconds_since_last: Optional[float] = None
         if isinstance(last_beat, str):
@@ -749,6 +794,7 @@ class MemoryStore:
             "last_beat": last_beat,
             "count": count,
             "seconds_since_last": seconds_since_last,
+            "run_id": run_id,
         }
 
     # ------------------------------------------------------------------
@@ -763,6 +809,7 @@ class MemoryStore:
         level: str = "info",
         goal: Optional[str] = None,
         role: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> None:
         """Append a generic event to the streaming log.
 
@@ -781,10 +828,12 @@ class MemoryStore:
             ev["goal"] = goal
         if role is not None:
             ev["role"] = role
+        if run_id is not None:
+            ev["run_id"] = run_id
 
         self._data.setdefault("events", []).append(ev)
 
-        # Keep events bounded in size to avoid unbounded growth during 90 day runs
+        # Keep events bounded in size for long runs
         if len(self._data["events"]) > MAX_EVENTS:
             self._data["events"] = self._data["events"][-MAX_EVENTS:]
 
@@ -796,8 +845,9 @@ class MemoryStore:
         limit: int = 200,
         kind: Optional[str] = None,
         level: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Retrieve recent events filtered by kind and level."""
+        """Retrieve recent events filtered by kind, level, and run_id."""
         events = self._data.get("events", [])
         if not isinstance(events, list):
             return []
@@ -810,9 +860,10 @@ class MemoryStore:
                 continue
             if level is not None and ev.get("level") != level:
                 continue
+            if run_id is not None and ev.get("run_id") != run_id:
+                continue
             filtered.append(ev)
 
-        # Most recent first
         filtered_sorted = sorted(
             filtered,
             key=lambda e: e.get("timestamp", ""),
@@ -858,7 +909,7 @@ class MemoryStore:
 
         self._data.setdefault("discoveries", []).append(entry)
 
-        # Keep discoveries bounded but with a larger cap than events
+        # Keep discoveries bounded
         if len(self._data["discoveries"]) > MAX_DISCOVERIES:
             self._data["discoveries"] = self._data["discoveries"][-MAX_DISCOVERIES:]
 
@@ -903,6 +954,260 @@ class MemoryStore:
                 continue
             result.append(e)
         return result
+
+    # ------------------------------------------------------------------
+    # Run manifests for long runs
+    # ------------------------------------------------------------------
+    def log_run_manifest(self, *args: Any, **kwargs: Any) -> None:
+        """Store a compact manifest for a finished or in progress run.
+
+        Supports both:
+            log_run_manifest(run_id, manifest_dict)
+        and:
+            log_run_manifest(manifest_dict)
+
+        The manifest is stored under run_manifests[run_id] with a
+        logged_at timestamp added if missing. A bounded number of
+        manifests are kept.
+        """
+        run_id: Optional[str] = None
+        manifest: Optional[Dict[str, Any]] = None
+
+        if len(args) == 2 and isinstance(args[0], str) and isinstance(args[1], dict):
+            run_id = args[0]
+            manifest = dict(args[1])
+        elif len(args) == 1 and isinstance(args[0], dict):
+            manifest = dict(args[0])
+            run_id = manifest.get("run_id")
+        else:
+            run_id = kwargs.get("run_id")
+            manifest_arg = kwargs.get("manifest")
+            if isinstance(manifest_arg, dict):
+                manifest = dict(manifest_arg)
+
+        if manifest is None:
+            return
+        if not run_id:
+            run_id = manifest.get("run_id")
+        if not run_id:
+            return
+
+        manifest.setdefault("run_id", run_id)
+        manifest.setdefault("logged_at", _utc_now_iso())
+
+        rm = self._data.setdefault("run_manifests", {})
+        if not isinstance(rm, dict):
+            rm = {}
+        rm[run_id] = manifest
+
+        # Bound number of manifests
+        if len(rm) > MAX_RUN_MANIFESTS:
+            items = sorted(
+                rm.items(),
+                key=lambda kv: str(kv[1].get("logged_at", "")),
+            )
+            excess = len(items) - MAX_RUN_MANIFESTS
+            for k, _v in items[:excess]:
+                rm.pop(k, None)
+
+        self._data["run_manifests"] = rm
+        self._save()
+
+    def get_run_manifest(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Retrieve a run manifest by run_id."""
+        rm = self._data.get("run_manifests") or {}
+        if not isinstance(rm, dict):
+            return None
+        manifest = rm.get(run_id)
+        if not isinstance(manifest, dict):
+            return None
+        return dict(manifest)
+
+    def list_run_manifests(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Return a list of recent run manifests sorted by logged_at."""
+        rm = self._data.get("run_manifests") or {}
+        if not isinstance(rm, dict):
+            return []
+        items = list(rm.values())
+        items_sorted = sorted(
+            [m for m in items if isinstance(m, dict)],
+            key=lambda m: str(m.get("logged_at", "")),
+            reverse=True,
+        )
+        return items_sorted[:limit]
+
+    # ------------------------------------------------------------------
+    # Tool events and per tool stats
+    # ------------------------------------------------------------------
+    def log_tool_event(
+        self,
+        *,
+        run_id: Optional[str],
+        goal: Optional[str],
+        domain: Optional[str],
+        role: Optional[str],
+        cycle_index: Optional[int],
+        tool_name: str,
+        status: str,
+        duration_seconds: Optional[float] = None,
+        energy_cost: Optional[float] = None,
+        rye_delta: Optional[float] = None,
+        error: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record a single tool usage event for diagnostics and tool RYE."""
+        ev: Dict[str, Any] = {
+            "timestamp": _utc_now_iso(),
+            "run_id": run_id,
+            "goal": goal,
+            "domain": domain,
+            "role": role,
+            "cycle_index": cycle_index,
+            "tool_name": tool_name,
+            "status": status,
+            "duration_seconds": duration_seconds,
+            "energy_cost": energy_cost,
+            "rye_delta": rye_delta,
+        }
+        if error is not None:
+            ev["error"] = error
+        if extra:
+            ev["extra"] = extra
+
+        self._data.setdefault("tool_events", []).append(ev)
+        if len(self._data["tool_events"]) > MAX_TOOL_EVENTS:
+            self._data["tool_events"] = self._data["tool_events"][-MAX_TOOL_EVENTS:]
+
+        self._save()
+
+    def get_tool_stats(self, run_id: Optional[str] = None) -> Dict[str, Any]:
+        """Aggregate basic per tool stats, optionally filtered by run_id.
+
+        Returns a dict:
+            {
+              "tools": {
+                 "browser": {
+                     "calls": int,
+                     "errors": int,
+                     "last_called_at": "iso",
+                     "last_error": "message or None"
+                 },
+                 "sandbox": { ... },
+                 ...
+              }
+            }
+
+        If rye_metrics exposes a compute_tool_rye helper in the future,
+        it can be integrated here with best effort.
+        """
+        events = self._data.get("tool_events", [])
+        if not isinstance(events, list):
+            events = []
+
+        stats: Dict[str, Dict[str, Any]] = {}
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            if run_id is not None and ev.get("run_id") != run_id:
+                continue
+            name = ev.get("tool_name")
+            if not name:
+                continue
+            st = stats.get(name) or {
+                "calls": 0,
+                "errors": 0,
+                "last_called_at": None,
+                "last_error": None,
+            }
+            st["calls"] = int(st.get("calls", 0)) + 1
+            if ev.get("status") == "error":
+                st["errors"] = int(st.get("errors", 0)) + 1
+                last_error = ev.get("error")
+                if last_error:
+                    st["last_error"] = last_error
+            ts = ev.get("timestamp")
+            if isinstance(ts, str):
+                prev_ts = st.get("last_called_at")
+                if prev_ts is None or str(ts) > str(prev_ts):
+                    st["last_called_at"] = ts
+            stats[name] = st
+
+        result: Dict[str, Any] = {"tools": stats}
+
+        # Optional future hook for per tool RYE
+        if _rye_metrics is not None and hasattr(_rye_metrics, "compute_tool_rye"):
+            try:
+                result["tool_rye"] = _rye_metrics.compute_tool_rye(events, run_id=run_id)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Milestones
+    # ------------------------------------------------------------------
+    def log_milestone(
+        self,
+        *,
+        run_id: Optional[str],
+        goal: Optional[str],
+        domain: Optional[str],
+        label: str,
+        description: str,
+        level: str = "info",
+        role: Optional[str] = None,
+        cycle_index: Optional[int] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record a key milestone for a run, such as best RYE or phase shift."""
+        entry: Dict[str, Any] = {
+            "timestamp": _utc_now_iso(),
+            "run_id": run_id,
+            "goal": goal,
+            "domain": domain,
+            "label": label,
+            "description": description,
+            "level": level,
+            "role": role,
+            "cycle_index": cycle_index,
+        }
+        if extra:
+            entry["extra"] = extra
+
+        self._data.setdefault("milestones", []).append(entry)
+        if len(self._data["milestones"]) > MAX_MILESTONES:
+            self._data["milestones"] = self._data["milestones"][-MAX_MILESTONES:]
+
+        self._save()
+
+    def get_milestones(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        goal: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve milestones filtered by run_id and goal, most recent first."""
+        ms = self._data.get("milestones", [])
+        if not isinstance(ms, list):
+            return []
+
+        filtered: List[Dict[str, Any]] = []
+        for m in ms:
+            if not isinstance(m, dict):
+                continue
+            if run_id is not None and m.get("run_id") != run_id:
+                continue
+            if goal is not None and m.get("goal") != goal:
+                continue
+            filtered.append(m)
+
+        filtered_sorted = sorted(
+            filtered,
+            key=lambda m: m.get("timestamp", ""),
+            reverse=True,
+        )
+        return filtered_sorted[:limit]
 
     # ------------------------------------------------------------------
     # Reporting helpers (for long autonomous runs)
@@ -955,7 +1260,6 @@ class MemoryStore:
             stability_index
             recovery_momentum
         """
-        # Start with basic defaults
         metrics: Dict[str, Optional[float]] = {
             "rolling_rye_10": None,
             "rolling_rye_50": None,
@@ -987,19 +1291,12 @@ class MemoryStore:
             metrics["stability_index"] = _rye_metrics.stability_index(history)
             metrics["recovery_momentum"] = _rye_metrics.recovery_momentum(history)
         except Exception:
-            # Metrics are optional, so failures should not crash reporting
             pass
 
         return metrics
 
     def build_text_report(self, goal: Optional[str] = None) -> str:
-        """Build a simple text or markdown report for a goal or all goals.
-
-        This is designed to be used by the UI after a long run:
-        - You can show it directly in Streamlit
-        - Or offer it as a downloadable .txt or .md file
-        """
-        # Header
+        """Build a simple text or markdown report for a goal or all goals."""
         if goal:
             title = f"Autonomous Research Report\nGoal: {goal}\n"
         else:
@@ -1007,7 +1304,6 @@ class MemoryStore:
 
         title += "=" * 40 + "\n\n"
 
-        # Basic stats
         history = self.get_cycle_history()
         if goal is not None:
             history = [c for c in history if c.get("goal") == goal]
@@ -1024,7 +1320,6 @@ class MemoryStore:
             title += "RYE: no data available\n"
         title += "\n"
 
-        # Advanced RYE metrics
         adv = self.get_advanced_rye_metrics(goal=goal)
         if any(v is not None for v in adv.values()):
             title += "Advanced RYE metrics:\n"
@@ -1044,7 +1339,6 @@ class MemoryStore:
                 title += f"- Recovery momentum: {adv['recovery_momentum']:.3f}\n"
             title += "\n"
 
-        # Notes
         notes = self.get_notes(goal=goal)
         title += f"Notes collected: {len(notes)}\n"
         if notes:
@@ -1057,7 +1351,6 @@ class MemoryStore:
                 title += f"- [{ts}] {content}\n"
         title += "\n"
 
-        # Hypotheses
         hyps = self.get_hypotheses(goal=goal)
         title += f"Hypotheses generated: {len(hyps)}\n"
         if hyps:
@@ -1074,7 +1367,6 @@ class MemoryStore:
                     title += f"- [{ts}] {text}\n"
         title += "\n"
 
-        # Citations
         cits = self.get_citations(goal=goal)
         title += f"Citations logged: {len(cits)}\n"
         if cits:
@@ -1087,7 +1379,6 @@ class MemoryStore:
                 url = c.get("url", "")
                 title += f"- [{ts}] [{src}] {c_title} - {url}\n"
 
-        # Discoveries summary
         disc = self.get_discoveries(goal=goal)
         title += "\nKey discoveries recorded: "
         title += f"{len(disc)}\n"
@@ -1164,13 +1455,7 @@ class MemoryStore:
         return dict(gi.get(goal, {}))
 
     def get_goal_summary(self, goal: str) -> Dict[str, Any]:
-        """Return a compact, UI-ready summary for a single goal.
-
-        This pulls from:
-            - goal_index entry
-            - basic and advanced RYE metrics
-            - counts of notes / hypotheses / citations / discoveries
-        """
+        """Return a compact, UI-ready summary for a single goal."""
         summary: Dict[str, Any] = {
             "goal": goal,
             "index": {},
