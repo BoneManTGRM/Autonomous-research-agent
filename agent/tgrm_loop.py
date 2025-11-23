@@ -24,9 +24,9 @@ Levels and Swarms
 -----------------
 The loop is now aware of:
     - tgrm_level (1, 2, 3) via config["tgrm_level"] (default 3)
-        Level 1: basic defect detection + repair (current behavior).
+        Level 1: basic defect detection and repair.
         Level 2: richer targeted research on questions and TODOs.
-        Level 3: domain-aware and role-aware logic for swarms.
+        Level 3: domain aware and role aware logic for swarms.
 
     - role: "agent", "researcher", "critic", "planner",
             "synthesizer", "explorer", etc.
@@ -36,26 +36,25 @@ The loop is now aware of:
 Domain awareness
 ----------------
 The loop now uses the `domain` tag ("general", "longevity", "math", ...)
-to surface higher-level issues such as:
+to surface higher level issues such as:
     - missing_biomarkers (longevity)
     - missing_mechanisms (longevity)
     - missing_formalism (math: definitions / theorems / proofs)
     - missing_connections (math: links to existing theory)
 
 These appear as additional issue codes and pass through the same
-TGRM pipeline (Test → Detect → Repair → Verify) without breaking any
-existing behavior.
+TGRM pipeline without breaking any existing behavior.
 
-Engine-worker / 90-day architecture
+Engine worker / 90 day architecture
 -----------------------------------
 This module is designed to be called by:
     - CoreAgent.run_cycle(...) for single cycles
-    - A long-running engine_worker that orchestrates many cycles
+    - A long running engine worker that orchestrates many cycles
 
 To support that:
     - Each run_cycle returns both a machine log and a human summary.
     - Both carry delta_R, energy_E, RYE, hypotheses, citations, and
-      candidate_interventions for cure/treatment-style reports.
+      candidate_interventions for cure or treatment style reports.
 """
 
 from __future__ import annotations
@@ -86,7 +85,7 @@ class TGRMLoop:
         self.config = config or {}
 
         # Shared toolbelt (browser + sandbox + data pipelines)
-        # If CoreAgent passes one, we share; otherwise we create a local instance.
+        # If CoreAgent passes one, we share it. Otherwise we create a local instance.
         self.tools: Toolbelt = tools if tools is not None else Toolbelt()
 
         # Core tools
@@ -99,12 +98,12 @@ class TGRMLoop:
         self.semantic_tool = SemanticScholarTool()
 
         # Long run optimization: track which questions have already been
-        # researched so we do not re-query the same text a thousand times
-        # during 8h or 24h sessions.
+        # researched so we do not re query the same text many times during
+        # 8 hour or 24 hour sessions.
         self._seen_questions: set[str] = set()
 
-        # TGRM level: 1 (basic), 2 (targeted), 3 (domain + swarm aware).
-        # If not set in config, we default to level 3 to unlock full power.
+        # TGRM level: 1 (basic), 2 (targeted), 3 (domain plus swarm aware).
+        # If not set in config, default to level 3 to unlock full power.
         try:
             self.tgrm_level: int = int(self.config.get("tgrm_level", 3))
         except Exception:
@@ -117,7 +116,7 @@ class TGRMLoop:
         """Very rough token estimate from text length."""
         if not text:
             return 0
-        # ~4 characters per token is a common rough heuristic
+        # Rough heuristic: about 4 characters per token
         return max(1, len(text) // 4)
 
     # ------------------------------------------------------------------
@@ -137,11 +136,11 @@ class TGRMLoop:
 
         Args:
             goal:
-                Human-readable research goal for this cycle.
+                Human readable research goal for this cycle.
             cycle_index:
-                Global cycle index (used for logging and history).
+                Global cycle index used for logging and history.
             role:
-                Logical role (for example "agent", "researcher", "critic").
+                Logical role such as "agent", "researcher", or "critic".
             source_controls:
                 Optional switches like:
                     {
@@ -151,32 +150,31 @@ class TGRMLoop:
                       "pdf": True,
                       "biomarkers": False,
                     }
-                If None, defaults are used (web on, others off).
+                If None, defaults are used.
             pdf_bytes:
-                Optional PDF content (uploaded file) that can be ingested
-                as part of the Repair phase if "pdf" is enabled.
+                Optional PDF content that can be ingested as part of the
+                Repair phase if "pdf" is enabled.
             biomarker_snapshot:
-                Optional dict of biomarker or lab values for future
-                longevity analysis (currently not used directly here).
+                Optional dict of biomarker or lab values. Reserved for future
+                longevity analysis.
             domain:
-                Optional domain tag (for example "general", "longevity", "math")
-                from presets. Preserved in the log for future
-                domain-specific behavior.
+                Optional domain tag such as "general", "longevity", or "math".
+                Preserved in the log for future domain specific behavior.
 
         Returns:
             Dict with:
                 {
-                  "summary": human-facing summary,
+                  "summary": human facing summary,
                   "log":     full cycle log
                 }
         """
         src_ctrl = self._normalise_source_controls(source_controls)
         domain_tag = domain or "general"
 
-        # Per-cycle tool usage tracker (for energy E and diagnostics)
+        # Per cycle tool usage tracker (for energy E and diagnostics)
         tool_usage: ToolUsage = self.tools.new_usage_tracker()
 
-        # Long run context: fetch RYE stats for this goal if available.
+        # Long run context: fetch RYE stats for this goal if available
         avg_rye: Optional[float] = None
         total_cycles_for_goal: int = 0
         try:
@@ -189,6 +187,8 @@ class TGRMLoop:
             total_cycles_for_goal = 0
 
         # Maintenance mode:
+        # If there are many cycles on this goal and RYE is high, avoid heavy
+        # repeated external calls and focus on light refinement.
         maintenance_mode = False
         if (
             self.tgrm_level >= 1
@@ -198,14 +198,14 @@ class TGRMLoop:
         ):
             maintenance_mode = True
 
-        # TEST phase: evaluate current state
+        # TEST phase
         prior_notes = self.memory_store.get_notes(goal)
         status_report = self._test(goal, prior_notes)
 
-        # DETECT phase: identify issues to repair
+        # DETECT phase
         issues, issue_descriptions = self._detect(status_report, domain=domain_tag)
 
-        # REPAIR phase: apply targeted repairs (now tool-aware)
+        # REPAIR phase (tool aware)
         (
             repair_actions,
             notes_added,
@@ -223,7 +223,7 @@ class TGRMLoop:
             tool_usage=tool_usage,
         )
 
-        # VERIFY phase: re-evaluate state after repair
+        # VERIFY phase
         new_notes = self.memory_store.get_notes(goal)
         new_status_report = self._test(goal, new_notes)
         issues_after, _ = self._detect(new_status_report, domain=domain_tag)
@@ -234,7 +234,7 @@ class TGRMLoop:
         for h in hypotheses:
             self.memory_store.add_hypothesis(goal, h["text"], score=h.get("confidence"))
 
-        # Candidate interventions / cures / treatments
+        # Candidate interventions
         candidate_interventions = self._extract_candidate_interventions(
             goal=goal,
             domain=domain_tag,
@@ -242,7 +242,7 @@ class TGRMLoop:
             citations=citations,
         )
 
-        # Compute metrics (Reparodynamics: ΔR / E)
+        # Metrics (Reparodynamics: ΔR / E)
         delta_r = compute_delta_r(
             issues_before=len(issues),
             issues_after=len(issues_after),
@@ -263,7 +263,7 @@ class TGRMLoop:
         )
         rye_value = compute_rye(delta_r, energy_e)
 
-        # Create cycle summary (machine-facing log)
+        # Machine facing log
         cycle_summary = {
             "cycle": cycle_index,
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -303,7 +303,7 @@ class TGRMLoop:
         # Log cycle into memory
         self.memory_store.log_cycle(cycle_summary)
 
-        # Human-readable summary
+        # Human readable summary
         human_summary = {
             "cycle": cycle_index,
             "role": role,
@@ -337,7 +337,7 @@ class TGRMLoop:
         Level 2:
             - Also track approximate citation density.
         Level 3:
-            - Keep room for per-domain diagnostic stats (future extension).
+            - Leave room for per domain diagnostic stats.
         """
         known_notes_count = len(notes)
 
@@ -373,16 +373,16 @@ class TGRMLoop:
             - contradiction
 
         Level 2:
-            - can react to low citation density (few citation markers).
+            - reacts to low citation density.
 
         Level 3:
-            - domain-aware issues for longevity and math.
+            - adds domain aware issues for longevity and math.
         """
         issues: List[str] = []
         descriptions: List[str] = []
         notes = status_report.get("notes", [])
 
-        # --- Core generic issues (Level 1) ---
+        # Core generic issues
         if not notes:
             issues.append("no_notes")
             descriptions.append("No prior notes found; initial research required.")
@@ -395,15 +395,13 @@ class TGRMLoop:
                 if "TODO" in content or "todo" in content:
                     issues.append("todo_item")
                     descriptions.append("TODO item detected in notes; missing information.")
-                # Simple placeholder for contradiction marker
                 if "CONTRADICTION" in content:
                     issues.append("contradiction")
                     descriptions.append("Marked contradiction in notes; needs resolution.")
 
-        # --- Level 2: citation-level diagnostics ---
+        # Level 2: citation level diagnostics
         if self.tgrm_level >= 2 and notes:
             citation_markers = status_report.get("approx_citation_markers", 0)
-            # Very rough heuristic: under-cited if fewer markers than notes
             if citation_markers < len(notes):
                 issues.append("under_cited")
                 descriptions.append(
@@ -411,7 +409,7 @@ class TGRMLoop:
                     "prioritize finding stronger primary sources."
                 )
 
-        # --- Level 3: domain-aware issues ---
+        # Level 3: domain aware issues
         if self.tgrm_level >= 3 and notes and domain:
             dom = domain.lower()
             if dom == "longevity":
@@ -427,10 +425,9 @@ class TGRMLoop:
         issues: List[str],
         descriptions: List[str],
     ) -> None:
-        """Add extra issue types for longevity / anti-aging research."""
+        """Add extra issue types for longevity or anti aging research."""
         text = "\n".join(n.get("content", "") for n in notes)
 
-        # Missing explicit biomarker discussion
         if all(
             kw.lower() not in text.lower()
             for kw in ["biomarker", "blood", "lab value", "marker", "hdl", "ldl", "triglyceride"]
@@ -441,7 +438,6 @@ class TGRMLoop:
                 "identify concrete measurable markers and how interventions affect them."
             )
 
-        # Missing mechanisms / pathways
         if all(
             kw.lower() not in text.lower()
             for kw in [
@@ -465,10 +461,9 @@ class TGRMLoop:
         issues: List[str],
         descriptions: List[str],
     ) -> None:
-        """Add extra issue types for math / theory research."""
+        """Add extra issue types for math or theory research."""
         text = "\n".join(n.get("content", "") for n in notes)
 
-        # Missing formal definitions / theorems
         has_definition = "definition" in text.lower()
         has_theorem = "theorem" in text.lower() or "lemma" in text.lower()
         if not (has_definition and has_theorem):
@@ -477,7 +472,6 @@ class TGRMLoop:
                 "Mathematical formalism is incomplete; add explicit definitions and at least one theorem or lemma."
             )
 
-        # Missing links to existing theory
         if all(
             kw.lower() not in text.lower()
             for kw in [
@@ -492,7 +486,7 @@ class TGRMLoop:
             issues.append("missing_connections")
             descriptions.append(
                 "Connections to existing mathematical frameworks are thin; "
-                "relate Reparodynamics to known stability / control / information theories."
+                "relate Reparodynamics to known stability, control, or information theories."
             )
 
     def _repair(
@@ -507,25 +501,7 @@ class TGRMLoop:
         domain: Optional[str] = None,
         tool_usage: Optional[ToolUsage] = None,
     ):
-        """Apply repairs to address detected issues.
-
-        This is where:
-        - Tavily web search runs
-        - PubMed and Semantic Scholar are queried
-        - PDF ingestion can be used when available
-        - Targeted research is performed for open questions or TODOs
-
-        Long run optimization:
-            - In maintenance mode, only a small number of issues are
-              processed per cycle to avoid hammering web APIs.
-            - Even in normal mode, we cap issues per cycle so that 24h
-              runs do not explode in cost.
-
-        Swarm / role awareness:
-            - researcher / explorer: allowed to handle more issues per cycle.
-            - critic: fewer issues, more focused.
-            - synthesizer / planner: often do low-cost notes-only passes.
-        """
+        """Apply repairs to address detected issues."""
         repair_actions: List[Dict[str, str]] = []
         notes_added: List[str] = []
         citations: List[Dict[str, str]] = []
@@ -538,7 +514,7 @@ class TGRMLoop:
             "pdf_ingestions": 0,
             "contradictions_resolved": 0,
             "sources_used": 0,
-            # extra tool-related stats
+            # extra tool related stats
             "browser_actions": 0,
             "code_execs": 0,
             "data_loads": 0,
@@ -548,9 +524,9 @@ class TGRMLoop:
         if maintenance_mode:
             base_max_issues = 2
         else:
-            base_max_issues = 5  # plenty for progress, but bounded for 24h runs
+            base_max_issues = 5
 
-        # Role-based adjustment (swarm-friendly)
+        # Role based adjustment
         role_lower = (role or "agent").lower()
         if role_lower in {"researcher", "explorer"}:
             max_issues = base_max_issues + 2
@@ -570,7 +546,6 @@ class TGRMLoop:
                 self.memory_store.add_citation(goal, c)
 
         for issue, desc in zip(issues_to_handle, descriptions_to_handle):
-            # Main "no notes" entry point: broad initial sweep
             if issue == "no_notes":
                 note_text, new_cites, issue_stats = self._initial_research(
                     goal=goal,
@@ -585,7 +560,7 @@ class TGRMLoop:
                 repair_actions.append(
                     {
                         "issue": issue,
-                        "description": f"[{role}] Performed initial multi-source research for '{goal}'",
+                        "description": f"[{role}] Performed initial multi source research for '{goal}'",
                     }
                 )
                 notes_added.append(note_text)
@@ -595,7 +570,6 @@ class TGRMLoop:
                 for k, v in issue_stats.items():
                     stats[k] = stats.get(k, 0) + v
 
-                # Token accounting for this note
                 if tool_usage is not None:
                     tool_usage.approx_tokens += self._estimate_tokens(note_text)
 
@@ -774,14 +748,13 @@ class TGRMLoop:
         domain: Optional[str],
         purpose: str,
     ) -> Dict[str, Any]:
-        """Hybrid-mode selection of Tavily search level / size / topic.
+        """Hybrid mode selection of web search level and size.
 
-        purpose ∈ {"initial", "targeted", "strengthen", "gap_repair"}
+        purpose in {"initial", "targeted", "strengthen", "gap_repair"}.
         """
         role_lower = (role or "agent").lower()
         dom = (domain or "general").lower()
 
-        # Topic routing
         if dom in {"longevity", "biology", "medicine", "health"}:
             topic = "science"
         elif dom in {"math", "physics", "chemistry"}:
@@ -789,17 +762,12 @@ class TGRMLoop:
         else:
             topic = "general"
 
-        # Base level from global TGRM level (1–3)
         base_level = max(1, min(self.tgrm_level, 3))
-
-        # Start with base level, then adjust
         level = base_level
 
-        # Maintenance tends to downshift one level if possible
         if maintenance_mode and base_level > 1:
             level = base_level - 1
 
-        # Purpose-specific nudges
         if purpose in {"initial", "gap_repair", "strengthen"}:
             if not maintenance_mode and base_level == 3 and role_lower in {"researcher", "explorer"}:
                 level = 3
@@ -809,7 +777,6 @@ class TGRMLoop:
             elif role_lower in {"critic", "planner", "synthesizer", "integrator"}:
                 level = max(1, min(base_level, 2))
 
-        # Max results tuned by purpose
         if purpose == "initial":
             base_max = 5 if not maintenance_mode else 3
         elif purpose == "targeted":
@@ -836,7 +803,7 @@ class TGRMLoop:
         maintenance_mode: bool,
         tool_usage: Optional[ToolUsage] = None,
     ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
-        """Perform the initial multi-source research when there are no notes."""
+        """Perform the initial multi source research when there are no notes."""
         citations: List[Dict[str, str]] = []
         stats = {
             "web_calls": 0,
@@ -874,6 +841,9 @@ class TGRMLoop:
             web_cites = self.web_tool.to_citations(web_results)
             citations.extend(web_cites)
 
+            if tool_usage is not None:
+                tool_usage.approx_tokens += self._estimate_tokens(web_summary)
+
             note_lines.append("Web summary (Tavily):")
             note_lines.append(web_summary)
             note_lines.append("")
@@ -901,16 +871,19 @@ class TGRMLoop:
                     note_lines.append(browser_result.text_snippet[:2000])
                 note_lines.append("")
             except Exception:
-                # Browser failures should not break the cycle
+                # Browser failures must not break the cycle
                 pass
 
         # PubMed search
         if source_controls.get("pubmed", False):
             pubmed_results = self.pubmed_tool.search(goal, max_results=5)
             stats["pubmed_calls"] += 1
-            if tool_usage is not None:
-                tool_usage.sql_queries += 0  # reserved for future structured queries
             citations.extend(pubmed_results)
+
+            if tool_usage is not None:
+                titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
+                tool_usage.approx_tokens += self._estimate_tokens(titles)
+
             note_lines.append("PubMed sources:")
             for r in pubmed_results:
                 note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
@@ -921,6 +894,11 @@ class TGRMLoop:
             sem_results = self.semantic_tool.search(goal, max_results=5)
             stats["semantic_calls"] += 1
             citations.extend(sem_results)
+
+            if tool_usage is not None:
+                titles = " ".join(r.get("title", "") or "" for r in sem_results)
+                tool_usage.approx_tokens += self._estimate_tokens(titles)
+
             note_lines.append("Semantic Scholar sources:")
             for r in sem_results:
                 note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
@@ -988,7 +966,7 @@ class TGRMLoop:
         domain: Optional[str] = None,
         tool_usage: Optional[ToolUsage] = None,
     ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
-        """Perform focused multi-source research on open questions or TODOs."""
+        """Perform focused multi source research on open questions or TODOs."""
         citations: List[Dict[str, str]] = []
         stats = {
             "web_calls": 0,
@@ -1026,7 +1004,7 @@ class TGRMLoop:
         note_lines.append("")
 
         for q in questions:
-            note_lines.append("### Question-focused search:")
+            note_lines.append("### Question focused search:")
             note_lines.append(q)
             note_lines.append("")
 
@@ -1046,6 +1024,9 @@ class TGRMLoop:
                 web_cites = self.web_tool.to_citations(web_results)
                 citations.extend(web_cites)
 
+                if tool_usage is not None:
+                    tool_usage.approx_tokens += self._estimate_tokens(web_summary)
+
                 note_lines.append("Web summary (Tavily):")
                 note_lines.append(web_summary)
                 note_lines.append("Web sources:")
@@ -1057,6 +1038,11 @@ class TGRMLoop:
                 pubmed_results = self.pubmed_tool.search(q, max_results=5)
                 stats["pubmed_calls"] += 1
                 citations.extend(pubmed_results)
+
+                if tool_usage is not None:
+                    titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
+                    tool_usage.approx_tokens += self._estimate_tokens(titles)
+
                 note_lines.append("PubMed sources:")
                 for r in pubmed_results:
                     note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
@@ -1066,6 +1052,11 @@ class TGRMLoop:
                 sem_results = self.semantic_tool.search(q, max_results=5)
                 stats["semantic_calls"] += 1
                 citations.extend(sem_results)
+
+                if tool_usage is not None:
+                    titles = " ".join(r.get("title", "") or "" for r in sem_results)
+                    tool_usage.approx_tokens += self._estimate_tokens(titles)
+
                 note_lines.append("Semantic Scholar sources:")
                 for r in sem_results:
                     note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
@@ -1121,6 +1112,9 @@ class TGRMLoop:
             web_cites = self.web_tool.to_citations(web_results)
             citations.extend(web_cites)
 
+            if tool_usage is not None:
+                tool_usage.approx_tokens += self._estimate_tokens(web_summary)
+
             note_lines.append("Web summary (stronger evidence focus):")
             note_lines.append(web_summary)
             note_lines.append("Web sources:")
@@ -1132,6 +1126,11 @@ class TGRMLoop:
             pubmed_results = self.pubmed_tool.search(query, max_results=10)
             stats["pubmed_calls"] += 1
             citations.extend(pubmed_results)
+
+            if tool_usage is not None:
+                titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
+                tool_usage.approx_tokens += self._estimate_tokens(titles)
+
             note_lines.append("PubMed sources (stronger evidence):")
             for r in pubmed_results:
                 note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
@@ -1141,6 +1140,11 @@ class TGRMLoop:
             sem_results = self.semantic_tool.search(query, max_results=10)
             stats["semantic_calls"] += 1
             citations.extend(sem_results)
+
+            if tool_usage is not None:
+                titles = " ".join(r.get("title", "") or "" for r in sem_results)
+                tool_usage.approx_tokens += self._estimate_tokens(titles)
+
             note_lines.append("Semantic Scholar sources (stronger evidence):")
             for r in sem_results:
                 note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
@@ -1159,7 +1163,7 @@ class TGRMLoop:
         domain: Optional[str],
         tool_usage: Optional[ToolUsage] = None,
     ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
-        """Generic helper to fill domain-specific gaps."""
+        """Generic helper to fill domain specific gaps."""
         dom = (domain or "general").lower()
         citations: List[Dict[str, str]] = []
         stats = {
@@ -1175,7 +1179,7 @@ class TGRMLoop:
         }
 
         note_lines: List[str] = []
-        note_lines.append(f"[{role}] Domain-specific gap repair for goal:")
+        note_lines.append(f"[{role}] Domain specific gap repair for goal:")
         note_lines.append(goal)
         note_lines.append("")
         note_lines.append(f"Issue: {issue}")
@@ -1226,6 +1230,9 @@ class TGRMLoop:
             web_cites = self.web_tool.to_citations(web_results)
             citations.extend(web_cites)
 
+            if tool_usage is not None:
+                tool_usage.approx_tokens += self._estimate_tokens(web_summary)
+
             note_lines.append("Web summary (gap repair):")
             note_lines.append(web_summary)
             note_lines.append("Web sources:")
@@ -1237,6 +1244,11 @@ class TGRMLoop:
             pubmed_results = self.pubmed_tool.search(query, max_results=10)
             stats["pubmed_calls"] += 1
             citations.extend(pubmed_results)
+
+            if tool_usage is not None:
+                titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
+                tool_usage.approx_tokens += self._estimate_tokens(titles)
+
             note_lines.append("PubMed sources (gap repair):")
             for r in pubmed_results:
                 note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
@@ -1246,6 +1258,11 @@ class TGRMLoop:
             sem_results = self.semantic_tool.search(query, max_results=10)
             stats["semantic_calls"] += 1
             citations.extend(sem_results)
+
+            if tool_usage is not None:
+                titles = " ".join(r.get("title", "") or "" for r in sem_results)
+                tool_usage.approx_tokens += self._estimate_tokens(titles)
+
             note_lines.append("Semantic Scholar sources (gap repair):")
             for r in sem_results:
                 note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
@@ -1264,7 +1281,7 @@ class TGRMLoop:
         notes: List[Dict[str, Any]],
         citations: List[Dict[str, Any]],
     ) -> List[Dict[str, Any]]:
-        """Lightweight extractor for candidate interventions / cures / treatments."""
+        """Lightweight extractor for candidate interventions or treatments."""
         candidates: List[Dict[str, Any]] = []
         seen_titles: set[str] = set()
 
