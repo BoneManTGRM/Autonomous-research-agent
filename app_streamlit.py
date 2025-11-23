@@ -1,7 +1,7 @@
 """Enhanced Streamlit interface for the Autonomous Research Agent.
 
 Features:
-- Continuous Mode with duration presets (1h, 8h, 24h, 90 days, Forever)
+- Continuous Mode with duration presets (1h, 8h, 24h, 1 week, 1 month, 90 days, Forever)
 - Researcher + Critic multi agent mode
 - Swarm mode with up to dozens of specialized mini agents
 - Domain presets (General, Longevity, Math)
@@ -28,15 +28,15 @@ Reparodynamics:
     - Each cycle computes RYE = delta_R / E and is logged.
 
 Time:
-    All continuous run presets (1h, 8h, 24h, 90 days) map to real
+    All continuous run presets (1h, 8h, 24h, 1 week, 1 month, 90 days) map to real
     wall clock minutes via the CoreAgent's max_minutes budget.
 
 Note:
     For safety and to ensure runs actually finish when launched from
     this Streamlit UI, the 1h / 8h / 24h modes use an approximate
     cycle budget locally instead of relying solely on an external
-    background worker. 90 days and Forever still configure the
-    background worker via control_state.json.
+    background worker. 1 week / 1 month / 90 days and Forever still
+    configure the background worker via control_state.json.
 """
 
 from __future__ import annotations
@@ -846,6 +846,8 @@ def main() -> None:
             "1 hour (real clock)",
             "8 hours (real clock)",
             "24 hours (real clock)",
+            "1 week (real clock)",
+            "1 month (real clock)",
             "90 days (real clock)",
             "Forever (until stopped)",
         ],
@@ -853,7 +855,7 @@ def main() -> None:
         help=(
             "Manual mode runs a fixed number of cycles locally.\n"
             "1h / 8h / 24h run an approximate cycle budget locally so they actually end.\n"
-            "90 days and Forever configure the background worker via control_state.json."
+            "1 week / 1 month / 90 days and Forever configure the background worker via control_state.json."
         ),
     )
 
@@ -1001,8 +1003,9 @@ def main() -> None:
         else:
             # Timed modes.
             # For 1h / 8h / 24h we run an approximate local cycle budget so the run
-            # actually finishes even without an external worker. 90 days and Forever
-            # are still configured via control_state.json for a separate worker.
+            # actually finishes even without an external worker. 1 week / 1 month /
+            # 90 days and Forever are configured via control_state.json for a
+            # separate worker.
             if run_mode in (
                 "1 hour (real clock)",
                 "8 hours (real clock)",
@@ -1161,12 +1164,18 @@ def main() -> None:
                     render_cycle_summary(cs)
 
             else:
-                # 90 days and Forever: configure background worker only.
+                # 1 week / 1 month / 90 days and Forever: configure background worker only.
                 max_minutes: Optional[float] = None
                 forever_flag: bool = False
                 runtime_profile: Optional[str] = None
 
-                if run_mode == "90 days (real clock)":
+                if run_mode == "1 week (real clock)":
+                    max_minutes = 7.0 * 24.0 * 60.0
+                    runtime_profile = "1_week"
+                elif run_mode == "1 month (real clock)":
+                    max_minutes = 30.0 * 24.0 * 60.0
+                    runtime_profile = "1_month"
+                elif run_mode == "90 days (real clock)":
                     max_minutes = 90.0 * 24.0 * 60.0
                     runtime_profile = "90_days"
                 elif run_mode == "Forever (until stopped)":
@@ -1284,7 +1293,7 @@ def main() -> None:
         with st.expander("Raw control state"):
             st.code(json.dumps(control_state, indent=2), language="json")
     else:
-        st.write("No control state file yet. Configure a 90 day or Forever run to create one.")
+        st.write("No control state file yet. Configure a 1 week, 1 month, 90 day or Forever run to create one.")
 
     col_start, col_pause, col_stop = st.columns(3)
 
