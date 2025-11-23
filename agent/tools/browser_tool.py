@@ -1,24 +1,44 @@
 import os
+import json
+import time
 import requests
+from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
+
+try:
+    # Optional Tavily client (preferred when installed)
+    from tavily import TavilyClient
+except Exception:
+    TavilyClient = None  # type: ignore[assignment]
 
 
 class BrowserTool:
     """
-    Web search + lightweight browser fetch for the Autonomous Research Agent.
+    Web search plus lightweight browser fetch for the Autonomous Research Agent.
 
     Features:
         - Tavily based web search with answer mode and metadata
+        - Support for topic, time_range, search depth, auto parameters, images
         - Stubbed offline mode when no API key is available
         - Simple URL fetch for quick page inspection
         - Normalized result shape for the agent
+        - Basic logging to logs/web_search_log.json
+        - In memory cache to avoid paying twice for identical queries
 
     Backwards compatibility:
         - Existing calls using search(query, max_results=5) still work
         - Existing calls using fetch_url(url) still work
+        - Existing calls using search_with_answer(...) still work
+        - Existing code can also call the instance directly: browser("query")
     """
 
     TAVILY_ENDPOINT = "https://api.tavily.com/search"
+    LOG_PATH = Path("logs/web_search_log.json")
+
+    # cache key: (query, max_results, search_depth, topic, time_range)
+    _cache: Dict[Tuple[str, int, str, str, Optional[str]], Dict[str, Any]] = {}
+    _cache_ts: Dict[Tuple[str, int, str, str, Optional[str]], float] = {}
+    CACHE_TTL_SECONDS: float = 600.0
 
     def __init__(
         self,
@@ -43,9 +63,15 @@ class BrowserTool:
         """
         self.api_key = api_key or os.getenv("TAVILY_API_KEY")
         self.endpoint = endpoint or self.TAVILY_ENDPOINT
-        self.default_max_results = default_max_results
+        self.default_max_results = int(default_max_results)
         self.timeout = float(timeout)
         self.verify_ssl = bool(verify_ssl)
+
+        # Ensure log directory exists
+        try:
+            self.LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Key and status helpers
@@ -70,11 +96,51 @@ class BrowserTool:
         }
 
     # ------------------------------------------------------------------
-    # Internal HTTP helper
+    # Logging and caching
     # ------------------------------------------------------------------
-    def _post_tavily(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+    def _log_event(self, event: Dict[str, Any]) -> None:
+        """Append an event to the web search log without ever crashing."""
+        try:
+            if self.LOG_PATH.exists():
+                with self.LOG_PATH.open("r", encoding="utf_8") as f:
+                    data = json.load(f)
+                if not isinstance(data, list):
+                    data = []
+            else:
+                data = []
+            data.append(event)
+            with self.LOG_PATH.open("w", encoding="utf_8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            return
+
+    def _cache_get(
+        self,
+        key: Tuple[str, int, str, str, Optional[str]],
+    ) -> Optional[Dict[str, Any]]:
+        ts = self._cache_ts.get(key)
+        if ts is None:
+            return None
+        if time.time() - ts > self.CACHE_TTL_SECONDS:
+            self._cache.pop(key, None)
+            self._cache_ts.pop(key, None)
+            return None
+        return self._cache.get(key)
+
+    def _cache_set(
+        self,
+        key: Tuple[str, int, str, str, Optional[str]],
+        value: Dict[str, Any],
+    ) -> None:
+        self._cache[key] = value
+        self._cache_ts[key] = time.time()
+
+    # ------------------------------------------------------------------
+    # Internal HTTP or client helpers
+    # ------------------------------------------------------------------
+    def _post_tavily_http(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Internal helper for Tavily POST.
+        Internal helper for Tavily POST over raw HTTP.
 
         Never raises. On any error it returns a dict with:
             {"error": "..."}
@@ -85,7 +151,7 @@ class BrowserTool:
         try:
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
-                "X-API-Key": self.api_key,  # works with newer Tavily clients
+                "X-API-Key": self.api_key,  # compatible with newer Tavily API wrappers
                 "Content-Type": "application/json",
             }
             resp = requests.post(
@@ -100,6 +166,36 @@ class BrowserTool:
         except Exception as e:
             return {"error": str(e)}
 
+    def _tavily_client_search(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Use tavily-python client if available, otherwise fall back to HTTP helper.
+        """
+        if TavilyClient is None:
+            return self._post_tavily_http(payload)
+
+        if not self.api_key:
+            return {"error": "No Tavily API key configured."}
+
+        try:
+            client = TavilyClient(api_key=self.api_key)  # type: ignore[call-arg]
+            # Map payload into client.search parameters
+            resp = client.search(
+                query=payload.get("query", ""),
+                max_results=payload.get("max_results", self.default_max_results),
+                topic=payload.get("topic", "general"),
+                search_depth=payload.get("search_depth", "basic"),
+                time_range=payload.get("time_range"),
+                include_answer=payload.get("include_answer", False),
+                include_raw_content=payload.get("include_raw_content", False),
+                include_images=payload.get("include_images", False),
+                auto_parameters=payload.get("auto_parameters", False),
+            )
+            if isinstance(resp, dict):
+                return resp
+            return {"results": resp}
+        except Exception as e:
+            return {"error": str(e)}
+
     @staticmethod
     def _normalize_results(raw_results: Any) -> List[Dict[str, Any]]:
         """
@@ -107,13 +203,16 @@ class BrowserTool:
 
         Input can be:
             - list of dicts
-            - dict containing "results"
+            - dict containing "results" or "items"
         """
         if raw_results is None:
             return []
 
-        if isinstance(raw_results, dict) and "results" in raw_results:
-            raw_results = raw_results["results"]
+        if isinstance(raw_results, dict):
+            if "results" in raw_results:
+                raw_results = raw_results["results"]
+            elif "items" in raw_results:
+                raw_results = raw_results["items"]
 
         if not isinstance(raw_results, list):
             return []
@@ -126,7 +225,13 @@ class BrowserTool:
             src = item.get("source") or item.get("provider") or "web"
             title = item.get("title") or item.get("name") or "(untitled)"
             url = item.get("url") or item.get("link") or ""
-            snippet = item.get("snippet") or item.get("content") or item.get("text") or ""
+            snippet = (
+                item.get("snippet")
+                or item.get("content")
+                or item.get("raw_content")
+                or item.get("text")
+                or ""
+            )
             score = item.get("score") or item.get("relevance_score")
 
             normalized.append(
@@ -142,7 +247,7 @@ class BrowserTool:
         return normalized
 
     # ------------------------------------------------------------------
-    # Public API
+    # Public API - search
     # ------------------------------------------------------------------
     def search(
         self,
@@ -151,6 +256,10 @@ class BrowserTool:
         search_depth: str = "basic",
         include_answer: bool = False,
         include_raw_content: bool = False,
+        topic: str = "general",
+        time_range: Optional[str] = None,
+        auto_parameters: bool = False,
+        include_images: bool = False,
     ) -> List[Dict[str, Any]]:
         """
         Perform a web search.
@@ -159,20 +268,26 @@ class BrowserTool:
             query:
                 Text query to search for.
             max_results:
-                Maximum number of results. Defaults to 5; this preserves
-                backward compatible behavior with older calls.
+                Maximum number of results.
             search_depth:
                 "basic" for faster searches, "advanced" for richer context.
             include_answer:
-                If True, Tavily will try to generate a direct answer which
-                is attached to the first result under "answer".
+                If True, Tavily will try to generate a direct answer.
             include_raw_content:
-                If True, raw page content text is requested where Tavily supports it.
+                If True, request raw page content where available.
+            topic:
+                "general", "news", or "finance".
+            time_range:
+                Optional range "day", "week", "month", "year".
+            auto_parameters:
+                Let Tavily auto tune some parameters for difficult queries.
+            include_images:
+                If True, allow Tavily to return image suggestions.
 
         Returns:
             A list of normalized result dicts:
                 {
-                    "source": "tavily" or similar,
+                    "source": "web" or similar,
                     "title": "...",
                     "url": "https://...",
                     "snippet": "...",
@@ -181,10 +296,15 @@ class BrowserTool:
 
         When no API key is present, returns a single stub entry.
         """
+        query = (query or "").strip()
         max_results = max(1, int(max_results or self.default_max_results))
 
+        if not query:
+            return []
+
+        # Stub when no key
         if not self.api_key:
-            return [
+            stub = [
                 {
                     "source": "stub",
                     "title": f"Stubbed search result for: {query}",
@@ -193,6 +313,19 @@ class BrowserTool:
                     "score": None,
                 }
             ]
+            self._log_event(
+                {
+                    "event": "stub_search",
+                    "query": query,
+                    "max_results": max_results,
+                }
+            )
+            return stub
+
+        cache_key = (query, max_results, search_depth, topic, time_range)
+        cached = self._cache_get(cache_key)
+        if cached is not None:
+            return cached.get("results", [])
 
         payload: Dict[str, Any] = {
             "query": query,
@@ -200,11 +333,26 @@ class BrowserTool:
             "search_depth": search_depth,
             "include_answer": include_answer,
             "include_raw_content": include_raw_content,
+            "topic": topic,
+            "time_range": time_range,
+            "auto_parameters": auto_parameters,
+            "include_images": include_images,
         }
 
-        data = self._post_tavily(payload)
+        start = time.time()
+        data = self._tavily_client_search(payload)
+        elapsed = time.time() - start
+
         if "error" in data:
-            return [
+            self._log_event(
+                {
+                    "event": "search_error",
+                    "query": query,
+                    "error": data["error"],
+                    "elapsed_sec": elapsed,
+                }
+            )
+            error_result = [
                 {
                     "source": "error",
                     "title": "Search failed",
@@ -213,14 +361,34 @@ class BrowserTool:
                     "score": None,
                 }
             ]
+            self._cache_set(cache_key, {"results": error_result})
+            return error_result
 
-        return self._normalize_results(data.get("results", data))
+        results = self._normalize_results(data.get("results", data))
+
+        self._log_event(
+            {
+                "event": "search",
+                "query": query,
+                "max_results": max_results,
+                "search_depth": search_depth,
+                "topic": topic,
+                "time_range": time_range,
+                "elapsed_sec": elapsed,
+                "num_results": len(results),
+            }
+        )
+
+        self._cache_set(cache_key, {"results": results})
+        return results
 
     def search_with_answer(
         self,
         query: str,
         max_results: int = 5,
         search_depth: str = "advanced",
+        topic: str = "general",
+        time_range: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Convenience helper that returns both:
@@ -233,7 +401,11 @@ class BrowserTool:
                 "results": [ {source, title, url, snippet, score}, ... ]
             }
         """
+        query = (query or "").strip()
         max_results = max(1, int(max_results or self.default_max_results))
+
+        if not query:
+            return {"answer": None, "results": []}
 
         if not self.api_key:
             return {
@@ -255,10 +427,23 @@ class BrowserTool:
             "search_depth": search_depth,
             "include_answer": True,
             "include_raw_content": False,
+            "topic": topic,
+            "time_range": time_range,
         }
 
-        data = self._post_tavily(payload)
+        start = time.time()
+        data = self._tavily_client_search(payload)
+        elapsed = time.time() - start
+
         if "error" in data:
+            self._log_event(
+                {
+                    "event": "search_with_answer_error",
+                    "query": query,
+                    "error": data["error"],
+                    "elapsed_sec": elapsed,
+                }
+            )
             return {
                 "answer": None,
                 "results": [
@@ -274,8 +459,25 @@ class BrowserTool:
 
         answer = data.get("answer") if isinstance(data, dict) else None
         results = self._normalize_results(data.get("results", data))
+
+        self._log_event(
+            {
+                "event": "search_with_answer",
+                "query": query,
+                "max_results": max_results,
+                "search_depth": search_depth,
+                "topic": topic,
+                "time_range": time_range,
+                "elapsed_sec": elapsed,
+                "num_results": len(results),
+            }
+        )
+
         return {"answer": answer, "results": results}
 
+    # ------------------------------------------------------------------
+    # Public API - fetch URL
+    # ------------------------------------------------------------------
     def fetch_url(self, url: str) -> Dict[str, Any]:
         """
         Fetch a URL and return a lightweight snapshot.
