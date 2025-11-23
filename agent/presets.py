@@ -24,7 +24,10 @@ These settings do NOT break existing code but unlock future power for:
 """
 
 from __future__ import annotations
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
+
+# Simple version tag so the app and UI can display which preset set is loaded.
+PRESETS_VERSION: str = "2025-11-23"
 
 # ---------------------------------------------------------------------
 # Global Runtime Profiles (applies for all presets)
@@ -277,6 +280,11 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "label": "General research",
         "domain": "general",
 
+        # Default TGRM and engine hints
+        "default_tgrm_level": 3,
+        "supports_single_agent": True,
+        "supports_swarm": True,
+
         "default_goal": (
             "Research and summarize the concept of Reparodynamics, define RYE and TGRM, "
             "identify similar frameworks in the literature, and produce a structured comparison table."
@@ -505,6 +513,11 @@ PRESETS: Dict[str, Dict[str, Any]] = {
     "longevity": {
         "label": "Longevity / Anti aging",
         "domain": "longevity",
+
+        # Default TGRM and engine hints
+        "default_tgrm_level": 3,
+        "supports_single_agent": True,
+        "supports_swarm": True,
 
         "default_goal": (
             "Identify and summarize interventions, biomarkers, and mechanisms that extend healthspan and longevity, "
@@ -782,6 +795,11 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "label": "Math / Theory",
         "domain": "math",
 
+        # Default TGRM and engine hints
+        "default_tgrm_level": 3,
+        "supports_single_agent": True,
+        "supports_swarm": True,
+
         "default_goal": (
             "Formalize Reparodynamics, RYE, and TGRM mathematically: definitions, axioms, theorems, "
             "proof sketches, and comparisons to control, information, and stability theories."
@@ -1025,3 +1043,26 @@ def get_continuous_mode_defaults() -> Dict[str, Any]:
 def get_swarm_global_hints() -> Dict[str, Any]:
     """Return global swarm hints and safety ceilings."""
     return SWARM_GLOBAL_HINTS
+
+
+def list_preset_names() -> List[str]:
+    """Return a sorted list of available preset names."""
+    return sorted(PRESETS.keys())
+
+
+def describe_presets() -> List[Dict[str, Any]]:
+    """Lightweight summaries for UI or logging."""
+    summaries: List[Dict[str, Any]] = []
+    for name, cfg in PRESETS.items():
+        summaries.append(
+            {
+                "name": name,
+                "label": cfg.get("label", name),
+                "domain": cfg.get("domain"),
+                "default_goal": cfg.get("default_goal"),
+                "default_runtime_profile": cfg.get("default_runtime_profile"),
+                "supports_swarm": cfg.get("supports_swarm", False),
+                "supports_single_agent": cfg.get("supports_single_agent", True),
+            }
+        )
+    return summaries
