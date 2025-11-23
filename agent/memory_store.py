@@ -53,10 +53,13 @@ except Exception:  # pragma: no cover
 
 
 # ----------------------------------------------------------------------
+# Schema and global caps
+# ----------------------------------------------------------------------
+MEMORY_SCHEMA_VERSION = 2
+
 # Hard but generous caps for 24-90 day or long runs
 # These mirror the events and discoveries bounding you already had.
 # They are global caps; older items are dropped first.
-# ----------------------------------------------------------------------
 MAX_NOTES = 50_000
 MAX_CYCLES = 50_000
 MAX_HYPOTHESES = 20_000
@@ -130,6 +133,7 @@ class MemoryStore:
             "run_manifests": {},  # run_id -> manifest dict
             "tool_events": [],    # per tool usage events
             "milestones": [],     # milestones over long runs
+            "schema_version": MEMORY_SCHEMA_VERSION,
         }
         self._load()
         self._ensure_keys()
@@ -168,12 +172,25 @@ class MemoryStore:
             if key not in self._data:
                 self._data[key] = default
             else:
-                if key in ("notes", "cycles", "hypotheses", "citations", "biomarkers", "events", "discoveries", "tool_events", "milestones"):
+                if key in (
+                    "notes",
+                    "cycles",
+                    "hypotheses",
+                    "citations",
+                    "biomarkers",
+                    "events",
+                    "discoveries",
+                    "tool_events",
+                    "milestones",
+                ):
                     if not isinstance(self._data.get(key), list):
                         self._data[key] = []
                 elif key in ("run_manifests", "run_state", "worker_state", "watchdog", "goal_index"):
                     if not isinstance(self._data.get(key), dict):
                         self._data[key] = {}
+        # Ensure schema version is present
+        if not isinstance(self._data.get("schema_version"), int):
+            self._data["schema_version"] = MEMORY_SCHEMA_VERSION
 
     def _load(self) -> None:
         """Load memory from disk if the file exists."""
@@ -198,6 +215,7 @@ class MemoryStore:
                     "run_manifests": {},
                     "tool_events": [],
                     "milestones": [],
+                    "schema_version": MEMORY_SCHEMA_VERSION,
                 }
 
     def _save(self) -> None:
@@ -209,6 +227,7 @@ class MemoryStore:
         """
         tmp_path = self.memory_file + ".tmp"
         try:
+            self._data["schema_version"] = MEMORY_SCHEMA_VERSION
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, self.memory_file)
@@ -258,6 +277,47 @@ class MemoryStore:
 
         return path
 
+    # Simple schema and file info for UI or engine_worker dashboards
+    def get_schema_info(self) -> Dict[str, Any]:
+        """Return basic schema and file info for status panels."""
+        info: Dict[str, Any] = {
+            "schema_version": int(self._data.get("schema_version", MEMORY_SCHEMA_VERSION)),
+            "file_path": os.path.abspath(self.memory_file),
+            "file_size_bytes": None,
+        }
+        try:
+            info["file_size_bytes"] = os.path.getsize(self.memory_file)
+        except Exception:
+            info["file_size_bytes"] = None
+        return info
+
+    # Optional hard reset for dev and testing
+    def reset_memory(self, keep_run_state: bool = False) -> None:
+        """Reset the memory file to an empty state.
+
+        This is mainly for development and testing. In production you would
+        typically never call this.
+        """
+        run_state_backup = self._data.get("run_state") if keep_run_state else {}
+        self._data = {
+            "notes": [],
+            "cycles": [],
+            "hypotheses": [],
+            "citations": [],
+            "biomarkers": [],
+            "run_state": run_state_backup or {},
+            "worker_state": {},
+            "watchdog": {},
+            "goal_index": {},
+            "events": [],
+            "discoveries": [],
+            "run_manifests": {},
+            "tool_events": [],
+            "milestones": [],
+            "schema_version": MEMORY_SCHEMA_VERSION,
+        }
+        self._save()
+
     # ------------------------------------------------------------------
     # Internal helpers for goal index
     # ------------------------------------------------------------------
@@ -272,7 +332,13 @@ class MemoryStore:
         rye_value: Optional[float] = None,
         domain: Optional[str] = None,
     ) -> None:
-        """Update compact per goal stats for swarms and analytics."""
+        """Update compact per goal stats for swarms and analytics.
+
+        This maintains:
+            - note_count, cycle_count
+            - per role counts and avg_rye
+            - goal level avg_rye, min_rye, max_rye, rye_count
+        """
         gi = self._data.setdefault("goal_index", {})
         entry = gi.get(goal) or {}
         if not isinstance(entry, dict):
@@ -328,6 +394,19 @@ class MemoryStore:
             else:
                 entry["avg_rye"] = float(rye_value)
                 entry["rye_count"] = 1
+
+            # Track min and max RYE at the goal index level as well
+            prev_min = entry.get("min_rye")
+            prev_max = entry.get("max_rye")
+            v = float(rye_value)
+            if isinstance(prev_min, (int, float)):
+                entry["min_rye"] = min(float(prev_min), v)
+            else:
+                entry["min_rye"] = v
+            if isinstance(prev_max, (int, float)):
+                entry["max_rye"] = max(float(prev_max), v)
+            else:
+                entry["max_rye"] = v
 
         gi[goal] = entry
         self._data["goal_index"] = gi
@@ -642,7 +721,8 @@ class MemoryStore:
         can resume a long run.
         """
         if state is not None and isinstance(state, dict) and not any(
-            v is not None for v in (goal, mode, minutes_remaining, last_cycle_index, domain, extra, run_id)
+            v is not None
+            for v in (goal, mode, minutes_remaining, last_cycle_index, domain, extra, run_id)
         ):
             payload = dict(state)
             payload.setdefault("updated_at", _utc_now_iso())
@@ -955,6 +1035,21 @@ class MemoryStore:
             result.append(e)
         return result
 
+    def get_recent_discoveries(
+        self,
+        *,
+        limit: int = 50,
+        goal: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return recent discoveries for dashboards and reports."""
+        entries = self.get_discoveries(goal=goal)
+        entries_sorted = sorted(
+            entries,
+            key=lambda d: d.get("timestamp", ""),
+            reverse=True,
+        )
+        return entries_sorted[:limit]
+
     # ------------------------------------------------------------------
     # Run manifests for long runs
     # ------------------------------------------------------------------
@@ -1137,7 +1232,10 @@ class MemoryStore:
         # Optional future hook for per tool RYE
         if _rye_metrics is not None and hasattr(_rye_metrics, "compute_tool_rye"):
             try:
-                result["tool_rye"] = _rye_metrics.compute_tool_rye(events, run_id=run_id)  # type: ignore[attr-defined]
+                result["tool_rye"] = _rye_metrics.compute_tool_rye(
+                    events,
+                    run_id=run_id,
+                )  # type: ignore[attr-defined]
             except Exception:
                 pass
 
@@ -1221,9 +1319,29 @@ class MemoryStore:
 
         If goal is provided, restrict to that goal.
         If role is also provided, restrict to that logical role.
+
         Returns:
             (avg_rye, min_rye, max_rye, count)
         """
+        # Fast path: if goal is provided and no role filter, try goal_index
+        if goal is not None and role is None:
+            gi = self._data.get("goal_index") or {}
+            if isinstance(gi, dict):
+                entry = gi.get(goal)
+                if isinstance(entry, dict):
+                    avg_val = entry.get("avg_rye")
+                    min_val = entry.get("min_rye")
+                    max_val = entry.get("max_rye")
+                    count_val = entry.get("rye_count")
+                    if isinstance(avg_val, (int, float)) and isinstance(count_val, int) and count_val > 0:
+                        return (
+                            float(avg_val),
+                            float(min_val) if isinstance(min_val, (int, float)) else None,
+                            float(max_val) if isinstance(max_val, (int, float)) else None,
+                            int(count_val),
+                        )
+
+        # Fallback: compute from cycles directly
         history = self._data.get("cycles", [])
         if goal is not None:
             history = [c for c in history if c.get("goal") == goal]
@@ -1314,8 +1432,10 @@ class MemoryStore:
         title += f"Total cycles: {total_cycles}\n"
         if rye_count > 0 and avg_rye is not None:
             title += f"RYE (avg): {avg_rye:.3f}\n"
-            title += f"RYE (min): {min_rye:.3f}\n"
-            title += f"RYE (max): {max_rye:.3f}\n"
+            if min_rye is not None:
+                title += f"RYE (min): {min_rye:.3f}\n"
+            if max_rye is not None:
+                title += f"RYE (max): {max_rye:.3f}\n"
         else:
             title += "RYE: no data available\n"
         title += "\n"
@@ -1493,3 +1613,31 @@ class MemoryStore:
         }
 
         return summary
+
+    def get_goal_leaderboard(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return a leaderboard of goals ordered by avg_rye descending."""
+        gi = self._data.get("goal_index") or {}
+        if not isinstance(gi, dict):
+            return []
+
+        rows: List[Dict[str, Any]] = []
+        for goal, entry in gi.items():
+            if not isinstance(entry, dict):
+                continue
+            avg_val = entry.get("avg_rye")
+            count_val = entry.get("rye_count")
+            if not isinstance(avg_val, (int, float)) or not isinstance(count_val, int):
+                continue
+            rows.append(
+                {
+                    "goal": goal,
+                    "avg_rye": float(avg_val),
+                    "rye_count": int(count_val),
+                    "note_count": int(entry.get("note_count", 0)),
+                    "cycle_count": int(entry.get("cycle_count", 0)),
+                    "domain": entry.get("domain"),
+                }
+            )
+
+        rows_sorted = sorted(rows, key=lambda r: (r["avg_rye"], r["rye_count"]), reverse=True)
+        return rows_sorted[:limit]
