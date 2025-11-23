@@ -700,20 +700,48 @@ def compute_tool_rye(
 
         per_tool[name] = t
 
-    result: Dict[str, Any] = {}
+    tools_out: Dict[str, Any] = {}
 
     for name, t in per_tool.items():
-        ratios: List[float] = [float(r) for r in t.get("ratios", []) if isinstance(r, (int, float))]
-        rye_avg: Optional[float] = None
-        rye_median_val: Optional[float] = None
-        rye_last: Optional[float] = None
+        ratios_raw = t.get("ratios", [])
+        ratios: List[float] = [
+            float(r) for r in ratios_raw if isinstance(r, (int, float))
+        ]
 
         sum_energy = float(t.get("sum_energy", 0.0))
         sum_delta_r = float(t.get("sum_delta_r", 0.0))
+
+        rye_avg: Optional[float] = None
+        rye_median_val: Optional[float] = None
+        rye_last: Optional[float] = None
 
         if sum_energy > 0 and sum_delta_r != 0:
             rye_avg = sum_delta_r / sum_energy
 
         if ratios:
             rye_median_val = statistics.median(ratios)
-            rye_last = ratios[-
+            rye_last = ratios[-1]
+
+        events = int(t.get("events", 0))
+        ok_events = int(t.get("ok_events", 0))
+        error_events = int(t.get("error_events", 0))
+        last_timestamp = t.get("last_timestamp")
+
+        success_rate: Optional[float] = None
+        if events > 0:
+            success_rate = ok_events / float(events)
+
+        tools_out[name] = {
+            "events": events,
+            "ok_events": ok_events,
+            "error_events": error_events,
+            "success_rate": success_rate,
+            "sum_delta_r": sum_delta_r,
+            "sum_energy": sum_energy,
+            "rye_avg": rye_avg,
+            "rye_median": rye_median_val,
+            "rye_last": rye_last,
+            "last_timestamp": last_timestamp,
+        }
+
+    return {"tools": tools_out}
