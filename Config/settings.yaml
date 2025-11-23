@@ -1,11 +1,170 @@
-# Default configuration for the autonomous research agent.
-#
-# You can modify these settings to adjust paths and other parameters. These
-# values are read at runtime by main.py. If this file is missing, sensible
-# defaults defined in the code will be used instead.
+# ================================================================
+# Autonomous Research Agent — Full Configuration
+# Maxed-out YAML for Streamlit UI + Background Worker + CoreAgent
+# ================================================================
 
-# Path to the memory file where notes and cycle logs are stored.
+
+# ------------------------------------------------
+# STORAGE / MEMORY
+# ------------------------------------------------
 memory_file: logs/sessions/default_memory.json
+vector_memory_path: logs/vector_store/vector_memory.jsonl
 
-# Number of results to retrieve when performing web searches (unused in stub).
-web_search_results: 2
+# Checkpoint system for long autonomous runs
+checkpoint_dir: logs/checkpoints
+checkpoint_every_cycles: 25
+checkpoint_every_minutes: 15
+
+
+# ------------------------------------------------
+# RUNTIME + WATCHDOG / AUTONOMY
+# ------------------------------------------------
+# Watchdog will ping memory every X minutes
+watchdog_interval_minutes: 3
+
+# Hard upper bound on cycles per single run before soft-reset
+max_cycles_per_run: 2000000
+
+# Maximum points sent to charts in UI (avoid RangeError)
+max_history_points: 1000
+
+
+# ------------------------------------------------
+# DEFAULT DOMAIN PRESETS
+# ------------------------------------------------
+default_domain: general   # general, longevity, math, biology, ai_safety, custom
+
+default_source_controls:
+  web: true
+  pubmed: false
+  semantic: false
+  pdf: true
+  biomarkers: false
+
+default_goal: >
+  Research and summarize Reparodynamics, analyze RYE and TGRM behavior,
+  compare against similar frameworks like MAPE-K, cybernetics, resilience,
+  and complex adaptive systems, and propose refinements.
+
+
+# ------------------------------------------------
+# TOOL CONFIGURATION
+# ------------------------------------------------
+tools:
+  browser:
+    enabled: true
+    provider: tavily
+    max_results: 5
+  code_sandbox:
+    enabled: true
+    max_runtime_ms: 400
+  data_connectors:
+    enabled: true
+    auto_table_detect: true
+  pubmed:
+    enabled: true
+    max_results: 5
+  semantic_scholar:
+    enabled: true
+    max_results: 5
+  pdf:
+    enabled: true
+
+
+# ------------------------------------------------
+# STREAMLIT UI DEFAULTS
+# ------------------------------------------------
+ui:
+  swarm_default_enabled: false
+  swarm_default_size: 8
+  multiagent_default_enabled: false
+  biomarker_mode_default: false
+  default_run_mode: "Manual (finite cycles)"
+
+
+# ------------------------------------------------
+# WORKER DEFAULTS (background engine)
+# ------------------------------------------------
+worker:
+  enabled: true
+  default_goal: >
+    Autonomous long-run Reparodynamics research, testing the TGRM loop,
+    RYE stability, efficiency trends, and self-repair behavior under
+    long time budgets.
+
+  default_domain: general
+
+  runtime_profiles:
+    1_hour:
+      label: "1 Hour Run"
+      default_minutes: 60
+      max_minutes: 70
+    8_hours:
+      label: "8 Hour Run"
+      default_minutes: 480
+      max_minutes: 520
+    24_hours:
+      label: "24 Hour Run"
+      default_minutes: 1440
+      max_minutes: 1500
+    90_days:
+      label: "90 Day Run"
+      default_minutes: 129600
+      max_minutes: 130000
+    forever:
+      label: "Infinite Run"
+      max_minutes: null
+
+  # For segmentation (Meta-controller)
+  meta:
+    enabled: true
+    max_segments: 6
+    default_total_minutes: 60   # overridden by env or UI
+    smoothing_factor: 0.6       # exponential smoothing for recent RYE
+    min_segment_minutes: 5
+
+
+# ------------------------------------------------
+# ENERGY MODEL / RYE MODEL
+# ------------------------------------------------
+energy_model:
+  base_energy: 1.0
+  swarm_energy_multiplier: 1.8
+  critic_energy_multiplier: 1.3
+  researcher_energy_multiplier: 1.0
+  theorist_energy_multiplier: 1.2
+  integrator_energy_multiplier: 1.1
+  explorer_energy_multiplier: 1.3
+
+rye:
+  smoothing_window: 10
+  collapse_threshold: 0.01
+  equilibrium_expected: 0.60
+  coherence_plateau_expected: 0.82
+
+
+# ------------------------------------------------
+# LOGGING + SYSTEM INFO
+# ------------------------------------------------
+logging:
+  level: INFO
+  store_cycles: true
+  store_summaries: true
+
+system:
+  identify: "Reparodynamics Autonomous Agent v3.0"
+  version: 3.0
+  description: >
+    A long-run self-repairing autonomous research system using the TGRM loop,
+    RYE metrics, swarm intelligence, meta-control, and multi-agent reasoning.
+
+
+# ------------------------------------------------
+# SAFETY LIMITS (same for UI + Worker)
+# ------------------------------------------------
+safety:
+  max_swarm_agents: 32
+  max_ui_cycles: 200
+  max_pdf_size_mb: 20
+  max_query_length: 4000
+  max_memory_notes: 100000
