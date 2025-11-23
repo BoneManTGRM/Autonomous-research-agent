@@ -62,6 +62,18 @@ Domain presets and experiment modes:
     The experiment_mode (for example discovery, stability_test,
     protocol_builder) can be passed in and tagged on runs so that the
     meta controller and report generator can distinguish different runs.
+
+Discovery extensions:
+    CoreAgent can optionally cooperate with:
+        - DiscoveryLogger for RYE spikes, hypotheses, and contradictions
+        - HypothesisManager for a pending / validated / rejected pipeline
+        - SnapshotGenerator for weekly experiment summaries
+        - MemoryPruner for long run memory health
+        - VerificationEngine for deeper checks of promising hypotheses
+
+    These helpers sit on top of your existing TGRM loop and do not
+    change its core behavior. They only consume the summary dicts and
+    write logs or hypothesis records.
 """
 
 from __future__ import annotations
@@ -94,6 +106,13 @@ try:
     from . import rye_metrics as _rye_metrics_mod  # type: ignore
 except Exception:
     _rye_metrics_mod = None
+
+# Discovery stack imports (new)
+from .discovery_log import DiscoveryLogger, get_global_logger
+from .hypothesis_manager import HypothesisManager
+from .memory_pruner import MemoryPruner
+from .snapshot_generator import SnapshotGenerator
+from .verification_engine import VerificationEngine
 
 
 class CoreAgent:
@@ -204,6 +223,32 @@ class CoreAgent:
         # Enforce safety cap
         self.agent_roles: List[str] = roles[: self.max_agents]
 
+        # ------------------------------------------------------------------
+        # Discovery stack (new, sits on top of existing logic)
+        # ------------------------------------------------------------------
+        # Track last RYE to detect spikes.
+        self._last_rye: Optional[float] = None
+
+        # Shared discovery logger and hypothesis pipeline.
+        # run_id will be set per run where needed.
+        self.discovery_logger: DiscoveryLogger = get_global_logger()
+        self.hypothesis_manager: HypothesisManager = HypothesisManager(run_id=None)
+
+        # Long run helpers for 90 day experiments.
+        self.memory_pruner: MemoryPruner = MemoryPruner(self.memory_store, run_id=None)
+        self.snapshot_generator: SnapshotGenerator = SnapshotGenerator(run_id=None)
+
+        # Verification engine for deeper checks on promising hypotheses.
+        # The actual check functions can be wired from engine_worker.
+        self.verification_engine: VerificationEngine = VerificationEngine(
+            hypothesis_manager=self.hypothesis_manager,
+            discovery_logger=self.discovery_logger,
+            literature_check_fn=None,
+            critique_fn=None,
+            data_check_fn=None,
+            run_id=None,
+        )
+
     # ------------------------------------------------------------------
     # Internal helpers for crash proofing and run tracking
     # ------------------------------------------------------------------
@@ -280,6 +325,142 @@ class CoreAgent:
                         self.memory_store.log_run_manifest(manifest)  # type: ignore[attr-defined]
                     except Exception:
                         pass
+        except Exception:
+            return
+
+    # ------------------------------------------------------------------
+    # Discovery helpers (new, non intrusive)
+    # ------------------------------------------------------------------
+    def _handle_post_cycle_discovery(
+        self,
+        summary: Dict[str, Any],
+        *,
+        cycle_index: int,
+        role: str,
+        domain: Optional[str],
+        run_id: Optional[str],
+        experiment_mode: Optional[str],
+    ) -> None:
+        """Inspect a cycle summary and log discovery related signals.
+
+        This method never raises. It reads from summary and writes into
+        the discovery logger and hypothesis manager, without changing
+        the TGRM core behavior.
+
+        Current behavior:
+            - detect RYE spikes and log them
+            - register candidate hypotheses surfaced by the loop
+        """
+        try:
+            # Attach run_id into helpers if present
+            if run_id is not None:
+                self.discovery_logger.run_id = run_id
+                self.hypothesis_manager.run_id = run_id
+                self.memory_pruner.run_id = run_id
+                self.snapshot_generator.run_id = run_id
+                self.verification_engine.run_id = run_id
+        except Exception:
+            pass
+
+        # 1) RYE spike logging
+        try:
+            rye_val = summary.get("RYE")
+            delta_r = summary.get("delta_R")
+            energy = summary.get("Energy") or summary.get("energy")
+
+            if isinstance(rye_val, (int, float)):
+                rye_float = float(rye_val)
+                previous = self._last_rye
+
+                min_rye_spike = float(self.config.get("rye_spike_min", 0.5))
+                spike = False
+                if previous is None and rye_float >= min_rye_spike:
+                    spike = True
+                elif previous is not None and rye_float >= max(min_rye_spike, previous * 1.25):
+                    spike = True
+
+                if spike:
+                    lines: List[str] = []
+                    lines.append(f"RYE reached {rye_float:.4f} on cycle {cycle_index}.")
+                    if isinstance(delta_r, (int, float)):
+                        lines.append(f"Estimated delta_R: {float(delta_r):.4f}.")
+                    if isinstance(energy, (int, float)):
+                        lines.append(f"Estimated energy: {float(energy):.4f}.")
+                    if domain:
+                        lines.append(f"Domain: {domain}.")
+                    if experiment_mode:
+                        lines.append(f"Experiment mode: {experiment_mode}.")
+
+                    desc = "\n".join(lines)
+
+                    self.discovery_logger.log_rye_spike(
+                        title=f"RYE spike at cycle {cycle_index}",
+                        description=desc,
+                        cycle_index=cycle_index,
+                        agent_role=role,
+                        rye_before=previous if isinstance(previous, (int, float)) else None,
+                        rye_after=rye_float,
+                        delta_r=float(delta_r) if isinstance(delta_r, (int, float)) else None,
+                        energy=float(energy) if isinstance(energy, (int, float)) else None,
+                        tags=[domain] if domain else None,
+                        extra={"summary": summary},
+                    )
+
+                self._last_rye = rye_float
+        except Exception:
+            # Discovery hooks must never interfere with the main loop
+            pass
+
+        # 2) Hypothesis registration from summary["candidate_hypotheses"]
+        try:
+            raw_hyp_list = (
+                summary.get("candidate_hypotheses")
+                or summary.get("hypotheses")
+                or []
+            )
+
+            if not isinstance(raw_hyp_list, list):
+                return
+
+            for item in raw_hyp_list:
+                if isinstance(item, str):
+                    title = item
+                    description = ""
+                    tags: Optional[List[str]] = None
+                elif isinstance(item, dict):
+                    title = str(item.get("title") or "Untitled hypothesis")
+                    description = str(item.get("description") or "")
+                    raw_tags = item.get("tags") or []
+                    tags = [str(t) for t in raw_tags] if isinstance(raw_tags, (list, tuple)) else None
+                else:
+                    title = str(item)
+                    description = ""
+                    tags = None
+
+                rec = self.hypothesis_manager.create_hypothesis(
+                    title=title,
+                    description=description,
+                    cycle_index=cycle_index,
+                    agent_role=role,
+                    rye_before=None if self._last_rye is None else float(self._last_rye),
+                    rye_after=summary.get("RYE") if isinstance(summary.get("RYE"), (int, float)) else None,
+                    delta_r=summary.get("delta_R") if isinstance(summary.get("delta_R"), (int, float)) else None,
+                    energy=summary.get("Energy") if isinstance(summary.get("Energy"), (int, float)) else None,
+                    tags=tags,
+                )
+
+                self.discovery_logger.log_hypothesis(
+                    title=rec.title,
+                    description=rec.description,
+                    cycle_index=rec.cycle_index,
+                    agent_role=rec.agent_role,
+                    rye_before=rec.rye_before,
+                    rye_after=rec.rye_after,
+                    delta_r=rec.delta_r,
+                    energy=rec.energy,
+                    tags=rec.tags,
+                    extra={"hypothesis_id": rec.hypothesis_id},
+                )
         except Exception:
             return
 
@@ -637,6 +818,16 @@ class CoreAgent:
             tool_stats = result.get("tool_stats")
             if tool_stats is not None and "tool_stats" not in summary:
                 summary["tool_stats"] = tool_stats
+
+            # Discovery aware post processing (new hook, does not change core behavior)
+            self._handle_post_cycle_discovery(
+                summary,
+                cycle_index=cycle_index,
+                role=role,
+                domain=domain,
+                run_id=run_id,
+                experiment_mode=experiment_mode,
+            )
 
         return result
 
@@ -1315,3 +1506,100 @@ class CoreAgent:
             summaries.append(summary)
 
         return summaries
+
+    # ------------------------------------------------------------------
+    # Discovery utility methods for workers and external callers
+    # ------------------------------------------------------------------
+    def prune_memory(
+        self,
+        min_keep: int = 1000,
+        max_drop_fraction: float = 0.3,
+    ) -> Dict[str, Any]:
+        """Run a memory pruning pass using MemoryPruner.
+
+        This expects the backing MemoryStore to expose a list_entries /
+        delete_entries interface either directly or through an adapter.
+        If pruning fails, it returns a small summary without raising.
+        """
+        try:
+            summary = self.memory_pruner.prune(
+                min_keep=min_keep,
+                max_drop_fraction=max_drop_fraction,
+            )
+            return summary
+        except Exception as exc:
+            return {
+                "timestamp": time.time(),
+                "error": str(exc),
+                "dropped": 0,
+                "reason": "prune_failed",
+            }
+
+    def generate_snapshot(
+        self,
+        week_number: int,
+    ) -> Optional[Path]:
+        """Generate a weekly snapshot report using SnapshotGenerator.
+
+        Uses:
+            - cycle history from MemoryStore
+            - rye_metrics if available
+            - hypothesis manager summary
+            - memory statistics if provided by MemoryStore
+        """
+        try:
+            history = self.memory_store.get_cycle_history()
+            cycle_stats = {
+                "cycles_total": len(history),
+            }
+
+            rye_stats: Dict[str, Any] = {}
+            if _rye_metrics_mod is not None:
+                try:
+                    if hasattr(_rye_metrics_mod, "rye_summary"):
+                        rye_stats = _rye_metrics_mod.rye_summary(history)  # type: ignore[attr-defined]
+                except Exception:
+                    rye_stats = {}
+
+            hyp_summary = self.hypothesis_manager.summary_strings()
+
+            memory_stats: Dict[str, Any] = {}
+            try:
+                if hasattr(self.memory_store, "memory_stats"):
+                    memory_stats = self.memory_store.memory_stats()  # type: ignore[attr-defined]
+            except Exception:
+                memory_stats = {}
+
+            path = self.snapshot_generator.generate(
+                week_number=week_number,
+                cycle_stats=cycle_stats,
+                rye_stats=rye_stats,
+                hypotheses={
+                    "pending": hyp_summary.get("pending", []),
+                    "validated": hyp_summary.get("validated", []),
+                    "rejected": hyp_summary.get("rejected", []),
+                },
+                discoveries=[],
+                tool_usage={},
+                contradictions=[],
+                memory_stats=memory_stats,
+                extra={},
+            )
+            return path
+        except Exception:
+            return None
+
+    def verify_pending_hypotheses(
+        self,
+        limit: Optional[int] = None,
+    ) -> List[Any]:
+        """Run verification passes on pending hypotheses.
+
+        This calls the VerificationEngine with the current configuration.
+        It is safe to call on a schedule from engine_worker.
+        """
+        try:
+            results = self.verification_engine.verify_pending(limit=limit)
+            return results
+        except Exception:
+            return []
