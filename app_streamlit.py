@@ -2,11 +2,11 @@
 
 Features:
 - Continuous Mode with duration presets (1h, 8h, 24h, 90 days, Forever)
-- Researcher + Critic multi-agent mode
+- Researcher + Critic multi agent mode
 - Swarm mode with up to dozens of specialized mini agents
 - Domain presets (General, Longevity, Math)
 - PubMed / Semantic Scholar ingestion controls
-- Biomarker analysis toggle (for anti-aging teams)
+- Biomarker analysis toggle (for anti aging teams)
 - Hypothesis generation viewer
 - PDF ingestion for real scientific papers
 - RYE, delta_R, and Energy charts
@@ -15,6 +15,12 @@ Features:
 - Report generation from full cycle history
 - Optional PDF report export (if reportlab is installed)
 - Tools status panel for web browser and sandbox tools
+- Discovery log viewer and autonomous discovery panel
+- Snapshot timeline with equilibrium and stability view
+- Hypothesis manager with confidence and domain filters
+- Memory pruning controls (if supported by MemoryStore)
+- Verification panel for cures, treatments, and stability checks
+- Multi agent insight graph for roles, hypotheses, and discoveries
 
 Reparodynamics:
     The UI is a front panel on a reparodynamic system:
@@ -23,7 +29,7 @@ Reparodynamics:
 
 Time:
     All continuous run presets (1h, 8h, 24h, 90 days) map to real
-    wall-clock minutes via the CoreAgent's max_minutes budget.
+    wall clock minutes via the CoreAgent's max_minutes budget.
 
 Note:
     For safety and to ensure runs actually finish when launched from
@@ -63,6 +69,27 @@ from agent.rye_metrics import (
     build_run_diagnostics,
 )
 
+# Optional discovery and verification helpers (imported lazily if present)
+try:  # type: ignore[import]
+    from agent import discovery_log as _discovery_module  # pragma: no cover
+except Exception:  # pragma: no cover
+    _discovery_module = None  # type: ignore[assignment]
+
+try:  # type: ignore[import]
+    from agent import verification_engine as _verification_module  # pragma: no cover
+except Exception:  # pragma: no cover
+    _verification_module = None  # type: ignore[assignment]
+
+try:  # type: ignore[import]
+    from agent import hypothesis_manager as _hypo_module  # pragma: no cover
+except Exception:  # pragma: no cover
+    _hypo_module = None  # type: ignore[assignment]
+
+try:  # type: ignore[import]
+    from agent import memory_pruner as _pruner_module  # pragma: no cover
+except Exception:  # pragma: no cover
+    _pruner_module = None  # type: ignore[assignment]
+
 # Optional tools registry (for web browser and sandbox status)
 try:
     from agent.tools import TOOL_REGISTRY  # type: ignore[import]
@@ -80,7 +107,7 @@ CYCLES_PER_HOUR_ESTIMATE = 120
 SWARM_ROLES: List[Tuple[str, str]] = [
     ("researcher", "Deep literature and web researcher"),
     ("critic", "Methodology critic and refiner"),
-    ("explorer", "Out-of-distribution explorer (new angles, analogies)"),
+    ("explorer", "Out of distribution explorer (new angles, analogies)"),
     ("theorist", "Model builder and unifier"),
     ("integrator", "Synthesizer that integrates and summarizes"),
 ]
@@ -423,11 +450,225 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
 
 
 # -------------------------------------------------------------------
+# Advanced log and snapshot helpers for Option C
+# -------------------------------------------------------------------
+def _load_json_file(path: Path) -> Optional[Any]:
+    """Small helper to load a JSON file and return the decoded data."""
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def load_discovery_log() -> List[Dict[str, Any]]:
+    """Try to load discovery log entries from standard locations."""
+    candidates = [
+        Path("logs/discovery_log.json"),
+        Path("logs/discovery/discovery_log.json"),
+        Path("logs/discovery/discoveries.json"),
+    ]
+    for p in candidates:
+        data = _load_json_file(p)
+        if isinstance(data, list):
+            return [d for d in data if isinstance(d, dict)]
+    # If discovery module exposes a helper, use it
+    if _discovery_module is not None:
+        try:
+            func = getattr(_discovery_module, "load_discovery_log", None)
+            if callable(func):
+                data = func()
+                if isinstance(data, list):
+                    return [d for d in data if isinstance(d, dict)]
+        except Exception:
+            pass
+    return []
+
+
+def load_snapshots() -> List[Dict[str, Any]]:
+    """Load snapshot JSON files as a list of {name, timestamp, data}."""
+    snapshot_dir_candidates = [
+        Path("logs/snapshots"),
+        Path("logs/snapshot"),
+    ]
+    snapshots: List[Dict[str, Any]] = []
+    for base in snapshot_dir_candidates:
+        if not base.exists() or not base.is_dir():
+            continue
+        for path in sorted(base.glob("*.json")):
+            data = _load_json_file(path)
+            if not isinstance(data, dict):
+                continue
+            ts_val = data.get("timestamp") or data.get("timestamp_utc") or data.get("created_at")
+            try:
+                if isinstance(ts_val, str):
+                    ts = datetime.fromisoformat(ts_val)
+                else:
+                    ts = None
+            except Exception:
+                ts = None
+            snapshots.append(
+                {
+                    "name": path.name,
+                    "path": str(path),
+                    "timestamp": ts,
+                    "raw_timestamp": ts_val,
+                    "data": data,
+                }
+            )
+    # Sort by timestamp if available
+    snapshots.sort(key=lambda s: s["timestamp"] or datetime.min)
+    return snapshots
+
+
+def extract_hypotheses_from_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten hypotheses across all cycles into a list with cycle info."""
+    results: List[Dict[str, Any]] = []
+    for entry in history:
+        cycle_idx = entry.get("cycle")
+        role = entry.get("role", "agent")
+        domain = entry.get("domain", "general")
+        ts = entry.get("timestamp")
+        hyps = entry.get("hypotheses") or []
+        for h in hyps:
+            if isinstance(h, dict):
+                text = h.get("text", "")
+                conf = h.get("confidence")
+            else:
+                text = str(h)
+                conf = None
+            if not text:
+                continue
+            results.append(
+                {
+                    "cycle": cycle_idx,
+                    "role": role,
+                    "domain": domain,
+                    "timestamp": ts,
+                    "text": text,
+                    "confidence": conf,
+                }
+            )
+    return results
+
+
+def load_verification_log() -> List[Dict[str, Any]]:
+    """Try to load verification log entries from standard locations."""
+    candidates = [
+        Path("logs/verification_log.json"),
+        Path("logs/verification/verification_log.json"),
+        Path("logs/verification/results.json"),
+    ]
+    for p in candidates:
+        data = _load_json_file(p)
+        if isinstance(data, list):
+            return [d for d in data if isinstance(d, dict)]
+    if _verification_module is not None:
+        try:
+            func = getattr(_verification_module, "load_verification_log", None)
+            if callable(func):
+                data = func()
+                if isinstance(data, list):
+                    return [d for d in data if isinstance(d, dict)]
+        except Exception:
+            pass
+    return []
+
+
+def equilibrium_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    """Extract equilibrium related metrics from a snapshot if present."""
+    metrics = snapshot.get("metrics") or snapshot.get("rye_metrics") or {}
+    if not isinstance(metrics, dict):
+        metrics = {}
+    return {
+        "rye_avg": metrics.get("rye_avg"),
+        "stability_index": metrics.get("stability_index"),
+        "coherence_plateau": metrics.get("coherence_plateau"),
+        "equilibrium_fraction": metrics.get("equilibrium_fraction"),
+    }
+
+
+def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[str, Any]]) -> str:
+    """Build a Graphviz DOT string linking goals, roles, hypotheses, and discoveries."""
+    nodes: List[str] = []
+    edges: List[str] = []
+
+    # Single root node for the run
+    nodes.append('run [label="Run", shape=box, style=filled, fillcolor="#eeeeee"]')
+
+    # Domains
+    domains = sorted({str(e.get("domain", "general")) for e in history})
+    for d in domains:
+        safe_d = d.replace('"', "'")
+        nodes.append(f'domain_{safe_d} [label="Domain: {safe_d}", shape=box]')
+        edges.append(f"run -> domain_{safe_d}")
+
+    # Roles
+    roles = sorted({str(e.get("role", "agent")) for e in history})
+    for r in roles:
+        safe_r = r.replace('"', "'")
+        nodes.append(f'role_{safe_r} [label="Role: {safe_r}", shape=ellipse]')
+        edges.append(f"run -> role_{safe_r}")
+
+    # Hypotheses, take top 8 by confidence if available
+    hyps = extract_hypotheses_from_history(history)
+    if hyps:
+        scored = []
+        for h in hyps:
+            conf = h.get("confidence")
+            if isinstance(conf, (int, float)):
+                score = float(conf)
+            else:
+                score = 0.0
+            scored.append((score, h))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        top_hyps = [h for _, h in scored[:8]]
+    else:
+        top_hyps = []
+
+    for idx, h in enumerate(top_hyps):
+        label = h["text"][:60].replace('"', "'")
+        nodes.append(f'hyp_{idx} [label="H: {label}", shape=note]')
+        d = str(h.get("domain", "general")).replace('"', "'")
+        r = str(h.get("role", "agent")).replace('"', "'")
+        edges.append(f"domain_{d} -> hyp_{idx}")
+        edges.append(f"role_{r} -> hyp_{idx}")
+
+    # Discoveries, top 8 by rye_gain if present
+    top_disc: List[Dict[str, Any]] = []
+    if discoveries:
+        scored_disc = []
+        for d in discoveries:
+            gain = d.get("rye_gain") or d.get("delta_rye") or 0.0
+            try:
+                gain_f = float(gain)
+            except Exception:
+                gain_f = 0.0
+            scored_disc.append((gain_f, d))
+        scored_disc.sort(key=lambda x: x[0], reverse=True)
+        top_disc = [d for _, d in scored_disc[:8]]
+
+    for idx, d in enumerate(top_disc):
+        label = str(d.get("title") or d.get("summary") or d.get("id") or f"Discovery {idx + 1}")
+        label = label[:60].replace('"', "'")
+        nodes.append(f'disc_{idx} [label="D: {label}", shape=diamond]')
+        edges.append(f"run -> disc_{idx}")
+
+    dot_lines = ["digraph G {", 'rankdir=LR;', 'node [fontname="Helvetica"];']
+    dot_lines.extend(nodes)
+    dot_lines.extend(edges)
+    dot_lines.append("}")
+    return "\n".join(dot_lines)
+
+
+# -------------------------------------------------------------------
 # Main UI
 # -------------------------------------------------------------------
 def main() -> None:
     st.title("Autonomous Research Agent")
-    st.caption("Reparodynamics, RYE, and TGRM powered research loop (with swarm mode, web browser, sandbox, and background worker)")
+    st.caption("Reparodynamics, RYE, and TGRM powered research loop (with swarm mode, web browser, sandbox, background worker, and advanced discovery panels)")
 
     agent, memory = init_agent()
 
@@ -534,7 +775,7 @@ def main() -> None:
     # Swarm toggle and size
     st.sidebar.subheader("Swarm configuration")
     enable_swarm = st.sidebar.checkbox(
-        "Enable Swarm (multi-role mini agents)",
+        "Enable Swarm (multi role mini agents)",
         value=False,
         help=(
             "Run up to dozens of specialized agents (researchers, critics, explorers, "
@@ -593,7 +834,7 @@ def main() -> None:
 
     # Biomarker mode
     use_biomarkers = st.sidebar.checkbox(
-        "Biomarker / Longevity Mode (anti-aging teams)",
+        "Biomarker / Longevity Mode (anti aging teams)",
         value=bool(sc_defaults.get("biomarkers", False)),
     )
 
@@ -966,7 +1207,7 @@ def main() -> None:
                 # Classic multi agent flag
                 new_state["multi_agent_pair"] = bool(multi_agent)
 
-                # Optional attached pdf flag (worker can decide whether to re-ingest files)
+                # Optional attached pdf flag (worker can decide whether to re ingest files)
                 new_state["has_pdf"] = bool(use_pdf and uploaded_pdf is not None)
 
                 save_control_state(new_state)
@@ -1017,7 +1258,7 @@ def main() -> None:
             progress_fraction = None
 
     if max_minutes_cfg is None:
-        st.write("This worker-configured run has no fixed time budget (Forever mode).")
+        st.write("This worker configured run has no fixed time budget (Forever mode).")
     else:
         col_rt1, col_rt2, col_rt3 = st.columns(3)
         with col_rt1:
@@ -1043,7 +1284,7 @@ def main() -> None:
         with st.expander("Raw control state"):
             st.code(json.dumps(control_state, indent=2), language="json")
     else:
-        st.write("No control state file yet. Configure a 90-day or Forever run to create one.")
+        st.write("No control state file yet. Configure a 90 day or Forever run to create one.")
 
     col_start, col_pause, col_stop = st.columns(3)
 
@@ -1080,81 +1321,410 @@ def main() -> None:
         st.write("No worker_state saved yet.")
 
     # ------------------------------
-    # History + Charts
+    # History + Advanced Panels
     # ------------------------------
     st.markdown("---")
-    st.subheader("Cycle history")
+    st.subheader("History and advanced analysis")
 
     history = memory.get_cycle_history()
     if not history:
         st.write("No cycles yet.")
     else:
-        rows: List[Dict[str, Any]] = []
-        for entry in history:
-            goal_text = entry.get("goal", "") or ""
-            rows.append(
-                {
-                    "cycle": entry.get("cycle"),
-                    "role": entry.get("role", "agent"),
-                    "domain": entry.get("domain", "general"),
-                    "goal": goal_text[:60] + ("..." if len(goal_text) > 60 else ""),
-                    "delta_R": entry.get("delta_R"),
-                    "energy_E": entry.get("energy_E"),
-                    "RYE": entry.get("RYE"),
-                    "timestamp": entry.get("timestamp"),
-                }
-            )
+        # Top level tabs for Option C
+        tab_history, tab_discovery, tab_snapshots, tab_hypo, tab_memory, tab_verify, tab_graph = st.tabs(
+            [
+                "Cycle history",
+                "Discovery log",
+                "Snapshots and equilibrium",
+                "Hypothesis manager",
+                "Memory pruning",
+                "Verification and cures",
+                "Multi agent insight graph",
+            ]
+        )
 
-        st.dataframe(rows, use_container_width=True)
+        # ----------------- Cycle history tab -----------------
+        with tab_history:
+            rows: List[Dict[str, Any]] = []
+            for entry in history:
+                goal_text = entry.get("goal", "") or ""
+                rows.append(
+                    {
+                        "cycle": entry.get("cycle"),
+                        "role": entry.get("role", "agent"),
+                        "domain": entry.get("domain", "general"),
+                        "goal": goal_text[:60] + ("..." if len(goal_text) > 60 else ""),
+                        "delta_R": entry.get("delta_R"),
+                        "energy_E": entry.get("energy_E"),
+                        "RYE": entry.get("RYE"),
+                        "timestamp": entry.get("timestamp"),
+                    }
+                )
 
-        st.markdown("### Efficiency Charts")
+            st.dataframe(rows, use_container_width=True)
 
-        # To avoid frontend RangeError on very long runs,
-        # only send the most recent MAX_POINTS_FOR_CHARTS points to the charts.
-        plot_rows = rows[-MAX_POINTS_FOR_CHARTS:]
+            st.markdown("### Efficiency Charts")
 
-        cycles_x = [r["cycle"] for r in plot_rows if r["cycle"] is not None]
-        rye_y = [r["RYE"] for r in plot_rows]
-        delta_y = [r["delta_R"] for r in plot_rows]
-        energy_y = [r["energy_E"] for r in plot_rows]
+            plot_rows = rows[-MAX_POINTS_FOR_CHARTS:]
 
-        if cycles_x:
-            st.line_chart({"RYE": rye_y})
-            st.caption("Higher RYE means more efficient repair (delta_R per unit energy).")
+            cycles_x = [r["cycle"] for r in plot_rows if r["cycle"] is not None]
+            rye_y = [r["RYE"] for r in plot_rows]
+            delta_y = [r["delta_R"] for r in plot_rows]
+            energy_y = [r["energy_E"] for r in plot_rows]
 
-            st.line_chart({"delta_R": delta_y})
-            st.caption("delta_R is how much improvement each cycle produced.")
+            if cycles_x:
+                st.line_chart({"RYE": rye_y})
+                st.caption("Higher RYE means more efficient repair (delta_R per unit energy).")
 
-            st.line_chart({"energy_E": energy_y})
-            st.caption("Energy per cycle (approximate effort cost).")
+                st.line_chart({"delta_R": delta_y})
+                st.caption("delta_R is how much improvement each cycle produced.")
 
-        # Advanced RYE diagnostics using rye_metrics build_run_diagnostics
-        st.markdown("### Advanced RYE diagnostics")
+                st.line_chart({"energy_E": energy_y})
+                st.caption("Energy per cycle (approximate effort cost).")
 
-        diagnostics = build_run_diagnostics(history=history, domain=None, window=10)
-        roll_val = diagnostics.get("rolling_rye")
-        trend_val = diagnostics.get("trend_simple")
-        slope_val = diagnostics.get("trend_slope")
-        stability_val = diagnostics.get("stability_index")
-        momentum_val = diagnostics.get("recovery_momentum")
+            # Advanced RYE diagnostics using rye_metrics build_run_diagnostics
+            st.markdown("### Advanced RYE diagnostics")
 
-        adv_cols = st.columns(5)
-        with adv_cols[0]:
-            st.metric("Rolling RYE (10)", f"{roll_val:.3f}" if roll_val is not None else "n/a")
-        with adv_cols[1]:
-            st.metric("RYE trend", f"{trend_val:.3f}" if trend_val is not None else "n/a")
-        with adv_cols[2]:
-            st.metric("RYE slope", f"{slope_val:.4f}" if slope_val is not None else "n/a")
-        with adv_cols[3]:
-            st.metric("Stability index", f"{stability_val:.3f}" if stability_val is not None else "n/a")
-        with adv_cols[4]:
-            st.metric("Recovery momentum", f"{momentum_val:.3f}" if momentum_val is not None else "n/a")
+            diagnostics = build_run_diagnostics(history=history, domain=None, window=10)
+            roll_val = diagnostics.get("rolling_rye")
+            trend_val = diagnostics.get("trend_simple")
+            slope_val = diagnostics.get("trend_slope")
+            stability_val = diagnostics.get("stability_index")
+            momentum_val = diagnostics.get("recovery_momentum")
 
-        with st.expander("Raw history JSON"):
-            st.code(json.dumps(history, indent=2), language="json")
+            adv_cols = st.columns(5)
+            with adv_cols[0]:
+                st.metric("Rolling RYE (10)", f"{roll_val:.3f}" if roll_val is not None else "n/a")
+            with adv_cols[1]:
+                st.metric("RYE trend", f"{trend_val:.3f}" if trend_val is not None else "n/a")
+            with adv_cols[2]:
+                st.metric("RYE slope", f"{slope_val:.4f}" if slope_val is not None else "n/a")
+            with adv_cols[3]:
+                st.metric("Stability index", f"{stability_val:.3f}" if stability_val is not None else "n/a")
+            with adv_cols[4]:
+                st.metric("Recovery momentum", f"{momentum_val:.3f}" if momentum_val is not None else "n/a")
 
-        with st.expander("Raw diagnostics JSON"):
-            st.code(json.dumps(diagnostics, indent=2), language="json")
+            with st.expander("Raw history JSON"):
+                st.code(json.dumps(history, indent=2), language="json")
+
+            with st.expander("Raw diagnostics JSON"):
+                st.code(json.dumps(diagnostics, indent=2), language="json")
+
+        # ----------------- Discovery log tab -----------------
+        with tab_discovery:
+            st.markdown("### Discovery log")
+            discoveries = load_discovery_log()
+            if not discoveries:
+                st.info("No discovery log found yet. The worker will populate it once discovery logging is enabled.")
+            else:
+                # Simple filters
+                domains_available = sorted(
+                    {str(d.get("domain", "general")) for d in discoveries}
+                )
+                domain_filter = st.multiselect(
+                    "Filter by domain",
+                    options=domains_available,
+                    default=domains_available,
+                )
+                min_gain = st.number_input(
+                    "Minimum RYE gain to show",
+                    min_value=0.0,
+                    max_value=10.0,
+                    value=0.0,
+                    step=0.01,
+                )
+
+                filtered = []
+                for d in discoveries:
+                    dom = str(d.get("domain", "general"))
+                    if domain_filter and dom not in domain_filter:
+                        continue
+                    gain = d.get("rye_gain") or d.get("delta_rye") or 0.0
+                    try:
+                        gain_f = float(gain)
+                    except Exception:
+                        gain_f = 0.0
+                    if gain_f < min_gain:
+                        continue
+                    d_view = dict(d)
+                    d_view["rye_gain"] = gain_f
+                    filtered.append(d_view)
+
+                if filtered:
+                    st.write(f"Showing {len(filtered)} discoveries after filters.")
+                    st.dataframe(filtered, use_container_width=True)
+                else:
+                    st.info("No discoveries matched the current filters.")
+
+                with st.expander("Raw discovery log JSON"):
+                    st.code(json.dumps(discoveries, indent=2), language="json")
+
+        # ----------------- Snapshots and equilibrium tab -----------------
+        with tab_snapshots:
+            st.markdown("### Snapshots and equilibrium")
+
+            snapshots = load_snapshots()
+            if not snapshots:
+                st.info("No snapshots found yet. The worker will create them when snapshot generation is enabled.")
+            else:
+                labels = []
+                for s in snapshots:
+                    ts = s["timestamp"]
+                    if isinstance(ts, datetime):
+                        label = f"{s['name']} - {ts.isoformat(timespec='seconds')}"
+                    else:
+                        label = s["name"]
+                    labels.append(label)
+
+                st.write(f"Total snapshots: {len(snapshots)}")
+
+                col_sel1, col_sel2 = st.columns(2)
+                with col_sel1:
+                    idx1 = st.selectbox(
+                        "Select first snapshot",
+                        options=list(range(len(snapshots))),
+                        format_func=lambda i: labels[i],
+                    )
+                with col_sel2:
+                    idx2 = st.selectbox(
+                        "Select second snapshot to compare",
+                        options=list(range(len(snapshots))),
+                        index=min(len(snapshots) - 1, max(1, len(snapshots) - 1)),
+                        format_func=lambda i: labels[i],
+                    )
+
+                s1 = snapshots[idx1]
+                s2 = snapshots[idx2]
+
+                st.markdown("#### Snapshot 1 equilibrium view")
+                eq1 = equilibrium_from_snapshot(s1["data"])
+                col_eq1 = st.columns(4)
+                col_eq1[0].metric("RYE avg", f"{eq1['rye_avg']:.3f}" if eq1["rye_avg"] is not None else "n/a")
+                col_eq1[1].metric("Stability idx", f"{eq1['stability_index']:.3f}" if eq1["stability_index"] is not None else "n/a")
+                col_eq1[2].metric("Coherence plateau", f"{eq1['coherence_plateau']:.3f}" if eq1["coherence_plateau"] is not None else "n/a")
+                col_eq1[3].metric("Equilibrium fraction", f"{eq1['equilibrium_fraction']:.3f}" if eq1["equilibrium_fraction"] is not None else "n/a")
+
+                st.markdown("#### Snapshot 2 equilibrium view")
+                eq2 = equilibrium_from_snapshot(s2["data"])
+                col_eq2 = st.columns(4)
+                col_eq2[0].metric("RYE avg", f"{eq2['rye_avg']:.3f}" if eq2["rye_avg"] is not None else "n/a")
+                col_eq2[1].metric("Stability idx", f"{eq2['stability_index']:.3f}" if eq2["stability_index"] is not None else "n/a")
+                col_eq2[2].metric("Coherence plateau", f"{eq2['coherence_plateau']:.3f}" if eq2["coherence_plateau"] is not None else "n/a")
+                col_eq2[3].metric("Equilibrium fraction", f"{eq2['equilibrium_fraction']:.3f}" if eq2["equilibrium_fraction"] is not None else "n/a")
+
+                st.markdown("#### Equilibrium delta (snapshot2 - snapshot1)")
+                def _delta(a: Optional[float], b: Optional[float]) -> Optional[float]:
+                    if a is None or b is None:
+                        return None
+                    return b - a
+
+                d_rye = _delta(eq1["rye_avg"], eq2["rye_avg"])
+                d_stab = _delta(eq1["stability_index"], eq2["stability_index"])
+                d_plateau = _delta(eq1["coherence_plateau"], eq2["coherence_plateau"])
+                d_eqfrac = _delta(eq1["equilibrium_fraction"], eq2["equilibrium_fraction"])
+
+                col_de = st.columns(4)
+                col_de[0].metric("Delta RYE avg", f"{d_rye:+.3f}" if d_rye is not None else "n/a")
+                col_de[1].metric("Delta stability", f"{d_stab:+.3f}" if d_stab is not None else "n/a")
+                col_de[2].metric("Delta plateau", f"{d_plateau:+.3f}" if d_plateau is not None else "n/a")
+                col_de[3].metric("Delta equilibrium", f"{d_eqfrac:+.3f}" if d_eqfrac is not None else "n/a")
+
+                with st.expander("Raw snapshot 1 JSON"):
+                    st.code(json.dumps(s1["data"], indent=2), language="json")
+                with st.expander("Raw snapshot 2 JSON"):
+                    st.code(json.dumps(s2["data"], indent=2), language="json")
+
+        # ----------------- Hypothesis manager tab -----------------
+        with tab_hypo:
+            st.markdown("### Hypothesis manager")
+
+            all_hyps = extract_hypotheses_from_history(history)
+            if not all_hyps:
+                st.info("No hypotheses recorded yet in cycle history.")
+            else:
+                # Filters
+                domains = sorted({str(h["domain"]) for h in all_hyps})
+                roles = sorted({str(h["role"]) for h in all_hyps})
+                domain_filter = st.multiselect("Filter by domain", options=domains, default=domains)
+                role_filter = st.multiselect("Filter by role", options=roles, default=roles)
+
+                min_conf = st.number_input(
+                    "Minimum confidence",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.0,
+                    step=0.05,
+                )
+
+                filtered_h = []
+                for h in all_hyps:
+                    d = str(h["domain"])
+                    r = str(h["role"])
+                    if domain_filter and d not in domain_filter:
+                        continue
+                    if role_filter and r not in role_filter:
+                        continue
+                    conf = h.get("confidence")
+                    if isinstance(conf, (int, float)) and conf < min_conf:
+                        continue
+                    filtered_h.append(h)
+
+                st.write(f"Total hypotheses: {len(all_hyps)}, after filters: {len(filtered_h)}")
+
+                # Sort by confidence if present
+                def _score(h: Dict[str, Any]) -> float:
+                    c = h.get("confidence")
+                    try:
+                        return float(c) if c is not None else 0.0
+                    except Exception:
+                        return 0.0
+
+                filtered_h.sort(key=_score, reverse=True)
+                view_rows = []
+                for h in filtered_h:
+                    view_rows.append(
+                        {
+                            "cycle": h["cycle"],
+                            "role": h["role"],
+                            "domain": h["domain"],
+                            "confidence": h["confidence"],
+                            "text": h["text"][:120] + ("..." if len(h["text"]) > 120 else ""),
+                            "timestamp": h["timestamp"],
+                        }
+                    )
+                st.dataframe(view_rows, use_container_width=True)
+
+                hypo_md = ["# Hypotheses\n"]
+                for h in filtered_h:
+                    conf_txt = ""
+                    if isinstance(h.get("confidence"), (int, float)):
+                        conf_txt = f" (confidence ~ {h['confidence']:.2f})"
+                    hypo_md.append(f"- [{h['domain']}/{h['role']} cycle {h['cycle']}] {h['text']}{conf_txt}")
+                hypo_md_text = "\n".join(hypo_md)
+                st.download_button(
+                    "Download hypotheses as Markdown",
+                    data=hypo_md_text,
+                    file_name="hypotheses_export.md",
+                    mime="text/markdown",
+                )
+
+        # ----------------- Memory pruning tab -----------------
+        with tab_memory:
+            st.markdown("### Memory pruning and compaction")
+
+            st.write("This panel calls optional pruning methods on the MemoryStore if they exist. "
+                     "If not, it just shows high level stats.")
+
+            total_cycles = len(history)
+            st.metric("Total cycles in history", total_cycles)
+
+            # Check for optional pruning hooks on MemoryStore or pruner module
+            has_prune_method = hasattr(memory, "prune_low_value_notes") or hasattr(memory, "prune_history")
+            has_pruner_module = _pruner_module is not None
+
+            if not has_prune_method and not has_pruner_module:
+                st.info("No pruning hooks detected on MemoryStore or memory_pruner module. "
+                        "You can still manually clear history by deleting the memory file on disk.")
+            else:
+                threshold = st.number_input(
+                    "Approximate minimum RYE gain to keep entries (used if supported)",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.01,
+                    step=0.005,
+                )
+                max_keep = st.number_input(
+                    "Maximum entries to keep in detailed history (0 means no cap)",
+                    min_value=0,
+                    max_value=100000,
+                    value=5000,
+                    step=500,
+                )
+
+                if st.button("Run pruning now (experimental)"):
+                    pruned_count = 0
+                    error_msg = None
+                    try:
+                        if hasattr(memory, "prune_low_value_notes"):
+                            func = getattr(memory, "prune_low_value_notes")
+                            pruned_count = int(func(threshold=threshold, max_keep=max_keep))  # type: ignore[arg-type]
+                        elif hasattr(memory, "prune_history"):
+                            func = getattr(memory, "prune_history")
+                            pruned_count = int(func(threshold=threshold, max_keep=max_keep))  # type: ignore[arg-type]
+                        elif has_pruner_module and hasattr(_pruner_module, "run_memory_pruning"):
+                            func = getattr(_pruner_module, "run_memory_pruning")
+                            pruned_count = int(func(memory_store=memory, threshold=threshold, max_keep=max_keep))  # type: ignore[arg-type]
+                    except Exception as e:
+                        error_msg = str(e)
+
+                    if error_msg:
+                        st.error(f"Pruning call raised an error: {error_msg}")
+                    else:
+                        st.success(f"Pruning completed. Approximate entries removed: {pruned_count}")
+                        st.info("Reload the page to reflect updated history and diagnostics.")
+
+        # ----------------- Verification and cures tab -----------------
+        with tab_verify:
+            st.markdown("### Verification and cure oriented findings")
+
+            verifications = load_verification_log()
+            if not verifications:
+                st.info("No verification log found yet. Verification engine has not written results or file is empty.")
+            else:
+                # Summaries
+                success_flags = []
+                rye_deltas = []
+                for v in verifications:
+                    ok = v.get("verified") or v.get("success")
+                    success_flags.append(bool(ok))
+                    delta = v.get("rye_gain") or v.get("delta_rye") or v.get("delta_RYE")
+                    try:
+                        rye_deltas.append(float(delta))
+                    except Exception:
+                        continue
+
+                total = len(verifications)
+                successful = sum(1 for x in success_flags if x)
+                st.metric("Total verifications", total)
+                st.metric("Successful verifications", successful)
+                st.metric("Success rate", f"{(successful / total * 100.0):.1f}%" if total > 0 else "n/a")
+                if rye_deltas:
+                    st.metric("Average RYE change when verified", f"{(sum(rye_deltas) / len(rye_deltas)):.3f}")
+                else:
+                    st.metric("Average RYE change when verified", "n/a")
+
+                # Table
+                view_rows_v = []
+                for v in verifications:
+                    label = v.get("label") or v.get("id") or v.get("target") or "item"
+                    hyp = v.get("hypothesis") or v.get("text")
+                    ok = bool(v.get("verified") or v.get("success"))
+                    d_rye = v.get("rye_gain") or v.get("delta_rye") or v.get("delta_RYE")
+                    domain = v.get("domain", "general")
+                    view_rows_v.append(
+                        {
+                            "label": label,
+                            "domain": domain,
+                            "verified": ok,
+                            "delta_RYE": d_rye,
+                            "hypothesis": (hyp or "")[:120] + ("..." if hyp and len(hyp) > 120 else ""),
+                        }
+                    )
+                st.dataframe(view_rows_v, use_container_width=True)
+
+                with st.expander("Raw verification log JSON"):
+                    st.code(json.dumps(verifications, indent=2), language="json")
+
+        # ----------------- Multi agent insight graph tab -----------------
+        with tab_graph:
+            st.markdown("### Multi agent insight graph")
+
+            discoveries_for_graph = load_discovery_log()
+            if not history:
+                st.info("No history yet to build a graph.")
+            else:
+                dot = build_insight_graph(history=history, discoveries=discoveries_for_graph)
+                st.graphviz_chart(dot)
 
     # ------------------------------
     # Run diagnostics (continuous mode support from MemoryStore)
