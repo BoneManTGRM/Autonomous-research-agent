@@ -205,6 +205,23 @@ class TGRMLoop:
         # DETECT phase
         issues, issue_descriptions = self._detect(status_report, domain=domain_tag)
 
+        # Discovery friendly issue structure before repair
+        issue_code_counts_before: Dict[str, int] = {}
+        for code in issues:
+            issue_code_counts_before[code] = issue_code_counts_before.get(code, 0) + 1
+
+        domain_issue_codes = [
+            "missing_biomarkers",
+            "missing_mechanisms",
+            "missing_formalism",
+            "missing_connections",
+        ]
+        domain_issue_flags_before = {code: (code in issues) for code in domain_issue_codes}
+
+        has_questions_before = "question_mark" in issues
+        has_todos_before = "todo_item" in issues
+        has_contradictions_before = "contradiction" in issues
+
         # REPAIR phase (tool aware)
         (
             repair_actions,
@@ -227,6 +244,15 @@ class TGRMLoop:
         new_notes = self.memory_store.get_notes(goal)
         new_status_report = self._test(goal, new_notes)
         issues_after, _ = self._detect(new_status_report, domain=domain_tag)
+
+        issue_code_counts_after: Dict[str, int] = {}
+        for code in issues_after:
+            issue_code_counts_after[code] = issue_code_counts_after.get(code, 0) + 1
+
+        domain_issue_flags_after = {code: (code in issues_after) for code in domain_issue_codes}
+        has_questions_after = "question_mark" in issues_after
+        has_todos_after = "todo_item" in issues_after
+        has_contradictions_after = "contradiction" in issues_after
 
         # Hypothesis generation
         max_h = 3 if self.tgrm_level == 1 else 5
@@ -274,6 +300,17 @@ class TGRMLoop:
             # Issues before and after
             "issues_before": issue_descriptions,
             "issues_after": issues_after,
+            "issue_codes_before": issues,
+            "issue_code_counts_before": issue_code_counts_before,
+            "issue_code_counts_after": issue_code_counts_after,
+            "domain_issue_flags_before": domain_issue_flags_before,
+            "domain_issue_flags_after": domain_issue_flags_after,
+            "has_open_questions_before": has_questions_before,
+            "has_open_questions_after": has_questions_after,
+            "has_todos_before": has_todos_before,
+            "has_todos_after": has_todos_after,
+            "has_contradictions_before": has_contradictions_before,
+            "has_contradictions_after": has_contradictions_after,
             # Actions and artifacts
             "repairs_applied": repair_actions,
             "notes_added": notes_added,
@@ -298,6 +335,8 @@ class TGRMLoop:
             "avg_rye_for_goal_before_cycle": avg_rye,
             "total_cycles_for_goal_before_cycle": total_cycles_for_goal,
             "maintenance_mode": maintenance_mode,
+            # Optional biomarker snapshot for longevity style goals
+            "biomarker_snapshot": biomarker_snapshot,
         }
 
         # Log cycle into memory
@@ -311,6 +350,10 @@ class TGRMLoop:
             "goal": goal,
             "issues_before": issue_descriptions,
             "issues_after": issues_after,
+            "issue_codes_before": issues,
+            "issue_codes_after": issues_after,
+            "issue_code_counts_before": issue_code_counts_before,
+            "issue_code_counts_after": issue_code_counts_after,
             "repairs": [a.get("description", "") for a in repair_actions],
             "delta_R": delta_r,
             "energy_E": energy_e,
