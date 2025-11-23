@@ -3,6 +3,7 @@
 Outputs:
 1. Full Reparodynamics Report (rich RYE and swarm analytics)
 2. Targeted Findings Report (cures, treatments, mechanisms, interventions)
+3. Optional PDF exports for both reports (if reportlab is available)
 """
 
 from __future__ import annotations
@@ -15,7 +16,20 @@ from .rye_metrics import (
     stability_index,
     recovery_momentum,
     regression_rye_slope,
+    robust_rolling_rye,
+    build_run_diagnostics,
+    rye_percentiles,
 )
+
+import textwrap
+
+# Optional PDF support
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+except Exception:  # pragma: no cover - optional dependency
+    canvas = None  # type: ignore[assignment]
+    letter = None  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------
@@ -149,6 +163,87 @@ def _classify_phase(
     return "mixed or flat efficiency"
 
 
+def _primary_domain_from_stats(domain_stats: Dict[str, Dict[str, Any]]) -> Optional[str]:
+    """Pick a primary domain based on cycle counts."""
+    if not domain_stats:
+        return None
+    # choose domain with highest count
+    best_domain = None
+    best_count = -1
+    for d, stats in domain_stats.items():
+        cnt = int(stats.get("count", 0))
+        if cnt > best_count:
+            best_count = cnt
+            best_domain = d
+    return best_domain
+
+
+def _markdown_to_plain_lines(text: str, width: int = 90) -> List[str]:
+    """Very simple markdown-to-plain converter for PDF text.
+
+    - Strips leading markdown markers (#, *, -, etc.)
+    - Wraps lines to a maximum character width for better PDF layout.
+    """
+    lines: List[str] = []
+    for raw in text.splitlines():
+        s = raw.lstrip()
+        # strip some simple markdown markers
+        for prefix in ("#", "* ", "- ", "• ", "> "):
+            if s.startswith(prefix):
+                s = s[len(prefix) :].lstrip()
+                break
+        if not s:
+            lines.append("")  # preserve blank lines
+            continue
+        wrapped = textwrap.wrap(s, width=width) or [""]
+        lines.extend(wrapped)
+    return lines
+
+
+def _write_pdf(text: str, output_path: str, title: Optional[str] = None) -> str:
+    """Write plain text content into a simple PDF file.
+
+    Requires reportlab. If reportlab is not installed, raises a RuntimeError
+    with a clear message so the caller can handle it or tell the user to
+    install the dependency.
+    """
+    if canvas is None or letter is None:
+        raise RuntimeError(
+            "PDF generation requires the 'reportlab' package. "
+            "Install it with: pip install reportlab"
+        )
+
+    c = canvas.Canvas(output_path, pagesize=letter)
+    width, height = letter
+
+    if title:
+        c.setTitle(title)
+
+    text_obj = c.beginText()
+    left_margin = 40
+    top_margin = height - 50
+    bottom_margin = 40
+    line_height = 14
+
+    text_obj.setTextOrigin(left_margin, top_margin)
+    text_obj.setFont("Helvetica", 10)
+
+    for line in _markdown_to_plain_lines(text, width=100):
+        # New page if we reach bottom
+        if text_obj.getY() <= bottom_margin:
+            c.drawText(text_obj)
+            c.showPage()
+            text_obj = c.beginText()
+            text_obj.setTextOrigin(left_margin, top_margin)
+            text_obj.setFont("Helvetica", 10)
+        text_obj.textLine(line)
+
+    c.drawText(text_obj)
+    c.showPage()
+    c.save()
+    return output_path
+
+
 # ---------------------------------------------------------
 # FULL REPORT (Advanced)
 # ---------------------------------------------------------
@@ -208,15 +303,29 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     avg_delta = sum(delta_values) / len(delta_values) if delta_values else 0.0
     avg_energy = sum(energy_values) / len(energy_values) if energy_values else 0.0
 
-    roll = rolling_rye(cycles, window=10)
-    trend = efficiency_trend(cycles)
-    med_rye = median_rye(cycles)
-    stab = stability_index(cycles)
-    momentum = recovery_momentum(cycles)
-    slope = regression_rye_slope(cycles)
-    runtime = _extract_session_runtime(timestamps)
-
+    # Domain and role stats (for primary domain and swarm view)
     domain_stats, role_stats = _domain_and_role_stats(cycles)
+    primary_domain = _primary_domain_from_stats(domain_stats)
+
+    # Diagnostics bundle (uses robust rolling, trend, slope, stability, momentum, percentiles)
+    diagnostics = build_run_diagnostics(
+        history=cycles,
+        domain=primary_domain,
+        window=10,
+    )
+
+    roll = diagnostics.get("rolling_rye")
+    robust_roll = diagnostics.get("robust_rolling_rye")
+    trend = diagnostics.get("trend_simple")
+    med_rye = diagnostics.get("rye_median")
+    stab = diagnostics.get("stability_index")
+    momentum = diagnostics.get("recovery_momentum")
+    slope = diagnostics.get("trend_slope")
+    low_p = diagnostics.get("low_percentile")
+    mid_p = diagnostics.get("mid_percentile")
+    high_p = diagnostics.get("high_percentile")
+
+    runtime = _extract_session_runtime(timestamps)
 
     # Optional goal index and discoveries from memory store
     goal_index_entry: Optional[Dict[str, Any]] = None
@@ -271,6 +380,8 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
 
     if roll is not None:
         lines.append(f"- Rolling RYE (last 10): **{roll:.3f}**")
+    if robust_roll is not None:
+        lines.append(f"- Robust rolling RYE (median, last 10): **{robust_roll:.3f}**")
 
     if med_rye is not None:
         lines.append(f"- Median RYE (noise resistant): **{med_rye:.3f}**")
@@ -287,6 +398,11 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
 
     if momentum is not None:
         lines.append(f"- Recovery momentum: **{momentum:.3f}** (higher means late stage acceleration)")
+
+    if low_p is not None and mid_p is not None and high_p is not None:
+        lines.append(
+            f"- RYE distribution: low ~**{low_p:.3f}**, median ~**{mid_p:.3f}**, high ~**{high_p:.3f}**"
+        )
 
     phase_label = _classify_phase(slope, trend, stab)
     lines.append(f"- Phase classification: **{phase_label}**")
@@ -390,7 +506,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
             ts = d.get("timestamp", "")
             kind = d.get("kind", "")
             label = d.get("label", "")
-            score = d.get("score")
+            score = d.get("score", None)
             if isinstance(score, (int, float)):
                 lines.append(f"- [{ts}] [{kind}] ({score:.2f}) {label}")
             else:
@@ -402,8 +518,9 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     lines.append(
         "This session reflects a sequence of TGRM cycles (Test → Detect → Repair → Verify). "
         "RYE quantifies how much verified improvement (ΔR) occurred per unit energy (E). "
-        "The stability index, momentum, and slope together indicate whether the system is moving "
-        "toward a stable high repair yield equilibrium or oscillating in a more exploratory regime."
+        "The stability index, momentum, and trend signals together indicate whether the system "
+        "is moving toward a stable high repair yield equilibrium or oscillating in a more "
+        "exploratory regime."
     )
 
     return "\n".join(lines)
@@ -527,3 +644,46 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> s
             lines.append(f"... and {len(unique_findings) - 80} more hypotheses mentioning treatments or mechanisms.\n")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------
+# PDF WRAPPERS
+# ---------------------------------------------------------
+def generate_report_pdf(
+    memory_store: Any,
+    goal: Optional[str] = None,
+    output_path: str = "autonomous_agent_report.pdf",
+) -> str:
+    """Generate the full report and write it to a PDF file.
+
+    Returns:
+        The output_path for convenience.
+
+    Raises:
+        RuntimeError if reportlab is not installed.
+    """
+    md = generate_report(memory_store, goal=goal)
+    title = "Autonomous Research Agent Report"
+    if goal:
+        title = f"{title} - Goal Snapshot"
+    return _write_pdf(md, output_path=output_path, title=title)
+
+
+def generate_findings_report_pdf(
+    memory_store: Any,
+    goal: Optional[str] = None,
+    output_path: str = "autonomous_agent_findings_report.pdf",
+) -> str:
+    """Generate the targeted findings report and write it to a PDF file.
+
+    Returns:
+        The output_path for convenience.
+
+    Raises:
+        RuntimeError if reportlab is not installed.
+    """
+    md = generate_findings_report(memory_store, goal=goal)
+    title = "Autonomous Agent Findings Report"
+    if goal:
+        title = f"{title} - Goal Snapshot"
+    return _write_pdf(md, output_path=output_path, title=title)
