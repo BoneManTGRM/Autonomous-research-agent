@@ -17,6 +17,7 @@ This upgraded module introduces:
 • Repair Efficiency Signature (NEW)
 • Per cycle RYE summaries (NEW)
 • Run level diagnostics bundle (NEW)
+• Tool RYE diagnostics for tool_events (NEW)
 
 Backwards compatibility:
     Existing callers that only pass the original arguments still work:
@@ -57,7 +58,6 @@ def normalize_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         v = _safe_float(entry.get("RYE"))
         if v is None:
             continue
-        # Store a shallow copy with normalized RYE value
         e = dict(entry)
         e["RYE"] = v
         norm.append(e)
@@ -94,7 +94,6 @@ def compute_delta_r(
     hypothesis_gain = hypotheses_generated * 0.2
     source_gain = min(max(sources_used, 0), 20) * 0.05
 
-    # Extra signal channels
     bonus = max(novelty_score * 0.4, 0.0) + max(coherence_gain * 0.3, 0.0)
 
     delta = float(base + contradiction_gain + hypothesis_gain + source_gain + bonus)
@@ -327,11 +326,9 @@ def stability_index(history: List[Dict[str, Any]]) -> Optional[float]:
     var = statistics.pvariance(vals)
 
     if var == 0:
-        # Perfectly flat. If mean is positive, treat as fully stable.
         return 1.0 if mean >= 0 else 0.0
 
     score = mean / (var + 1e-6)
-    # Soft scaling into [0, 1]
     score *= 0.25
     return min(max(score, 0.0), 1.0)
 
@@ -350,7 +347,6 @@ def recovery_momentum(history: List[Dict[str, Any]]) -> Optional[float]:
     slope = regression_rye_slope(history)
     if slope is None:
         return None
-    # Simple scaling to make the value more interpretable and non negative
     return max(slope * 10.0, 0.0)
 
 
@@ -602,3 +598,122 @@ def build_run_diagnostics(
         diagnostics["rye_avg_weighted"] = apply_domain_weight(rye_avg, domain)
 
     return diagnostics
+
+
+# ---------------------------------------------------------------------------
+# Tool RYE diagnostics (for MemoryStore.get_tool_stats hook)
+# ---------------------------------------------------------------------------
+
+def compute_tool_rye(
+    tool_events: List[Dict[str, Any]],
+    *,
+    run_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Aggregate RYE style metrics per tool from tool_events.
+
+    Expected tool_events format (from MemoryStore.log_tool_event):
+        {
+          "timestamp": str,
+          "run_id": Optional[str],
+          "goal": Optional[str],
+          "domain": Optional[str],
+          "role": Optional[str],
+          "cycle_index": Optional[int],
+          "tool_name": str,
+          "status": str,            # "ok" or "error"
+          "duration_seconds": Optional[float],
+          "energy_cost": Optional[float],
+          "rye_delta": Optional[float],
+          "error": Optional[str],
+          "extra": Optional[dict],
+        }
+
+    We compute for each tool:
+        - events: total events
+        - ok_events: non error events
+        - error_events: events with status == "error"
+        - sum_delta_r: sum of rye_delta where available
+        - sum_energy: sum of energy_cost where available and positive
+        - rye_avg: sum_delta_r / sum_energy if possible
+        - rye_median: median per event rye_delta / energy_cost when both exist
+        - rye_last: last per event ratio when both exist
+
+    Returns:
+        {
+          "tools": {
+             "browser": { ... },
+             "sandbox": { ... },
+             ...
+          }
+        }
+    """
+    if not isinstance(tool_events, list):
+        tool_events = []
+
+    per_tool: Dict[str, Dict[str, Any]] = {}
+
+    for ev in tool_events:
+        if not isinstance(ev, dict):
+            continue
+        if run_id is not None and ev.get("run_id") != run_id:
+            continue
+
+        name = ev.get("tool_name")
+        if not name:
+            continue
+
+        t = per_tool.get(name) or {
+            "events": 0,
+            "ok_events": 0,
+            "error_events": 0,
+            "sum_delta_r": 0.0,
+            "sum_energy": 0.0,
+            "ratios": [],       # per event delta_r / energy_e
+            "last_timestamp": None,
+        }
+
+        t["events"] = int(t.get("events", 0)) + 1
+
+        status = ev.get("status", "ok")
+        if status == "error":
+            t["error_events"] = int(t.get("error_events", 0)) + 1
+        else:
+            t["ok_events"] = int(t.get("ok_events", 0)) + 1
+
+        delta_r = _safe_float(ev.get("rye_delta"))
+        energy_e = _safe_float(ev.get("energy_cost"))
+
+        if delta_r is not None:
+            t["sum_delta_r"] = float(t.get("sum_delta_r", 0.0)) + delta_r
+        if energy_e is not None and energy_e > 0:
+            t["sum_energy"] = float(t.get("sum_energy", 0.0)) + energy_e
+
+        if delta_r is not None and energy_e is not None and energy_e > 0:
+            t["ratios"].append(delta_r / energy_e)
+
+        ts = ev.get("timestamp")
+        if isinstance(ts, str):
+            prev_ts = t.get("last_timestamp")
+            if prev_ts is None or str(ts) > str(prev_ts):
+                t["last_timestamp"] = ts
+
+        per_tool[name] = t
+
+    result: Dict[str, Any] = {}
+
+    for name, t in per_tool.items():
+        ratios: List[float] = [float(r) for r in t.get("ratios", []) if isinstance(r, (int, float))]
+        rye_avg: Optional[float] = None
+        rye_median_val: Optional[float] = None
+        rye_last: Optional[float] = None
+
+        sum_energy = float(t.get("sum_energy", 0.0))
+        sum_delta_r = float(t.get("sum_delta_r", 0.0))
+
+        if sum_energy > 0 and sum_delta_r != 0:
+            rye_avg = sum_delta_r / sum_energy
+
+        if ratios:
+            rye_median_val = statistics.median(ratios)
+            rye_last = ratios[-
