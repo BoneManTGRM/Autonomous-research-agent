@@ -1,5 +1,5 @@
 # ================================================================
-# Autonomous Research Agent — Full Configuration
+# Autonomous Research Agent - Full Configuration
 # Maxed-out YAML for Streamlit UI + Background Worker + CoreAgent
 # ================================================================
 
@@ -119,6 +119,14 @@ worker:
       label: "24 Hour Run"
       default_minutes: 1440
       max_minutes: 1500
+    1_week:
+      label: "1 Week Run"
+      default_minutes: 10080      # 7 days * 24 * 60
+      max_minutes: 10500
+    1_month:
+      label: "1 Month Run"
+      default_minutes: 43200      # 30 days * 24 * 60
+      max_minutes: 44000
     90_days:
       label: "90 Day Run"
       default_minutes: 129600
@@ -134,6 +142,12 @@ worker:
     default_total_minutes: 60   # overridden by env or UI
     smoothing_factor: 0.6       # exponential smoothing for recent RYE
     min_segment_minutes: 5
+
+  # Optional hints for back-to-back worker runs (env still controls real behavior)
+  back_to_back:
+    enabled_default: false
+    default_repeats: 1
+    max_repeats: 10
 
 
 # ------------------------------------------------
