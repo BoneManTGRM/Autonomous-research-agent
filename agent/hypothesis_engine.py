@@ -191,6 +191,40 @@ def _estimate_rye_relevance(text: str) -> float:
     return max(0.0, min(1.0, hits / float(max(1, len(tokens)))))
 
 
+def _estimate_delta_r_hint(
+    novelty: float,
+    rye_relevance: float,
+    domain: Optional[str],
+    role: Optional[str],
+) -> float:
+    """Deterministic hint for how much ΔR this hypothesis might deliver if confirmed.
+
+    This is NOT ΔR itself, just a small scalar that can feed into
+    compute_delta_r(...) as an extra signal or be logged with the hypothesis.
+    """
+    d = (domain or "").lower()
+    r = (role or "").lower()
+
+    # Base potential from novelty and RYE relevance
+    base = 0.4 * novelty + 0.6 * rye_relevance  # tilt toward direct RYE language
+    # Domain scaling: longevity/math are harder, so each good hypothesis is more valuable
+    if d in {"longevity", "math"}:
+        base *= 1.2
+
+    # Role scaling: explorer = more speculative, integrator = more actionable
+    if r == "explorer":
+        base *= 0.9
+    elif r == "integrator":
+        base *= 1.1
+    elif r == "critic":
+        base *= 1.0
+    elif r == "researcher":
+        base *= 1.0
+
+    # Map to a gentle ΔR hint range, e.g. [0.0, 2.0]
+    return max(0.0, min(2.0, 2.0 * base))
+
+
 def _has_contradiction_signals(notes: List[Dict[str, Any]]) -> bool:
     """Detect whether the current notes contain contradiction markers.
 
@@ -590,6 +624,45 @@ def _classify_hypothesis(
     }
 
 
+def _build_tags(
+    priority: float,
+    rye_relevance: float,
+    novelty: float,
+    contradiction_sensitive: bool,
+    domain: Optional[str],
+    role: Optional[str],
+) -> List[str]:
+    """Lightweight tags for downstream filtering or visualization."""
+    tags: List[str] = []
+
+    if priority >= 0.7:
+        tags.append("high_priority")
+    elif priority <= 0.3:
+        tags.append("low_priority")
+
+    if rye_relevance >= 0.4:
+        tags.append("rye_core")
+    elif rye_relevance <= 0.1:
+        tags.append("weak_rye_link")
+
+    if novelty >= 0.5:
+        tags.append("high_novelty")
+    elif novelty <= 0.15:
+        tags.append("low_novelty")
+
+    if contradiction_sensitive:
+        tags.append("contradiction_sensitive")
+
+    d = (domain or "").lower()
+    r = (role or "").lower()
+    if d:
+        tags.append(f"domain:{d}")
+    if r:
+        tags.append(f"role:{r}")
+
+    return tags
+
+
 # ---------------------------------------------------------------------
 # Main API
 # ---------------------------------------------------------------------
@@ -605,7 +678,7 @@ def generate_hypotheses(
 
     Args:
         goal:
-            Human-readable research goal.
+            Human readable research goal.
         notes:
             List of note dicts (from MemoryStore).
         citations:
@@ -629,6 +702,8 @@ def generate_hypotheses(
               "novelty": 0.0-1.0,
               "rye_relevance": 0.0-1.0,
               "priority": 0.0-1.0,
+              "score": 0.0-1.0,              # alias of priority for reports/sorting
+              "delta_r_hint": float,         # estimated ΔR contribution if confirmed
               "classification": {
                   "kind": "...",
                   "focus": "...",
@@ -636,12 +711,13 @@ def generate_hypotheses(
                   "k2": "..."
               },
               "contradiction_sensitive": bool,
+              "tags": [ ... ],
             }
 
     Reparodynamics angle:
         These hypotheses are potential "repair targets" for future cycles.
         If later cycles confirm or refute them, delta_R reflects that, and
-        long-run RYE (delta_R / E) can track which directions were fruitful.
+        long run RYE (delta_R / E) can track which directions were fruitful.
     """
     if not goal and not notes and not citations:
         return []
@@ -743,12 +819,28 @@ def generate_hypotheses(
             min(1.0, 0.6 * novelty + 0.4 * rye_rel),
         )
 
+        delta_r_hint = _estimate_delta_r_hint(
+            novelty=novelty,
+            rye_relevance=rye_rel,
+            domain=domain,
+            role=role,
+        )
+
         classification = _classify_hypothesis(
             text=text,
             domain=domain,
             role=role,
             k1=k1,
             k2=k2,
+        )
+
+        tags = _build_tags(
+            priority=priority,
+            rye_relevance=rye_rel,
+            novelty=novelty,
+            contradiction_sensitive=contradiction_sensitive,
+            domain=domain,
+            role=role,
         )
 
         used_texts.add(text)
@@ -762,8 +854,11 @@ def generate_hypotheses(
                 "novelty": round(novelty, 3),
                 "rye_relevance": round(rye_rel, 3),
                 "priority": round(priority, 3),
+                "score": round(priority, 3),  # alias for compatibility with report sorters
+                "delta_r_hint": round(delta_r_hint, 3),
                 "classification": classification,
                 "contradiction_sensitive": bool(contradiction_sensitive),
+                "tags": tags,
             }
         )
 
