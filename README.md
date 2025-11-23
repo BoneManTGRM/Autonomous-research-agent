@@ -5,8 +5,8 @@ Live Deployment
 https://autonomous-research-agent-hqby.onrender.com
 
 Important  
-Paste your Tavily key in the sidebar to enable real web search.  
-Without it, the agent automatically switches to offline stub mode.
+Add your Tavily key in the sidebar to enable real web search.  
+Without a key, the system automatically switches to offline stub mode.
 
 ---
 
@@ -15,271 +15,135 @@ Without it, the agent automatically switches to offline stub mode.
 **Reparodynamics**, **TGRM**, and **RYE** were created and defined by **Cody Ryan Jenkins**.  
 These scientific terms:
 
-- may not be renamed  
-- may not be rebranded  
-- may not be represented as originating from another source  
-- must appear unchanged in all forks, redistributions, or derivative works  
+- cannot be renamed  
+- cannot be rebranded  
+- cannot be represented as originating from another individual or group  
+- must remain unchanged in forks, redistributions, or derivative systems  
+- require attribution in any scientific, academic, technical, or commercial use  
 
-Any scientific, academic, technical, or commercial project that uses or extends these concepts must provide attribution.
-
-### Required Citation
+### Required Citation  
 Jenkins, C. R. (2025). *Reparodynamics v2.2*  
 DOI: https://doi.org/10.5281/zenodo.17653046
 
-Reparodynamics is a protected scientific identity representing a unified framework for autonomous repair, stability, and long-run self-improvement.
+Reparodynamics is a protected scientific identity describing a unified framework for autonomous repair, stability, and long-run self-improvement.
 
 ---
 
 # 🚀 Overview
 
-The Autonomous Research Agent is a high-autonomy scientific engine built on the Reparodynamics framework.  
-It is designed for:
-
-- genuine research  
-- measurable improvement  
-- long-duration autonomy  
-- multi-agent reasoning  
-- data-grounded scientific exploration  
-
-This is not a chatbot wrapper.  
-It is a **self-improving research system** with real tools, real ingestion, and a quantitative repair metric.
+This system is a **true autonomous research engine**, not a chatbot.  
+It performs real multi-step reasoning, scientific ingestion, and self-improving cycles governed by **TGRM** and measured by **RYE**.
 
 ### Core capabilities
 - Full TGRM cycle (Test → Detect → Repair → Verify)  
 - RYE computation each cycle  
-- Multi-agent & Swarm Mode  
-- Web, PubMed, Semantic Scholar ingestion  
-- PDF and structured data extraction  
-- Isolated code sandbox  
-- Vector memory & long-run memory store  
-- Background worker for multi-month sessions  
-- Meta-controller for adaptive behavior across segments  
+- Multi-agent reasoning and Swarm Intelligence  
+- PubMed & Semantic Scholar ingestion  
+- Real web search with Tavily  
+- PDF, CSV, TSV, XLSX, JSON ingestion  
+- Code-execution sandbox  
+- Vector memory + long-run memory store  
+- Background worker for multi-day or multi-month autonomy  
+- Meta-controller segmentation for intelligent phase control  
 
-The system supports small analytical bursts or multi-month autonomous operation.
+The system is usable for rapid insight, hypothesis generation, or multi-month scientific investigations.
 
 ---
 
 # ⚡ Major Capabilities
 
-## 🔁 Full TGRM Loop  
-Each cycle performs:
+## 🔁 Full TGRM Loop
 
-1. **Test** — evaluate current knowledge  
-2. **Detect** — identify contradictions, gaps, or missing evidence  
-3. **Repair** — gather data, run code, ingest papers  
-4. **Verify** — confirm improvements  
-5. **Compute RYE** — measure improvement per energy  
-6. **Log** — save for transparency & reproducibility  
+Each cycle includes:
 
-This creates a continuously refining scientific pipeline.
+1. **Test** — evaluate notes, sources, hypotheses  
+2. **Detect** — identify contradictions, gaps, low-support claims  
+3. **Repair** — gather new evidence, run code, perform reasoning  
+4. **Verify** — check improvements & eliminate regressions  
+5. **Compute RYE** — ΔR / E for each repair  
+6. **Log** — full transparency for reproducibility  
 
----
-
-## 🌐 Real Data & Literature Pipelines
-
-- Tavily web search  
-- PubMed biomedical literature  
-- Semantic Scholar technical papers  
-- PDF extraction  
-- CSV, TSV, XLSX, JSON, ZIP, GZ ingestion  
-
-Grounds research in real sources.
+This produces an actual **self-correcting scientific system**.
 
 ---
 
-## 🧪 Code Sandbox
+## 🌐 Literature & Data Pipelines
+
+- Tavily Web Search  
+- PubMed biomedical ingestion  
+- Semantic Scholar technical ingestion  
+- PDF parsing  
+- CSV / TSV / XLSX / JSON / ZIP / GZ dataset ingestion  
+
+All research is grounded in external sources and verifiable data.
+
+---
+
+## 🧪 Safe Code Sandbox
 
 Supports:
 
-- simulations  
+- numerical experiments  
+- modeling  
 - statistics  
-- numeric verification  
-- hypothesis testing  
 - dataset analysis  
-- model evaluation  
+- algorithm tests  
+- verification of hypotheses  
 
 Runs safely in isolation.
 
 ---
 
-## 🧠 Swarm Mode
+## 🧠 Swarm Intelligence (Multi-Agent)
 
-A coordinated multi-agent lineup, with roles such as:
+A coordinated multi-role architecture including:
 
 - Researcher  
 - Critic  
+- Planner  
 - Explorer  
-- Theorist  
+- Synthesizer  
 - Integrator  
 
-Each agent runs independent TGRM cycles and contributes to shared memory.  
-Swarm mode dramatically expands coverage and reduces blind spots.
+Each agent runs independent TGRM cycles and contributes into shared memory.  
+Swarm mode produces broader coverage, higher novelty, and stricter verification.
 
 ---
 
-## ⏳ Long-Run Engine (Worker + Meta Controller)
+## ⏳ Long-Run Engine (Background Worker)
 
 Includes:
 
-- Background worker  
-- Crash recovery & checkpoints  
-- Watchdog heartbeat  
-- Meta-controller segmentation  
-- Exploration → stabilization → refinement phases  
-- Runtime caps or unconstrained operation  
+- Worker process running autonomous cycles
+- Multi-month autonomy (1 Week, 1 Month, 90 Days, Forever)
+- Crash recovery via checkpoints  
+- Watchdog and heartbeat monitoring  
+- Meta-controller for segmented reasoning  
+- Cross-segment stabilization, refinement, and equilibrium detection  
 
-Supports hours, days, or multi-month autonomy.
+This is what enables *true* long-duration Reparodynamics experiments.
 
 ---
 
 ## 🧬 Domain Presets
 
-Ready profiles for:
+Optimized profiles for:
 
 - General science  
 - Longevity & anti-aging  
-- Mathematics / theorem building  
+- Mathematics / theorem-building  
 - Biology  
 - Custom domains  
 
-Presets configure TGRM behavior, ingestion, and tools per field.
+Each preset adjusts:
+
+- ingestion sources  
+- TGRM behavior  
+- RYE weighting  
+- tool policies  
+- evidence strictness  
+- swarm orchestration  
 
 ---
 
 # 📁 Repository Structure
-
-```
-autonomous-research-agent/
-    agent/
-        core_agent.py
-        tgrm_loop.py
-        hypothesis_engine.py
-        rye_metrics.py
-        memory_store.py
-        presets.py
-        report_generator.py
-        vector_memory.py
-        tools/
-            browser_tool.py
-            code_sandbox.py
-            data_connectors.py
-            tools_web.py
-            tools_files.py
-            tools_papers.py
-            tools_pubmed.py
-            tools_semantic_scholar.py
-    engine_worker.py
-    app_streamlit.py
-    config/
-        settings.yaml
-    logs/
-        sessions/
-    requirements.txt
-```
-
----
-
-# 🔑 Required Keys
-
-### Tavily  
-```
-TAVILY_API_KEY=your_key_here
-```
-Paste into the sidebar or expose via environment variable.
-
----
-
-# 🧪 Running Locally
-
-```
-git clone your_repo_url_here
-cd autonomous-research-agent
-pip install -r requirements.txt
-streamlit run app_streamlit.py
-```
-
-Insert your Tavily key when the UI loads.
-
----
-
-# 🔁 How Continuous Mode Operates
-
-Modes include:
-
-- 1 hour  
-- 8 hours  
-- 24 hours  
-- 90 days  
-- Forever  
-
-Each cycle performs the full TGRM loop with RYE scoring.  
-The meta-controller optimizes behavior over time.
-
----
-
-# 📊 Reporting & Analytics
-
-Built-in reporting includes:
-
-- RYE trend visualization  
-- delta R over time  
-- Repair actions per cycle  
-- Hypothesis evolution  
-- Data source logs  
-- Stability metrics  
-- Session-wide summaries  
-- Markdown & optional PDF export  
-
----
-
-# ☁ Deployment
-
-Supports deployment on:
-
-- Render Web Service (UI)  
-- Render Background Worker (long runs)  
-- Streamlit Cloud  
-
-Start worker manually:
-
-```
-python engine_worker.py
-```
-
-Environment vars include:
-
-WORKER_GOAL  
-WORKER_RUNTIME_PROFILE  
-WORKER_SWARM_ROLES  
-WORKER_MAX_MINUTES  
-WORKER_STOP_RYE  
-WORKER_META  
-WORKER_FOREVER  
-
----
-
-# 📜 License
-
-Licensed under **Apache 2.0** with additional scientific attribution requirements.  
-See LICENSE and NOTICE.
-
-Reparodynamics, TGRM, and RYE must remain properly attributed and may not be renamed.
-
----
-
-# 📘 Required NOTICE File
-
-```
-Reparodynamics, TGRM, and RYE are scientific terms created and defined by
-Cody Ryan Jenkins. These terms may not be rebranded or represented as
-originating from another source. Any scientific or academic use requires
-attribution to the original creator.
-© 2025 Cody Ryan Jenkins
-```
-
----
-
-# 🧑‍🔬 Credits
-
-Created by **Cody R. Jenkins**  
-Reparodynamics • TGRM • RYE  
