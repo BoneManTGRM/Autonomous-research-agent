@@ -13,6 +13,8 @@ Features:
 - Real Tavily search support detection
 - Source citation viewer
 - Report generation from full cycle history
+- Optional PDF report export (if reportlab is installed)
+- Tools status panel for web browser and sandbox tools
 
 Reparodynamics:
     The UI is a front panel on a reparodynamic system:
@@ -41,14 +43,23 @@ from agent.presets import PRESETS, get_preset  # domain presets
 from agent.report_generator import (
     generate_report,
     generate_findings_report,
-)  # report builders
+    generate_report_pdf,
+    generate_findings_report_pdf,
+)  # report builders and PDF exporters
 from agent.rye_metrics import (
     rolling_rye,
     efficiency_trend,
     regression_rye_slope,
     stability_index,
     recovery_momentum,
+    build_run_diagnostics,
 )
+
+# Optional tools registry (for web browser and sandbox status)
+try:
+    from agent.tools import TOOL_REGISTRY  # type: ignore[import]
+except Exception:  # pragma: no cover
+    TOOL_REGISTRY = {}  # type: ignore[assignment]
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
@@ -153,6 +164,21 @@ def tavily_status() -> Dict[str, Any]:
         tail = key[-4:]
         return {"has_key": True, "display": f"Tavily key detected (...{tail})"}
     return {"has_key": False, "display": "No Tavily API key found. Web search will use stubbed results."}
+
+
+def detect_tools() -> Dict[str, bool]:
+    """Detect presence of web browser and sandbox tools from TOOL_REGISTRY."""
+    if not isinstance(TOOL_REGISTRY, dict):
+        return {"web": False, "sandbox": False}
+
+    # Flexible detection by common keys
+    web_keys = {"web_search", "browser", "web", "internet"}
+    sandbox_keys = {"sandbox", "code_sandbox", "python_sandbox", "exec_sandbox"}
+
+    has_web = any(k in TOOL_REGISTRY for k in web_keys)
+    has_sandbox = any(k in TOOL_REGISTRY for k in sandbox_keys)
+
+    return {"web": has_web, "sandbox": has_sandbox}
 
 
 def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
@@ -392,7 +418,7 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
 # -------------------------------------------------------------------
 def main() -> None:
     st.title("Autonomous Research Agent")
-    st.caption("Reparodynamics, RYE, and TGRM powered research loop (with swarm mode and background worker)")
+    st.caption("Reparodynamics, RYE, and TGRM powered research loop (with swarm mode, web browser, sandbox, and background worker)")
 
     agent, memory = init_agent()
 
@@ -446,6 +472,39 @@ def main() -> None:
     else:
         st.sidebar.warning(status["display"])
         st.sidebar.write("Paste a Tavily key above to enable real web search. Otherwise, stubbed results are used.")
+
+    # Tool status (web browser and sandbox)
+    st.sidebar.subheader("Tools status")
+    tool_flags = detect_tools()
+
+    if tool_flags["web"]:
+        st.sidebar.success("Web browser tool is available in tools.py.")
+    else:
+        st.sidebar.info("Web browser tool not detected in tools.py. CoreAgent may still use Tavily directly.")
+
+    if tool_flags["sandbox"]:
+        st.sidebar.success("Sandbox tool is available for safe code execution.")
+    else:
+        st.sidebar.info("Sandbox tool not detected in tools.py.")
+
+    # Web browser and sandbox toggles
+    use_web_tool = st.sidebar.checkbox(
+        "Use web browser tool",
+        value=status["has_key"],
+        help=(
+            "If enabled, the agent will use the web browser tool for searches. "
+            "If disabled, only local notes and PDFs are used."
+        ),
+    )
+
+    allow_sandbox = st.sidebar.checkbox(
+        "Allow sandbox code execution",
+        value=tool_flags["sandbox"],
+        help=(
+            "If enabled and the sandbox tool is present, the agent can run code in a bounded sandbox. "
+            "If disabled, code execution tools are not used."
+        ),
+    )
 
     # Swarm toggle and size
     st.sidebar.subheader("Swarm configuration")
@@ -578,13 +637,14 @@ def main() -> None:
         next_index = len(history)
         results: List[Dict[str, Any]] = []
 
-        # Source controls for TGRM loop
+        # Source controls for TGRM loop, including web browser and sandbox flags
         source_controls = {
-            "web": True,
+            "web": bool(use_web_tool),
             "pubmed": bool(use_pubmed),
             "semantic": bool(use_semantic),
             "pdf": bool(use_pdf and uploaded_pdf is not None),
             "biomarkers": bool(use_biomarkers),
+            "sandbox": bool(allow_sandbox and tool_flags["sandbox"]),
         }
 
         # PDF bytes (if provided)
@@ -726,7 +786,7 @@ def main() -> None:
             # Classic multi agent flag
             new_state["multi_agent_pair"] = bool(multi_agent)
 
-            # Optional attached pdf flag (worker can decide whether to re ingests files)
+            # Optional attached pdf flag (worker can decide whether to re-ingest files)
             new_state["has_pdf"] = bool(use_pdf and uploaded_pdf is not None)
 
             save_control_state(new_state)
@@ -842,16 +902,17 @@ def main() -> None:
             st.line_chart({"energy_E": energy_y})
             st.caption("Energy per cycle (approximate effort cost).")
 
-        # Advanced RYE diagnostics from rye_metrics
+        # Advanced RYE diagnostics using rye_metrics build_run_diagnostics
         st.markdown("### Advanced RYE diagnostics")
 
-        adv_cols = st.columns(5)
-        roll_val = rolling_rye(history, window=10)
-        trend_val = efficiency_trend(history)
-        slope_val = regression_rye_slope(history)
-        stability_val = stability_index(history)
-        momentum_val = recovery_momentum(history)
+        diagnostics = build_run_diagnostics(history=history, domain=None, window=10)
+        roll_val = diagnostics.get("rolling_rye")
+        trend_val = diagnostics.get("trend_simple")
+        slope_val = diagnostics.get("trend_slope")
+        stability_val = diagnostics.get("stability_index")
+        momentum_val = diagnostics.get("recovery_momentum")
 
+        adv_cols = st.columns(5)
         with adv_cols[0]:
             st.metric("Rolling RYE (10)", f"{roll_val:.3f}" if roll_val is not None else "n/a")
         with adv_cols[1]:
@@ -863,8 +924,11 @@ def main() -> None:
         with adv_cols[4]:
             st.metric("Recovery momentum", f"{momentum_val:.3f}" if momentum_val is not None else "n/a")
 
-        with st.expander("Raw JSON"):
+        with st.expander("Raw history JSON"):
             st.code(json.dumps(history, indent=2), language="json")
+
+        with st.expander("Raw diagnostics JSON"):
+            st.code(json.dumps(diagnostics, indent=2), language="json")
 
     # ------------------------------
     # Run diagnostics (continuous mode support from MemoryStore)
@@ -917,11 +981,25 @@ def main() -> None:
             report_md = generate_report(memory_store=memory, goal=None)
             st.markdown(report_md)
             st.download_button(
-                "Download full report",
+                "Download full report (Markdown)",
                 data=report_md,
                 file_name="autonomous_research_report.md",
                 mime="text/markdown",
             )
+            # Optional PDF
+            try:
+                pdf_path = generate_report_pdf(memory_store=memory, goal=None, output_path="autonomous_research_report.pdf")
+                with open(pdf_path, "rb") as f:
+                    st.download_button(
+                        "Download full report (PDF)",
+                        data=f,
+                        file_name="autonomous_research_report.pdf",
+                        mime="application/pdf",
+                    )
+            except RuntimeError as e:
+                st.info(str(e))
+            except Exception:
+                st.info("PDF generation failed unexpectedly. Check server logs for details.")
 
     with col_rep2:
         if st.button("Outcome focused summary"):
@@ -939,11 +1017,29 @@ def main() -> None:
             findings_md = generate_findings_report(memory_store=memory, goal=None)
             st.markdown(findings_md)
             st.download_button(
-                "Download findings report",
+                "Download findings report (Markdown)",
                 data=findings_md,
                 file_name="autonomous_findings_report.md",
                 mime="text/markdown",
             )
+            # Optional PDF
+            try:
+                pdf_path = generate_findings_report_pdf(
+                    memory_store=memory,
+                    goal=None,
+                    output_path="autonomous_agent_findings_report.pdf",
+                )
+                with open(pdf_path, "rb") as f:
+                    st.download_button(
+                        "Download findings report (PDF)",
+                        data=f,
+                        file_name="autonomous_agent_findings_report.pdf",
+                        mime="application/pdf",
+                    )
+            except RuntimeError as e:
+                st.info(str(e))
+            except Exception:
+                st.info("PDF generation failed unexpectedly. Check server logs for details.")
 
 
 if __name__ == "__main__":
