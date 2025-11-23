@@ -2,15 +2,16 @@
 
 """Domain presets for the Autonomous Research Agent.
 
-Presets act as domain-specific "profiles" that define:
+Presets act as domain specific profiles that define:
 - default goals
 - source controls
 - domain tags
 - query behavior
 - RYE weighting hints
 - reporting structure
-- runtime profiles for 1h / 8h / 24h / 90-day / forever runs
-- swarm role contracts and intelligence hints for multi-agent operation
+- runtime profiles for 1h / 8h / 24h / 90 day / forever runs
+- swarm role contracts and intelligence hints for multi agent operation
+- diagnostics cadence for advanced RYE metrics and stability tracking
 
 These settings do NOT break existing code but unlock future power for:
 - continuous mode tuning
@@ -19,6 +20,7 @@ These settings do NOT break existing code but unlock future power for:
 - swarm aware behavior (many coordinated logical agents)
 - cure or treatment extraction pipelines
 - stricter verification and smarter hypothesis selection
+- repair efficiency signatures per domain and per preset
 """
 
 from __future__ import annotations
@@ -115,10 +117,7 @@ CONTINUOUS_MODE_DEFAULTS: Dict[str, Any] = {
 # ---------------------------------------------------------------------
 # Swarm defaults (shared across presets)
 # ---------------------------------------------------------------------
-# This describes what a "swarm" means at the preset level.
-# The Streamlit app and CoreAgent can read these hints but are not forced to.
-
-# Global, domain-agnostic role templates with contracts
+# Global, domain agnostic role templates with contracts
 SWARM_ROLES: List[Dict[str, Any]] = [
     {
         "name": "researcher",
@@ -256,7 +255,7 @@ SWARM_GLOBAL_HINTS: Dict[str, Any] = {
     # Hard safety ceiling for platform resources.
     # App and core can still choose a lower local limit.
     "max_agents_safe": 32,
-    # Good default for most presets when user clicks "swarm".
+    # Good default for most presets when user clicks swarm.
     "default_agents": 5,
     # How time should be split in continuous mode for swarms.
     "time_split_strategy": "equal",  # equal, weighted, or custom
@@ -424,6 +423,15 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "default_runtime_profile": "8_hours",
         "default_rye_stop_threshold": None,
         "rye_thresholds": DEFAULT_RYE_THRESHOLDS,
+
+        # Repair efficiency diagnostics hints
+        "run_diagnostics": {
+            "enabled": True,
+            "window": 10,
+            "frequency_cycles": 25,
+            "include_stability_index": True,
+            "include_recovery_momentum": True,
+        },
 
         # Cure or treatment extraction is generic here
         "cure_extraction": {
@@ -650,6 +658,15 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "default_rye_stop_threshold": 0.08,
         "rye_thresholds": DEFAULT_RYE_THRESHOLDS,
 
+        # Repair efficiency diagnostics hints
+        "run_diagnostics": {
+            "enabled": True,
+            "window": 10,
+            "frequency_cycles": 20,
+            "include_stability_index": True,
+            "include_recovery_momentum": True,
+        },
+
         # Cure or treatment extraction is a primary goal for longevity
         "cure_extraction": {
             "enabled": True,
@@ -692,7 +709,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                 "Longevity swarms are tuned for deep evidence gathering, biomarker interpretation, "
                 "and critical review of clinical data. Each role should behave like a specialized scientist."
             ),
-            # Specific 5-role longevity swarm template for highly intelligent runs
+            # Specific 5 role longevity swarm template for highly intelligent runs
             "role_templates": [
                 {
                     "name": "mitochondria_metabolism_specialist",
@@ -915,6 +932,15 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "default_rye_stop_threshold": 0.05,
         "rye_thresholds": DEFAULT_RYE_THRESHOLDS,
 
+        # Repair efficiency diagnostics hints
+        "run_diagnostics": {
+            "enabled": True,
+            "window": 10,
+            "frequency_cycles": 30,
+            "include_stability_index": True,
+            "include_recovery_momentum": True,
+        },
+
         # Math preset does not extract cures, but can still extract structures
         "cure_extraction": {
             "enabled": False,
@@ -982,10 +1008,20 @@ PRESETS: Dict[str, Dict[str, Any]] = {
 # Accessors
 # ---------------------------------------------------------------------
 def get_preset(name: str) -> Dict[str, Any]:
-    """Return a preset config, falling back to 'general' if unknown."""
+    """Return a preset config, falling back to general if unknown."""
     return PRESETS.get(name, PRESETS["general"])
 
 
 def get_runtime_profile(name: str) -> Dict[str, Any]:
     """Return a runtime profile, falling back to 24_hours if unknown."""
     return RUNTIME_PROFILES.get(name, RUNTIME_PROFILES["24_hours"])
+
+
+def get_continuous_mode_defaults() -> Dict[str, Any]:
+    """Return continuous mode defaults used by CoreAgent and engine_worker."""
+    return CONTINUOUS_MODE_DEFAULTS
+
+
+def get_swarm_global_hints() -> Dict[str, Any]:
+    """Return global swarm hints and safety ceilings."""
+    return SWARM_GLOBAL_HINTS
