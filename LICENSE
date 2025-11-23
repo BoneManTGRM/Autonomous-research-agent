@@ -2,24 +2,31 @@ Apache License
 Version 2.0, January 2004
 http://www.apache.org/licenses/
 
-Copyright 2025 Reparodynamics
+Copyright 2025 Cody Ryan Jenkins
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use the open-source portions of this project except 
-in compliance with the License. You may obtain a copy of the 
-License at:
+Licensed under the Apache License, Version 2.0 (the "License").
+You may not use this project except in compliance with the License.
+You may obtain a copy of the License at:
 
     http://www.apache.org/licenses/LICENSE-2.0
 
-Unless required by applicable law or agreed to in writing, software 
+Unless required by applicable law or agreed to in writing, software
 distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. 
-See the License for the specific language governing permissions and 
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
 limitations under the License.
 
-ADDITIONAL NOTICE:
-This repository uses a dual-licensing model. The core components 
-(TGRM loop, RYE computation, basic agent logic) are licensed under 
-Apache 2.0. Premium, swarm, long-run worker, enterprise, and hosted 
-features are NOT included under this license and require a separate 
-commercial license from Reparodynamics.
+NOTICE REQUIREMENT:
+All redistributions of this software must include the NOTICE file
+from this repository. The NOTICE file contains required attribution
+regarding the scientific terminology and origin of the Reparodynamics
+framework, including the names Reparodynamics, TGRM, and RYE.
+
+By using, modifying, or distributing this software, you agree that
+the scientific terms Reparodynamics, TGRM, and RYE may not be
+rebranded, renamed, or represented as originating from any other
+creator. Scientific or academic use of these terms requires proper
+attribution to the original author, Cody Ryan Jenkins.
+
+This project is fully licensed under Apache 2.0. No commercial or
+proprietary license is required for any component.
