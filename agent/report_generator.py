@@ -1,7 +1,7 @@
 """Extended Report Generator for the Autonomous Research Agent.
 
 Outputs:
-1. Full Reparodynamics Report (rich RYE and swarm analytics)
+1. Full Reparodynamics Report (rich RYE and swarm analytics, including Option C meta segments)
 2. Targeted Findings Report (cures, treatments, mechanisms, interventions)
 3. Optional PDF exports for both reports (if reportlab is available)
 """
@@ -243,6 +243,79 @@ def _write_pdf(text: str, output_path: str, title: Optional[str] = None) -> str:
     return output_path
 
 
+def _meta_segment_stats(
+    cycles: List[Dict[str, Any]]
+) -> Dict[int, Dict[str, Any]]:
+    """Aggregate Option C meta controller segments from per cycle run_metadata.
+
+    Expects cycles to optionally contain a run_metadata dict with keys such as:
+        segment_index, phase, mode, runtime_profile, elapsed_minutes, RYE
+
+    Returns:
+        {
+            segment_index: {
+                "phase": str or None,
+                "mode": str or None,
+                "runtime_profile": str or None,
+                "count": int,
+                "avg_rye": float or None,
+                "min_rye": float or None,
+                "max_rye": float or None,
+            },
+            ...
+        }
+    """
+    segments: Dict[int, Dict[str, Any]] = {}
+
+    for c in cycles:
+        meta = c.get("run_metadata") or {}
+        if not isinstance(meta, dict):
+            continue
+
+        seg_idx = meta.get("segment_index")
+        if not isinstance(seg_idx, int):
+            continue
+
+        rye_val = c.get("RYE")
+        rye_f: Optional[float] = None
+        if isinstance(rye_val, (int, float)):
+            rye_f = float(rye_val)
+
+        seg = segments.setdefault(
+            seg_idx,
+            {
+                "phase": meta.get("phase"),
+                "mode": meta.get("mode"),
+                "runtime_profile": meta.get("runtime_profile"),
+                "count": 0,
+                "rye_sum": 0.0,
+                "min_rye": None,
+                "max_rye": None,
+            },
+        )
+
+        seg["count"] = int(seg.get("count", 0)) + 1
+        if rye_f is not None:
+            seg["rye_sum"] = float(seg.get("rye_sum", 0.0)) + rye_f
+            cur_min = seg.get("min_rye")
+            cur_max = seg.get("max_rye")
+            if cur_min is None or rye_f < cur_min:
+                seg["min_rye"] = rye_f
+            if cur_max is None or rye_f > cur_max:
+                seg["max_rye"] = rye_f
+
+    # Convert sums to averages and prune internals
+    for idx, seg in list(segments.items()):
+        cnt = int(seg.get("count", 0)) or 0
+        if cnt <= 0:
+            seg["avg_rye"] = None
+        else:
+            seg["avg_rye"] = float(seg.get("rye_sum", 0.0)) / float(cnt)
+        seg.pop("rye_sum", None)
+
+    return segments
+
+
 # ---------------------------------------------------------
 # FULL REPORT (Advanced)
 # ---------------------------------------------------------
@@ -361,6 +434,9 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
         discoveries = memory_store.get_discoveries(goal=goal) if hasattr(memory_store, "get_discoveries") else []
     except Exception:
         discoveries = []
+
+    # Option C meta segment stats (if run_metadata is present)
+    meta_segments = _meta_segment_stats(cycles)
 
     # Build report
     lines: List[str] = []
@@ -531,6 +607,32 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
         lines.append("|------|--------|---------|")
         for r, stats in sorted(role_stats.items(), key=lambda kv: kv[0]):
             lines.append(f"| {r} | {stats['count']} | {stats['avg_rye']:.3f} |")
+        lines.append("")
+
+    # Option C meta segments
+    lines.append("## Meta controller segments (Option C)\n")
+    if not meta_segments:
+        lines.append("No meta segments detected in run_metadata. This may mean classic mode was used, or the worker did not record segment indices.\n")
+    else:
+        lines.append(
+            "These segment level statistics are inferred from per cycle run_metadata. "
+            "Each segment usually corresponds to a meta phase such as exploration, stabilization, or refinement."
+        )
+        lines.append("")
+        lines.append("| Segment | Phase | Mode | Runtime profile | Cycles | Avg RYE | Best RYE |")
+        lines.append("|---------|-------|------|-----------------|--------|---------|----------|")
+        for idx in sorted(meta_segments.keys()):
+            seg = meta_segments[idx]
+            phase = seg.get("phase") or ""
+            mode = seg.get("mode") or ""
+            rp = seg.get("runtime_profile") or ""
+            cnt = int(seg.get("count", 0))
+            avg_seg = seg.get("avg_rye")
+            min_seg = seg.get("min_rye")
+            max_seg = seg.get("max_rye")
+            avg_str = f"{avg_seg:.3f}" if isinstance(avg_seg, (int, float)) else "n/a"
+            best_str = f"{max_seg:.3f}" if isinstance(max_seg, (int, float)) else "n/a"
+            lines.append(f"| {idx} | {phase} | {mode} | {rp} | {cnt} | {avg_str} | {best_str} |")
         lines.append("")
 
     # Goal index, if available
