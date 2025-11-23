@@ -47,7 +47,7 @@ import yaml
 
 from agent.core_agent import CoreAgent
 from agent.memory_store import MemoryStore
-from agent.presets import PRESETS, get_preset  # domain presets
+from agent.presets import PRESETS, get_preset, RUNTIME_PROFILES  # domain presets and runtime profiles
 from agent.report_generator import (
     generate_report,
     generate_findings_report,
@@ -472,6 +472,22 @@ def main() -> None:
     selected_key = preset_keys[preset_labels.index(selected_label)]
     preset = get_preset(selected_key)
     domain_tag = preset.get("domain", selected_key)
+
+    # Show runtime profile info from presets if configured
+    st.sidebar.subheader("Runtime profile")
+    default_runtime_profile = preset.get("default_runtime_profile")
+    if default_runtime_profile:
+        rp_cfg = RUNTIME_PROFILES.get(default_runtime_profile, {})
+        rp_label = rp_cfg.get("label", default_runtime_profile)
+        rp_desc = rp_cfg.get("description", "")
+        rp_est_cycles = rp_cfg.get("estimated_cycles")
+        st.sidebar.write(f"Preset profile: **{rp_label}**")
+        if rp_est_cycles is not None:
+            st.sidebar.caption(f"Estimated cycles target: {rp_est_cycles}")
+        if rp_desc:
+            st.sidebar.caption(rp_desc)
+    else:
+        st.sidebar.caption("This preset has no runtime profile configured. Manual and timed modes use generic defaults.")
 
     # Tavily status (after handling key input)
     status = tavily_status()
