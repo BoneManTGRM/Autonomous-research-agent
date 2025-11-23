@@ -448,7 +448,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     Controlled by:
     - WORKER_MAX_MINUTES (optional)
     - WORKER_STOP_RYE (optional)
-    - WORKER_RUNTIME_PROFILE (optional: 1_hour, 8_hours, 24_hours, 90_days, forever)
+    - WORKER_RUNTIME_PROFILE (optional: 1_hour, 8_hours, 24_hours, 1_week, 1_month, 90_days, forever)
     - WORKER_ROLE (default "agent")
     - WORKER_SOURCES (optional, comma separated)
     - WORKER_RESUME (bool, default True)
@@ -598,12 +598,14 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     - WORKER_SWARM_ROLES (comma separated, optional)
     - WORKER_MAX_MINUTES (optional)
     - WORKER_STOP_RYE (optional)
-    - WORKER_RUNTIME_PROFILE (optional: 1_hour, 8_hours, 24_hours, 90_days, forever)
+    - WORKER_RUNTIME_PROFILE (optional: 1_hour, 8_hours, 24_hours, 1_week, 1_month, 90_days, forever)
     - WORKER_SOURCES (optional, comma separated)
     - WORKER_RESUME (bool, default True)
     - WORKER_WATCHDOG_MINUTES (float, default 5.0)
     - WORKER_FOREVER (bool, default False)
     - WORKER_WEB, WORKER_SANDBOX, WORKER_PUBMED, WORKER_SEMANTIC, WORKER_PDF, WORKER_BIOMARKERS
+    - WORKER_SHIFT_MINUTES (optional, minutes per shift; enables shift mode if > 0)
+    - WORKER_REPEAT_SHIFTS (bool, default False; if True and shift minutes set, runs back to back shifts)
     """
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
@@ -617,6 +619,10 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     roles_list = _env_list("WORKER_SWARM_ROLES")
     resume = _env_bool("WORKER_RESUME", default=True)
     watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
+
+    # New: shift based scheduling for swarm
+    shift_minutes = _env_float("WORKER_SHIFT_MINUTES")
+    repeat_shifts = _env_bool("WORKER_REPEAT_SHIFTS", default=False)
 
     if roles_list is None:
         roles_list = agent.get_agent_roles()
@@ -652,6 +658,8 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Watchdog interval (min): {watchdog_minutes}")
     print(f"Source controls: {source_controls}")
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
+    print(f"Shift minutes: {shift_minutes if shift_minutes is not None else 'None'}")
+    print(f"Repeat shifts: {repeat_shifts}")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -683,21 +691,93 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         experiment_mode="classic_swarm",
     )
 
-    summaries = agent.run_swarm_continuous(
-        goal=goal,
-        max_rounds=10_000_000,
-        stop_rye=stop_rye,
-        roles=roles_list,
-        source_controls=source_controls,
-        pdf_bytes=None,
-        biomarker_snapshot=None,
-        domain=domain,
-        max_minutes=max_minutes,
-        forever=forever,
-        resume_from_checkpoint=resume,
-        watchdog_interval_minutes=watchdog_minutes,
-        runtime_profile=runtime_profile,
-    )
+    # New: support back to back swarm shifts
+    summaries_all: List[Dict[str, Any]] = []
+
+    if not repeat_shifts or shift_minutes is None or shift_minutes <= 0:
+        # Classic behavior: one big run_swarm_continuous call
+        summaries_all = agent.run_swarm_continuous(
+            goal=goal,
+            max_rounds=10_000_000,
+            stop_rye=stop_rye,
+            roles=roles_list,
+            source_controls=source_controls,
+            pdf_bytes=None,
+            biomarker_snapshot=None,
+            domain=domain,
+            max_minutes=max_minutes,
+            forever=forever,
+            resume_from_checkpoint=resume,
+            watchdog_interval_minutes=watchdog_minutes,
+            runtime_profile=runtime_profile,
+        )
+    else:
+        # Shift mode: run repeated blocks of shift_minutes
+        total_elapsed = 0.0
+        shift_index = 0
+
+        while True:
+            # Compute minutes for this shift
+            if not forever and max_minutes is not None:
+                remaining = max_minutes - total_elapsed
+                if remaining <= 0:
+                    break
+                this_shift_minutes = min(shift_minutes, remaining)
+            else:
+                this_shift_minutes = shift_minutes
+
+            shift_index += 1
+            print(f"--- Swarm shift {shift_index} starting, budget {this_shift_minutes:.2f} minutes ---")
+            sys.stdout.flush()
+
+            shift_summaries = agent.run_swarm_continuous(
+                goal=goal,
+                max_rounds=10_000_000,
+                stop_rye=stop_rye,
+                roles=roles_list,
+                source_controls=source_controls,
+                pdf_bytes=None,
+                biomarker_snapshot=None,
+                domain=domain,
+                max_minutes=this_shift_minutes,
+                forever=False,
+                resume_from_checkpoint=resume,
+                watchdog_interval_minutes=watchdog_minutes,
+                runtime_profile=runtime_profile,
+            )
+
+            if not shift_summaries:
+                used = this_shift_minutes
+            else:
+                last_meta = shift_summaries[-1].get("run_metadata")
+                em = None
+                if isinstance(last_meta, dict):
+                    em = last_meta.get("elapsed_minutes")
+                if isinstance(em, (int, float)):
+                    used = float(em)
+                else:
+                    used = this_shift_minutes
+
+            total_elapsed += used
+            summaries_all.extend(shift_summaries)
+
+            print(
+                f"--- Swarm shift {shift_index} finished, "
+                f"elapsed this shift {used:.2f} minutes, total {total_elapsed:.2f} ---"
+            )
+            sys.stdout.flush()
+
+            # Stop if we hit total max_minutes
+            if not forever and max_minutes is not None and total_elapsed >= max_minutes:
+                break
+
+            # If repeat_shifts is disabled, stop after one shift
+            if not repeat_shifts:
+                break
+
+            # In forever mode with repeat_shifts, keep looping until external stop
+
+    summaries = summaries_all
 
     _heartbeat(agent, label="worker_swarm_finished", run_id=run_id)
 
@@ -720,7 +800,12 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             stop_rye=stop_rye,
             max_minutes=max_minutes,
             summaries=summaries,
-            extra={"engine": "swarm", "roles": roles_list},
+            extra={
+                "engine": "swarm",
+                "roles": roles_list,
+                "shift_minutes": shift_minutes,
+                "repeat_shifts": repeat_shifts,
+            },
         )
     except Exception:
         print("Diagnostics computation failed, see logs for details.")
@@ -944,7 +1029,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     Controlled by:
     - WORKER_MAX_MINUTES (overall macro budget)
     - WORKER_META_MAX_SEGMENTS (max number of segments, default 6)
-    - WORKER_RUNTIME_PROFILE (hint for phase profiles)
+    - WORKER_RUNTIME_PROFILE (hint for phase profiles: 1_hour, 8_hours, 24_hours, 1_week, 1_month, 90_days, forever)
     - WORKER_MODE / WORKER_SWARM (preferred mode: single vs swarm)
     - WORKER_SOURCES etc as in classic engines
     """
@@ -974,6 +1059,10 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             total_budget_minutes = 8 * 60.0
         elif runtime_profile_env == "24_hours":
             total_budget_minutes = 24 * 60.0
+        elif runtime_profile_env == "1_week":
+            total_budget_minutes = 7 * 24 * 60.0
+        elif runtime_profile_env == "1_month":
+            total_budget_minutes = 30 * 24 * 60.0
         elif runtime_profile_env == "90_days":
             total_budget_minutes = 90 * 24 * 60.0
         elif runtime_profile_env == "forever" or forever_env:
