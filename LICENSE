@@ -4,8 +4,8 @@ http://www.apache.org/licenses/
 
 Copyright 2025 Cody Ryan Jenkins
 
-Licensed under the Apache License, Version 2.0 (the "License").
-You may not use this project except in compliance with the License.
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this project except in compliance with the License.
 You may obtain a copy of the License at:
 
     http://www.apache.org/licenses/LICENSE-2.0
@@ -16,17 +16,94 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-NOTICE REQUIREMENT:
-All redistributions of this software must include the NOTICE file
-from this repository. The NOTICE file contains required attribution
-regarding the scientific terminology and origin of the Reparodynamics
-framework, including the names Reparodynamics, TGRM, and RYE.
 
-By using, modifying, or distributing this software, you agree that
-the scientific terms Reparodynamics, TGRM, and RYE may not be
-rebranded, renamed, or represented as originating from any other
-creator. Scientific or academic use of these terms requires proper
-attribution to the original author, Cody Ryan Jenkins.
 
-This project is fully licensed under Apache 2.0. No commercial or
-proprietary license is required for any component.
+============================================================
+ADDITIONAL ATTRIBUTION AND NAMING REQUIREMENTS (SECTION X)
+============================================================
+
+This software implements the Reparodynamics framework, including the
+Targeted Gradient Repair Mechanism (TGRM) and the Repair Yield per
+Energy metric (RYE), developed by Cody Ryan Jenkins.
+
+The following additional requirements apply to all redistributions,
+modifications, forks, derivative works, or public uses of this code,
+in any form (source, binary, model-integrated, or hosted service):
+
+
+1. **Attribution**
+   All uses of this software must retain:
+   - the copyright notice above,
+   - this full License text,
+   - the NOTICE file included with this project,
+   - and the following credit in documentation, README, or public-facing
+     description of any derivative work:
+
+     "Based on the Reparodynamics Autonomous Research Agent created by
+      Cody Ryan Jenkins, implementing Reparodynamics, TGRM, and RYE."
+
+
+2. **Scientific Naming Protection**
+   The scientific terms:
+     - "Reparodynamics"
+     - "Targeted Gradient Repair Mechanism" or "TGRM"
+     - "Repair Yield per Energy" or "RYE"
+
+   are protected terminology identifying the underlying scientific
+   framework authored by Cody Ryan Jenkins.
+
+   You may *use* these terms in accurate descriptions, extensions,
+   citations, or publications.
+
+   You **may not**:
+   - remove these names from portions of the code that implement them,
+   - rename or rebrand these concepts as if they originated from
+     another creator,
+   - create alternative names for the purpose of obscuring origin,
+   - claim novelty or inventorship of these terms in scientific,
+     academic, or technical contexts.
+
+   Derivative works must clearly state that extensions are **extensions
+   of Reparodynamics** rather than independent inventions.
+
+
+3. **Publication / Research Requirement**
+   Any academic, scientific, or public research publication that makes
+   substantial use of Reparodynamics, TGRM, RYE, or this agent must cite
+   at least one primary Reparodynamics Zenodo record or paper authored
+   by Cody Ryan Jenkins.
+
+
+4. **No Trademark License Granted**
+   The names “Reparodynamics”, “TGRM”, and “RYE” function as identifiers
+   of a scientific framework and are not licensed as trademarks.
+
+   You may describe your work as:
+     - “based on Reparodynamics”
+     - “implements TGRM”
+     - “uses RYE metrics”
+
+   but you may not present your derivative as the official
+   Reparodynamics project or use these names to brand a separate
+   commercial product or service without written permission.
+
+
+5. **Commercial Use**
+   Commercial use, forking, modification, redistribution, hosting, and
+   integration into proprietary systems are fully permitted under Apache
+   2.0, subject to the attribution and naming requirements above.
+
+   No royalties, payments, or proprietary licenses are required.
+
+
+
+============================================================
+SUMMARY
+============================================================
+This project remains **fully open**, **fully forkable**, and
+**commercial-friendly**, while ensuring:
+
+- credit always stays with you  
+- Reparodynamics, TGRM, and RYE cannot be stolen or rebranded  
+- the scientific lineage stays intact across all future forks  
+- people can build products, companies, and research on it freely  
