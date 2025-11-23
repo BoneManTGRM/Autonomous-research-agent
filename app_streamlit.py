@@ -24,12 +24,20 @@ Reparodynamics:
 Time:
     All continuous run presets (1h, 8h, 24h, 90 days) map to real
     wall-clock minutes via the CoreAgent's max_minutes budget.
+
+Note:
+    For safety and to ensure runs actually finish when launched from
+    this Streamlit UI, the 1h / 8h / 24h modes use an approximate
+    cycle budget locally instead of relying solely on an external
+    background worker. 90 days and Forever still configure the
+    background worker via control_state.json.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime
@@ -64,7 +72,8 @@ except Exception:  # pragma: no cover
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
 # Rough estimate for how many cycles you expect per hour in continuous mode.
-# This is now just a safety cap; real time is controlled by max_minutes.
+# This is now used to derive a safe local cycle budget for 1h / 8h / 24h runs
+# so those modes actually end when launched from the Streamlit UI.
 CYCLES_PER_HOUR_ESTIMATE = 120
 
 # Swarm roles: base archetypes for mini agents
@@ -584,7 +593,11 @@ def main() -> None:
             "Forever (until stopped)",
         ],
         index=0,
-        help="Timed modes respect real wall clock minutes via the agent time budget.",
+        help=(
+            "Manual mode runs a fixed number of cycles locally.\n"
+            "1h / 8h / 24h run an approximate cycle budget locally so they actually end.\n"
+            "90 days and Forever configure the background worker via control_state.json."
+        ),
     )
 
     # Optional RYE stop for continuous modes
@@ -623,10 +636,10 @@ def main() -> None:
         max_value=200,
         value=3,
         step=1,
-        help="Used when Run mode is Manual. Timed modes rely on the background worker.",
+        help="Used when Run mode is Manual. Timed modes use a local cycle budget or a background worker.",
     )
 
-    run_button = st.button("Run agent (manual or configure worker)")
+    run_button = st.button("Run agent (manual or timed)")
 
     # ------------------------------
     # Run cycles or configure worker
@@ -729,79 +742,230 @@ def main() -> None:
                 render_cycle_summary(cs)
 
         else:
-            # Continuous modes no longer run inside Streamlit.
-            # Instead, we configure control_state for the background worker.
-            max_minutes: Optional[float] = None
-            forever_flag: bool = False
-            runtime_profile: Optional[str] = None
+            # Timed modes.
+            # For 1h / 8h / 24h we run an approximate local cycle budget so the run
+            # actually finishes even without an external worker. 90 days and Forever
+            # are still configured via control_state.json for a separate worker.
+            if run_mode in (
+                "1 hour (real clock)",
+                "8 hours (real clock)",
+                "24 hours (real clock)",
+            ):
+                if run_mode == "1 hour (real clock)":
+                    hours = 1.0
+                    profile_label = "1 Hour Run (local)"
+                elif run_mode == "8 hours (real clock)":
+                    hours = 8.0
+                    profile_label = "8 Hour Run (local, approximated)"
+                else:
+                    hours = 24.0
+                    profile_label = "24 Hour Run (local, approximated)"
 
-            if run_mode == "1 hour (real clock)":
-                max_minutes = 60.0
-                runtime_profile = "1_hour"
-            elif run_mode == "8 hours (real clock)":
-                max_minutes = 8 * 60.0
-                runtime_profile = "8_hours"
-            elif run_mode == "24 hours (real clock)":
-                max_minutes = 24 * 60.0
-                runtime_profile = "24_hours"
-            elif run_mode == "90 days (real clock)":
-                max_minutes = 90.0 * 24.0 * 60.0
-                runtime_profile = "90_days"
-            elif run_mode == "Forever (until stopped)":
-                max_minutes = None
-                forever_flag = True
-                runtime_profile = "forever"
+                # Derive a safe, capped cycle budget so the run ends.
+                approx_cycles = int(CYCLES_PER_HOUR_ESTIMATE * hours)
+                # Cap cycles to avoid extreme sessions from the UI side.
+                approx_cycles = max(1, min(approx_cycles, 200))
 
-            # Worker will use its own safety caps on cycles.
-            control_state = load_control_state()
-            new_state: Dict[str, Any] = dict(control_state)
-
-            # Base fields
-            new_state.update(
-                {
-                    "status": "running",
-                    "mode": "swarm" if enable_swarm else ("multi" if multi_agent else "single"),
-                    "run_profile": runtime_profile,
-                    "goal": goal,
-                    "domain": domain_tag,
-                    "max_minutes": max_minutes,
-                    "forever": forever_flag,
-                    "stop_rye": stop_rye_threshold,
-                    "source_controls": source_controls,
-                    "use_biomarkers": bool(use_biomarkers),
-                    "timestamp_utc": datetime.utcnow().isoformat(),
-                }
-            )
-
-            # Swarm configuration for the worker
-            if enable_swarm and swarm_roles:
-                new_state["swarm"] = {
-                    "enabled": True,
-                    "roles": [name for name, _ in swarm_roles],
-                    "size": len(swarm_roles),
-                }
-            else:
-                new_state["swarm"] = {"enabled": False, "roles": [], "size": 0}
-
-            # Classic multi agent flag
-            new_state["multi_agent_pair"] = bool(multi_agent)
-
-            # Optional attached pdf flag (worker can decide whether to re-ingest files)
-            new_state["has_pdf"] = bool(use_pdf and uploaded_pdf is not None)
-
-            save_control_state(new_state)
-
-            if max_minutes is not None:
-                st.success(
-                    f"Configured background worker for continuous mode {run_mode} "
-                    f"with time budget ~ {max_minutes:.1f} minutes. "
-                    "The worker will now run cycles and update history while this UI just monitors."
+                st.info(
+                    f"{profile_label}: running approximately {approx_cycles} core cycles "
+                    f"(capped) so this timed run actually ends in this Streamlit session."
                 )
+
+                rye_below_counter = 0
+                rye_threshold_hits_required = 3 if stop_rye_threshold is not None else 0
+
+                if enable_swarm and swarm_roles:
+                    total_mini_cycles = len(swarm_roles) * approx_cycles
+                    st.write(
+                        f"Timed Swarm: {len(swarm_roles)} agents x {approx_cycles} outer cycles "
+                        f"(total up to {total_mini_cycles} mini cycles)."
+                    )
+                    outer_done = 0
+                    for i in range(approx_cycles):
+                        base_index = next_index + i * len(swarm_roles)
+                        for j, (role_name, _) in enumerate(swarm_roles):
+                            ci = base_index + j
+                            role_goal = role_specific_goal(goal, role_name)
+                            out = agent.run_cycle(
+                                goal=role_goal,
+                                cycle_index=ci,
+                                role=role_name,
+                                source_controls=source_controls,
+                                pdf_bytes=pdf_bytes,
+                                biomarker_snapshot=None,
+                                domain=domain_tag,
+                            )
+                            summary = out["summary"]
+                            results.append(summary)
+
+                            rye_val = summary.get("RYE")
+                            if stop_rye_threshold is not None and isinstance(rye_val, (int, float)):
+                                if rye_val < stop_rye_threshold:
+                                    rye_below_counter += 1
+                                else:
+                                    rye_below_counter = 0
+                                if rye_below_counter >= rye_threshold_hits_required:
+                                    st.warning(
+                                        f"Stopping early: RYE fell below {stop_rye_threshold} "
+                                        f"for {rye_threshold_hits_required} consecutive mini cycles."
+                                    )
+                                    outer_done = approx_cycles
+                                    break
+                        outer_done += 1
+                        if outer_done >= approx_cycles:
+                            break
+                else:
+                    if not multi_agent:
+                        for i in range(approx_cycles):
+                            ci = next_index + i
+                            out = agent.run_cycle(
+                                goal=goal,
+                                cycle_index=ci,
+                                role="agent",
+                                source_controls=source_controls,
+                                pdf_bytes=pdf_bytes,
+                                biomarker_snapshot=None,
+                                domain=domain_tag,
+                            )
+                            summary = out["summary"]
+                            results.append(summary)
+
+                            rye_val = summary.get("RYE")
+                            if stop_rye_threshold is not None and isinstance(rye_val, (int, float)):
+                                if rye_val < stop_rye_threshold:
+                                    rye_below_counter += 1
+                                else:
+                                    rye_below_counter = 0
+                                if rye_below_counter >= rye_threshold_hits_required:
+                                    st.warning(
+                                        f"Stopping early: RYE fell below {stop_rye_threshold} "
+                                        f"for {rye_threshold_hits_required} consecutive cycles."
+                                    )
+                                    break
+                    else:
+                        for i in range(approx_cycles):
+                            base = next_index + 2 * i
+
+                            # Researcher
+                            r = agent.run_cycle(
+                                goal=goal,
+                                cycle_index=base,
+                                role="researcher",
+                                source_controls=source_controls,
+                                pdf_bytes=pdf_bytes,
+                                biomarker_snapshot=None,
+                                domain=domain_tag,
+                            )
+                            r_summary = r["summary"]
+                            results.append(r_summary)
+
+                            rye_val = r_summary.get("RYE")
+                            if stop_rye_threshold is not None and isinstance(rye_val, (int, float)):
+                                if rye_val < stop_rye_threshold:
+                                    rye_below_counter += 1
+                                else:
+                                    rye_below_counter = 0
+                                if rye_below_counter >= rye_threshold_hits_required:
+                                    st.warning(
+                                        f"Stopping early after researcher: RYE fell below {stop_rye_threshold} "
+                                        f"for {rye_threshold_hits_required} consecutive cycles."
+                                    )
+                                    break
+
+                            # Critic
+                            critic_goal = f"Critically review and refine notes for: {goal}"
+                            c = agent.run_cycle(
+                                goal=critic_goal,
+                                cycle_index=base + 1,
+                                role="critic",
+                                source_controls=source_controls,
+                                pdf_bytes=None,
+                                biomarker_snapshot=None,
+                                domain=domain_tag,
+                            )
+                            c_summary = c["summary"]
+                            results.append(c_summary)
+
+                            rye_val_c = c_summary.get("RYE")
+                            if stop_rye_threshold is not None and isinstance(rye_val_c, (int, float)):
+                                if rye_val_c < stop_rye_threshold:
+                                    rye_below_counter += 1
+                                else:
+                                    rye_below_counter = 0
+                                if rye_below_counter >= rye_threshold_hits_required:
+                                    st.warning(
+                                        f"Stopping early after critic: RYE fell below {stop_rye_threshold} "
+                                        f"for {rye_threshold_hits_required} consecutive cycles."
+                                    )
+                                    break
+
+                st.subheader("Cycle Summaries (timed local run)")
+                for cs in results:
+                    render_cycle_summary(cs)
+
             else:
-                st.success(
-                    "Configured background worker for continuous mode Forever. "
-                    "The worker will run until stopped by status or environment limits."
+                # 90 days and Forever: configure background worker only.
+                max_minutes: Optional[float] = None
+                forever_flag: bool = False
+                runtime_profile: Optional[str] = None
+
+                if run_mode == "90 days (real clock)":
+                    max_minutes = 90.0 * 24.0 * 60.0
+                    runtime_profile = "90_days"
+                elif run_mode == "Forever (until stopped)":
+                    max_minutes = None
+                    forever_flag = True
+                    runtime_profile = "forever"
+
+                control_state = load_control_state()
+                new_state: Dict[str, Any] = dict(control_state)
+
+                # Base fields
+                new_state.update(
+                    {
+                        "status": "running",
+                        "mode": "swarm" if enable_swarm else ("multi" if multi_agent else "single"),
+                        "run_profile": runtime_profile,
+                        "goal": goal,
+                        "domain": domain_tag,
+                        "max_minutes": max_minutes,
+                        "forever": forever_flag,
+                        "stop_rye": stop_rye_threshold,
+                        "source_controls": source_controls,
+                        "use_biomarkers": bool(use_biomarkers),
+                        "timestamp_utc": datetime.utcnow().isoformat(),
+                    }
                 )
+
+                # Swarm configuration for the worker
+                if enable_swarm and swarm_roles:
+                    new_state["swarm"] = {
+                        "enabled": True,
+                        "roles": [name for name, _ in swarm_roles],
+                        "size": len(swarm_roles),
+                    }
+                else:
+                    new_state["swarm"] = {"enabled": False, "roles": [], "size": 0}
+
+                # Classic multi agent flag
+                new_state["multi_agent_pair"] = bool(multi_agent)
+
+                # Optional attached pdf flag (worker can decide whether to re-ingest files)
+                new_state["has_pdf"] = bool(use_pdf and uploaded_pdf is not None)
+
+                save_control_state(new_state)
+
+                if max_minutes is not None:
+                    st.success(
+                        f"Configured background worker for continuous mode {run_mode} "
+                        f"with time budget ~ {max_minutes:.1f} minutes. "
+                        "The worker will now run cycles and update history while this UI just monitors."
+                    )
+                else:
+                    st.success(
+                        "Configured background worker for continuous mode Forever. "
+                        "The worker will run until stopped by status or environment limits."
+                    )
 
     # ------------------------------
     # Engine control panel (for worker)
@@ -837,7 +1001,7 @@ def main() -> None:
             progress_fraction = None
 
     if max_minutes_cfg is None:
-        st.write("This run has no fixed time budget (Forever mode).")
+        st.write("This worker-configured run has no fixed time budget (Forever mode).")
     else:
         col_rt1, col_rt2, col_rt3 = st.columns(3)
         with col_rt1:
@@ -863,7 +1027,7 @@ def main() -> None:
         with st.expander("Raw control state"):
             st.code(json.dumps(control_state, indent=2), language="json")
     else:
-        st.write("No control state file yet. Configure a timed run to create one.")
+        st.write("No control state file yet. Configure a 90-day or Forever run to create one.")
 
     col_start, col_pause, col_stop = st.columns(3)
 
