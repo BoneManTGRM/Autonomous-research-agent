@@ -78,6 +78,11 @@ class ToolUsage:
     downloads: int = 0
     approx_tokens: int = 0
 
+    # Extra channels for compute_energy (kept separate from web_calls)
+    semantic_calls: int = 0
+    pubmed_calls: int = 0
+    pdf_ingestions: int = 0
+
     def add_tokens_for_text(self, text: str) -> None:
         """Very rough token estimate from text length."""
         if not text:
@@ -91,6 +96,27 @@ class ToolUsage:
             return
         self.approx_tokens += max(1, len(code) // 3)
 
+    # Convenience helpers for common tool events
+    def record_web_call(self, text: str = "") -> None:
+        self.web_calls += 1
+        if text:
+            self.add_tokens_for_text(text)
+
+    def record_semantic_call(self, text: str = "") -> None:
+        self.semantic_calls += 1
+        if text:
+            self.add_tokens_for_text(text)
+
+    def record_pubmed_call(self, text: str = "") -> None:
+        self.pubmed_calls += 1
+        if text:
+            self.add_tokens_for_text(text)
+
+    def record_pdf_ingestion(self, approx_text: str = "") -> None:
+        self.pdf_ingestions += 1
+        if approx_text:
+            self.add_tokens_for_text(approx_text)
+
     def merge(self, other: "ToolUsage") -> None:
         """Merge another ToolUsage into this instance."""
         self.web_calls += other.web_calls
@@ -101,6 +127,9 @@ class ToolUsage:
         self.api_calls += other.api_calls
         self.downloads += other.downloads
         self.approx_tokens += other.approx_tokens
+        self.semantic_calls += other.semantic_calls
+        self.pubmed_calls += other.pubmed_calls
+        self.pdf_ingestions += other.pdf_ingestions
 
     def to_energy_kwargs(self) -> Dict[str, Any]:
         """
@@ -110,9 +139,9 @@ class ToolUsage:
             energy_e = compute_energy(
                 actions_taken=actions,
                 web_calls=tool_usage.web_calls,
-                semantic_calls=0,
-                pubmed_calls=0,
-                pdf_ingestions=0,
+                semantic_calls=tool_usage.semantic_calls,
+                pubmed_calls=tool_usage.pubmed_calls,
+                pdf_ingestions=tool_usage.pdf_ingestions,
                 tokens_estimate=tool_usage.approx_tokens,
                 swarm_size=swarm_size,
                 swarm_layering=swarm_layering,
@@ -120,9 +149,9 @@ class ToolUsage:
         """
         return {
             "web_calls": self.web_calls,
-            "semantic_calls": 0,
-            "pubmed_calls": 0,
-            "pdf_ingestions": 0,
+            "semantic_calls": self.semantic_calls,
+            "pubmed_calls": self.pubmed_calls,
+            "pdf_ingestions": self.pdf_ingestions,
             "tokens_estimate": self.approx_tokens,
         }
 
@@ -748,13 +777,19 @@ class DataPipelines:
     # Core frame helper
     def _df_to_result(self, df: "pd.DataFrame", name: str) -> DataLoadResult:  # type: ignore[name-defined]
         preview = df.head(10).to_dict(orient="records")  # type: ignore
+
+        metadata: Dict[str, Any] = {
+            "columns": list(df.columns),
+            "dtypes": {str(col): str(dtype) for col, dtype in df.dtypes.items()},
+        }
+
         return DataLoadResult(
             name=name,
             rows=int(df.shape[0]),
             cols=int(df.shape[1]),
             preview=preview,
             error=None,
-            metadata={},
+            metadata=metadata,
         )
 
     def load_csv(self, file_bytes: bytes, name: str = "uploaded.csv") -> DataLoadResult:
