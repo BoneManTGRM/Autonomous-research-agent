@@ -3,7 +3,7 @@ services:
     name: reparodynamics-autonomous-agent
     env: python
 
-    # ✳️ Plan: change "starter" to "free" if you want the free tier
+    # Plan: change "starter" to "free" if you want the free tier
     plan: starter
 
     # Where your code lives in the repo (root = ".")
@@ -24,13 +24,50 @@ services:
     # Basic health check so Render knows the app is alive
     healthCheckPath: /
 
-    # Optional: keep logs a bit longer
+    # Shared disk for logs, memory, checkpoints, and control_state.json
     disk:
       name: agent-logs
       mountPath: /opt/render/project/src/logs
       sizeGB: 1
 
     # Environment variables (you set the actual values in Render dashboard)
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11
+
+      - key: OPENAI_API_KEY
+        sync: false
+
+      - key: TAVILY_API_KEY
+        sync: false
+
+  - type: worker
+    name: reparodynamics-autonomous-agent-worker
+    env: python
+
+    # Plan: upgrade this if you want long, heavy 90 day or Forever runs
+    plan: starter
+
+    rootDir: .
+
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+
+    # Background engine worker that reads logs/control_state.json
+    # and runs continuous TGRM loops for 1 week, 1 month, 90 days, and Forever
+    startCommand: >
+      python engine_worker.py
+
+    autoDeploy: true
+
+    # Share the same disk as the web service so history, checkpoints,
+    # watchdog, and control_state.json are visible to both
+    disk:
+      name: agent-logs
+      mountPath: /opt/render/project/src/logs
+      sizeGB: 1
+
     envVars:
       - key: PYTHON_VERSION
         value: 3.11
