@@ -167,7 +167,6 @@ def _primary_domain_from_stats(domain_stats: Dict[str, Dict[str, Any]]) -> Optio
     """Pick a primary domain based on cycle counts."""
     if not domain_stats:
         return None
-    # choose domain with highest count
     best_domain = None
     best_count = -1
     for d, stats in domain_stats.items():
@@ -262,6 +261,29 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     if n_cycles == 0:
         return "# Autonomous Research Agent Report\n\nNo cycles logged."
 
+    # Optional control and watchdog snapshots
+    run_state: Optional[Dict[str, Any]] = None
+    worker_state: Optional[Dict[str, Any]] = None
+    watchdog_info: Optional[Dict[str, Any]] = None
+
+    try:
+        if hasattr(memory_store, "load_run_state"):
+            run_state = memory_store.load_run_state()
+    except Exception:
+        run_state = None
+
+    try:
+        if hasattr(memory_store, "get_worker_state"):
+            worker_state = memory_store.get_worker_state()
+    except Exception:
+        worker_state = None
+
+    try:
+        if hasattr(memory_store, "get_watchdog_info"):
+            watchdog_info = memory_store.get_watchdog_info()
+    except Exception:
+        watchdog_info = None
+
     # Metric stores
     rye_values: List[float] = []
     delta_values: List[float] = []
@@ -347,6 +369,87 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     # Runtime
     if runtime:
         lines.append(f"**Session runtime:** {runtime}\n")
+
+    # Run control snapshot
+    if run_state or worker_state or watchdog_info:
+        lines.append("## Run control snapshot\n")
+        if run_state:
+            lines.append("**Last saved run state:**")
+            rs_goal = run_state.get("goal")
+            rs_mode = run_state.get("mode")
+            rs_domain = run_state.get("domain")
+            rs_role = run_state.get("role")
+            rs_min_left = run_state.get("minutes_remaining")
+            rs_last_cycle = run_state.get("last_cycle_index")
+            rs_updated = run_state.get("updated_at")
+
+            if rs_goal:
+                lines.append(f"- Goal: `{rs_goal}`")
+            if rs_domain:
+                lines.append(f"- Domain: `{rs_domain}`")
+            if rs_role:
+                lines.append(f"- Primary role: `{rs_role}`")
+            if rs_mode:
+                lines.append(f"- Mode: `{rs_mode}`")
+            if rs_min_left is not None:
+                try:
+                    lines.append(f"- Approx minutes remaining at save: **{float(rs_min_left):.1f}**")
+                except Exception:
+                    lines.append(f"- Approx minutes remaining at save: **{rs_min_left}**")
+            if rs_last_cycle is not None:
+                lines.append(f"- Last completed cycle index: **{rs_last_cycle}**")
+            if rs_updated:
+                lines.append(f"- Run state updated at: `{rs_updated}`")
+            lines.append("")
+
+        if worker_state:
+            lines.append("**Live worker status (last snapshot):**")
+            ws_status = worker_state.get("status")
+            ws_mode = worker_state.get("mode")
+            ws_goal = worker_state.get("goal")
+            ws_domain = worker_state.get("domain")
+            ws_roles = worker_state.get("roles") or []
+            ws_profile = worker_state.get("runtime_profile")
+            ws_stop_rye = worker_state.get("stop_rye")
+            ws_max_minutes = worker_state.get("max_minutes")
+            ws_updated = worker_state.get("updated_at")
+
+            if ws_status:
+                lines.append(f"- Status: **{ws_status}**")
+            if ws_mode:
+                lines.append(f"- Mode: `{ws_mode}`")
+            if ws_goal:
+                lines.append(f"- Goal: `{ws_goal}`")
+            if ws_domain:
+                lines.append(f"- Domain: `{ws_domain}`")
+            if ws_roles:
+                lines.append(f"- Roles: {', '.join(str(r) for r in ws_roles)}")
+            if ws_profile:
+                lines.append(f"- Runtime profile: `{ws_profile}`")
+            if isinstance(ws_stop_rye, (int, float)):
+                lines.append(f"- Stop RYE threshold: **{float(ws_stop_rye):.3f}**")
+            if ws_max_minutes is not None:
+                try:
+                    lines.append(f"- Max run minutes: **{float(ws_max_minutes):.1f}**")
+                except Exception:
+                    lines.append(f"- Max run minutes: **{ws_max_minutes}**")
+            if ws_updated:
+                lines.append(f"- Worker state updated at: `{ws_updated}`")
+            lines.append("")
+
+        if watchdog_info:
+            lines.append("**Watchdog heartbeat:**")
+            wd_last = watchdog_info.get("last_beat")
+            wd_count = watchdog_info.get("count")
+            wd_seconds = watchdog_info.get("seconds_since_last")
+            if wd_last:
+                lines.append(f"- Last heartbeat: `{wd_last}`")
+            if wd_count is not None:
+                lines.append(f"- Total heartbeats recorded: **{int(wd_count)}**")
+            if isinstance(wd_seconds, (int, float)):
+                minutes_since = wd_seconds / 60.0
+                lines.append(f"- Time since last heartbeat: **{minutes_since:.2f} minutes**")
+            lines.append("")
 
     # Goals
     if goal:
