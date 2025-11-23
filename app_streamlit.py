@@ -813,6 +813,52 @@ def main() -> None:
     current_status = control_state.get("status", "idle")
     st.write(f"Current engine status: **{current_status}**")
 
+    # Run time progress based on control_state
+    st.markdown("#### Run time progress")
+
+    max_minutes_cfg = control_state.get("max_minutes")
+    ts_str = control_state.get("timestamp_utc")
+    elapsed_minutes: Optional[float] = None
+    remaining_minutes: Optional[float] = None
+    progress_fraction: Optional[float] = None
+
+    if isinstance(max_minutes_cfg, (int, float)) and ts_str:
+        try:
+            start_dt = datetime.fromisoformat(ts_str)
+            now_dt = datetime.utcnow()
+            diff = now_dt - start_dt
+            elapsed_minutes = max(diff.total_seconds() / 60.0, 0.0)
+            remaining_minutes = max(float(max_minutes_cfg) - elapsed_minutes, 0.0)
+            if max_minutes_cfg > 0:
+                progress_fraction = min(max(elapsed_minutes / float(max_minutes_cfg), 0.0), 1.0)
+        except Exception:
+            elapsed_minutes = None
+            remaining_minutes = None
+            progress_fraction = None
+
+    if max_minutes_cfg is None:
+        st.write("This run has no fixed time budget (Forever mode).")
+    else:
+        col_rt1, col_rt2, col_rt3 = st.columns(3)
+        with col_rt1:
+            if elapsed_minutes is not None:
+                st.metric("Elapsed minutes", f"{elapsed_minutes:.1f}")
+            else:
+                st.metric("Elapsed minutes", "n/a")
+        with col_rt2:
+            if remaining_minutes is not None:
+                st.metric("Minutes remaining", f"{remaining_minutes:.1f}")
+            else:
+                st.metric("Minutes remaining", "n/a")
+        with col_rt3:
+            if progress_fraction is not None:
+                st.metric("Time used", f"{progress_fraction * 100:.1f}%")
+            else:
+                st.metric("Time used", "n/a")
+
+        if progress_fraction is not None:
+            st.progress(progress_fraction)
+
     if control_state:
         with st.expander("Raw control state"):
             st.code(json.dumps(control_state, indent=2), language="json")
