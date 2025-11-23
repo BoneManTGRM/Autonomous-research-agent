@@ -310,10 +310,15 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     - WORKER_WEB, WORKER_SANDBOX, WORKER_PUBMED, WORKER_SEMANTIC, WORKER_PDF, WORKER_BIOMARKERS
     """
     goal, domain = build_goal_and_domain()
+    preset_cfg = get_preset(domain)
 
     max_minutes = _env_float("WORKER_MAX_MINUTES")
     stop_rye = _env_float("WORKER_STOP_RYE")
-    runtime_profile = os.getenv("WORKER_RUNTIME_PROFILE")  # example: "8_hours"
+
+    runtime_profile_env = os.getenv("WORKER_RUNTIME_PROFILE")
+    # Effective runtime profile: env override, else preset default, else None
+    runtime_profile = runtime_profile_env or preset_cfg.get("default_runtime_profile")
+
     role = os.getenv("WORKER_ROLE", "agent")
     resume = _env_bool("WORKER_RESUME", default=True)
     watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
@@ -325,14 +330,21 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     elif runtime_profile == "forever" and max_minutes is None:
         forever = True
 
-    source_controls = _build_source_controls(config)
+    # Domain aware source controls: preset defaults feed into config unless YAML overrides them
+    config_for_sources = dict(config)
+    if "default_source_controls" not in config_for_sources:
+        sc_preset = preset_cfg.get("source_controls")
+        if isinstance(sc_preset, dict):
+            config_for_sources["default_source_controls"] = sc_preset
+    source_controls = _build_source_controls(config_for_sources)
 
     tool_flags = detect_tools()
     print("=== Autonomous Research Engine - Single Agent Mode ===")
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
     print(f"Role: {role}")
-    print(f"Runtime profile (requested): {runtime_profile or 'none (use preset default)'}")
+    print(f"Runtime profile (env override): {runtime_profile_env or 'None'}")
+    print(f"Runtime profile (effective): {runtime_profile or 'None (engine default)'}")
     print(f"Max minutes (explicit): {max_minutes if max_minutes is not None else 'None (profile/preset/forever)'}")
     print(f"Stop RYE threshold (explicit): {stop_rye if stop_rye is not None else 'None (preset/profile)'}")
     print(f"Forever mode: {forever}")
@@ -392,10 +404,14 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     - WORKER_WEB, WORKER_SANDBOX, WORKER_PUBMED, WORKER_SEMANTIC, WORKER_PDF, WORKER_BIOMARKERS
     """
     goal, domain = build_goal_and_domain()
+    preset_cfg = get_preset(domain)
 
     max_minutes = _env_float("WORKER_MAX_MINUTES")
     stop_rye = _env_float("WORKER_STOP_RYE")
-    runtime_profile = os.getenv("WORKER_RUNTIME_PROFILE")
+
+    runtime_profile_env = os.getenv("WORKER_RUNTIME_PROFILE")
+    runtime_profile = runtime_profile_env or preset_cfg.get("default_runtime_profile")
+
     roles_list = _env_list("WORKER_SWARM_ROLES")
     resume = _env_bool("WORKER_RESUME", default=True)
     watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
@@ -410,14 +426,20 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     elif runtime_profile == "forever" and max_minutes is None:
         forever = True
 
-    source_controls = _build_source_controls(config)
+    config_for_sources = dict(config)
+    if "default_source_controls" not in config_for_sources:
+        sc_preset = preset_cfg.get("source_controls")
+        if isinstance(sc_preset, dict):
+            config_for_sources["default_source_controls"] = sc_preset
+    source_controls = _build_source_controls(config_for_sources)
 
     tool_flags = detect_tools()
     print("=== Autonomous Research Engine - Swarm Mode ===")
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
     print(f"Roles: {roles_list}")
-    print(f"Runtime profile (requested): {runtime_profile or 'none (use preset default)'}")
+    print(f"Runtime profile (env override): {runtime_profile_env or 'None'}")
+    print(f"Runtime profile (effective): {runtime_profile or 'None (engine default)'}")
     print(f"Max minutes (explicit): {max_minutes if max_minutes is not None else 'None (profile/preset/forever)'}")
     print(f"Stop RYE threshold (explicit): {stop_rye if stop_rye is not None else 'None (preset/profile)'}")
     print(f"Forever mode: {forever}")
@@ -668,6 +690,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     - WORKER_SOURCES etc as in classic engines
     """
     goal, domain = build_goal_and_domain()
+    preset_cfg = get_preset(domain)
 
     total_budget_minutes = _env_float("WORKER_MAX_MINUTES")
     meta_max_segments = _env_float("WORKER_META_MAX_SEGMENTS")
@@ -685,7 +708,6 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
     forever_env = _env_bool("WORKER_FOREVER", default=False)
 
-    preset_cfg = get_preset(domain)
     if total_budget_minutes is None:
         if runtime_profile_env == "1_hour":
             total_budget_minutes = 60.0
@@ -703,7 +725,13 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     if total_budget_minutes <= 0:
         total_budget_minutes = 60.0
 
-    source_controls = _build_source_controls(config)
+    # Domain aware source controls here as well
+    config_for_sources = dict(config)
+    if "default_source_controls" not in config_for_sources:
+        sc_preset = preset_cfg.get("source_controls")
+        if isinstance(sc_preset, dict):
+            config_for_sources["default_source_controls"] = sc_preset
+    source_controls = _build_source_controls(config_for_sources)
 
     tool_flags = detect_tools()
     print("=== Autonomous Research Engine - Meta Controller Mode (Option C) ===")
@@ -712,7 +740,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Preferred mode: {preferred_mode}")
     print(f"Total macro budget (minutes): {total_budget_minutes}")
     print(f"Max meta segments: {meta_max_segments_int}")
-    print(f"Runtime profile hint: {runtime_profile_env or 'none (use defaults)'}")
+    print(f"Runtime profile hint (env): {runtime_profile_env or 'none'}")
     print(f"Explicit stop RYE (env): {stop_rye_env if stop_rye_env is not None else 'None'}")
     print(f"Resume from checkpoint: {resume}")
     print(f"Watchdog interval (min): {watchdog_minutes}")
