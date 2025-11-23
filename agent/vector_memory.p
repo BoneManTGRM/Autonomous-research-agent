@@ -7,14 +7,15 @@ autonomous research agent. It is intentionally lightweight:
 - If embeddings are not available, it falls back to simple keyword search.
 - It applies a simple time-decay weighting so older items slowly lose
   influence compared to recent ones.
-- It respects importance and basic metadata filters, making it swarm aware.
+- It respects importance and basic metadata filters, making it swarm and
+  meta-controller (Option C) aware.
 
 Reparodynamics interpretation:
     VectorMemory is the substrate where "repair" accumulates. High-quality
     notes, hypotheses, citations, and discoveries are stored here so that
     future TGRM cycles can retrieve them efficiently with minimal extra
     energy. Importance, time decay, and metadata filters act as a RYE-aware
-    routing surface for long 24–90 day missions.
+    routing surface for long 24 to 90 day missions and multi-phase runs.
 """
 
 from __future__ import annotations
@@ -53,7 +54,8 @@ class VectorMemory:
         - Bounded memory size (max_items)
         - Importance-aware scoring
         - Time-decayed relevance
-        - Simple metadata filters for goal, role, domain, and kind/type
+        - Simple metadata filters for goal, role, domain, kind/type
+        - Optional meta filters for phase and segment_index (Option C)
     """
 
     def __init__(
@@ -78,18 +80,29 @@ class VectorMemory:
         self.decay_half_life_days = float(decay_half_life_days)
         self.max_items = int(max_items)
 
-        self._model = None
-        if SentenceTransformer is not None and np is not None:
-            try:
-                self._model = SentenceTransformer(model_name)
-            except Exception:
-                self._model = None
+        # Lazy model loading to avoid heavy startup cost if embeddings are not needed
+        self._model_name: Optional[str] = model_name if SentenceTransformer is not None and np is not None else None
+        self._model: Optional[Any] = None
+        self._model_loaded: bool = False
 
     # ------------------------------------------------------------------
     # Utility functions
     # ------------------------------------------------------------------
     def _now(self) -> _dt.datetime:
         return _dt.datetime.utcnow()
+
+    def _ensure_model(self) -> None:
+        """Lazy load the embedding model if possible."""
+        if self._model_loaded:
+            return
+        self._model_loaded = True
+        if self._model_name is None or SentenceTransformer is None or np is None:
+            self._model = None
+            return
+        try:
+            self._model = SentenceTransformer(self._model_name)
+        except Exception:
+            self._model = None
 
     def _time_decay_weight(self, ts: _dt.datetime) -> float:
         """Compute time-decay weight for a timestamp.
@@ -115,7 +128,10 @@ class VectorMemory:
 
     def _embed(self, text: str) -> Optional[Any]:
         """Compute embedding for text if model is available."""
-        if not text or self._model is None or np is None:
+        if not text or np is None:
+            return None
+        self._ensure_model()
+        if self._model is None:
             return None
         try:
             vec = self._model.encode([text])[0]
@@ -130,6 +146,8 @@ class VectorMemory:
         role: Optional[str],
         domain: Optional[str],
         kind: Optional[str],
+        phase: Optional[str],
+        segment_index: Optional[int],
     ) -> bool:
         """Return True if the item passes the metadata filters."""
         meta = item.metadata or {}
@@ -146,6 +164,31 @@ class VectorMemory:
             k1 = meta.get("kind")
             k2 = meta.get("type")
             if k1 != kind and k2 != kind:
+                return False
+
+        # Meta-controller phase filter (Option C)
+        if phase is not None:
+            # Allow either direct metadata["phase"] or nested run_metadata["phase"]
+            meta_phase = meta.get("phase")
+            if meta_phase is None:
+                rm = meta.get("run_metadata") or {}
+                if isinstance(rm, dict):
+                    meta_phase = rm.get("phase")
+            if meta_phase != phase:
+                return False
+
+        # Meta-controller segment filter
+        if segment_index is not None:
+            # Accept either top level segment_index or nested
+            seg = meta.get("segment_index")
+            if seg is None:
+                rm = meta.get("run_metadata") or {}
+                if isinstance(rm, dict):
+                    seg = rm.get("segment_index")
+            try:
+                if seg is None or int(seg) != int(segment_index):
+                    return False
+            except Exception:
                 return False
 
         return True
@@ -172,6 +215,34 @@ class VectorMemory:
         self.items.append(item)
         self._trim_if_needed()
 
+    def add_structured_note(
+        self,
+        text: str,
+        *,
+        goal: Optional[str] = None,
+        role: Optional[str] = None,
+        domain: Optional[str] = None,
+        kind: Optional[str] = None,
+        importance: float = 1.0,
+        extra_metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Helper to add a note with common fields wired in one call.
+
+        This is a thin wrapper over add_item and does not change behavior
+        for existing callers that use add_item directly.
+        """
+        meta: Dict[str, Any] = dict(extra_metadata or {})
+        if goal is not None:
+            meta.setdefault("goal", goal)
+        if role is not None:
+            meta.setdefault("role", role)
+        if domain is not None:
+            meta.setdefault("domain", domain)
+        if kind is not None:
+            meta.setdefault("kind", kind)
+        meta.setdefault("importance", importance)
+        self.add_item(text=text, metadata=meta)
+
     def _similarity(self, v1: Any, v2: Any) -> float:
         """Cosine similarity between two vectors, with safety checks."""
         if np is None:
@@ -195,6 +266,8 @@ class VectorMemory:
         role: Optional[str] = None,
         domain: Optional[str] = None,
         kind: Optional[str] = None,
+        phase: Optional[str] = None,
+        segment_index: Optional[int] = None,
     ) -> List[MemoryItem]:
         """Search memory with a query string.
 
@@ -210,6 +283,11 @@ class VectorMemory:
             goal, role, domain, kind:
                 Optional metadata filters. If provided, only items whose
                 metadata match these fields are considered.
+            phase:
+                Optional meta-controller phase filter
+                (for example "exploration", "stabilization", "refinement").
+            segment_index:
+                Optional segment index filter from the meta controller.
 
         Returns:
             List[MemoryItem]: up to top_k best-matching items.
@@ -217,10 +295,18 @@ class VectorMemory:
         if not query or not self.items:
             return []
 
-        # Pre-filter based on metadata so we don't waste work on unrelated items
+        # Pre-filter based on metadata so we do not score unrelated items
         candidate_items: List[MemoryItem] = []
         for item in self.items:
-            if self._match_filters(item, goal=goal, role=role, domain=domain, kind=kind):
+            if self._match_filters(
+                item,
+                goal=goal,
+                role=role,
+                domain=domain,
+                kind=kind,
+                phase=phase,
+                segment_index=segment_index,
+            ):
                 candidate_items.append(item)
 
         if not candidate_items:
@@ -266,6 +352,18 @@ class VectorMemory:
     def size(self) -> int:
         """Return current number of items stored."""
         return len(self.items)
+
+    def clear(self) -> None:
+        """Remove all items. Use with care in long runs."""
+        self.items.clear()
+
+    def clear_for_goal(self, goal: str) -> int:
+        """Remove items matching a given goal. Returns number removed."""
+        if not goal:
+            return 0
+        before = len(self.items)
+        self.items = [it for it in self.items if (it.metadata or {}).get("goal") != goal]
+        return before - len(self.items)
 
     def dump_metadata_snapshot(self, limit: int = 50) -> List[Dict[str, Any]]:
         """Return a lightweight snapshot of recent items' metadata.
