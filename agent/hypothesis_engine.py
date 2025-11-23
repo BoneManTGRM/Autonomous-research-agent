@@ -2,7 +2,7 @@
 
 This module is deliberately:
 - LLM-free (pure Python, deterministic).
-- Stateless (no global counters that can drift over 24–90 day runs).
+- Stateless (no global counters that can drift over 24-90 day runs).
 - Swarm-safe (no shared mutable state across agents).
 - Domain-aware (optional hooks for longevity / math / general).
 - Role-aware (uses swarm role hints to shape hypothesis style).
@@ -150,6 +150,60 @@ def _novelty_score(
     return novelty
 
 
+def _estimate_rye_relevance(text: str) -> float:
+    """Estimate how directly a hypothesis speaks to RYE style ideas.
+
+    This is a small heuristic in [0, 1] based on presence of terms
+    related to repair efficiency, energy, tradeoffs, and equilibrium.
+    """
+    if not text:
+        return 0.0
+
+    tokens = [_normalize_token(t) for t in text.split() if t]
+    if not tokens:
+        return 0.0
+
+    rye_terms = {
+        "repair",
+        "repairs",
+        "yield",
+        "efficiency",
+        "efficient",
+        "energy",
+        "cost",
+        "costs",
+        "tradeoff",
+        "tradeoffs",
+        "equilibrium",
+        "equilibria",
+        "stable",
+        "stability",
+        "resilience",
+        "drift",
+    }
+
+    hits = 0
+    for t in tokens:
+        if t in rye_terms:
+            hits += 1
+
+    # Simple normalized count
+    return max(0.0, min(1.0, hits / float(max(1, len(tokens)))))
+
+
+def _has_contradiction_signals(notes: List[Dict[str, Any]]) -> bool:
+    """Detect whether the current notes contain contradiction markers.
+
+    This lets us bias hypothesis style toward integrator or critic tones
+    in cases where the literature is already internally inconsistent.
+    """
+    for n in notes:
+        content = str(n.get("content", "")).lower()
+        if "contradiction" in content or "inconsistent" in content or "conflict" in content:
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------
 # Keyword extraction helpers (notes + citations)
 # ---------------------------------------------------------------------
@@ -167,7 +221,7 @@ def _extract_keywords_from_notes(
         - return the most common terms
 
     This is intentionally simple and deterministic so it remains stable
-    across 24–90 day runs and across multiple swarm agents.
+    across 24-90 day runs and across multiple swarm agents.
     """
     freq: Dict[str, int] = {}
     for n in notes:
@@ -324,6 +378,51 @@ def _merge_keywords(
 
 
 # ---------------------------------------------------------------------
+# Domain inference
+# ---------------------------------------------------------------------
+def _infer_domain_from_text(
+    goal: str,
+    notes: List[Dict[str, Any]],
+    citations: List[Dict[str, Any]],
+) -> Optional[str]:
+    """Infer a likely domain if none is explicitly provided.
+
+    This is deterministic and uses simple keyword counts over
+    goal, notes, and citation titles/snippets.
+    """
+    text_parts: List[str] = [str(goal or "")]
+    for n in notes:
+        text_parts.append(str(n.get("content", "")))
+    for c in citations:
+        text_parts.append(str(c.get("title", "")))
+        text_parts.append(str(c.get("snippet", "")))
+
+    full_text = " ".join(text_parts).lower()
+    if not full_text.strip():
+        return None
+
+    lon_count = 0
+    for kw in LONGEVITY_DOMAIN_KEYWORDS:
+        if kw in full_text:
+            lon_count += 1
+
+    math_count = 0
+    for kw in MATH_DOMAIN_KEYWORDS:
+        if kw in full_text:
+            math_count += 1
+
+    # Simple decision rule: whichever count is larger, if it is clearly non-zero
+    if lon_count == 0 and math_count == 0:
+        return None
+    if lon_count > math_count:
+        return "longevity"
+    if math_count > lon_count:
+        return "math"
+    # Tie case: do not force, let caller treat as general
+    return None
+
+
+# ---------------------------------------------------------------------
 # Domain and role-aware templates
 # ---------------------------------------------------------------------
 def _get_templates_for_domain_and_role(
@@ -423,6 +522,75 @@ def _get_templates_for_domain_and_role(
 
 
 # ---------------------------------------------------------------------
+# Hypothesis classification helpers
+# ---------------------------------------------------------------------
+def _classify_hypothesis(
+    text: str,
+    domain: Optional[str],
+    role: Optional[str],
+    k1: str,
+    k2: str,
+) -> Dict[str, Any]:
+    """Assign a simple kind/focus label to a hypothesis.
+
+    This does not change behavior of the engine but gives richer
+    metadata for reports and future agents.
+    """
+    d = (domain or "").lower()
+    r = (role or "").lower()
+    t = text.lower()
+
+    kind = "general"
+    focus = "unspecified"
+
+    if d == "longevity":
+        if "biomarker" in t or "marker" in t:
+            kind = "biomarker"
+        elif "intervention" in t or "protocol" in t or "stack" in t:
+            kind = "intervention"
+        elif "pathway" in t or "mechanism" in t:
+            kind = "mechanism"
+        else:
+            kind = "longevity_pattern"
+
+    elif d == "math":
+        if "definition" in t or "axiom" in t:
+            kind = "formal_definition"
+        elif "theorem" in t or "proof" in t or "convergence" in t:
+            kind = "theorem_or_proof"
+        elif "functional" in t or "lyapunov" in t:
+            kind = "stability_functional"
+        else:
+            kind = "math_structure"
+
+    else:
+        if "model" in t or "framework" in t:
+            kind = "model"
+        elif "intervention" in t or "protocol" in t:
+            kind = "intervention"
+        else:
+            kind = "relationship"
+
+    if r == "critic":
+        focus = "tension_or_gap"
+    elif r == "explorer":
+        focus = "cross_domain"
+    elif r == "integrator":
+        focus = "integration"
+    elif r == "researcher":
+        focus = "mechanism_or_pattern"
+    else:
+        focus = "unspecified"
+
+    return {
+        "kind": kind,
+        "focus": focus,
+        "k1": k1,
+        "k2": k2,
+    }
+
+
+# ---------------------------------------------------------------------
 # Main API
 # ---------------------------------------------------------------------
 def generate_hypotheses(
@@ -454,20 +622,44 @@ def generate_hypotheses(
         List of:
             {
               "text": "...",
-              "confidence": 0.30–0.90,
+              "confidence": 0.30-0.90,
               "domain": "longevity" | "math" | "general" | None,
               "role": "researcher" | "critic" | ... | None,
               "keywords": [k1, k2],
-              "novelty": 0.0–1.0,
+              "novelty": 0.0-1.0,
+              "rye_relevance": 0.0-1.0,
+              "priority": 0.0-1.0,
+              "classification": {
+                  "kind": "...",
+                  "focus": "...",
+                  "k1": "...",
+                  "k2": "..."
+              },
+              "contradiction_sensitive": bool,
             }
 
     Reparodynamics angle:
         These hypotheses are potential "repair targets" for future cycles.
-        If later cycles confirm or refute them, ΔR reflects that, and
-        long-run RYE (ΔR / E) can track which directions were fruitful.
+        If later cycles confirm or refute them, delta_R reflects that, and
+        long-run RYE (delta_R / E) can track which directions were fruitful.
     """
     if not goal and not notes and not citations:
         return []
+
+    # If domain not given, attempt a deterministic inference
+    inferred_domain = _infer_domain_from_text(goal, notes, citations)
+    if domain is None:
+        domain = inferred_domain
+    if domain is None:
+        domain = "general"
+
+    # If role not given, bias toward critic when contradictions appear,
+    # otherwise default to researcher behavior.
+    if role is None:
+        if _has_contradiction_signals(notes):
+            role = "critic"
+        else:
+            role = "researcher"
 
     # 1) Build keyword pool from notes + citations
     note_terms = _extract_keywords_from_notes(notes, max_keywords=8)
@@ -510,6 +702,8 @@ def generate_hypotheses(
 
     step = (base_high - base_low) / max(1, len(templates))
 
+    contradiction_sensitive = _has_contradiction_signals(notes)
+
     idx = 0
     for (k1, k2) in pairs:
         tpl = templates[idx % len(templates)]
@@ -540,6 +734,23 @@ def generate_hypotheses(
         confidence = base_low + step * band_index
         confidence = max(0.0, min(1.0, confidence))
 
+        rye_rel = _estimate_rye_relevance(text)
+
+        # Simple composite priority for downstream sorting or filtering
+        # Weight novelty slightly higher than direct RYE wording
+        priority = max(
+            0.0,
+            min(1.0, 0.6 * novelty + 0.4 * rye_rel),
+        )
+
+        classification = _classify_hypothesis(
+            text=text,
+            domain=domain,
+            role=role,
+            k1=k1,
+            k2=k2,
+        )
+
         used_texts.add(text)
         hypo_list.append(
             {
@@ -549,6 +760,10 @@ def generate_hypotheses(
                 "role": (role or None),
                 "keywords": [k1, k2],
                 "novelty": round(novelty, 3),
+                "rye_relevance": round(rye_rel, 3),
+                "priority": round(priority, 3),
+                "classification": classification,
+                "contradiction_sensitive": bool(contradiction_sensitive),
             }
         )
 
