@@ -16,6 +16,7 @@ Key ideas:
        and adapts using RYE and time used.
 - Uses environment variables to control goal, domain, runtime, swarm, and meta behavior.
 - Relies on CoreAgent presets, checkpoints, and watchdog for crash recovery.
+- Supports web browser and sandbox tools via source_controls flags.
 
 You can start it with commands like:
     WORKER_GOAL="Long run test on reparodynamics" \
@@ -39,7 +40,13 @@ import yaml
 from agent.core_agent import CoreAgent
 from agent.memory_store import MemoryStore
 from agent.presets import PRESETS, get_preset  # PRESETS for backward compat defaults
+from agent.rye_metrics import build_run_diagnostics
 
+# Optional tools registry for web browser and sandbox detection
+try:
+    from agent.tools import TOOL_REGISTRY  # type: ignore[import]
+except Exception:  # pragma: no cover
+    TOOL_REGISTRY = {}  # type: ignore[assignment]
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
@@ -102,15 +109,49 @@ def _env_list(name: str) -> Optional[List[str]]:
     return parts or None
 
 
+def detect_tools() -> Dict[str, bool]:
+    """Detect presence of web browser and sandbox tools from TOOL_REGISTRY."""
+    if not isinstance(TOOL_REGISTRY, dict):
+        return {"web": False, "sandbox": False}
+
+    web_keys = {"web_search", "browser", "web", "internet"}
+    sandbox_keys = {"sandbox", "code_sandbox", "python_sandbox", "exec_sandbox"}
+
+    has_web = any(k in TOOL_REGISTRY for k in web_keys)
+    has_sandbox = any(k in TOOL_REGISTRY for k in sandbox_keys)
+
+    return {"web": has_web, "sandbox": has_sandbox}
+
+
+def _configure_tavily_from_env() -> None:
+    """
+    Optional Tavily key configuration.
+
+    If WORKER_TAVILY_KEY is set, propagate it to TAVILY_API_KEY so the
+    same engine can be used headless without the Streamlit UI.
+    """
+    key = os.getenv("WORKER_TAVILY_KEY")
+    if key:
+        os.environ["TAVILY_API_KEY"] = key
+
+
 def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
     """
     Build source controls for the worker.
 
+    Keys:
+        web, pubmed, semantic, pdf, biomarkers, sandbox
+
     Priority:
-    1. WORKER_SOURCES env (comma separated: web,pubmed,semantic,pdf,biomarkers)
-       - If present, only those listed are enabled.
+    1. WORKER_SOURCES env (comma separated: web,pubmed,semantic,pdf,biomarkers,sandbox)
+       If present, only those listed are enabled.
     2. config["default_source_controls"] from YAML (if provided)
-    3. Hard-coded defaults.
+    3. Hard coded defaults.
+    4. Optional per source overrides:
+       WORKER_WEB, WORKER_PUBMED, WORKER_SEMANTIC, WORKER_PDF,
+       WORKER_BIOMARKERS, WORKER_SANDBOX.
+    5. Final clamp based on TOOL_REGISTRY detection: if sandbox tool is not
+       present, sandbox is forced to False.
     """
     # Base defaults
     defaults: Dict[str, bool] = {
@@ -119,6 +160,7 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
         "semantic": True,
         "pdf": True,
         "biomarkers": False,
+        "sandbox": False,
     }
 
     cfg_sc = config.get("default_source_controls")
@@ -129,15 +171,40 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
         defaults = merged
 
     env_sources = _env_list("WORKER_SOURCES")
-    if env_sources is None:
-        return defaults
+    if env_sources is not None:
+        allowed = {s.lower() for s in env_sources}
+        sc: Dict[str, bool] = {}
+        for key in defaults.keys():
+            sc[key] = key.lower() in allowed
+    else:
+        sc = defaults.copy()
 
-    # If WORKER_SOURCES is set, treat it as an allow-list
-    allowed = {s.lower() for s in env_sources}
-    result: Dict[str, bool] = {}
-    for key in defaults.keys():
-        result[key] = key.lower() in allowed
-    return result
+    # Per source env overrides (optional)
+    def _override_bool(key: str, env_name: str) -> None:
+        raw = os.getenv(env_name)
+        if raw is not None:
+            sc[key] = _env_bool(env_name, default=sc.get(key, False))
+
+    _override_bool("web", "WORKER_WEB")
+    _override_bool("pubmed", "WORKER_PUBMED")
+    _override_bool("semantic", "WORKER_SEMANTIC")
+    _override_bool("pdf", "WORKER_PDF")
+    _override_bool("biomarkers", "WORKER_BIOMARKERS")
+    _override_bool("sandbox", "WORKER_SANDBOX")
+
+    # Final clamp based on TOOL_REGISTRY capabilities
+    flags = detect_tools()
+    if not flags["sandbox"]:
+        sc["sandbox"] = False
+
+    # Web clamp is softer: if web tool is not present but Tavily key exists,
+    # the CoreAgent can still use Tavily directly.
+    # So we only force web off if TOOL_REGISTRY has no web and no Tavily key.
+    if not flags["web"]:
+        if not os.getenv("TAVILY_API_KEY"):
+            sc["web"] = False
+
+    return sc
 
 
 # ---------------------------------------------------------------------------
@@ -183,7 +250,6 @@ def build_goal_and_domain() -> Tuple[str, str]:
     elif isinstance(config.get("default_worker_goal"), str):
         goal = config["default_worker_goal"]
     else:
-        # Prefer longevity preset goal if available
         if "longevity" in PRESETS:
             longevity_preset = get_preset("longevity")
             goal = longevity_preset.get(
@@ -211,7 +277,7 @@ def build_goal_and_domain() -> Tuple[str, str]:
 
 def _heartbeat(agent: CoreAgent, label: str) -> None:
     """
-    Best-effort heartbeat into the MemoryStore so the UI can see that the
+    Best effort heartbeat into the MemoryStore so the UI can see that the
     worker is alive. Silently ignored if heartbeat is not implemented.
     """
     try:
@@ -236,11 +302,12 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     - WORKER_MAX_MINUTES (optional)
     - WORKER_STOP_RYE (optional)
     - WORKER_RUNTIME_PROFILE (optional: 1_hour, 8_hours, 24_hours, 90_days, forever)
-    - WORKER_ROLE (default 'agent')
+    - WORKER_ROLE (default "agent")
     - WORKER_SOURCES (optional, comma separated)
     - WORKER_RESUME (bool, default True)
     - WORKER_WATCHDOG_MINUTES (float, default 5.0)
     - WORKER_FOREVER (bool, default False)
+    - WORKER_WEB, WORKER_SANDBOX, WORKER_PUBMED, WORKER_SEMANTIC, WORKER_PDF, WORKER_BIOMARKERS
     """
     goal, domain = build_goal_and_domain()
 
@@ -251,7 +318,6 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     resume = _env_bool("WORKER_RESUME", default=True)
     watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
 
-    # Determine whether to run "forever" based on profile or explicit env
     forever_env = _env_bool("WORKER_FOREVER", default=False)
     forever = False
     if forever_env and max_minutes is None:
@@ -261,6 +327,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
     source_controls = _build_source_controls(config)
 
+    tool_flags = detect_tools()
     print("=== Autonomous Research Engine - Single Agent Mode ===")
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
@@ -272,6 +339,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Resume from checkpoint: {resume}")
     print(f"Watchdog interval (min): {watchdog_minutes}")
     print(f"Source controls: {source_controls}")
+    print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     sys.stdout.flush()
 
     _heartbeat(agent, label="worker_single_start")
@@ -296,6 +364,15 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
     print("=== Continuous run finished cleanly ===")
     print(f"Total completed cycles: {len(summaries)}")
+    try:
+        diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
+        print(f"RYE avg: {diag.get('rye_avg')}")
+        print(f"RYE median: {diag.get('rye_median')}")
+        print(f"RYE last: {diag.get('rye_last')}")
+        print(f"Stability index: {diag.get('stability_index')}")
+        print(f"Recovery momentum: {diag.get('recovery_momentum')}")
+    except Exception:
+        print("Diagnostics computation failed, see logs for details.")
     sys.stdout.flush()
 
 
@@ -312,6 +389,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     - WORKER_RESUME (bool, default True)
     - WORKER_WATCHDOG_MINUTES (float, default 5.0)
     - WORKER_FOREVER (bool, default False)
+    - WORKER_WEB, WORKER_SANDBOX, WORKER_PUBMED, WORKER_SEMANTIC, WORKER_PDF, WORKER_BIOMARKERS
     """
     goal, domain = build_goal_and_domain()
 
@@ -323,10 +401,8 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
 
     if roles_list is None:
-        # Use all configured roles inside CoreAgent (capped at 32)
         roles_list = agent.get_agent_roles()
 
-    # Determine whether to run "forever" based on profile or explicit env
     forever_env = _env_bool("WORKER_FOREVER", default=False)
     forever = False
     if forever_env and max_minutes is None:
@@ -336,6 +412,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
     source_controls = _build_source_controls(config)
 
+    tool_flags = detect_tools()
     print("=== Autonomous Research Engine - Swarm Mode ===")
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
@@ -347,6 +424,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Resume from checkpoint: {resume}")
     print(f"Watchdog interval (min): {watchdog_minutes}")
     print(f"Source controls: {source_controls}")
+    print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     sys.stdout.flush()
 
     _heartbeat(agent, label="worker_swarm_start")
@@ -371,6 +449,15 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
     print("=== Swarm run finished cleanly ===")
     print(f"Total summaries produced across all roles and rounds: {len(summaries)}")
+    try:
+        diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
+        print(f"RYE avg: {diag.get('rye_avg')}")
+        print(f"RYE median: {diag.get('rye_median')}")
+        print(f"RYE last: {diag.get('rye_last')}")
+        print(f"Stability index: {diag.get('stability_index')}")
+        print(f"Recovery momentum: {diag.get('recovery_momentum')}")
+    except Exception:
+        print("Diagnostics computation failed, see logs for details.")
     sys.stdout.flush()
 
 
@@ -378,10 +465,12 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 # Meta-controller engine (Option C)
 # ---------------------------------------------------------------------------
 
+
 def _compute_segment_stats(segment_summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Inspect a list of cycle or swarm summaries and compute simple stats for the meta-controller.
+    Inspect a list of cycle or swarm summaries and compute stats for the meta-controller.
 
+    Uses build_run_diagnostics so segment stats are consistent with the UI.
     Returns:
         {
             "count": int,
@@ -389,29 +478,44 @@ def _compute_segment_stats(segment_summaries: List[Dict[str, Any]]) -> Dict[str,
             "max_rye": Optional[float],
             "min_rye": Optional[float],
             "last_rye": Optional[float],
+            "stability": Optional[float],
+            "momentum": Optional[float],
         }
     """
-    ryes: List[float] = []
-    for s in segment_summaries:
-        rv = s.get("RYE")
-        if isinstance(rv, (int, float)):
-            ryes.append(float(rv))
+    if not segment_summaries:
+        return {
+            "count": 0,
+            "avg_rye": None,
+            "max_rye": None,
+            "min_rye": None,
+            "last_rye": None,
+            "stability": None,
+            "momentum": None,
+        }
 
-    if not ryes:
+    diag = build_run_diagnostics(history=segment_summaries, domain=None, window=10)
+    rye_vals: List[float] = [
+        float(e["RYE"]) for e in segment_summaries if isinstance(e.get("RYE"), (int, float))
+    ]
+    if not rye_vals:
         return {
             "count": len(segment_summaries),
             "avg_rye": None,
             "max_rye": None,
             "min_rye": None,
             "last_rye": None,
+            "stability": diag.get("stability_index"),
+            "momentum": diag.get("recovery_momentum"),
         }
 
     return {
         "count": len(segment_summaries),
-        "avg_rye": sum(ryes) / len(ryes),
-        "max_rye": max(ryes),
-        "min_rye": min(ryes),
-        "last_rye": ryes[-1],
+        "avg_rye": diag.get("rye_avg"),
+        "max_rye": max(rye_vals),
+        "min_rye": min(rye_vals),
+        "last_rye": rye_vals[-1],
+        "stability": diag.get("stability_index"),
+        "momentum": diag.get("recovery_momentum"),
     }
 
 
@@ -433,7 +537,6 @@ def _initial_meta_plan(
     if total_budget_minutes is None or total_budget_minutes <= 0:
         total_budget_minutes = 60.0
 
-    # Rough split: 40 percent explore, 40 percent stabilize, 20 percent refine
     explore_min = max(5.0, total_budget_minutes * 0.4)
     stabilize_min = max(5.0, total_budget_minutes * 0.4)
     refine_min = max(5.0, total_budget_minutes * 0.2)
@@ -447,7 +550,6 @@ def _initial_meta_plan(
     if preferred_mode not in {"single", "swarm"}:
         preferred_mode = "swarm"
 
-    # Domain informed default profiles
     if domain.lower() == "longevity":
         explore_profile = "1_hour"
         stabilize_profile = "8_hours"
@@ -519,24 +621,19 @@ def _adjust_phase_from_stats(
     effective_stop_rye: Optional[float] = None
 
     if recent_avg_rye is None:
-        # No RYE data yet
         effective_minutes = base_target
         effective_stop_rye = base_stop_rye
     else:
         if recent_avg_rye < 0.01:
-            # Very low efficiency: short diagnostic segment
             effective_minutes = max(min_minutes, base_target * 0.5)
             effective_stop_rye = None
         elif recent_avg_rye < 0.05:
-            # Low but non-zero: moderate segment, low stop threshold
             effective_minutes = base_target
             effective_stop_rye = (base_stop_rye or 0.03) * 0.8
         elif recent_avg_rye < 0.15:
-            # Healthy zone: keep base length, slightly higher threshold
             effective_minutes = base_target
             effective_stop_rye = (base_stop_rye or 0.05) * 1.1
         else:
-            # Very strong RYE: extend slightly, more demanding threshold
             effective_minutes = min(max_minutes, base_target * 1.2)
             effective_stop_rye = (base_stop_rye or 0.08) * 1.25
 
@@ -575,25 +672,21 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     total_budget_minutes = _env_float("WORKER_MAX_MINUTES")
     meta_max_segments = _env_float("WORKER_META_MAX_SEGMENTS")
     if meta_max_segments is None or meta_max_segments <= 0:
-        meta_max_segments = 6.0  # float, we cast to int when iterating
+        meta_max_segments = 6.0
     meta_max_segments_int = int(meta_max_segments)
 
-    # Preferred top level mode
     use_swarm_flag = _env_bool("WORKER_SWARM", default=False)
     mode_env = os.getenv("WORKER_MODE", "single").strip().lower()
     preferred_mode = "swarm" if (use_swarm_flag or mode_env == "swarm") else "single"
 
-    # Runtime profile is used as a hint; meta plan still applies
     runtime_profile_env = os.getenv("WORKER_RUNTIME_PROFILE")
     stop_rye_env = _env_float("WORKER_STOP_RYE")
     resume = _env_bool("WORKER_RESUME", default=True)
     watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
     forever_env = _env_bool("WORKER_FOREVER", default=False)
 
-    # Meta engine has a hard time cap: either WORKER_MAX_MINUTES or derived from profile or preset
     preset_cfg = get_preset(domain)
     if total_budget_minutes is None:
-        # Use profile hint if present
         if runtime_profile_env == "1_hour":
             total_budget_minutes = 60.0
         elif runtime_profile_env == "8_hours":
@@ -603,17 +696,16 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         elif runtime_profile_env == "90_days":
             total_budget_minutes = 90 * 24 * 60.0
         elif runtime_profile_env == "forever" or forever_env:
-            # If explicitly forever but no minutes, pick a large but finite default
             total_budget_minutes = 24 * 60.0
         else:
-            # Fall back to a 60 minute meta plan if nothing else is given
-            total_budget_minutes = 60.0
+            total_budget_minutes = float(preset_cfg.get("runtime_minutes", 60.0))
 
     if total_budget_minutes <= 0:
         total_budget_minutes = 60.0
 
     source_controls = _build_source_controls(config)
 
+    tool_flags = detect_tools()
     print("=== Autonomous Research Engine - Meta Controller Mode (Option C) ===")
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
@@ -625,6 +717,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Resume from checkpoint: {resume}")
     print(f"Watchdog interval (min): {watchdog_minutes}")
     print(f"Source controls: {source_controls}")
+    print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     sys.stdout.flush()
 
     _heartbeat(agent, label="worker_meta_start")
@@ -640,7 +733,6 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     recent_avg_rye: Optional[float] = None
     total_elapsed = 0.0
 
-    # Roles for swarm segments: either env override or agent default
     roles_env = _env_list("WORKER_SWARM_ROLES")
     if roles_env is None:
         roles_for_swarm: Sequence[str] = agent.get_agent_roles()
@@ -653,32 +745,27 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             print(f"[Meta] Time almost exhausted, stopping before segment {seg_index + 1}.")
             break
 
-        # Pick phase based on segment index
         if seg_index < len(meta_plan["phases"]):
             phase_cfg = meta_plan["phases"][seg_index]
         else:
-            # After all phases, loop with refinement behavior
             phase_cfg = meta_plan["phases"][-1]
 
         phase_name = phase_cfg.get("name", f"segment_{seg_index + 1}")
         phase_mode = phase_cfg.get("mode", preferred_mode)
         phase_profile = phase_cfg.get("runtime_profile")
 
-        # If the user gave a runtime profile env, let it override unless phase explicitly set something else
         if runtime_profile_env and phase_profile is None:
             phase_profile = runtime_profile_env
 
         effective_minutes, effective_stop_rye = _adjust_phase_from_stats(
             phase_cfg=phase_cfg,
-            stats={"count": 0},  # current segment has no stats yet
+            stats={"count": 0},
             recent_avg_rye=recent_avg_rye,
         )
 
-        # Never exceed time_left
         if effective_minutes > time_left:
             effective_minutes = time_left
 
-        # If user explicitly set a stop_rye env, that dominates the automatic one
         if stop_rye_env is not None:
             effective_stop_rye = stop_rye_env
 
@@ -735,17 +822,14 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             }
         )
 
-        # Compute stats for this segment and update meta state
         seg_stats = _compute_segment_stats(segment_summaries)
         seg_avg_rye = seg_stats["avg_rye"]
         if seg_avg_rye is not None:
             if recent_avg_rye is None:
                 recent_avg_rye = seg_avg_rye
             else:
-                # Exponential smoothing
                 recent_avg_rye = 0.6 * recent_avg_rye + 0.4 * seg_avg_rye
 
-        # Read elapsed_minutes from run_metadata if available
         segment_elapsed = 0.0
         if segment_summaries:
             meta = segment_summaries[-1].get("run_metadata")
@@ -754,7 +838,6 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 if isinstance(em, (int, float)):
                     segment_elapsed = float(em)
 
-        # Fallback if metadata is missing
         if segment_elapsed <= 0.0:
             segment_elapsed = effective_minutes
 
@@ -764,20 +847,20 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         print(f"        cycles/summaries: {seg_stats['count']}")
         print(f"        avg RYE: {seg_stats['avg_rye']}")
         print(f"        best RYE: {seg_stats['max_rye']}")
+        print(f"        stability: {seg_stats['stability']}")
+        print(f"        momentum: {seg_stats['momentum']}")
         print(f"        smoothed recent RYE: {recent_avg_rye}")
         print(f"        total elapsed minutes: {total_elapsed:.2f} / {total_budget_minutes:.2f}")
         sys.stdout.flush()
 
         _heartbeat(agent, label="worker_meta_segment")
 
-        # Predictive stopping: if RYE has been very low and time used is high, stop early
         if recent_avg_rye is not None and recent_avg_rye < 0.01 and total_elapsed > total_budget_minutes * 0.6:
             print("[Meta] RYE collapsed and most of the budget is used. Stopping early.")
             break
 
     _heartbeat(agent, label="worker_meta_finished")
 
-    # Final meta summary to stdout
     total_segments = len(segments_run)
     total_summaries = sum(len(seg["summaries"]) for seg in segments_run)
     print("")
@@ -807,6 +890,7 @@ def main() -> None:
     print("Starting Autonomous Research Agent background engine...")
     sys.stdout.flush()
 
+    _configure_tavily_from_env()
     agent, config = init_agent_from_config()
 
     use_swarm = _env_bool("WORKER_SWARM", default=False)
