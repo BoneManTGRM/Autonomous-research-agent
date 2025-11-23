@@ -331,6 +331,95 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "max_redundant_cycles": 8,
         },
 
+        # Tool intelligence for this preset
+        "tool_intelligence": {
+            "browser_usage": {
+                "mode": "adaptive",  # conservative, normal, aggressive, adaptive
+                "max_calls_per_cycle": 5,
+                "prefer_primary_sources": True,
+                "crawl_depth": 1,
+            },
+            "sandbox_usage": {
+                "enabled": True,
+                "max_execs_per_cycle": 3,
+                "verify_after_exec": True,
+                "allowed_packages": ["math", "statistics", "pandas", "numpy"],
+            },
+            "data_pipeline_usage": {
+                "load_csv": True,
+                "load_excel": True,
+                "load_sql": True,
+                "auto_detect_timeseries": True,
+            },
+        },
+
+        # Memory intelligence
+        "memory_intelligence": {
+            "write_frequency": "adaptive",  # low, medium, high, adaptive
+            "compression_strategy": "semantic",  # none, simple, semantic
+            "auto_summarize_every_n_cycles": 10,
+            "max_memory_items": 5000,
+            "forgetting_policy": {
+                "enabled": True,
+                "threshold_rye_gain": 0.01,
+                "drop_low_value_notes": True,
+                "reinforce_high_value_notes": True,
+            },
+        },
+
+        # Discovery engine hints
+        "discovery_engine": {
+            "enabled": True,
+            "threshold_novelty": 0.20,
+            "threshold_support": 0.15,
+            "detect_mechanisms": True,
+            "detect_interventions": True,
+            "detect_patterns": True,
+            "multi_agent_voting": True,
+            "minimum_role_agreement": 3,
+            "classification": [
+                "mechanism",
+                "intervention",
+                "treatment",
+                "biomarker_shift",
+                "mathematical_structure",
+                "prediction",
+            ],
+        },
+
+        # Swarm orchestration hints
+        "swarm_orchestration": {
+            "rotation_strategy": "round_robin",  # round_robin, weighted, priority
+            "role_weighting": {
+                "researcher": 1.0,
+                "critic": 1.0,
+                "planner": 1.0,
+                "synthesizer": 1.0,
+                "explorer": 1.0,
+                "integrator": 1.0,
+            },
+            "cycle_sync": "partial",  # none, partial, full
+            "integration_frequency": 1,
+            "consensus_model": "weighted_vote",  # single_best, majority, weighted_vote
+        },
+
+        # Compute tuning
+        "compute_tuning": {
+            "energy_to_depth_ratio": 1.0,
+            "exploration_vs_exploitation": "balanced",
+            "max_energy_spend_per_cycle": "adaptive",
+            "rye_weighting_mode": "domain_specific",
+        },
+
+        # Evidence strictness
+        "evidence_modes": {
+            "mode": "balanced",  # clinical, mechanistic, mathematical, exploratory, balanced
+            "require_citations": True,
+            "min_confidence_to_accept": 0.2,
+            "reject_fabricated_sources": True,
+            "disallow_uncited_claims": True,
+        },
+
         # Default runtime and RYE behavior for continuous mode
         "default_runtime_profile": "8_hours",
         "default_rye_stop_threshold": None,
@@ -369,7 +458,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                 "General swarm is balanced and good for exploratory research across many topics. "
                 "Roles should behave as broad but disciplined specialists rather than narrow domain experts."
             ),
-            # Optional smarter role templates (future engines can use these instead of the generic roles)
+            # Optional smarter role templates
             "role_templates": [
                 {
                     "name": "general_researcher",
@@ -466,6 +555,94 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "max_redundant_cycles": 5,
             "prefer_clinical_evidence": True,
             "penalize_hype_language": True,
+        },
+
+        # Tool intelligence
+        "tool_intelligence": {
+            "browser_usage": {
+                "mode": "aggressive",
+                "max_calls_per_cycle": 7,
+                "prefer_primary_sources": True,
+                "crawl_depth": 1,
+            },
+            "sandbox_usage": {
+                "enabled": True,
+                "max_execs_per_cycle": 4,
+                "verify_after_exec": True,
+                "allowed_packages": ["math", "statistics", "pandas", "numpy"],
+            },
+            "data_pipeline_usage": {
+                "load_csv": True,
+                "load_excel": True,
+                "load_sql": True,
+                "auto_detect_timeseries": True,
+            },
+        },
+
+        # Memory intelligence
+        "memory_intelligence": {
+            "write_frequency": "high",
+            "compression_strategy": "semantic",
+            "auto_summarize_every_n_cycles": 8,
+            "max_memory_items": 8000,
+            "forgetting_policy": {
+                "enabled": True,
+                "threshold_rye_gain": 0.02,
+                "drop_low_value_notes": True,
+                "reinforce_high_value_notes": True,
+            },
+        },
+
+        # Discovery engine (strong focus on interventions and biomarkers)
+        "discovery_engine": {
+            "enabled": True,
+            "threshold_novelty": 0.18,
+            "threshold_support": 0.20,
+            "detect_mechanisms": True,
+            "detect_interventions": True,
+            "detect_patterns": True,
+            "multi_agent_voting": True,
+            "minimum_role_agreement": 4,
+            "classification": [
+                "mechanism",
+                "intervention",
+                "treatment",
+                "biomarker_shift",
+                "prediction",
+            ],
+        },
+
+        # Swarm orchestration hints
+        "swarm_orchestration": {
+            "rotation_strategy": "weighted",
+            "role_weighting": {
+                "researcher": 1.3,
+                "critic": 1.2,
+                "planner": 1.1,
+                "synthesizer": 1.0,
+                "explorer": 0.9,
+                "integrator": 1.3,
+            },
+            "cycle_sync": "partial",
+            "integration_frequency": 1,
+            "consensus_model": "weighted_vote",
+        },
+
+        # Compute tuning
+        "compute_tuning": {
+            "energy_to_depth_ratio": 1.3,
+            "exploration_vs_exploitation": "exploit_heavy",
+            "max_energy_spend_per_cycle": "adaptive",
+            "rye_weighting_mode": "domain_specific",
+        },
+
+        # Evidence strictness
+        "evidence_modes": {
+            "mode": "clinical",
+            "require_citations": True,
+            "min_confidence_to_accept": 0.3,
+            "reject_fabricated_sources": True,
+            "disallow_uncited_claims": True,
         },
 
         # Default runtime and RYE behavior for continuous mode
@@ -642,6 +819,95 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "min_novelty_fraction": 0.2,
             "max_redundant_cycles": 3,
             "require_formal_structures": True,
+        },
+
+        # Tool intelligence
+        "tool_intelligence": {
+            "browser_usage": {
+                "mode": "conservative",
+                "max_calls_per_cycle": 4,
+                "prefer_primary_sources": True,
+                "crawl_depth": 1,
+            },
+            "sandbox_usage": {
+                "enabled": True,
+                "max_execs_per_cycle": 5,
+                "verify_after_exec": True,
+                "allowed_packages": ["math", "statistics", "numpy"],
+            },
+            "data_pipeline_usage": {
+                "load_csv": True,
+                "load_excel": False,
+                "load_sql": True,
+                "auto_detect_timeseries": False,
+            },
+        },
+
+        # Memory intelligence
+        "memory_intelligence": {
+            "write_frequency": "medium",
+            "compression_strategy": "semantic",
+            "auto_summarize_every_n_cycles": 12,
+            "max_memory_items": 4000,
+            "forgetting_policy": {
+                "enabled": True,
+                "threshold_rye_gain": 0.015,
+                "drop_low_value_notes": True,
+                "reinforce_high_value_notes": True,
+            },
+        },
+
+        # Discovery engine (structures and proof ideas)
+        "discovery_engine": {
+            "enabled": True,
+            "threshold_novelty": 0.22,
+            "threshold_support": 0.12,
+            "detect_mechanisms": False,
+            "detect_interventions": False,
+            "detect_patterns": True,
+            "multi_agent_voting": True,
+            "minimum_role_agreement": 3,
+            "classification": [
+                "mathematical_structure",
+                "framework",
+                "theorem",
+                "lemma",
+                "conjecture",
+                "prediction",
+            ],
+        },
+
+        # Swarm orchestration hints
+        "swarm_orchestration": {
+            "rotation_strategy": "round_robin",
+            "role_weighting": {
+                "researcher": 1.1,
+                "critic": 1.3,
+                "planner": 0.9,
+                "synthesizer": 1.0,
+                "explorer": 0.8,
+                "integrator": 1.2,
+            },
+            "cycle_sync": "full",
+            "integration_frequency": 1,
+            "consensus_model": "majority",
+        },
+
+        # Compute tuning
+        "compute_tuning": {
+            "energy_to_depth_ratio": 0.8,
+            "exploration_vs_exploitation": "explore_heavy",
+            "max_energy_spend_per_cycle": "adaptive",
+            "rye_weighting_mode": "domain_specific",
+        },
+
+        # Evidence strictness
+        "evidence_modes": {
+            "mode": "mathematical",
+            "require_citations": True,
+            "min_confidence_to_accept": 0.25,
+            "reject_fabricated_sources": True,
+            "disallow_uncited_claims": True,
         },
 
         # Default runtime and RYE behavior for continuous mode
