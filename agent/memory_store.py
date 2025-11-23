@@ -49,6 +49,20 @@ except Exception:  # pragma: no cover
     _rye_metrics = None  # type: ignore[assignment]
 
 
+# ----------------------------------------------------------------------
+# Hard but generous caps for 24–90 day / "forever" runs
+# These mirror the events / discoveries bounding you already had.
+# They are global caps; older items are dropped first.
+# ----------------------------------------------------------------------
+MAX_NOTES = 50_000
+MAX_CYCLES = 50_000
+MAX_HYPOTHESES = 20_000
+MAX_CITATIONS = 20_000
+MAX_BIOMARKERS = 20_000
+MAX_EVENTS = 5_000        # already used below, kept as constant
+MAX_DISCOVERIES = 2_000   # already used below, kept as constant
+
+
 def _utc_now_iso() -> str:
     """Return current UTC time in ISO 8601 with Z suffix."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -79,6 +93,7 @@ class MemoryStore:
         - atomic write strategy to greatly reduce corruption risk
         - goal_index streaming stats for fast RYE summaries
         - worker_state and events for live status and debugging
+        - bounded growth of logs (notes, cycles, hypotheses, citations, events)
     """
 
     def __init__(self, memory_file: str) -> None:
@@ -195,6 +210,41 @@ class MemoryStore:
         self._ensure_keys()
         self._save()
 
+    # Optional snapshot helper for manual backups during long runs
+    def export_snapshot(self, path: Optional[str] = None) -> str:
+        """Export a full JSON snapshot of the current memory file.
+
+        Args:
+            path:
+                Optional explicit path. If None, a timestamped
+                "<memory_file>.snapshot-YYYYmmddHHMMSS.json" file is used.
+
+        Returns:
+            The path of the snapshot file that was written.
+        """
+        self._ensure_keys()
+        now = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        if path is None:
+            base = os.path.abspath(self.memory_file)
+            path = f"{base}.snapshot-{now}.json"
+
+        try:
+            snapshot_dir = os.path.dirname(os.path.abspath(path))
+            if snapshot_dir and not os.path.exists(snapshot_dir):
+                os.makedirs(snapshot_dir, exist_ok=True)
+        except Exception:
+            # Best effort; if directory fails, writing will fail below
+            pass
+
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._data, f, ensure_ascii=False, indent=2)
+        except Exception:
+            # Do not raise in long runs; just return the intended path
+            return path
+
+        return path
+
     # ------------------------------------------------------------------
     # Internal helpers for goal index
     # ------------------------------------------------------------------
@@ -296,6 +346,11 @@ class MemoryStore:
             note["domain"] = domain
 
         self._data.setdefault("notes", []).append(note)
+
+        # Keep notes bounded for ultra-long runs
+        if len(self._data["notes"]) > MAX_NOTES:
+            self._data["notes"] = self._data["notes"][-MAX_NOTES:]
+
         self._touch_goal_index(
             goal,
             last_event_type="note",
@@ -379,6 +434,11 @@ class MemoryStore:
             "tags": tags or [],
         }
         self._data.setdefault("hypotheses", []).append(hyp)
+
+        # Bound hypothesis list growth
+        if len(self._data["hypotheses"]) > MAX_HYPOTHESES:
+            self._data["hypotheses"] = self._data["hypotheses"][-MAX_HYPOTHESES:]
+
         self._save()
 
         # Hypotheses are also valuable semantic memory
@@ -412,6 +472,11 @@ class MemoryStore:
             "citation": citation,
         }
         self._data.setdefault("citations", []).append(entry)
+
+        # Bound citation growth
+        if len(self._data["citations"]) > MAX_CITATIONS:
+            self._data["citations"] = self._data["citations"][-MAX_CITATIONS:]
+
         self._save()
 
         if self.vector_memory is not None:
@@ -451,6 +516,10 @@ class MemoryStore:
             "data": data,
         }
         self._data.setdefault("biomarkers", []).append(entry)
+
+        if len(self._data["biomarkers"]) > MAX_BIOMARKERS:
+            self._data["biomarkers"] = self._data["biomarkers"][-MAX_BIOMARKERS:]
+
         self._save()
 
     def get_biomarker_history(self, goal: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -466,6 +535,10 @@ class MemoryStore:
     def log_cycle(self, cycle_data: Dict[str, Any]) -> None:
         """Append cycle data to the cycle log."""
         self._data.setdefault("cycles", []).append(cycle_data)
+
+        # Bound cycles growth
+        if len(self._data["cycles"]) > MAX_CYCLES:
+            self._data["cycles"] = self._data["cycles"][-MAX_CYCLES:]
 
         # Update compact goal index for swarms
         goal = str(cycle_data.get("goal", ""))
@@ -712,9 +785,8 @@ class MemoryStore:
         self._data.setdefault("events", []).append(ev)
 
         # Keep events bounded in size to avoid unbounded growth during 90 day runs
-        max_events = 5000
-        if len(self._data["events"]) > max_events:
-            self._data["events"] = self._data["events"][-max_events:]
+        if len(self._data["events"]) > MAX_EVENTS:
+            self._data["events"] = self._data["events"][-MAX_EVENTS:]
 
         self._save()
 
@@ -787,9 +859,8 @@ class MemoryStore:
         self._data.setdefault("discoveries", []).append(entry)
 
         # Keep discoveries bounded but with a larger cap than events
-        max_disc = 2000
-        if len(self._data["discoveries"]) > max_disc:
-            self._data["discoveries"] = self._data["discoveries"][-max_disc:]
+        if len(self._data["discoveries"]) > MAX_DISCOVERIES:
+            self._data["discoveries"] = self._data["discoveries"][-MAX_DISCOVERIES:]
 
         self._save()
 
@@ -1091,3 +1162,49 @@ class MemoryStore:
         if goal is None:
             return dict(gi)
         return dict(gi.get(goal, {}))
+
+    def get_goal_summary(self, goal: str) -> Dict[str, Any]:
+        """Return a compact, UI-ready summary for a single goal.
+
+        This pulls from:
+            - goal_index entry
+            - basic and advanced RYE metrics
+            - counts of notes / hypotheses / citations / discoveries
+        """
+        summary: Dict[str, Any] = {
+            "goal": goal,
+            "index": {},
+            "rye_basic": {},
+            "rye_advanced": {},
+            "counts": {},
+        }
+
+        gi = self._data.get("goal_index") or {}
+        if isinstance(gi, dict):
+            entry = gi.get(goal) or {}
+            if isinstance(entry, dict):
+                summary["index"] = dict(entry)
+
+        avg_rye, min_rye, max_rye, count = self.get_rye_stats(goal=goal)
+        summary["rye_basic"] = {
+            "avg": avg_rye,
+            "min": min_rye,
+            "max": max_rye,
+            "count": count,
+        }
+        summary["rye_advanced"] = self.get_advanced_rye_metrics(goal=goal)
+
+        notes = self.get_notes(goal=goal)
+        hyps = self.get_hypotheses(goal=goal)
+        cits = self.get_citations(goal=goal)
+        disc = self.get_discoveries(goal=goal)
+
+        summary["counts"] = {
+            "notes": len(notes),
+            "hypotheses": len(hyps),
+            "citations": len(cits),
+            "discoveries": len(disc),
+            "cycles": len(self.get_cycles_for_goal(goal)),
+        }
+
+        return summary
