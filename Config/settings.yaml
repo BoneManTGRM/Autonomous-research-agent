@@ -46,6 +46,15 @@ default_goal: >
   compare against similar frameworks like MAPE-K, cybernetics, resilience,
   and complex adaptive systems, and propose refinements.
 
+# These are used directly by engine_worker.build_goal_and_domain()
+# when WORKER_GOAL / WORKER_DOMAIN are not set.
+default_worker_goal: >
+  Autonomous long-run Reparodynamics research, testing the TGRM loop,
+  RYE stability, efficiency trends, and self-repair behavior under
+  long time budgets.
+
+default_worker_domain: general
+
 
 # ------------------------------------------------
 # TOOL CONFIGURATION
@@ -87,6 +96,9 @@ ui:
 # ------------------------------------------------
 worker:
   enabled: true
+
+  # These mirror default_worker_goal/default_worker_domain above
+  # but can be used by CoreAgent or other components if needed.
   default_goal: >
     Autonomous long-run Reparodynamics research, testing the TGRM loop,
     RYE stability, efficiency trends, and self-repair behavior under
@@ -115,7 +127,7 @@ worker:
       label: "Infinite Run"
       max_minutes: null
 
-  # For segmentation (Meta-controller)
+  # For segmentation (Meta-controller / Option C)
   meta:
     enabled: true
     max_segments: 6
