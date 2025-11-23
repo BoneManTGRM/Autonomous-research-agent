@@ -57,6 +57,28 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "report_frequency": 2,
         "description": "Full daily autonomous research loop for equilibrium and deep repairs.",
     },
+    "1_week": {
+        "label": "1 Week Run",
+        "estimated_cycles": 7 * 600,  # approximate scale based on 24 hour profile
+        "rye_stop_threshold": 0.10,
+        "energy_scaling": 1.5,
+        "report_frequency": 6,
+        "description": (
+            "Seven day continuous research profile tuned for medium term stability, "
+            "repeated repair cycles, and detection of equilibrium windows."
+        ),
+    },
+    "1_month": {
+        "label": "1 Month Run",
+        "estimated_cycles": 30 * 600,  # approximate scale based on 24 hour profile
+        "rye_stop_threshold": 0.10,
+        "energy_scaling": 1.6,
+        "report_frequency": 12,
+        "description": (
+            "Multi week deep autonomy profile for sustained Reparodynamics experiments, "
+            "stack refinement, and long horizon repair efficiency tracking."
+        ),
+    },
     # Long horizon profile for Reparodynamics style experiments
     "90_days": {
         "label": "90 Day Run",
