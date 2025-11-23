@@ -5,16 +5,16 @@ Live Deployment
 https://autonomous-research-agent-hqby.onrender.com
 
 Important  
-Add your Tavily key in the sidebar or search will run in stub mode.
+Add your Tavily key inside the sidebar. Without it, search will run in offline stub mode.
 
 ---
 
 # 🔬 Scientific Attribution and Field Protection
 
 **Reparodynamics**, **TGRM**, and **RYE** were created and defined by **Cody Ryan Jenkins**.  
-These scientific terms may not be renamed, rebranded, removed, or represented as originating from any other creator.
+These scientific terms may not be renamed, repurposed, rebranded, or represented as originating from any other individual, organization, or entity.
 
-Any scientific, academic, commercial, or technical use must include attribution and citation.
+Any scientific, academic, commercial, or technical work that uses, references, or builds upon Reparodynamics or its components must include proper attribution and citation.
 
 **Required citation**  
 Jenkins, C. R. (2025). Reparodynamics v2.2  
@@ -22,65 +22,104 @@ DOI: https://doi.org/10.5281/zenodo.17653046
 
 Reparodynamics is a claimed scientific trademark of Cody Ryan Jenkins.
 
+This protects the identity and origin of the field while allowing open scientific collaboration.
+
 ---
 
 # 🚀 Overview
 
-This project is a full production autonomous research engine built on the Reparodynamics framework.
+The Autonomous Research Agent is a high autonomy research engine designed to operate using the principles of Reparodynamics. Its core purpose is to carry out real scientific exploration, structured self correction, and measurable knowledge improvement over long durations.
 
-It includes:
+The system is not a toy, demo, or simple chatbot wrapper. It is engineered for extended autonomous operation and uses a layered repair process to refine knowledge in real time.
 
-• Full TGRM cycle  
-• RYE computation per cycle  
-• Multi agent Swarm Mode  
-• Browser tools  
-• Code sandbox  
-• Data ingestion  
-• Background worker with watchdog  
-• Long run survivability modes  
+Key features include:
 
-Designed for real scientific discovery and high autonomy.  
-Runs for one hour, eight hours, one day, ninety days, or indefinitely.
+• The complete TGRM cycle (Test, Detect, Repair, Verify)  
+• RYE computation per cycle to measure improvement per energy used  
+• Multi agent Swarm Mode for coordinated research  
+• Browser and paper ingestion tools for real information gathering  
+• A robust memory system with vector retrieval  
+• An isolated code sandbox for safe experimentation  
+• A background worker capable of long continuous runs  
+• A meta controller that adapts behavior across phases  
+
+The system can run in short analytical bursts or multi day and multi month autonomous windows.
 
 ---
 
-# ⚡ Major Capabilities
+# ⚡ Major Capabilities and Extended Details
 
-### TGRM Loop  
-• Issue scanning  
-• Gap detection  
-• Targeted repair steps  
-• Verification with delta R  
-• RYE computation and logging  
+### Full TGRM Loop  
+TGRM is the foundation of the agent.  
+Each cycle performs:
+
+• Test: Evaluate current knowledge, detect inconsistencies  
+• Detect: Identify gaps, contradictions, missing information, or weak claims  
+• Repair: Use targeted tools to gather data, run code, or ingest literature  
+• Verify: Re evaluate the updated state and compute delta R  
+• RYE: Calculate Repair Yield per Energy as a quantitative score of improvement  
+• Log: Save cycle context for transparency and reproducibility  
+
+This cycle repeats across the entire runtime.
 
 ### Web and Literature Tools  
-• Tavily browser  
-• PubMed  
-• Semantic Scholar  
-• PDF ingestion  
-• CSV, JSON, XLSX, ZIP, GZ  
+The agent integrates multiple real information pipelines:
+
+• Tavily browser for web search  
+• PubMed queries for biomedical and biological literature  
+• Semantic Scholar for technical and scientific papers  
+• PDF ingestion to extract text from uploaded papers  
+• Structured data ingestion for CSV, JSON, XLSX, TSV, ZIP, and GZ  
+
+This allows the agent to ground its reasoning in external sources.
 
 ### Code Sandbox  
-Isolated Python execution for transformations and simulations.
+A safe isolated Python environment used for:
+
+• Data cleaning  
+• Numeric simulations  
+• Statistical testing  
+• Model evaluation  
+• Plotting and transformation tasks  
+• Verification of claims through computation  
+
+This allows the agent to validate hypotheses using real code, not language model guesses.
 
 ### Swarm Mode  
-Up to thirty two coordinated mini agents:  
-Researcher, Critic, Explorer, Theorist, Integrator  
-All writing to shared memory.
+Swarm mode enables a coordinated set of agents working together. Each agent has a defined research personality such as Researcher, Critic, Explorer, Theorist, or Integrator.
+
+Agents can:
+
+• Explore different hypotheses  
+• Criticize or refine other agents’ claims  
+• Independently run TGRM cycles  
+• Write contributions to a shared memory  
+• Build consensus across multiple reasoning styles  
+
+This dramatically increases research coverage and reduces blind spots.
 
 ### Long Run Engine  
-• Background worker  
-• Crash recovery  
-• Heartbeat watchdog  
-• Meta controller for exploration, stabilization, refinement  
+The long run engine supports extended autonomous research sessions. It includes:
+
+• A background worker  
+• Crash recovery logic  
+• Automatic checkpointing  
+• A heartbeat watchdog  
+• A meta controller with phase transitions  
+• Adjustable runtime limits  
+• Forever mode for continuous operation  
+
+The system is engineered for hours, days, or even multi month research windows.
 
 ### Domain Presets  
-• General research  
-• Longevity  
-• Math  
-• Custom profiles  
+Each preset configures research behavior, tool permissions, data sources, and TGRM weighting. Included presets:
 
-Each preset controls tools, goals, tags, and runtime behavior.
+• General Science  
+• Longevity and Anti Aging Research  
+• Mathematics and Theory Development  
+• Custom user defined profiles  
+
+Presets allow rapid switching between research domains without reconfiguring the core engine.
 
 ---
 
@@ -124,8 +163,8 @@ autonomous-research-agent/
 TAVILY_API_KEY=your_key_here
 ```
 
-Add it in the UI sidebar or as an environment variable.  
-Without this key, the agent uses offline stub search.
+Insert the key in the sidebar or set it as an environment variable.  
+Without the key, the agent still operates but search becomes offline.
 
 ---
 
@@ -138,54 +177,67 @@ pip install -r requirements.txt
 streamlit run app_streamlit.py
 ```
 
-Paste your Tavily key into the UI sidebar.
+Once running, paste your Tavily API key into the sidebar.
 
 ---
 
 # 🔁 How Continuous Mode Works
 
-Each cycle performs:  
+Every cycle includes:
+
 1. Test  
 2. Detect  
 3. Repair  
 4. Verify  
-5. Log  
-6. Repeat  
+5. Compute RYE  
+6. Log  
+7. Repeat  
 
-Run modes  
-One hour  
-Eight hours  
-One day  
-Ninety days  
-Forever
+Runtime modes include:
+
+• One hour analytical burst  
+• Eight hour research session  
+• Twenty four hour deep investigation  
+• Ninety day long haul  
+• Forever mode for unrestricted autonomous operation  
+
+The long run engine adapts across exploration, stabilization, and refinement phases.
 
 ---
 
-# 📊 Reporting
+# 📊 Reporting and Analytics
 
-• RYE report  
-• Findings and insights  
-• Tool usage metrics  
-• Cycle breakdown  
-• Full session summary  
-• Downloadable reports  
+The agent provides detailed research visualization including:
+
+• RYE performance trends  
+• Cycle by cycle delta R  
+• Repair actions and tool usage  
+• Evidence sources collected  
+• Hypothesis evolution  
+• Verification outcomes  
+• Memory updates  
+• Exportable session summaries  
+
+Reports can be downloaded in Markdown for scientific archiving.
 
 ---
 
 # ☁ Deployment
 
-Compatible with:
+The system is ready to deploy on:
 
-• Render Web Service  
-• Render Background Worker  
-• Streamlit Cloud  
+• Render Web Service for the user interface  
+• Render Background Worker for long runs  
+• Streamlit Cloud for simple deployment  
 
-Background worker command  
+To start the worker:
+
 ```
 python engine_worker.py
 ```
 
-Environment variables  
+Key environment variables:
+
 WORKER_GOAL  
 WORKER_RUNTIME_PROFILE  
 WORKER_SWARM_ROLES  
@@ -199,15 +251,15 @@ WORKER_FOREVER
 # 📜 License
 
 This project uses the Apache 2.0 license.  
-See LICENSE and NOTICE files in this repository.
+See LICENSE and NOTICE files.
 
-Apache requires that your attribution and NOTICE content remain in all forks and redistributions.
+Apache requires that attribution, copyright, and the contents of the NOTICE file remain in all forks and redistributions.
 
 ---
 
 # 📘 Required NOTICE File
 
-Create a file in the project root named NOTICE and place this inside:
+Create a file named NOTICE with the following content:
 
 ```
 Reparodynamics, TGRM, and RYE are scientific terms created and defined by Cody Ryan Jenkins.
@@ -216,11 +268,13 @@ Any scientific or academic use requires attribution to the original creator.
 © 2025 Cody Ryan Jenkins
 ```
 
-Apache requires that this NOTICE file be preserved in all forks and redistributions.
+This notice protects the scientific identity and prevents rebranding.
 
 ---
 
 # 🧑‍🔬 Credits
 
 Created by **Cody R. Jenkins**  
-Reparodynamics • TGRM • RYE
+Reparodynamics • TGRM • RYE  
+
+---
