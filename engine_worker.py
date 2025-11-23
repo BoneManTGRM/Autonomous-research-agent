@@ -17,6 +17,8 @@ Key ideas:
 - Uses environment variables to control goal, domain, runtime, swarm, and meta behavior.
 - Relies on CoreAgent presets, checkpoints, and watchdog for crash recovery.
 - Supports web browser and sandbox tools via source_controls flags.
+- Streams worker_state, run_manifests, milestones, and basic events into MemoryStore
+  so the UI and logs have a first class view of long runs.
 
 You can start it with commands like:
     WORKER_GOAL="Long run test on reparodynamics" \
@@ -208,7 +210,7 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
 
 
 # ---------------------------------------------------------------------------
-# Agent initialisation
+# Agent and memory helpers
 # ---------------------------------------------------------------------------
 
 
@@ -275,17 +277,162 @@ def build_goal_and_domain() -> Tuple[str, str]:
     return goal, domain
 
 
-def _heartbeat(agent: CoreAgent, label: str) -> None:
+def _get_memory_store(agent: CoreAgent) -> Optional[MemoryStore]:
+    """Best effort accessor for the agents MemoryStore."""
+    ms = getattr(agent, "memory_store", None)
+    if isinstance(ms, MemoryStore):
+        return ms
+    return None
+
+
+def _current_run_id(mode: str) -> str:
+    """
+    Construct a stable run id for this worker process.
+
+    Priority:
+        1) WORKER_RUN_ID env
+        2) derived from mode and pid
+    """
+    base = os.getenv("WORKER_RUN_ID")
+    if base:
+        return base
+    return f"{mode}-{os.getpid()}"
+
+
+def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> None:
     """
     Best effort heartbeat into the MemoryStore so the UI can see that the
     worker is alive. Silently ignored if heartbeat is not implemented.
     """
     try:
-        ms = getattr(agent, "memory_store", None)
+        ms = _get_memory_store(agent)
         if ms is not None and hasattr(ms, "heartbeat"):
-            ms.heartbeat(label=label)
+            if run_id is not None:
+                ms.heartbeat(label=label, run_id=run_id)
+            else:
+                ms.heartbeat(label=label)
     except Exception:
         # Heartbeat must never crash the worker
+        return
+
+
+def _log_run_manifest(
+    agent: CoreAgent,
+    run_id: str,
+    *,
+    mode: str,
+    domain: str,
+    goal: str,
+    runtime_profile: Optional[str],
+    stop_rye: Optional[float],
+    max_minutes: Optional[float],
+    summaries: List[Dict[str, Any]],
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Best effort manifest logging into MemoryStore using the new run_manifests section.
+    """
+    ms = _get_memory_store(agent)
+    if ms is None or not hasattr(ms, "log_run_manifest"):
+        return
+
+    try:
+        diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
+    except Exception:
+        diag = {}
+
+    manifest: Dict[str, Any] = {
+        "run_id": run_id,
+        "mode": mode,
+        "domain": domain,
+        "goal": goal,
+        "runtime_profile": runtime_profile,
+        "stop_rye": stop_rye,
+        "max_minutes": max_minutes,
+        "total_items": len(summaries),
+        "rye_avg": diag.get("rye_avg"),
+        "rye_median": diag.get("rye_median"),
+        "rye_last": diag.get("rye_last"),
+        "stability_index": diag.get("stability_index"),
+        "recovery_momentum": diag.get("recovery_momentum"),
+    }
+    if extra:
+        manifest["extra"] = extra
+
+    try:
+        ms.log_run_manifest(run_id, manifest)
+    except Exception:
+        # Manifest logging must not crash the worker
+        return
+
+
+def _log_milestone(
+    agent: CoreAgent,
+    *,
+    run_id: str,
+    goal: str,
+    domain: str,
+    label: str,
+    description: str,
+    level: str = "info",
+    role: Optional[str] = None,
+    cycle_index: Optional[int] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Best effort helper to write milestones for long runs and meta segments."""
+    ms = _get_memory_store(agent)
+    if ms is None or not hasattr(ms, "log_milestone"):
+        return
+    try:
+        ms.log_milestone(
+            run_id=run_id,
+            goal=goal,
+            domain=domain,
+            label=label,
+            description=description,
+            level=level,
+            role=role,
+            cycle_index=cycle_index,
+            extra=extra,
+        )
+    except Exception:
+        return
+
+
+def _update_worker_state(
+    agent: CoreAgent,
+    *,
+    status: str,
+    mode: str,
+    goal: str,
+    domain: str,
+    roles: Optional[List[str]] = None,
+    runtime_profile: Optional[str] = None,
+    stop_rye: Optional[float] = None,
+    max_minutes: Optional[float] = None,
+    run_id: Optional[str] = None,
+    experiment_mode: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Thin wrapper around MemoryStore.update_worker_state."""
+    ms = _get_memory_store(agent)
+    if ms is None or not hasattr(ms, "update_worker_state"):
+        return
+    try:
+        ms.update_worker_state(
+            status=status,
+            mode=mode,
+            goal=goal,
+            domain=domain,
+            roles=roles,
+            runtime_profile=runtime_profile,
+            stop_rye=stop_rye,
+            max_minutes=max_minutes,
+            run_id=run_id,
+            experiment_mode=experiment_mode,
+            extra=extra,
+        )
+    except Exception:
         return
 
 
@@ -316,7 +463,6 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     stop_rye = _env_float("WORKER_STOP_RYE")
 
     runtime_profile_env = os.getenv("WORKER_RUNTIME_PROFILE")
-    # Effective runtime profile: env override, else preset default, else None
     runtime_profile = runtime_profile_env or preset_cfg.get("default_runtime_profile")
 
     role = os.getenv("WORKER_ROLE", "agent")
@@ -339,10 +485,13 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     source_controls = _build_source_controls(config_for_sources)
 
     tool_flags = detect_tools()
+    run_id = _current_run_id("single")
+
     print("=== Autonomous Research Engine - Single Agent Mode ===")
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
     print(f"Role: {role}")
+    print(f"Run id: {run_id}")
     print(f"Runtime profile (env override): {runtime_profile_env or 'None'}")
     print(f"Runtime profile (effective): {runtime_profile or 'None (engine default)'}")
     print(f"Max minutes (explicit): {max_minutes if max_minutes is not None else 'None (profile/preset/forever)'}")
@@ -354,7 +503,34 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     sys.stdout.flush()
 
-    _heartbeat(agent, label="worker_single_start")
+    _update_worker_state(
+        agent,
+        status="starting",
+        mode="single",
+        goal=goal,
+        domain=domain,
+        roles=[role],
+        runtime_profile=runtime_profile,
+        stop_rye=stop_rye,
+        max_minutes=max_minutes,
+        run_id=run_id,
+        experiment_mode="classic_single",
+    )
+    _heartbeat(agent, label="worker_single_start", run_id=run_id)
+
+    _update_worker_state(
+        agent,
+        status="running",
+        mode="single",
+        goal=goal,
+        domain=domain,
+        roles=[role],
+        runtime_profile=runtime_profile,
+        stop_rye=stop_rye,
+        max_minutes=max_minutes,
+        run_id=run_id,
+        experiment_mode="classic_single",
+    )
 
     summaries = agent.run_continuous(
         goal=goal,
@@ -372,7 +548,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         runtime_profile=runtime_profile,
     )
 
-    _heartbeat(agent, label="worker_single_finished")
+    _heartbeat(agent, label="worker_single_finished", run_id=run_id)
 
     print("=== Continuous run finished cleanly ===")
     print(f"Total completed cycles: {len(summaries)}")
@@ -383,9 +559,35 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         print(f"RYE last: {diag.get('rye_last')}")
         print(f"Stability index: {diag.get('stability_index')}")
         print(f"Recovery momentum: {diag.get('recovery_momentum')}")
+        _log_run_manifest(
+            agent,
+            run_id,
+            mode="single",
+            domain=domain,
+            goal=goal,
+            runtime_profile=runtime_profile,
+            stop_rye=stop_rye,
+            max_minutes=max_minutes,
+            summaries=summaries,
+            extra={"engine": "single"},
+        )
     except Exception:
         print("Diagnostics computation failed, see logs for details.")
     sys.stdout.flush()
+
+    _update_worker_state(
+        agent,
+        status="stopped",
+        mode="single",
+        goal=goal,
+        domain=domain,
+        roles=[role],
+        runtime_profile=runtime_profile,
+        stop_rye=stop_rye,
+        max_minutes=max_minutes,
+        run_id=run_id,
+        experiment_mode="classic_single",
+    )
 
 
 def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
@@ -434,10 +636,13 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     source_controls = _build_source_controls(config_for_sources)
 
     tool_flags = detect_tools()
+    run_id = _current_run_id("swarm")
+
     print("=== Autonomous Research Engine - Swarm Mode ===")
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
     print(f"Roles: {roles_list}")
+    print(f"Run id: {run_id}")
     print(f"Runtime profile (env override): {runtime_profile_env or 'None'}")
     print(f"Runtime profile (effective): {runtime_profile or 'None (engine default)'}")
     print(f"Max minutes (explicit): {max_minutes if max_minutes is not None else 'None (profile/preset/forever)'}")
@@ -449,7 +654,34 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     sys.stdout.flush()
 
-    _heartbeat(agent, label="worker_swarm_start")
+    _update_worker_state(
+        agent,
+        status="starting",
+        mode="swarm",
+        goal=goal,
+        domain=domain,
+        roles=roles_list,
+        runtime_profile=runtime_profile,
+        stop_rye=stop_rye,
+        max_minutes=max_minutes,
+        run_id=run_id,
+        experiment_mode="classic_swarm",
+    )
+    _heartbeat(agent, label="worker_swarm_start", run_id=run_id)
+
+    _update_worker_state(
+        agent,
+        status="running",
+        mode="swarm",
+        goal=goal,
+        domain=domain,
+        roles=roles_list,
+        runtime_profile=runtime_profile,
+        stop_rye=stop_rye,
+        max_minutes=max_minutes,
+        run_id=run_id,
+        experiment_mode="classic_swarm",
+    )
 
     summaries = agent.run_swarm_continuous(
         goal=goal,
@@ -467,7 +699,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         runtime_profile=runtime_profile,
     )
 
-    _heartbeat(agent, label="worker_swarm_finished")
+    _heartbeat(agent, label="worker_swarm_finished", run_id=run_id)
 
     print("=== Swarm run finished cleanly ===")
     print(f"Total summaries produced across all roles and rounds: {len(summaries)}")
@@ -478,9 +710,35 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         print(f"RYE last: {diag.get('rye_last')}")
         print(f"Stability index: {diag.get('stability_index')}")
         print(f"Recovery momentum: {diag.get('recovery_momentum')}")
+        _log_run_manifest(
+            agent,
+            run_id,
+            mode="swarm",
+            domain=domain,
+            goal=goal,
+            runtime_profile=runtime_profile,
+            stop_rye=stop_rye,
+            max_minutes=max_minutes,
+            summaries=summaries,
+            extra={"engine": "swarm", "roles": roles_list},
+        )
     except Exception:
         print("Diagnostics computation failed, see logs for details.")
     sys.stdout.flush()
+
+    _update_worker_state(
+        agent,
+        status="stopped",
+        mode="swarm",
+        goal=goal,
+        domain=domain,
+        roles=roles_list,
+        runtime_profile=runtime_profile,
+        stop_rye=stop_rye,
+        max_minutes=max_minutes,
+        run_id=run_id,
+        experiment_mode="classic_swarm",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -636,6 +894,7 @@ def _adjust_phase_from_stats(
         - If RYE is very low or trending down, shorten the next segment and lower stop_rye.
         - If RYE is healthy or trending up, keep or extend the next segment and raise stop_rye a bit.
     """
+    _ = stats  # placeholder for future use
     base_target = float(phase_cfg.get("target_minutes", 20.0))
     min_minutes = float(phase_cfg.get("min_minutes", 5.0))
     max_minutes = float(phase_cfg.get("max_minutes", base_target))
@@ -734,9 +993,12 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     source_controls = _build_source_controls(config_for_sources)
 
     tool_flags = detect_tools()
+    run_id = _current_run_id("meta")
+
     print("=== Autonomous Research Engine - Meta Controller Mode (Option C) ===")
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
+    print(f"Run id: {run_id}")
     print(f"Preferred mode: {preferred_mode}")
     print(f"Total macro budget (minutes): {total_budget_minutes}")
     print(f"Max meta segments: {meta_max_segments_int}")
@@ -748,7 +1010,20 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     sys.stdout.flush()
 
-    _heartbeat(agent, label="worker_meta_start")
+    _update_worker_state(
+        agent,
+        status="starting",
+        mode="meta",
+        goal=goal,
+        domain=domain,
+        roles=None,
+        runtime_profile=runtime_profile_env,
+        stop_rye=stop_rye_env,
+        max_minutes=total_budget_minutes,
+        run_id=run_id,
+        experiment_mode="meta_controller",
+    )
+    _heartbeat(agent, label="worker_meta_start", run_id=run_id)
 
     meta_plan = _initial_meta_plan(
         goal=goal,
@@ -766,6 +1041,20 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         roles_for_swarm: Sequence[str] = agent.get_agent_roles()
     else:
         roles_for_swarm = roles_env
+
+    _update_worker_state(
+        agent,
+        status="running",
+        mode="meta",
+        goal=goal,
+        domain=domain,
+        roles=list(roles_for_swarm),
+        runtime_profile=runtime_profile_env,
+        stop_rye=stop_rye_env,
+        max_minutes=total_budget_minutes,
+        run_id=run_id,
+        experiment_mode="meta_controller",
+    )
 
     for seg_index in range(meta_max_segments_int):
         time_left = total_budget_minutes - total_elapsed
@@ -881,13 +1170,33 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         print(f"        total elapsed minutes: {total_elapsed:.2f} / {total_budget_minutes:.2f}")
         sys.stdout.flush()
 
-        _heartbeat(agent, label="worker_meta_segment")
+        _log_milestone(
+            agent,
+            run_id=run_id,
+            goal=goal,
+            domain=domain,
+            label=f"meta_segment_{seg_index + 1}",
+            description=(
+                f"Phase {phase_name} ({phase_mode}) finished with avg RYE {seg_stats['avg_rye']} "
+                f"and stability {seg_stats['stability']}."
+            ),
+            level="info",
+            extra={
+                "segment_index": seg_index + 1,
+                "phase_mode": phase_mode,
+                "runtime_profile": phase_profile,
+                "minutes_requested": effective_minutes,
+                "segment_stats": seg_stats,
+            },
+        )
+
+        _heartbeat(agent, label="worker_meta_segment", run_id=run_id)
 
         if recent_avg_rye is not None and recent_avg_rye < 0.01 and total_elapsed > total_budget_minutes * 0.6:
             print("[Meta] RYE collapsed and most of the budget is used. Stopping early.")
             break
 
-    _heartbeat(agent, label="worker_meta_finished")
+    _heartbeat(agent, label="worker_meta_finished", run_id=run_id)
 
     total_segments = len(segments_run)
     total_summaries = sum(len(seg["summaries"]) for seg in segments_run)
@@ -898,6 +1207,50 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Final smoothed recent RYE: {recent_avg_rye}")
     print(f"Total elapsed minutes (approx): {total_elapsed:.2f} / {total_budget_minutes:.2f}")
     sys.stdout.flush()
+
+    # Build a combined history for manifest level diagnostics
+    combined_history: List[Dict[str, Any]] = []
+    for seg in segments_run:
+        combined_history.extend(seg.get("summaries", []))
+
+    _log_run_manifest(
+        agent,
+        run_id,
+        mode="meta",
+        domain=domain,
+        goal=goal,
+        runtime_profile=runtime_profile_env,
+        stop_rye=stop_rye_env,
+        max_minutes=total_budget_minutes,
+        summaries=combined_history,
+        extra={
+            "engine": "meta",
+            "segments": [
+                {
+                    "phase": seg.get("phase"),
+                    "mode": seg.get("mode"),
+                    "runtime_profile": seg.get("runtime_profile"),
+                    "minutes_requested": seg.get("minutes_requested"),
+                    "segment_items": len(seg.get("summaries", [])),
+                }
+                for seg in segments_run
+            ],
+        },
+    )
+
+    _update_worker_state(
+        agent,
+        status="stopped",
+        mode="meta",
+        goal=goal,
+        domain=domain,
+        roles=list(roles_for_swarm),
+        runtime_profile=runtime_profile_env,
+        stop_rye=stop_rye_env,
+        max_minutes=total_budget_minutes,
+        run_id=run_id,
+        experiment_mode="meta_controller",
+    )
 
 
 # ---------------------------------------------------------------------------
