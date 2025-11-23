@@ -25,8 +25,43 @@ Backwards compatibility:
 """
 
 from __future__ import annotations
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 import statistics
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _safe_float(value: Any) -> Optional[float]:
+    """Convert to float if numeric, otherwise return None."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def normalize_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Normalize history to only entries that contain numeric RYE.
+
+    This makes downstream metrics more robust and predictable for long runs
+    where some cycles might be missing RYE or contain partial data.
+    """
+    if not isinstance(history, list):
+        return []
+
+    norm: List[Dict[str, Any]] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        v = _safe_float(entry.get("RYE"))
+        if v is None:
+            continue
+        # Store a shallow copy with normalized RYE value
+        e = dict(entry)
+        e["RYE"] = v
+        norm.append(e)
+    return norm
 
 
 # ---------------------------------------------------------------------------
@@ -128,14 +163,15 @@ def compute_energy(
 # ---------------------------------------------------------------------------
 
 def compute_rye(delta_r: float, energy_e: float) -> float:
-    """RYE = ΔR / E."""
-    if energy_e <= 0:
+    """RYE = ΔR / E, with a defensive zero floor for bad E."""
+    e = float(energy_e)
+    if e <= 0:
         return 0.0
-    return float(delta_r) / float(energy_e)
+    return float(delta_r) / e
 
 
 # ---------------------------------------------------------------------------
-# Rolling RYE
+# Rolling RYE (mean)
 # ---------------------------------------------------------------------------
 
 def rolling_rye(history: List[Dict[str, Any]], window: int = 10) -> Optional[float]:
@@ -143,12 +179,12 @@ def rolling_rye(history: List[Dict[str, Any]], window: int = 10) -> Optional[flo
     if not history or window <= 0:
         return None
 
-    recent = history[-window:]
-    vals = [
-        float(entry["RYE"])
-        for entry in recent
-        if isinstance(entry.get("RYE"), (int, float))
-    ]
+    norm = normalize_history(history)
+    if not norm:
+        return None
+
+    recent = norm[-window:]
+    vals = [float(entry["RYE"]) for entry in recent]
 
     if not vals:
         return None
@@ -157,16 +193,43 @@ def rolling_rye(history: List[Dict[str, Any]], window: int = 10) -> Optional[flo
 
 
 # ---------------------------------------------------------------------------
+# Robust rolling RYE (median style)
+# ---------------------------------------------------------------------------
+
+def robust_rolling_rye(history: List[Dict[str, Any]], window: int = 10) -> Optional[float]:
+    """
+    Median based rolling RYE.
+
+    This is more robust to occasional spikes or outliers, and useful
+    for noisy long runs with irregular repair bursts.
+    """
+    if not history or window <= 0:
+        return None
+
+    norm = normalize_history(history)
+    if not norm:
+        return None
+
+    recent = norm[-window:]
+    vals = [float(entry["RYE"]) for entry in recent]
+
+    if not vals:
+        return None
+
+    return statistics.median(vals)
+
+
+# ---------------------------------------------------------------------------
 # Median RYE - Noise Resistant
 # ---------------------------------------------------------------------------
 
 def median_rye(history: List[Dict[str, Any]]) -> Optional[float]:
     """Median RYE across all cycles, robust to outliers."""
-    vals = [
-        float(e["RYE"])
-        for e in history
-        if isinstance(e.get("RYE"), (int, float))
-    ]
+    norm = normalize_history(history)
+    if not norm:
+        return None
+
+    vals = [float(e["RYE"]) for e in norm]
     if not vals:
         return None
     return statistics.median(vals)
@@ -184,16 +247,17 @@ def efficiency_trend(history: List[Dict[str, Any]]) -> Optional[float]:
     Negative  -> declining efficiency
     Near zero -> flat or noisy
     """
-    n = len(history)
+    norm = normalize_history(history)
+    n = len(norm)
     if n < 4:
         return None
 
     mid = n // 2
-    old = history[:mid]
-    recent = history[mid:]
+    old = norm[:mid]
+    recent = norm[mid:]
 
     def _avg(h: List[Dict[str, Any]]) -> Optional[float]:
-        vals = [float(e["RYE"]) for e in h if isinstance(e.get("RYE"), (int, float))]
+        vals = [float(e["RYE"]) for e in h]
         return sum(vals) / len(vals) if vals else None
 
     avg_old = _avg(old)
@@ -216,19 +280,21 @@ def regression_rye_slope(history: List[Dict[str, Any]]) -> Optional[float]:
     Returns:
         slope (float) or None if not enough data.
     """
+    norm = normalize_history(history)
+    if len(norm) < 4:
+        return None
+
     xs: List[float] = []
     ys: List[float] = []
 
-    for i, entry in enumerate(history):
-        v = entry.get("RYE")
-        if isinstance(v, (int, float)):
-            xs.append(float(i))
-            ys.append(float(v))
-
-    if len(xs) < 4:
-        return None
+    for i, entry in enumerate(norm):
+        xs.append(float(i))
+        ys.append(float(entry["RYE"]))
 
     n = len(xs)
+    if n < 2:
+        return None
+
     mean_x = sum(xs) / n
     mean_y = sum(ys) / n
 
@@ -252,10 +318,11 @@ def stability_index(history: List[Dict[str, Any]]) -> Optional[float]:
     1.0 = perfectly stable improvements
     0.0 = chaotic swings
     """
-    vals = [float(e["RYE"]) for e in history if isinstance(e.get("RYE"), (int, float))]
-    if len(vals) < 4:
+    norm = normalize_history(history)
+    if len(norm) < 4:
         return None
 
+    vals = [float(e["RYE"]) for e in norm]
     mean = sum(vals) / len(vals)
     var = statistics.pvariance(vals)
 
@@ -283,7 +350,7 @@ def recovery_momentum(history: List[Dict[str, Any]]) -> Optional[float]:
     slope = regression_rye_slope(history)
     if slope is None:
         return None
-    # Simple scaling to make the value more interpretable
+    # Simple scaling to make the value more interpretable and non negative
     return max(slope * 10.0, 0.0)
 
 
@@ -320,6 +387,50 @@ def apply_domain_weight(rye_value: float, domain: Optional[str] = None) -> float
     factor = multipliers.get(domain.lower(), 1.0)
     result = float(rye_value) * factor
     return result
+
+
+# ---------------------------------------------------------------------------
+# Distribution Shape: Percentiles
+# ---------------------------------------------------------------------------
+
+def rye_percentiles(
+    history: List[Dict[str, Any]],
+    *,
+    q_low: float = 0.1,
+    q_mid: float = 0.5,
+    q_high: float = 0.9,
+) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+    """
+    Compute approximate low, median, and high RYE percentiles.
+
+    This gives you a quick sense of distribution shape:
+        low  -> pessimistic floor
+        mid  -> central tendency (usually close to median_rye)
+        high -> optimistic ceiling
+    """
+    norm = normalize_history(history)
+    if len(norm) == 0:
+        return None, None, None
+
+    vals = sorted(float(e["RYE"]) for e in norm)
+    n = len(vals)
+    if n == 0:
+        return None, None, None
+
+    def _percentile(arr: List[float], q: float) -> float:
+        q_clamped = min(max(q, 0.0), 1.0)
+        if n == 1:
+            return arr[0]
+        idx = q_clamped * (n - 1)
+        i0 = int(idx)
+        i1 = min(i0 + 1, n - 1)
+        frac = idx - i0
+        return arr[i0] * (1.0 - frac) + arr[i1] * frac
+
+    low = _percentile(vals, q_low)
+    mid = _percentile(vals, q_mid)
+    high = _percentile(vals, q_high)
+    return low, mid, high
 
 
 # ---------------------------------------------------------------------------
@@ -393,15 +504,15 @@ def aggregate_swarm_round(
     rye_weighted_vals: List[float] = []
 
     for s in role_summaries:
-        v = s.get("RYE")
-        if isinstance(v, (int, float)):
-            rye_vals.append(float(v))
+        v = _safe_float(s.get("RYE"))
+        if v is not None:
+            rye_vals.append(v)
 
-        vw = s.get("RYE_weighted")
-        if isinstance(vw, (int, float)):
-            rye_weighted_vals.append(float(vw))
-        elif isinstance(v, (int, float)) and domain is not None:
-            rye_weighted_vals.append(apply_domain_weight(float(v), domain))
+        vw = _safe_float(s.get("RYE_weighted"))
+        if vw is not None:
+            rye_weighted_vals.append(vw)
+        elif v is not None and domain is not None:
+            rye_weighted_vals.append(apply_domain_weight(v, domain))
 
     result: Dict[str, Any] = {
         "roles_count": len(role_summaries),
@@ -441,22 +552,30 @@ def build_run_diagnostics(
           "rye_median": Optional[float],
           "rye_last": Optional[float],
           "rolling_rye": Optional[float],
+          "robust_rolling_rye": Optional[float],
           "trend_simple": Optional[float],
           "trend_slope": Optional[float],
           "stability_index": Optional[float],
           "recovery_momentum": Optional[float],
+          "low_percentile": Optional[float],
+          "mid_percentile": Optional[float],
+          "high_percentile": Optional[float],
           "domain": Optional[str],
         }
     """
-    count = len(history)
-    rolling_val = rolling_rye(history, window=window)
-    med_val = median_rye(history)
-    trend_val = efficiency_trend(history)
-    slope_val = regression_rye_slope(history)
-    stab_val = stability_index(history)
-    rec_val = recovery_momentum(history)
+    norm = normalize_history(history)
+    count = len(norm)
 
-    rye_vals = [float(e["RYE"]) for e in history if isinstance(e.get("RYE"), (int, float))]
+    rolling_val = rolling_rye(norm, window=window)
+    robust_rolling_val = robust_rolling_rye(norm, window=window)
+    med_val = median_rye(norm)
+    trend_val = efficiency_trend(norm)
+    slope_val = regression_rye_slope(norm)
+    stab_val = stability_index(norm)
+    rec_val = recovery_momentum(norm)
+    low_p, mid_p, high_p = rye_percentiles(norm)
+
+    rye_vals = [float(e["RYE"]) for e in norm]
     rye_avg = sum(rye_vals) / len(rye_vals) if rye_vals else None
     rye_last = rye_vals[-1] if rye_vals else None
 
@@ -466,10 +585,14 @@ def build_run_diagnostics(
         "rye_median": med_val,
         "rye_last": rye_last,
         "rolling_rye": rolling_val,
+        "robust_rolling_rye": robust_rolling_val,
         "trend_simple": trend_val,
         "trend_slope": slope_val,
         "stability_index": stab_val,
         "recovery_momentum": rec_val,
+        "low_percentile": low_p,
+        "mid_percentile": mid_p,
+        "high_percentile": high_p,
     }
 
     if domain is not None:
