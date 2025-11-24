@@ -1,9 +1,9 @@
 """Implementation of the TGRM loop for the research agent.
 
 This module defines a `TGRMLoop` class that encapsulates the core logic
-of the agent's Targeted Gradient Repair Mechanism (TGRM). The loop iterates
-through phases of testing, detecting issues, repairing them, and verifying
-improvements. It interacts with the memory store and research tools.
+of the agent's Targeted Gradient Repair Mechanism (TGRM). The loop runs
+full reparodynamic cycles for a single research goal and returns both a
+machine friendly log and a human summary for each cycle.
 
 Reparodynamics view
 -------------------
@@ -12,13 +12,17 @@ The agent is treated as a reparodynamic system:
       while spending as little energy as possible.
     - delta_R measures improvement; E measures cost; RYE = delta_R / E is the
       core efficiency metric.
+    - Short term RYE gradients, equilibrium labels, and stability scores are
+      computed from recent history to support long run autonomy.
 
 TGRM phases (implemented below)
 -------------------------------
-    Test   : evaluate current notes / state
-    Detect : find gaps, TODOs, unanswered questions
-    Repair : perform targeted web / PubMed / Semantic Scholar actions
-    Verify : re-test, compute delta_R and RYE, and log a cycle entry
+    Test   : evaluate current notes and current state for this goal.
+    Detect : find gaps, TODOs, unanswered questions, and contradictions.
+    Repair : perform targeted web and scientific actions (web, PubMed,
+             Semantic Scholar, PDF ingestion) using the shared Toolbelt.
+    Verify : re test, compute delta_R and RYE, update history, and log a
+             detailed cycle entry in the MemoryStore.
 
 Levels and Swarms
 -----------------
@@ -30,8 +34,9 @@ The loop is aware of:
 
     - role: "agent", "researcher", "critic", "planner",
             "synthesizer", "explorer", etc.
-      Roles are used to bias how many issues are repaired per cycle
-      and how aggressive the research is.
+      Roles bias how many issues are repaired per cycle and how aggressive
+      external research should be, so a swarm can mix explorers, critics,
+      planners, and integrators safely.
 
 Domain awareness
 ----------------
