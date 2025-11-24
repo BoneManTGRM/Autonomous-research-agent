@@ -10,19 +10,19 @@ Reparodynamics view
 The agent is treated as a reparodynamic system:
     - Each cycle tries to reduce defects (gaps, TODOs, unanswered questions)
       while spending as little energy as possible.
-    - ΔR measures improvement; E measures cost; RYE = ΔR / E is the core
-      efficiency metric.
+    - delta_R measures improvement; E measures cost; RYE = delta_R / E is the
+      core efficiency metric.
 
 TGRM phases (implemented below)
 -------------------------------
     Test   : evaluate current notes / state
     Detect : find gaps, TODOs, unanswered questions
     Repair : perform targeted web / PubMed / Semantic Scholar actions
-    Verify : re-test, compute ΔR and RYE, and log a cycle entry
+    Verify : re-test, compute delta_R and RYE, and log a cycle entry
 
 Levels and Swarms
 -----------------
-The loop is now aware of:
+The loop is aware of:
     - tgrm_level (1, 2, 3) via config["tgrm_level"] (default 3)
         Level 1: basic defect detection and repair.
         Level 2: richer targeted research on questions and TODOs.
@@ -35,7 +35,7 @@ The loop is now aware of:
 
 Domain awareness
 ----------------
-The loop now uses the `domain` tag ("general", "longevity", "math", ...)
+The loop uses the `domain` tag ("general", "longevity", "math", ...)
 to surface higher level issues such as:
     - missing_biomarkers (longevity)
     - missing_mechanisms (longevity)
@@ -45,16 +45,20 @@ to surface higher level issues such as:
 These appear as additional issue codes and pass through the same
 TGRM pipeline without breaking any existing behavior.
 
-Engine worker / 90 day architecture
------------------------------------
+Reparodynamic 90 day architecture
+---------------------------------
 This module is designed to be called by:
-    - CoreAgent.run_cycle(...) for single cycles
-    - A long running engine worker that orchestrates many cycles
+    - CoreAgent.run_cycle(...) for single cycles.
+    - Continuous runners and swarm controllers for multi day and multi
+      agent runs.
 
 To support that:
-    - Each run_cycle returns both a machine log and a human summary.
+    - Each run_cycle returns a machine log and a human summary.
     - Both carry delta_R, energy_E, RYE, hypotheses, citations, and
-      candidate_interventions for cure or treatment style reports.
+      candidate_interventions.
+    - Extra fields expose RYE gradients, equilibrium status, and a
+      breakthrough_score that higher level components can track over
+      weeks or months.
 """
 
 from __future__ import annotations
@@ -73,7 +77,13 @@ from .tools import Toolbelt, ToolUsage
 
 
 class TGRMLoop:
-    """Encapsulate the TGRM loop logic for one research cycle."""
+    """Encapsulate the TGRM loop logic for one research cycle.
+
+    This class is intentionally self contained and stateless between runs
+    except for a few small caches such as _seen_questions. All long run
+    state is stored in the MemoryStore so that CoreAgent and engine_worker
+    can orchestrate continuous and swarm runs safely.
+    """
 
     def __init__(
         self,
@@ -84,7 +94,7 @@ class TGRMLoop:
         self.memory_store = memory_store
         self.config = config or {}
 
-        # Shared toolbelt (browser + sandbox + data pipelines)
+        # Shared toolbelt (browser + sandbox + data pipelines).
         # If CoreAgent passes one, we share it. Otherwise we create a local instance.
         self.tools: Toolbelt = tools if tools is not None else Toolbelt()
 
@@ -109,6 +119,9 @@ class TGRMLoop:
         except Exception:
             self.tgrm_level = 3
 
+        # Sliding window size for short term RYE gradient estimates
+        self.rye_window_size: int = int(self.config.get("rye_window_size", 20))
+
     # ------------------------------------------------------------------
     # Small helper for token estimation (for energy accounting)
     # ------------------------------------------------------------------
@@ -118,6 +131,250 @@ class TGRMLoop:
             return 0
         # Rough heuristic: about 4 characters per token
         return max(1, len(text) // 4)
+
+    # ------------------------------------------------------------------
+    # History helpers for RYE gradients and equilibrium status
+    # ------------------------------------------------------------------
+    def _get_recent_history_for_goal(
+        self,
+        goal: str,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Return recent history rows for this goal if the store supports it.
+
+        Falls back to empty list if not implemented.
+        """
+        try:
+            if hasattr(self.memory_store, "get_cycle_history_for_goal"):
+                rows = self.memory_store.get_cycle_history_for_goal(goal, limit=limit)  # type: ignore[attr-defined]
+                if isinstance(rows, list):
+                    return rows
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self.memory_store, "get_cycle_history"):
+                full = self.memory_store.get_cycle_history()  # type: ignore[attr-defined]
+                if isinstance(full, list):
+                    filtered = [r for r in full if r.get("goal") == goal]
+                    return filtered[-limit:]
+        except Exception:
+            pass
+
+        return []
+
+    def _compute_rye_gradient_and_equilibrium(
+        self,
+        goal: str,
+        current_rye: Optional[float],
+        delta_r: float,
+        energy_e: float,
+        domain: str,
+    ) -> Dict[str, Any]:
+        """Compute short term RYE gradient, equilibrium status, and stability score.
+
+        This uses recent history from MemoryStore but never raises even if
+        history is missing. It is meant to give higher level components
+        an approximate sense of whether the system is:
+            - climbing (improving RYE)
+            - plateaued (near equilibrium)
+            - oscillating or unstable
+        """
+        result: Dict[str, Any] = {
+            "rye_gradient": None,
+            "rye_window_mean": None,
+            "rye_window_std": None,
+            "equilibrium_label": "unknown",
+            "equilibrium_score": None,
+            "oscillation_score": None,
+        }
+
+        if current_rye is None:
+            return result
+
+        history = self._get_recent_history_for_goal(goal, limit=max(self.rye_window_size, 10))
+        rye_values: List[float] = []
+        for row in history:
+            val = row.get("RYE") or row.get("rye") or row.get("rye_value")
+            if isinstance(val, (int, float)):
+                rye_values.append(float(val))
+
+        # Include the current cycle in the window
+        rye_values.append(float(current_rye))
+        if not rye_values:
+            return result
+
+        # Sliding window statistics
+        window = rye_values[-self.rye_window_size :]
+        n = len(window)
+        mean_val = sum(window) / n
+        var_val = 0.0
+        if n > 1:
+            var_val = sum((x - mean_val) ** 2 for x in window) / (n - 1)
+        std_val = var_val ** 0.5
+
+        result["rye_window_mean"] = mean_val
+        result["rye_window_std"] = std_val
+
+        # Simple gradient estimate using last and first in window
+        if n > 1:
+            gradient = (window[-1] - window[0]) / max(1, n - 1)
+        else:
+            gradient = 0.0
+        result["rye_gradient"] = gradient
+
+        # Equilibrium heuristics:
+        #   - high mean RYE with low variance -> stable high equilibrium
+        #   - moderate mean with low variance -> stable plateau
+        #   - low mean or high variance -> unstable or oscillating
+        low_std_threshold = 0.08
+        high_std_threshold = 0.25
+        high_mean_threshold = 0.82
+        mid_mean_threshold = 0.6
+
+        equilibrium_score = 0.0
+        oscillation_score = 0.0
+        label = "exploring"
+
+        if mean_val >= high_mean_threshold and std_val <= low_std_threshold:
+            label = "high_equilibrium"
+            equilibrium_score = 0.9
+        elif mean_val >= mid_mean_threshold and std_val <= low_std_threshold:
+            label = "plateau_equilibrium"
+            equilibrium_score = 0.7
+        elif std_val >= high_std_threshold:
+            label = "oscillating"
+            oscillation_score = min(1.0, std_val / 0.6)
+        elif mean_val < 0.3:
+            label = "low_efficiency"
+        else:
+            label = "transient"
+
+        # Tiny domain adjustment: longevity work often tolerates lower RYE
+        # because primary evidence is harder to obtain. Math expects higher.
+        dom_lower = (domain or "general").lower()
+        if dom_lower == "longevity":
+            equilibrium_score *= 1.05
+        elif dom_lower == "math":
+            equilibrium_score *= 0.95
+
+        equilibrium_score = max(0.0, min(1.0, equilibrium_score))
+        oscillation_score = max(0.0, min(1.0, oscillation_score))
+
+        result["equilibrium_label"] = label
+        result["equilibrium_score"] = equilibrium_score
+        result["oscillation_score"] = oscillation_score
+
+        return result
+
+    def _compute_breakthrough_score(
+        self,
+        goal: str,
+        domain: str,
+        current_rye: Optional[float],
+        delta_r: float,
+        energy_e: float,
+        equilibrium_info: Dict[str, Any],
+        issue_code_counts_before: Dict[str, int],
+        issue_code_counts_after: Dict[str, int],
+        hypotheses: List[Dict[str, Any]],
+        citations: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Heuristic breakthrough score on a 0 to 1 scale.
+
+        This is not a claim of real discovery. It is a reparodynamic
+        internal signal indicating whether the system believes it has
+        crossed a meaningful threshold for:
+            - sustained RYE
+            - reduced open issues
+            - rich and diverse citations
+            - a focused, small set of high value hypotheses
+        """
+        info: Dict[str, Any] = {
+            "breakthrough_score": None,
+            "flags": [],
+        }
+
+        if current_rye is None:
+            info["breakthrough_score"] = 0.0
+            return info
+
+        score = 0.0
+        flags: List[str] = []
+
+        rye_val = float(current_rye)
+        mean_window = equilibrium_info.get("rye_window_mean") or rye_val
+        std_window = equilibrium_info.get("rye_window_std") or 0.0
+
+        # 1. Current and window RYE
+        if rye_val >= 0.85:
+            score += 0.25
+            flags.append("high_current_rye")
+        elif rye_val >= 0.7:
+            score += 0.15
+
+        if mean_window >= 0.8 and std_window <= 0.15:
+            score += 0.25
+            flags.append("sustained_high_rye")
+        elif mean_window >= 0.65 and std_window <= 0.2:
+            score += 0.15
+
+        # 2. Issue reduction
+        total_before = sum(issue_code_counts_before.values()) or 0
+        total_after = sum(issue_code_counts_after.values()) or 0
+
+        if total_before > 0:
+            reduction = max(0.0, float(total_before - total_after)) / float(total_before)
+        else:
+            reduction = 0.0
+
+        if reduction >= 0.7 and total_after <= 3:
+            score += 0.2
+            flags.append("large_issue_reduction")
+        elif reduction >= 0.4:
+            score += 0.1
+
+        # 3. Citation richness
+        unique_sources = set()
+        for c in citations:
+            key = (c.get("source"), c.get("url"))
+            unique_sources.add(key)
+        source_count = len(unique_sources)
+
+        if source_count >= 50:
+            score += 0.15
+            flags.append("rich_citation_base")
+        elif source_count >= 20:
+            score += 0.08
+
+        # 4. Hypothesis focus
+        hyp_count = len(hypotheses)
+        if 1 <= hyp_count <= 5:
+            score += 0.1
+            flags.append("focused_hypothesis_set")
+        elif hyp_count > 10:
+            score -= 0.05
+
+        # 5. Equilibrium label
+        eq_label = equilibrium_info.get("equilibrium_label")
+        if eq_label == "high_equilibrium":
+            score += 0.1
+        elif eq_label == "oscillating":
+            score -= 0.05
+
+        # Domain adjustments
+        dom_lower = domain.lower()
+        if dom_lower == "longevity":
+            score *= 1.05
+        elif dom_lower == "math":
+            score *= 1.05
+
+        # Clamp and finalize
+        score = max(0.0, min(1.0, score))
+        info["breakthrough_score"] = score
+        info["flags"] = flags
+
+        return info
 
     # ------------------------------------------------------------------
     # Main cycle
@@ -179,7 +436,7 @@ class TGRMLoop:
         total_cycles_for_goal: int = 0
         try:
             if hasattr(self.memory_store, "get_rye_stats"):
-                avg, _min_rye, _max_rye, count = self.memory_store.get_rye_stats(goal=goal)
+                avg, _min_rye, _max_rye, count = self.memory_store.get_rye_stats(goal=goal)  # type: ignore[attr-defined]
                 avg_rye = avg
                 total_cycles_for_goal = count
         except Exception:
@@ -268,7 +525,15 @@ class TGRMLoop:
             citations=citations,
         )
 
-        # Metrics (Reparodynamics: ΔR / E)
+        # Metrics (Reparodynamics: delta_R / E)
+        # We break delta_R into components for richer analysis.
+        delta_r_components = {
+            "issue_reduction": max(0, len(issues) - len(issues_after)),
+            "repairs_applied": len(repair_actions),
+            "hypotheses": len(hypotheses),
+            "sources_used": stats.get("sources_used", 0),
+            "contradictions_resolved": stats.get("contradictions_resolved", 0),
+        }
         delta_r = compute_delta_r(
             issues_before=len(issues),
             issues_after=len(issues_after),
@@ -288,6 +553,29 @@ class TGRMLoop:
             tokens_estimate=tool_usage.approx_tokens,
         )
         rye_value = compute_rye(delta_r, energy_e)
+
+        # RYE gradient and equilibrium status
+        equilibrium_info = self._compute_rye_gradient_and_equilibrium(
+            goal=goal,
+            current_rye=rye_value,
+            delta_r=delta_r,
+            energy_e=energy_e,
+            domain=domain_tag,
+        )
+
+        # Breakthrough score
+        breakthrough_info = self._compute_breakthrough_score(
+            goal=goal,
+            domain=domain_tag,
+            current_rye=rye_value,
+            delta_r=delta_r,
+            energy_e=energy_e,
+            equilibrium_info=equilibrium_info,
+            issue_code_counts_before=issue_code_counts_before,
+            issue_code_counts_after=issue_code_counts_after,
+            hypotheses=hypotheses,
+            citations=citations,
+        )
 
         # Machine facing log
         cycle_summary = {
@@ -320,8 +608,12 @@ class TGRMLoop:
             # Raw stats and metrics
             "stats": stats,
             "delta_R": delta_r,
+            "delta_R_components": delta_r_components,
             "energy_E": energy_e,
             "RYE": rye_value,
+            # RYE gradient and equilibrium/breakthrough
+            "equilibrium": equilibrium_info,
+            "breakthrough": breakthrough_info,
             # Tool usage details for this cycle
             "tool_usage": {
                 "web_calls": tool_usage.web_calls,
@@ -358,6 +650,9 @@ class TGRMLoop:
             "delta_R": delta_r,
             "energy_E": energy_e,
             "RYE": rye_value,
+            "delta_R_components": delta_r_components,
+            "equilibrium": equilibrium_info,
+            "breakthrough": breakthrough_info,
             "notes_added": notes_added,
             "citations": citations,
             "hypotheses": hypotheses,
@@ -380,7 +675,7 @@ class TGRMLoop:
         Level 2:
             - Also track approximate citation density.
         Level 3:
-            - Leave room for per domain diagnostic stats.
+            - Placeholder for per domain diagnostic stats.
         """
         known_notes_count = len(notes)
 
