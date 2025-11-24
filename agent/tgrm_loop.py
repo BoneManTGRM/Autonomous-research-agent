@@ -54,8 +54,8 @@ This module is designed to be called by:
 
 To support that:
     - Each run_cycle returns a machine log and a human summary.
-    - Both carry delta_R, energy_E, RYE, hypotheses, citations, and
-      candidate_interventions.
+    - Both carry delta_R, energy_E, RYE, hypotheses, citations, candidate
+      interventions, and candidate_hypotheses for the discovery stack.
     - Extra fields expose RYE gradients, equilibrium status, and a
       breakthrough_score that higher level components can track over
       weeks or months.
@@ -422,7 +422,8 @@ class TGRMLoop:
             Dict with:
                 {
                   "summary": human facing summary,
-                  "log":     full cycle log
+                  "log":     full cycle log,
+                  "tool_stats": per cycle tool stats
                 }
         """
         src_ctrl = self._normalise_source_controls(source_controls)
@@ -511,11 +512,51 @@ class TGRMLoop:
         has_todos_after = "todo_item" in issues_after
         has_contradictions_after = "contradiction" in issues_after
 
-        # Hypothesis generation
+        # Hypothesis generation (now structured for discovery / learning)
         max_h = 3 if self.tgrm_level == 1 else 5
-        hypotheses = generate_hypotheses(goal, new_notes, citations, max_hypotheses=max_h)
-        for h in hypotheses:
-            self.memory_store.add_hypothesis(goal, h["text"], score=h.get("confidence"))
+        raw_hypotheses = generate_hypotheses(goal, new_notes, citations, max_hypotheses=max_h)
+
+        hypotheses: List[Dict[str, Any]] = []
+        candidate_hypotheses: List[Dict[str, Any]] = []
+
+        for idx, h in enumerate(raw_hypotheses):
+            if isinstance(h, str):
+                text = h
+                conf = None
+            elif isinstance(h, dict):
+                text = str(h.get("text") or h.get("title") or "")
+                conf = h.get("confidence") or h.get("score")
+            else:
+                text = str(h)
+                conf = None
+
+            if not text:
+                continue
+
+            hyp_id = f"h_{cycle_index}_{idx}"
+            hyp_record: Dict[str, Any] = {
+                "id": hyp_id,
+                "title": text[:160],
+                "description": text,
+                "text": text,
+                "confidence": conf,
+                "tags": [domain_tag, "auto_generated"],
+            }
+            hypotheses.append(hyp_record)
+
+            candidate_hypotheses.append(
+                {
+                    "title": hyp_record["title"],
+                    "description": hyp_record["description"],
+                    "tags": hyp_record["tags"],
+                }
+            )
+
+            # Store minimal hypothesis text in MemoryStore for long-run learning
+            try:
+                self.memory_store.add_hypothesis(goal, text, score=conf)
+            except Exception:
+                pass
 
         # Candidate interventions
         candidate_interventions = self._extract_candidate_interventions(
@@ -604,6 +645,7 @@ class TGRMLoop:
             "notes_added": notes_added,
             "citations": citations,
             "hypotheses": hypotheses,
+            "candidate_hypotheses": candidate_hypotheses,
             "candidate_interventions": candidate_interventions,
             # Raw stats and metrics
             "stats": stats,
@@ -656,13 +698,20 @@ class TGRMLoop:
             "notes_added": notes_added,
             "citations": citations,
             "hypotheses": hypotheses,
+            "candidate_hypotheses": candidate_hypotheses,
             "candidate_interventions": candidate_interventions,
             "maintenance_mode": maintenance_mode,
             "tgrm_level": self.tgrm_level,
             "tool_usage": cycle_summary["tool_usage"],
         }
 
-        return {"summary": human_summary, "log": cycle_summary}
+        # Expose stats at the top level so CoreAgent / UI can see them without
+        # digging into the machine log.
+        return {
+            "summary": human_summary,
+            "log": cycle_summary,
+            "tool_stats": stats,
+        }
 
     # ------------------------------------------------------------------
     # TGRM phases
