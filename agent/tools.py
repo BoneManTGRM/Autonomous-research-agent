@@ -1158,3 +1158,70 @@ class Toolbelt:
     def new_usage_tracker(self) -> ToolUsage:
         """Return a fresh ToolUsage object for one cycle."""
         return ToolUsage()
+
+
+# ----------------------------------------------------------
+# TOOL_REGISTRY for engine_worker and capability detection
+# ----------------------------------------------------------
+
+# The engine worker imports TOOL_REGISTRY from agent.tools and checks
+# for keys like "web", "browser", "sandbox", "code_sandbox", etc.
+# We keep the values simple descriptors so other parts of the system
+# can introspect available tools if desired.
+#
+# Only the *keys* are required for detect_tools(); changing these names
+# would change capability detection, so they are chosen to match the
+# sets in engine_worker.detect_tools.
+
+TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
+    # Web / browser capabilities
+    "web": {
+        "kind": "web",
+        "class": BrowserTool,
+        "description": "HTTP/HTML browser and scraper (Playwright + requests fallback).",
+    },
+    "web_search": {
+        "kind": "web",
+        "class": BrowserTool,
+        "description": "Alias for web/browser capability.",
+    },
+    "browser": {
+        "kind": "web",
+        "class": BrowserTool,
+        "description": "Headless browser tool for navigation and scraping.",
+    },
+    "internet": {
+        "kind": "web",
+        "class": BrowserTool,
+        "description": "Alias indicating internet browsing/scraping.",
+    },
+
+    # Code / sandbox capabilities
+    "sandbox": {
+        "kind": "code",
+        "class": CodeSandbox,
+        "description": "Python code sandbox (in-process + subprocess).",
+    },
+    "code_sandbox": {
+        "kind": "code",
+        "class": CodeSandbox,
+        "description": "Alias for Python code sandbox.",
+    },
+    "python_sandbox": {
+        "kind": "code",
+        "class": CodeSandbox,
+        "description": "Alias for Python code sandbox.",
+    },
+    "exec_sandbox": {
+        "kind": "code",
+        "class": CodeSandbox,
+        "description": "Alias for process-isolated Python execution.",
+    },
+
+    # Data pipeline capability
+    "data": {
+        "kind": "data",
+        "class": DataPipelines,
+        "description": "Data loading and SQL helpers for CSV/Excel/Parquet/JSON/SQL.",
+    },
+}
