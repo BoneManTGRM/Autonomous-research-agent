@@ -14,6 +14,10 @@ This module provides a JSON-based persistent storage layer. It stores:
 - run_manifests (compact summaries of long runs)
 - tool_events (per tool usage events)
 - milestones (key run milestones)
+- hypothesis_evolution (how ideas are merged, split, or pruned)
+- option_c_diagnostics (deep AGI-style diagnostics for frontier runs)
+- swarm_contracts (specialization contracts for swarm roles)
+- learning_burst (burst learning state for the TGRM loop)
 
 The memory store acts as a lightweight knowledge base for the agent and is
 referenced each cycle to retrieve prior context and to persist new findings.
@@ -25,11 +29,13 @@ Reparodynamics interpretation:
     becomes a semantic, time aware repair substrate.
 
     The run_state, worker_state, watchdog, goal_index, events, discoveries,
-    run_manifests, tool_events, and milestones sections act as a meta layer:
-    they record how the system itself is running so that the agent
-    can restart and continue repair with minimal extra energy and
-    give swarm level analytics (per role and per goal), plus a
-    running log of key cure and treatment candidates and tool behavior.
+    run_manifests, tool_events, milestones, hypothesis_evolution,
+    option_c_diagnostics, swarm_contracts, and learning_burst sections act
+    as a meta layer: they record how the system itself is running so that
+    the agent can restart and continue repair with minimal extra energy
+    and give swarm level analytics (per role and per goal), plus a running
+    log of key cure and treatment candidates, tool behavior, and learning
+    curve shaping.
 """
 
 from __future__ import annotations
@@ -81,20 +87,24 @@ class MemoryStore:
     """A lightweight persistent memory store using a JSON file.
 
     The JSON file is structured with several top level keys:
-        - "notes":         free form text notes with metadata
-        - "cycles":        logs of each research cycle
-        - "hypotheses":    generated hypotheses for each goal
-        - "citations":     structured citation objects from web or papers
-        - "biomarkers":    placeholder for anti aging or lab data
-        - "run_state":     metadata for long running autonomous sessions
-        - "worker_state":  live background worker status
-        - "watchdog":      timestamps and counters for heartbeats
-        - "goal_index":    compact per goal stats, including per role counts
-        - "events":        streaming event log
-        - "discoveries":   cure, treatment, mechanism, and other key finds
-        - "run_manifests": compact per run summaries for reports
-        - "tool_events":   low level tool usage events
-        - "milestones":    key run milestones
+        - "notes":               free form text notes with metadata
+        - "cycles":              logs of each research cycle
+        - "hypotheses":          generated hypotheses for each goal
+        - "citations":           structured citation objects from web or papers
+        - "biomarkers":          placeholder for anti aging or lab data
+        - "run_state":           metadata for long running autonomous sessions
+        - "worker_state":        live background worker status
+        - "watchdog":            timestamps and counters for heartbeats
+        - "goal_index":          compact per goal stats, including per role counts
+        - "events":              streaming event log
+        - "discoveries":         cure, treatment, mechanism, and other key finds
+        - "run_manifests":       compact per run summaries for reports
+        - "tool_events":         low level tool usage events
+        - "milestones":          key run milestones
+        - "learning_burst":      burst learning state for TGRM
+        - "hypothesis_evolution": evolution of ideas over time
+        - "option_c_diagnostics": deep diagnostics for Option C frontier runs
+        - "swarm_contracts":     specialization contracts for swarm roles
 
     In memory (non persistent) vector memory may also be attached to
     support semantic search and time decayed retrieval if the optional
@@ -105,13 +115,18 @@ class MemoryStore:
         - atomic write strategy to greatly reduce corruption risk
         - goal_index streaming stats for fast RYE summaries
         - worker_state and events for live status and debugging
-        - bounded growth of logs (notes, cycles, hypotheses, citations, events, tool_events)
+        - bounded growth of logs (notes, cycles, hypotheses, citations,
+          events, tool_events, hypothesis_evolution, option_c_diagnostics,
+          swarm_contracts)
         - per run manifests and milestones for report generation
 
     Advanced learning layer:
         - goal_index tracks best RYE, last RYE, and basic phase hints
         - optional advanced RYE metrics for learning curves
         - learning profiles and leaderboards for goals and roles
+        - learning_burst supports temporary high intensity learning modes
+        - hypothesis_evolution tracks how ideas refine or merge
+        - option_c_diagnostics and swarm_contracts support frontier AGI runs
     """
 
     def __init__(self, memory_file: str) -> None:
@@ -138,6 +153,14 @@ class MemoryStore:
             "run_manifests": {},  # run_id -> manifest dict
             "tool_events": [],    # per tool usage events
             "milestones": [],     # milestones over long runs
+            "learning_burst": {
+                "active": False,
+                "cycles_remaining": None,
+                "burst_index": None,
+            },
+            "hypothesis_evolution": [],
+            "option_c_diagnostics": [],
+            "swarm_contracts": [],
             "schema_version": MEMORY_SCHEMA_VERSION,
         }
         self._load()
@@ -172,6 +195,10 @@ class MemoryStore:
             "run_manifests": {},
             "tool_events": [],
             "milestones": [],
+            "learning_burst": {},
+            "hypothesis_evolution": [],
+            "option_c_diagnostics": [],
+            "swarm_contracts": [],
         }
         for key, default in defaults.items():
             if key not in self._data:
@@ -187,10 +214,13 @@ class MemoryStore:
                     "discoveries",
                     "tool_events",
                     "milestones",
+                    "hypothesis_evolution",
+                    "option_c_diagnostics",
+                    "swarm_contracts",
                 ):
                     if not isinstance(self._data.get(key), list):
                         self._data[key] = []
-                elif key in ("run_manifests", "run_state", "worker_state", "watchdog", "goal_index"):
+                elif key in ("run_manifests", "run_state", "worker_state", "watchdog", "goal_index", "learning_burst"):
                     if not isinstance(self._data.get(key), dict):
                         self._data[key] = {}
         # Ensure schema version is present
@@ -220,6 +250,14 @@ class MemoryStore:
                     "run_manifests": {},
                     "tool_events": [],
                     "milestones": [],
+                    "learning_burst": {
+                        "active": False,
+                        "cycles_remaining": None,
+                        "burst_index": None,
+                    },
+                    "hypothesis_evolution": [],
+                    "option_c_diagnostics": [],
+                    "swarm_contracts": [],
                     "schema_version": MEMORY_SCHEMA_VERSION,
                 }
 
@@ -319,6 +357,14 @@ class MemoryStore:
             "run_manifests": {},
             "tool_events": [],
             "milestones": [],
+            "learning_burst": {
+                "active": False,
+                "cycles_remaining": None,
+                "burst_index": None,
+            },
+            "hypothesis_evolution": [],
+            "option_c_diagnostics": [],
+            "swarm_contracts": [],
             "schema_version": MEMORY_SCHEMA_VERSION,
         }
         self._save()
@@ -593,6 +639,29 @@ class MemoryStore:
         return [h for h in hyps if h.get("goal") == goal]
 
     # ------------------------------------------------------------------
+    # Hypothesis evolution (merge/split/mutate tracking)
+    # ------------------------------------------------------------------
+    def add_hypothesis_evolution(self, goal: str, evolution: Dict[str, Any]) -> None:
+        """Track evolution of hypotheses for a goal (merge, split, mutate, prune)."""
+        entry = {
+            "timestamp": _utc_now_iso(),
+            "goal": goal,
+            "evolution": evolution,
+        }
+        arr = self._data.setdefault("hypothesis_evolution", [])
+        arr.append(entry)
+        if len(arr) > 5_000:
+            self._data["hypothesis_evolution"] = arr[-5_000:]
+        self._save()
+
+    def get_hypothesis_evolution(self, goal: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Retrieve hypothesis evolution entries, optionally filtered by goal."""
+        entries = self._data.get("hypothesis_evolution", [])
+        if goal is None:
+            return list(entries)
+        return [e for e in entries if e.get("goal") == goal]
+
+    # ------------------------------------------------------------------
     # Citations
     # ------------------------------------------------------------------
     def add_citation(self, goal: str, citation: Dict[str, Any]) -> None:
@@ -747,6 +816,26 @@ class MemoryStore:
                 )
         except Exception:
             pass
+
+        # Learning signals for downstream analysis and TGRM tuning
+        cycle_data.setdefault(
+            "learning_signals",
+            {
+                "delta_notes": cycle_data.get("delta_notes"),
+                "delta_hypotheses": cycle_data.get("delta_hypotheses"),
+                "tool_efficiency": cycle_data.get("tool_efficiency"),
+                "verification_rigidity": (cycle_data.get("verification") or {}).get("rigidity")
+                if isinstance(cycle_data.get("verification"), dict)
+                else None,
+                "novelty_pressure": (cycle_data.get("repair") or {}).get("novelty_pressure")
+                if isinstance(cycle_data.get("repair"), dict)
+                else None,
+                "critic_strength": (cycle_data.get("detect") or {}).get("critic_strength")
+                if isinstance(cycle_data.get("detect"), dict)
+                else None,
+                "burst_mode": cycle_data.get("burst_mode"),
+            },
+        )
 
         self._save()
 
@@ -1336,6 +1425,64 @@ class MemoryStore:
                 pass
 
         return result
+
+    # ------------------------------------------------------------------
+    # Option C diagnostics (deep telemetry for frontier runs)
+    # ------------------------------------------------------------------
+    def log_option_c_diagnostics(self, run_id: str, diagnostics: Dict[str, Any]) -> None:
+        """Log advanced diagnostics for AGI-style Option C runs."""
+        entry = {
+            "timestamp": _utc_now_iso(),
+            "run_id": run_id,
+            "diagnostics": diagnostics,
+        }
+        arr = self._data.setdefault("option_c_diagnostics", [])
+        arr.append(entry)
+        if len(arr) > 5_000:
+            self._data["option_c_diagnostics"] = arr[-5_000:]
+        self._save()
+
+    def get_option_c_diagnostics(self, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Retrieve Option C diagnostics, optionally filtered by run_id."""
+        arr = self._data.get("option_c_diagnostics", [])
+        if run_id is None:
+            return list(arr)
+        return [d for d in arr if d.get("run_id") == run_id]
+
+    # ------------------------------------------------------------------
+    # Swarm contracts (per role negotiation / specialization)
+    # ------------------------------------------------------------------
+    def log_swarm_contract(self, run_id: str, role: str, contract: Dict[str, Any]) -> None:
+        """Record a swarm contract for a specific logical role."""
+        entry = {
+            "timestamp": _utc_now_iso(),
+            "run_id": run_id,
+            "role": role,
+            "contract": contract,
+        }
+        arr = self._data.setdefault("swarm_contracts", [])
+        arr.append(entry)
+        if len(arr) > 5_000:
+            self._data["swarm_contracts"] = arr[-5_000:]
+        self._save()
+
+    def get_swarm_contracts(
+        self,
+        run_id: Optional[str] = None,
+        role: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve swarm contracts, optionally filtered by run_id and role."""
+        arr = self._data.get("swarm_contracts", [])
+        results: List[Dict[str, Any]] = []
+        for c in arr:
+            if not isinstance(c, dict):
+                continue
+            if run_id is not None and c.get("run_id") != run_id:
+                continue
+            if role is not None and c.get("role") != role:
+                continue
+            results.append(c)
+        return results
 
     # ------------------------------------------------------------------
     # Milestones
