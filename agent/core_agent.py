@@ -316,6 +316,21 @@ class CoreAgent:
         #   }
         self.learned_from_memory: Dict[str, Any] = {}
 
+        # ------------------------------------------------------------------
+        # Agent-level training / learning configuration (added)
+        # ------------------------------------------------------------------
+        # Learning is at the agent level (TGRM + RYE + memory), not model weights.
+        self.learning_enabled: bool = bool(self.config.get("learning_enabled", True))
+        # Minimum cycle history before we trust learned suggestions.
+        self.min_training_history: int = int(self.config.get("min_training_history", 50))
+        if self.min_training_history < 0:
+            self.min_training_history = 0
+
+        # Last training burst summary (short diagnostic/optimization runs).
+        self.training_profile: Dict[str, Any] = {}
+        # Last high-level learning plan produced by optimize_learning_pipeline().
+        self.learning_plan: Dict[str, Any] = {}
+
         self._apply_intelligence_profile()
 
     # ------------------------------------------------------------------
@@ -387,7 +402,7 @@ class CoreAgent:
         except Exception:
             history = []
 
-        if not history:
+        if not history or len(history) < self.min_training_history:
             self.learned_from_memory = learned
             return learned
 
@@ -1896,3 +1911,289 @@ class CoreAgent:
             return results
         except Exception:
             return []
+
+    # ------------------------------------------------------------------
+    # Agent-level training / learning helpers (added)
+    # ------------------------------------------------------------------
+    def get_learning_status(self) -> Dict[str, Any]:
+        """Return a compact view of the agent-level learning state.
+
+        This is useful for the UI or external controllers that want to
+        show:
+
+            - whether learning is enabled
+            - how much history exists
+            - what the last learned suggestions were
+            - what the last training burst looked like
+        """
+        status: Dict[str, Any] = {
+            "learning_enabled": self.learning_enabled,
+            "min_training_history": self.min_training_history,
+            "learned_from_memory": dict(self.learned_from_memory) if self.learned_from_memory else {},
+            "training_profile": dict(self.training_profile) if self.training_profile else {},
+            "learning_plan": dict(self.learning_plan) if self.learning_plan else {},
+        }
+        try:
+            history = self.memory_store.get_cycle_history()
+            status["total_cycles"] = len(history)
+        except Exception:
+            status["total_cycles"] = None
+        return status
+
+    def _update_training_profile_from_summaries(
+        self,
+        summaries: List[Dict[str, Any]],
+        *,
+        domain: Optional[str] = None,
+        runtime_profile: Optional[str] = None,
+        experiment_mode: Optional[str] = None,
+    ) -> None:
+        """Internal helper: derive a training profile snapshot after a burst.
+
+        This consumes the *end state* (history + summaries) and creates
+        a compact record in self.training_profile. It does not change
+        core behavior or external state.
+        """
+        profile: Dict[str, Any] = {
+            "last_training_at": time.time(),
+            "domain": domain or "general",
+            "runtime_profile": runtime_profile,
+            "experiment_mode": experiment_mode,
+            "cycles_in_burst": len(summaries),
+        }
+
+        # Simple rollup over this burst
+        rye_vals: List[float] = []
+        for s in summaries:
+            rv = s.get("RYE")
+            if isinstance(rv, (int, float)):
+                rye_vals.append(float(rv))
+        if rye_vals:
+            profile["burst_rye_avg"] = sum(rye_vals) / len(rye_vals)
+            profile["burst_rye_last"] = rye_vals[-1]
+
+        # Use full history + rye_metrics to attach richer diagnostics if available
+        history: List[Dict[str, Any]] = []
+        try:
+            history = self.memory_store.get_cycle_history()
+        except Exception:
+            history = []
+
+        diag: Optional[Dict[str, Any]] = None
+        option_c: Optional[Dict[str, Any]] = None
+        effective_domain = domain or "general"
+
+        if _rye_metrics_mod is not None:
+            try:
+                if hasattr(_rye_metrics_mod, "build_run_diagnostics"):
+                    diag = _rye_metrics_mod.build_run_diagnostics(  # type: ignore[attr-defined]
+                        history,
+                        domain=effective_domain,
+                    )
+            except Exception:
+                diag = None
+
+            try:
+                if hasattr(_rye_metrics_mod, "build_option_c_signature"):
+                    option_c = _rye_metrics_mod.build_option_c_signature(  # type: ignore[attr-defined]
+                        history,
+                        domain=effective_domain,
+                        hours_run_so_far=None,
+                    )
+            except Exception:
+                option_c = None
+
+        if diag is not None:
+            profile["diagnostics"] = diag
+        if option_c is not None:
+            profile["option_c_signature"] = option_c
+
+        self.training_profile = profile
+
+    def run_training_burst(
+        self,
+        goal: str,
+        *,
+        domain: Optional[str] = None,
+        role: str = "agent",
+        runtime_profile: Optional[str] = None,
+        max_cycles: Optional[int] = None,
+        max_minutes: Optional[float] = None,
+        stop_rye: Optional[float] = None,
+        source_controls: Optional[Dict[str, bool]] = None,
+        pdf_bytes: Optional[bytes] = None,
+        biomarker_snapshot: Optional[Dict[str, Any]] = None,
+        experiment_mode: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Run a short, focused training burst.
+
+        This is where *agent-level* learning happens in practice:
+        - It writes new structured knowledge into MemoryStore.
+        - It exercises TGRM and tools on a focused goal.
+        - It updates self.training_profile and leaves self.learned_from_memory
+          available for later calls.
+
+        It does NOT change model weights. It only improves the agent's
+        internal state and history.
+
+        Typical use:
+            - 1 hour general diagnostic run
+            - 1 hour longevity refinement
+            - short math-theorem exploration burst
+        """
+        if not self.learning_enabled:
+            # Return empty but do not block the caller
+            return []
+
+        effective_domain = domain or "general"
+        # Default training runtime profile
+        if runtime_profile is None:
+            runtime_profile = str(self.config.get("training_runtime_profile", "1_hour"))
+            if runtime_profile not in RUNTIME_PROFILES:
+                runtime_profile = "1_hour"
+
+        # Default bounds for a "burst": conservative, safe, cheap
+        if max_cycles is None:
+            # Use profile estimate if present, otherwise a small number
+            est_cfg = RUNTIME_PROFILES.get(runtime_profile, {})
+            est = est_cfg.get("estimated_cycles")
+            if isinstance(est, (int, float)):
+                max_cycles = max(10, int(est // 2))
+            else:
+                max_cycles = 40
+
+        if max_minutes is None:
+            if runtime_profile == "1_hour":
+                max_minutes = 60.0
+            elif runtime_profile == "8_hours":
+                max_minutes = 4 * 60.0
+            else:
+                # Generic small burst
+                max_minutes = 60.0
+
+        if experiment_mode is None:
+            experiment_mode = "training"
+
+        summaries = self.run_continuous(
+            goal=goal,
+            max_cycles=max_cycles,
+            stop_rye=stop_rye,
+            role=role,
+            source_controls=source_controls,
+            pdf_bytes=pdf_bytes,
+            biomarker_snapshot=biomarker_snapshot,
+            domain=effective_domain,
+            max_minutes=max_minutes,
+            forever=False,
+            resume_from_checkpoint=False,
+            runtime_profile=runtime_profile,
+            run_id=None,
+            experiment_mode=experiment_mode,
+        )
+
+        # After the burst, update training profile from full history + this burst
+        self._update_training_profile_from_summaries(
+            summaries,
+            domain=effective_domain,
+            runtime_profile=runtime_profile,
+            experiment_mode=experiment_mode,
+        )
+
+        return summaries
+
+    def optimize_learning_pipeline(
+        self,
+        domain: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Derive a high-level learning plan from existing history.
+
+        This is the "Nova, optimize my learning pipeline" entry point.
+
+        It:
+            - calls learn_from_memory(domain)
+            - optionally calls rye_metrics Option C for richer diagnostics
+            - proposes simple, concrete next actions (as text) without
+              mutating core behavior.
+
+        It is safe to call from the UI or a controller.
+        """
+        plan: Dict[str, Any] = {
+            "domain": domain or "general",
+            "learning_enabled": self.learning_enabled,
+            "actions": [],
+            "learned_from_memory": {},
+            "option_c_signature": None,
+        }
+
+        if not self.learning_enabled:
+            plan["actions"].append("Learning is disabled in config (learning_enabled=False). Enable it to train the agent.")
+            self.learning_plan = plan
+            return plan
+
+        # Step 1: pull learned hints from history
+        learned = self.learn_from_memory(domain=domain)
+        plan["learned_from_memory"] = dict(learned)
+
+        # Step 2: Option C signature if available (full run self-diagnosis)
+        option_c = None
+        if _rye_metrics_mod is not None and hasattr(_rye_metrics_mod, "build_option_c_signature"):
+            try:
+                history = self.memory_store.get_cycle_history()
+                if history:
+                    option_c = _rye_metrics_mod.build_option_c_signature(  # type: ignore[attr-defined]
+                        history,
+                        domain=domain or "general",
+                        hours_run_so_far=None,
+                    )
+            except Exception:
+                option_c = None
+        plan["option_c_signature"] = option_c
+
+        # Step 3: propose next actions (text only, no hard changes)
+        actions: List[str] = []
+
+        has_history = bool(learned.get("has_history"))
+        rec_profile = learned.get("recommended_runtime_profile")
+        rec_stop = learned.get("recommended_stop_rye")
+
+        if not has_history:
+            actions.append(
+                "Run at least one short training burst (for example 1-hour general or longevity) "
+                "to build initial cycle history before auto-tuning."
+            )
+        else:
+            if isinstance(rec_profile, str):
+                actions.append(
+                    f"Use runtime profile '{rec_profile}' for the next training burst in domain '{plan['domain']}'."
+                )
+            if isinstance(rec_stop, (int, float)):
+                actions.append(
+                    f"Start with a conservative RYE stop threshold around {rec_stop:.3f} for diagnostic runs."
+                )
+
+        if option_c:
+            try:
+                tier = option_c.get("run_tier", {}).get("tier")
+                env_state = option_c.get("autonomy_safety_envelope", {}).get("state")
+                if tier:
+                    actions.append(f"Current run tier according to Option C: {tier}.")
+                if env_state:
+                    actions.append(f"Autonomy–stability safety envelope is classified as: {env_state}.")
+            except Exception:
+                pass
+
+        # Generic training hygiene suggestions (agent-level learning)
+        actions.append(
+            "Use run_training_burst(...) with focused goals (for example one clear longevity question) "
+            "to teach the agent on compact, high-signal problems."
+        )
+        actions.append(
+            "Periodically call prune_memory(...) to keep MemoryStore healthy and avoid dilution of high-value traces."
+        )
+        actions.append(
+            "After major bursts, regenerate snapshots with generate_snapshot(...) so you can track skill buildup over weeks."
+        )
+
+        plan["actions"] = actions
+        self.learning_plan = plan
+        return plan
