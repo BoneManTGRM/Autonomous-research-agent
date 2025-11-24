@@ -171,7 +171,7 @@ class VerificationEngine:
         self._history: Dict[str, List[float]] = {}
 
     # ------------------------------------------------------------------
-    # main public entry point
+    # main public entry points
     # ------------------------------------------------------------------
     def verify_pending(self, limit: Optional[int] = None) -> List[VerificationResult]:
         """
@@ -190,6 +190,19 @@ class VerificationEngine:
             results.append(result)
 
         return results
+
+    def verify_one(self, hypothesis_id: str) -> Optional[VerificationResult]:
+        """
+        Convenience helper to verify a single hypothesis by id.
+
+        If the hypothesis is not pending or does not exist, returns None.
+        """
+        record = self.hypothesis_manager.get_hypothesis(hypothesis_id)
+        if record is None:
+            return None
+        if getattr(record, "status", "pending") != "pending":
+            return None
+        return self._verify_single(record)
 
     # ------------------------------------------------------------------
     # internal workers
@@ -293,6 +306,10 @@ class VerificationEngine:
 
         # Update learning history
         self._update_history(hyp, final_score)
+
+        # Tier label from verification score
+        tier_label = self._infer_tier_label(final_score)
+        extra_all["tier_label"] = tier_label
 
         # Decide and propagate back into hypothesis manager + discovery log
         if final_score >= local_validate:
@@ -465,7 +482,7 @@ class VerificationEngine:
             except Exception:
                 rv = 0.0
 
-            # For a research agent, RYE in ~0.02–0.20 is realistic high-efficiency zone.
+            # For a research agent, RYE in about 0.02 to 0.20 is realistic high-efficiency zone.
             if rv <= 0:
                 score = min(score, 0.15)
                 reasons.append("Energy: non-positive RYE, downgraded.")
@@ -609,7 +626,7 @@ class VerificationEngine:
         """
         Adapt validation and rejection thresholds based on:
           - intelligence_profile
-          - domain (e.g., longevity, math)
+          - domain (for example, longevity, math)
           - safety bias and required citations level
         """
         v = float(self.validate_threshold)
@@ -647,7 +664,6 @@ class VerificationEngine:
         # Tier3 and discovery focus can loosen validation slightly for breakthrough hunting
         if tier3_bias > 0.7 and discovery_focus > 0.7:
             v -= 0.02  # allow slightly more adventurous validation
-            # but keep rejection threshold similar for safety
 
         # Clamp to sane range
         v = max(0.55, min(0.95, v))
@@ -770,7 +786,7 @@ class VerificationEngine:
         equilibrium_focus = float(profile.get("equilibrium_focus", 0.5))
         tier3_bias = float(profile.get("tier3_bias", 0.0))
 
-        # Deep / ultra_deep should favor structural, data, and memory
+        # Deep or ultra_deep should favor structural, data, and memory
         if depth in ("deep", "ultra_deep"):
             base_weights["structural"] += 0.02
             base_weights["data"] += 0.02
@@ -843,7 +859,7 @@ class VerificationEngine:
         ]
         if thresholds:
             description_lines.append(
-                f"Thresholds used — validate >= {thresholds.get('validate', self.validate_threshold):.3f}, "
+                f"Thresholds used - validate >= {thresholds.get('validate', self.validate_threshold):.3f}, "
                 f"reject <= {thresholds.get('reject', self.reject_threshold):.3f}."
             )
         description_lines.append("")
@@ -901,7 +917,7 @@ class VerificationEngine:
         ]
         if thresholds:
             description_lines.append(
-                f"Thresholds used — validate >= {thresholds.get('validate', self.validate_threshold):.3f}, "
+                f"Thresholds used - validate >= {thresholds.get('validate', self.validate_threshold):.3f}, "
                 f"reject <= {thresholds.get('reject', self.reject_threshold):.3f}."
             )
         description_lines.append("")
@@ -955,7 +971,7 @@ class VerificationEngine:
         ]
         if thresholds:
             description_lines.append(
-                f"Thresholds used — validate >= {thresholds.get('validate', self.validate_threshold):.3f}, "
+                f"Thresholds used - validate >= {thresholds.get('validate', self.validate_threshold):.3f}, "
                 f"reject <= {thresholds.get('reject', self.reject_threshold):.3f}."
             )
         description_lines.append("")
