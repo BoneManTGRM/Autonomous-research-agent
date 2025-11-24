@@ -745,3 +745,493 @@ def compute_tool_rye(
         }
 
     return {"tools": tools_out}
+
+
+# ======================================================================
+#                         OPTION C EXTRAS
+# ======================================================================
+
+# RYE Volatility Signature (local self-diagnosis)
+
+def rye_volatility_signature(
+    history: List[Dict[str, Any]],
+    *,
+    window: int = 20,
+) -> Dict[str, Optional[float]]:
+    """
+    Local volatility signature of RYE over a recent window.
+
+    Returns:
+        {
+          "std": float or None,
+          "range": float or None,
+          "cv": float or None,
+          "volatility_score": float or None in [0, 1],
+        }
+
+    volatility_score:
+        ~1.0 -> very stable
+        ~0.0 -> highly volatile
+    """
+    norm = normalize_history(history)
+    if len(norm) == 0 or window <= 1:
+        return {
+            "std": None,
+            "range": None,
+            "cv": None,
+            "volatility_score": None,
+        }
+
+    recent = norm[-window:]
+    vals = [float(e["RYE"]) for e in recent]
+    if len(vals) < 2:
+        return {
+            "std": None,
+            "range": None,
+            "cv": None,
+            "volatility_score": None,
+        }
+
+    mean = sum(vals) / len(vals)
+    std = statistics.pstdev(vals)
+    vmin = min(vals)
+    vmax = max(vals)
+    r = vmax - vmin
+
+    if mean == 0:
+        cv = None
+    else:
+        cv = abs(std / mean)
+
+    if cv is None:
+        volatility_score = None
+    else:
+        raw = 1.0 / (1.0 + cv)
+        volatility_score = max(0.0, min(raw, 1.0))
+
+    return {
+        "std": std,
+        "range": r,
+        "cv": cv,
+        "volatility_score": volatility_score,
+    }
+
+
+# RYE Equilibrium Detector
+
+def detect_rye_equilibrium(
+    history: List[Dict[str, Any]],
+    *,
+    window: int = 30,
+    slope_tolerance: float = 0.01,
+) -> Dict[str, Optional[Any]]:
+    """
+    Detects whether the system appears to be in a RYE equilibrium zone.
+
+    Conditions (heuristic):
+        - enough recent points
+        - regression slope magnitude below slope_tolerance
+        - volatility is not excessive
+    """
+    norm = normalize_history(history)
+    if len(norm) < window:
+        return {
+            "in_equilibrium": False,
+            "reason": "not_enough_data",
+            "window_size": len(norm),
+            "local_slope": None,
+            "local_volatility_score": None,
+        }
+
+    recent = norm[-window:]
+    slope = regression_rye_slope(recent)
+    vol_sig = rye_volatility_signature(recent, window=window)
+
+    if slope is None:
+        return {
+            "in_equilibrium": False,
+            "reason": "no_slope",
+            "window_size": len(recent),
+            "local_slope": None,
+            "local_volatility_score": vol_sig.get("volatility_score"),
+        }
+
+    vol_score = vol_sig.get("volatility_score")
+    if vol_score is None:
+        in_eq = abs(slope) <= slope_tolerance
+    else:
+        in_eq = (abs(slope) <= slope_tolerance) and (vol_score >= 0.4)
+
+    reason = "equilibrium" if in_eq else "non_equilibrium"
+
+    return {
+        "in_equilibrium": in_eq,
+        "reason": reason,
+        "window_size": len(recent),
+        "local_slope": slope,
+        "local_volatility_score": vol_score,
+    }
+
+
+# TGRM Harmonic Index (proxy)
+
+def tgrm_harmonic_index(
+    history: List[Dict[str, Any]],
+) -> Optional[float]:
+    """
+    Proxy for TGRM harmonic resonance.
+
+    Approximated via:
+        - stability_index
+        - recovery_momentum
+
+    Returns:
+        float in [0, 1] or None
+    """
+    stab = stability_index(history)
+    rec = recovery_momentum(history)
+
+    if stab is None and rec is None:
+        return None
+
+    stab_norm = stab if stab is not None else 0.0
+    rec_norm = min(max((rec or 0.0) / 5.0, 0.0), 1.0)
+
+    idx = 0.6 * stab_norm + 0.4 * rec_norm
+    return max(0.0, min(idx, 1.0))
+
+
+# Breakthrough Probability Estimator (per run snapshot)
+
+def estimate_breakthrough_probability(
+    diagnostics: Dict[str, Any],
+    *,
+    domain: Optional[str] = None,
+    horizon_hours: Optional[int] = None,
+) -> Dict[str, Optional[Any]]:
+    """
+    Estimate the probability that this run configuration could yield a
+    meaningful breakthrough within a given horizon.
+
+    Inputs (from diagnostics):
+        - trend_slope
+        - recovery_momentum
+        - stability_index
+        - high_percentile
+        - rye_avg
+    """
+    trend = diagnostics.get("trend_slope") or 0.0
+    momentum = diagnostics.get("recovery_momentum") or 0.0
+    stab = diagnostics.get("stability_index") or 0.0
+    high_p = diagnostics.get("high_percentile") or 0.0
+    rye_avg = diagnostics.get("rye_avg") or 0.0
+
+    trend_component = max(trend, 0.0) * 8.0
+    trend_component = min(trend_component, 0.30)
+
+    momentum_component = min(momentum / 5.0, 0.25)
+    stability_component = stab * 0.25
+
+    high_component = 0.0
+    if high_p > 1.0:
+        high_component += 0.10
+    if high_p > 2.0:
+        high_component += 0.05
+    if rye_avg > 0.5:
+        high_component += 0.05
+
+    domain_factor = 0.0
+    if domain:
+        dl = domain.lower()
+        if dl in {"longevity", "biology", "bioai"}:
+            domain_factor = 0.05
+        elif dl in {"math", "ai"}:
+            domain_factor = 0.03
+
+    base_prob = trend_component + momentum_component + stability_component + high_component + domain_factor
+
+    if horizon_hours is not None and horizon_hours > 0:
+        if horizon_hours <= 24:
+            horizon_scale = 0.8
+        elif horizon_hours <= 7 * 24:
+            horizon_scale = 1.0
+        elif horizon_hours <= 90 * 24:
+            horizon_scale = 1.2
+        else:
+            horizon_scale = 1.3
+    else:
+        horizon_scale = 1.0
+
+    prob = base_prob * horizon_scale
+    prob = max(0.0, min(prob, 0.95))
+
+    return {
+        "probability": prob,
+        "trend_component": trend_component,
+        "momentum_component": momentum_component,
+        "stability_component": stability_component,
+        "high_component": high_component,
+        "domain_boost": domain_factor,
+        "horizon_hours": horizon_hours,
+    }
+
+
+# Autonomy–Stability Safety Envelope
+
+def autonomy_safety_envelope(
+    diagnostics: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Classify the current run's safety envelope qualitatively.
+
+    Returns:
+        {
+          "state": "stable" | "oscillatory" | "collapsing" | "explosive" | "neutral" | "unknown",
+          "details": { ... },
+        }
+    """
+    stab = diagnostics.get("stability_index")
+    slope = diagnostics.get("trend_slope")
+    low_p = diagnostics.get("low_percentile")
+    high_p = diagnostics.get("high_percentile")
+
+    if stab is None or slope is None or low_p is None or high_p is None:
+        return {
+            "state": "unknown",
+            "details": {
+                "reason": "insufficient_metrics",
+            },
+        }
+
+    spread = high_p - low_p
+
+    if stab >= 0.7 and abs(slope) < 0.02:
+        state = "stable"
+        reason = "high_stability_flat_trend"
+    elif stab >= 0.5 and slope > 0:
+        state = "healthy_growth"
+        reason = "stable_and_improving"
+    elif stab >= 0.4 and spread > 1.5:
+        state = "oscillatory"
+        reason = "moderate_stability_high_spread"
+    elif stab < 0.3 and slope < 0:
+        state = "collapsing"
+        reason = "low_stability_negative_trend"
+    elif spread > 3.0:
+        state = "explosive"
+        reason = "very_high_spread"
+    else:
+        state = "neutral"
+        reason = "mixed_signals"
+
+    return {
+        "state": state,
+        "details": {
+            "stability_index": stab,
+            "trend_slope": slope,
+            "low_percentile": low_p,
+            "high_percentile": high_p,
+            "spread": spread,
+            "reason": reason,
+        },
+    }
+
+
+# Run Tier Classifier (Tier 0 / 1 / 2 / 3)
+
+def classify_run_tier(
+    diagnostics: Dict[str, Any],
+    *,
+    breakthrough_prob: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Classify a run into tiers:
+
+        Tier 0: unstable / chaotic
+        Tier 1: normal working agent (positive average RYE)
+        Tier 2: self-repairing, long-run stable
+        Tier 3: "Major Breakthrough Zone" candidate
+    """
+    count = diagnostics.get("count") or 0
+    stab = diagnostics.get("stability_index") or 0.0
+    avg = diagnostics.get("rye_avg") or 0.0
+    trend = diagnostics.get("trend_slope") or 0.0
+    mid_p = diagnostics.get("mid_percentile") or 0.0
+
+    if breakthrough_prob is None:
+        bp = estimate_breakthrough_probability(diagnostics).get("probability") or 0.0
+    else:
+        bp = breakthrough_prob
+
+    tier = "Tier 0"
+    reason = "insufficient_data"
+
+    if count < 4:
+        tier = "Tier 0"
+        reason = "too_few_cycles"
+    elif stab < 0.2 and avg <= 0.0:
+        tier = "Tier 0"
+        reason = "unstable_negative_or_zero_rye"
+    elif avg > 0.0 and stab >= 0.2:
+        tier = "Tier 1"
+        reason = "positive_rye_basic_stability"
+    if avg > 0.2 and stab >= 0.4 and trend >= 0.0 and mid_p > 0.0:
+        tier = "Tier 2"
+        reason = "self_repairing_long_run_candidate"
+    if avg > 0.4 and stab >= 0.6 and trend > 0.0 and mid_p > 0.2 and bp >= 0.30:
+        tier = "Tier 3"
+        reason = "high_stability_positive_trend_breakthrough_zone"
+
+    return {
+        "tier": tier,
+        "reason": reason,
+        "metrics": {
+            "count": count,
+            "stability_index": stab,
+            "rye_avg": avg,
+            "trend_slope": trend,
+            "mid_percentile": mid_p,
+            "breakthrough_probability": bp,
+        },
+    }
+
+
+# Critical-Failure Early Warning Score
+
+def early_failure_warning_score(
+    diagnostics: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Estimate how close the system may be to a failure state.
+
+    High scores mean higher risk and may warrant human attention.
+    """
+    stab = diagnostics.get("stability_index")
+    trend = diagnostics.get("trend_slope")
+    avg = diagnostics.get("rye_avg")
+    low_p = diagnostics.get("low_percentile")
+    last = diagnostics.get("rye_last")
+
+    if stab is None or trend is None or avg is None or low_p is None or last is None:
+        return {
+            "score": None,
+            "factors": {
+                "reason": "insufficient_metrics",
+            },
+        }
+
+    inv_stability = 1.0 - max(0.0, min(stab, 1.0))
+
+    downward = max(-trend * 10.0, 0.0)
+    downward = min(downward, 1.0)
+
+    avg_risk = 0.0
+    if avg < 0:
+        avg_risk = min(abs(avg), 1.0) * 0.7
+    elif low_p < 0:
+        avg_risk = 0.3
+
+    last_risk = 0.0
+    if last < 0:
+        last_risk = min(abs(last), 1.0)
+
+    score = (
+        0.35 * inv_stability +
+        0.25 * downward +
+        0.20 * avg_risk +
+        0.20 * last_risk
+    )
+    score = max(0.0, min(score, 1.0))
+
+    return {
+        "score": score,
+        "factors": {
+            "inv_stability": inv_stability,
+            "downward": downward,
+            "avg_risk": avg_risk,
+            "last_risk": last_risk,
+        },
+    }
+
+
+# 90-Day Breakthrough Likelihood Score
+
+def breakthrough_likelihood_90d(
+    diagnostics: Dict[str, Any],
+    *,
+    domain: Optional[str] = None,
+    hours_run_so_far: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Convenience wrapper: estimate breakthrough likelihood specifically for
+    a 90-day horizon, optionally conditioned on how long the system has
+    already been running.
+    """
+    horizon_hours = 90 * 24
+    base = estimate_breakthrough_probability(
+        diagnostics,
+        domain=domain,
+        horizon_hours=horizon_hours,
+    )
+    prob = base.get("probability") or 0.0
+
+    if hours_run_so_far is None or hours_run_so_far <= 0:
+        progress_factor = 0.7
+    else:
+        progress_factor = min(hours_run_so_far / float(horizon_hours), 1.0)
+        progress_factor = max(progress_factor, 0.5)
+
+    adjusted_prob = max(0.0, min(prob * progress_factor, 0.99))
+
+    return {
+        "probability": adjusted_prob,
+        "base_probability": prob,
+        "horizon_hours": horizon_hours,
+        "hours_run_so_far": hours_run_so_far,
+    }
+
+
+# Option C master bundle for a run
+
+def build_option_c_signature(
+    history: List[Dict[str, Any]],
+    *,
+    domain: Optional[str] = None,
+    hours_run_so_far: Optional[float] = None,
+    window: int = 10,
+) -> Dict[str, Any]:
+    """
+    High-level Option C self-diagnosis snapshot.
+
+    Combines:
+        - run diagnostics
+        - volatility signature
+        - equilibrium detection
+        - TGRM harmonic index
+        - breakthrough probability
+        - 90-day breakthrough likelihood
+        - autonomy safety envelope
+        - early failure warning
+        - run tier classification
+    """
+    diag = build_run_diagnostics(history, domain=domain, window=window)
+    vol = rye_volatility_signature(history)
+    eq = detect_rye_equilibrium(history)
+    harm = tgrm_harmonic_index(history)
+    bp = estimate_breakthrough_probability(diag, domain=domain, horizon_hours=None)
+    bp90 = breakthrough_likelihood_90d(diag, domain=domain, hours_run_so_far=hours_run_so_far)
+    env = autonomy_safety_envelope(diag)
+    fail = early_failure_warning_score(diag)
+    tier_info = classify_run_tier(diag, breakthrough_prob=bp.get("probability"))
+
+    return {
+        "diagnostics": diag,
+        "volatility": vol,
+        "equilibrium": eq,
+        "tgrm_harmonic_index": harm,
+        "breakthrough_probability": bp,
+        "breakthrough_likelihood_90d": bp90,
+        "autonomy_safety_envelope": env,
+        "early_failure_warning": fail,
+        "run_tier": tier_info,
+    }
