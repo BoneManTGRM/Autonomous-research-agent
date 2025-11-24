@@ -1,0 +1,130 @@
+[
+  {
+    "kind": "discovery_log_meta",
+    "id": "bootstrap_meta_001",
+    "run_id": "default",
+    "timestamp_utc": "2025-01-01T00:00:00Z",
+    "schema_version": "1.1",
+    "domain": "meta",
+    "title": "Discovery log initialized",
+    "summary": "Initial discovery_log.json created. Real discoveries, validated hypotheses, rejected hypotheses, and verification events will be appended automatically by the Autonomous Research Agent.",
+    "fields_help": {
+      "kind": "validated | rejected | verification_inconclusive | discovery | meta",
+      "title": "Short human readable label for the discovery or event",
+      "summary": "Two to four sentence description of what was found or decided",
+      "run_id": "Logical run or experiment id, for example run_001 or longevity_scout_01",
+      "domain": "Research domain tag, for example longevity, math, biology, ai_safety, general",
+      "rye_gain": "Change in RYE attributed to this discovery or validation (float). Positive means better repair efficiency.",
+      "delta_rye": "Optional alias for rye_gain, also a float.",
+      "delta_R": "Change in repair score or stability metric associated with this event.",
+      "energy": "Approximate energy or effort cost for this discovery in the TGRM loop.",
+      "agent_role": "Role of the agent that produced the discovery, for example researcher, critic, theorist, explorer, integrator, swarm_3.",
+      "cycle_index": "Index of the cycle in the global history where this discovery was logged.",
+      "tags": "List of string tags, for example [\"candidate\", \"mechanism\", \"longevity\", \"high_confidence\"].",
+      "sources": "Optional list of key sources or citations, each item like {\"title\": \"...\", \"url\": \"...\", \"type\": \"pubmed|web|pdf\"}.",
+      "notes": "Free form extra notes for humans or downstream tools.",
+      "verification_score": "If the item came from the verification engine this is its final score between 0 and 1.",
+      "hypothesis_id": "Link back to the originating hypothesis record when applicable."
+    }
+  },
+  {
+    "kind": "discovery",
+    "id": "example_discovery_001",
+    "run_id": "bootstrap_example",
+    "timestamp_utc": "2025-01-01T00:05:00Z",
+    "domain": "general",
+    "title": "Example discovery placeholder",
+    "summary": "This is a placeholder discovery used only to show the JSON shape. Real discoveries from the swarm will be appended below this entry during autonomous runs.",
+    "rye_gain": 0.012,
+    "delta_rye": 0.012,
+    "delta_R": 0.35,
+    "energy": 3.2,
+    "agent_role": "researcher",
+    "cycle_index": 0,
+    "tags": [
+      "example",
+      "template",
+      "bootstrap"
+    ],
+    "sources": [
+      {
+        "title": "Placeholder source for discovery template",
+        "url": "https://example.com/discovery-template",
+        "type": "web"
+      }
+    ],
+    "notes": "You can delete this example entry later. It simply proves that the UI and loader can handle a full discovery object."
+  },
+  {
+    "kind": "validated",
+    "id": "example_validated_001",
+    "run_id": "bootstrap_example",
+    "timestamp_utc": "2025-01-01T00:10:00Z",
+    "domain": "longevity",
+    "title": "Example validated hypothesis template",
+    "summary": "Template entry showing how a validated hypothesis will be recorded. Real validated items are written by the verification engine.",
+    "rye_gain": 0.025,
+    "delta_rye": 0.025,
+    "delta_R": 0.80,
+    "energy": 4.5,
+    "agent_role": "critic",
+    "cycle_index": 1,
+    "tags": [
+      "example",
+      "validated",
+      "bootstrap"
+    ],
+    "sources": [],
+    "verification_score": 0.91,
+    "hypothesis_id": "HYP_BOOTSTRAP_001",
+    "notes": "The verification engine will populate verification_score and hypothesis_id with real values."
+  },
+  {
+    "kind": "verification_inconclusive",
+    "id": "example_inconclusive_001",
+    "run_id": "bootstrap_example",
+    "timestamp_utc": "2025-01-01T00:15:00Z",
+    "domain": "general",
+    "title": "Example inconclusive verification template",
+    "summary": "Shows how an inconclusive verification attempt is logged. The hypothesis remains pending and can be revisited by later runs.",
+    "rye_gain": 0.0,
+    "delta_rye": 0.0,
+    "delta_R": 0.0,
+    "energy": 1.0,
+    "agent_role": "researcher",
+    "cycle_index": 2,
+    "tags": [
+      "example",
+      "verification_inconclusive",
+      "bootstrap"
+    ],
+    "sources": [],
+    "verification_score": 0.48,
+    "hypothesis_id": "HYP_BOOTSTRAP_002",
+    "notes": "Real entries of this type help you see which ideas need more data or better modeling."
+  },
+  {
+    "kind": "rejected",
+    "id": "example_rejected_001",
+    "run_id": "bootstrap_example",
+    "timestamp_utc": "2025-01-01T00:20:00Z",
+    "domain": "math",
+    "title": "Example rejected hypothesis template",
+    "summary": "Template entry for a rejected hypothesis. In real runs this signals that an idea failed literature checks, data checks, or swarm critique.",
+    "rye_gain": -0.015,
+    "delta_rye": -0.015,
+    "delta_R": -0.20,
+    "energy": 2.8,
+    "agent_role": "theorist",
+    "cycle_index": 3,
+    "tags": [
+      "example",
+      "rejected",
+      "bootstrap"
+    ],
+    "sources": [],
+    "verification_score": 0.12,
+    "hypothesis_id": "HYP_BOOTSTRAP_003",
+    "notes": "Rejected ideas are still valuable for showing where RYE dropped and why the system corrected course."
+  }
+]
