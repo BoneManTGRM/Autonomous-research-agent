@@ -29,7 +29,7 @@ Multi-agent extension:
         - long continuous runs where each "round" consists of many roles.
 
     The maximum number of logical agents is capped at 32 for safety,
-    and can be configured via config["max_agents"] (1–32).
+    and can be configured via config["max_agents"] (1-32).
 
 Toolbelt and tool registry:
     CoreAgent owns a tools layer that can be:
@@ -75,6 +75,17 @@ Discovery extensions:
     These helpers sit on top of your existing TGRM loop and do not
     change its core behavior. They only consume the summary dicts and
     write logs or hypothesis records.
+
+Learning from memory history:
+    CoreAgent can analyze past cycle history (via MemoryStore and
+    rye_metrics) and derive a "learned" profile that auto tunes:
+        - suggested runtime profile (1 hour, 8 hours, 24 hours)
+        - suggested stop_rye thresholds
+        - diagnostics snapshot for the UI
+
+    This learning is optional, conservative, and backward compatible:
+        - If rye_metrics is unavailable, the feature is a no-op.
+        - If config["auto_learn_from_memory"] is False, it is disabled.
 """
 
 from __future__ import annotations
@@ -293,6 +304,18 @@ class CoreAgent:
         else:
             self.intelligence_profile = {}
 
+        # ------------------------------------------------------------------
+        # Learned profile from memory history
+        # ------------------------------------------------------------------
+        # This holds the last learned suggestions from learn_from_memory:
+        #   {
+        #     "has_history": bool,
+        #     "recommended_runtime_profile": Optional[str],
+        #     "recommended_stop_rye": Optional[float],
+        #     "diagnostics": Optional[dict],
+        #   }
+        self.learned_from_memory: Dict[str, Any] = {}
+
         self._apply_intelligence_profile()
 
     # ------------------------------------------------------------------
@@ -333,6 +356,93 @@ class CoreAgent:
         else:
             self.intelligence_profile = {}
         self._apply_intelligence_profile()
+
+    # ------------------------------------------------------------------
+    # Learning from memory history
+    # ------------------------------------------------------------------
+    def learn_from_memory(self, domain: Optional[str] = None) -> Dict[str, Any]:
+        """Analyze past cycles and derive learned runtime hints.
+
+        This method is conservative and purely advisory:
+            - It never raises.
+            - It does not mutate external state except self.learned_from_memory.
+            - It can be called by the UI, workers, or continuous modes.
+
+        Returns:
+            Dict with keys:
+                - "has_history": bool
+                - "recommended_runtime_profile": Optional[str]
+                - "recommended_stop_rye": Optional[float]
+                - "diagnostics": Optional[dict]
+        """
+        learned: Dict[str, Any] = {
+            "has_history": False,
+            "recommended_runtime_profile": None,
+            "recommended_stop_rye": None,
+            "diagnostics": None,
+        }
+
+        try:
+            history = self.memory_store.get_cycle_history()
+        except Exception:
+            history = []
+
+        if not history:
+            self.learned_from_memory = learned
+            return learned
+
+        learned["has_history"] = True
+
+        diagnostics: Optional[Dict[str, Any]] = None
+        effective_domain = domain or "general"
+
+        if _rye_metrics_mod is not None and hasattr(_rye_metrics_mod, "build_run_diagnostics"):
+            try:
+                diagnostics = _rye_metrics_mod.build_run_diagnostics(  # type: ignore[attr-defined]
+                    history,
+                    domain=effective_domain,
+                )
+            except Exception:
+                diagnostics = None
+
+        learned["diagnostics"] = diagnostics
+
+        # Simple heuristic for runtime profile and stop_rye based on diagnostics
+        recommended_profile: Optional[str] = None
+        recommended_stop_rye: Optional[float] = None
+
+        if isinstance(diagnostics, dict):
+            avg = diagnostics.get("rye_avg")
+            stab = diagnostics.get("stability_index")
+            slope = diagnostics.get("trend_slope")
+            mid = diagnostics.get("mid_percentile")
+
+            # Choose profile based on average efficiency and stability
+            if isinstance(avg, (int, float)) and isinstance(stab, (int, float)):
+                if avg >= 0.5 and stab >= 0.6:
+                    # High efficiency and stable: safe to attempt a long run
+                    recommended_profile = "24_hours"
+                elif avg >= 0.2 and stab >= 0.3:
+                    # Moderate efficiency: medium run
+                    recommended_profile = "8_hours"
+                else:
+                    # Noisy or weak efficiency: short diagnostic run
+                    recommended_profile = "1_hour"
+
+            # Use the mid percentile as a soft baseline for stop_rye
+            if isinstance(mid, (int, float)):
+                # Keep threshold conservative to avoid premature termination
+                recommended_stop_rye = float(mid) * 0.5
+
+            # If trend is clearly negative, bias toward shorter profile
+            if isinstance(slope, (int, float)) and slope < 0 and recommended_profile == "24_hours":
+                recommended_profile = "8_hours"
+
+        learned["recommended_runtime_profile"] = recommended_profile
+        learned["recommended_stop_rye"] = recommended_stop_rye
+
+        self.learned_from_memory = learned
+        return learned
 
     # ------------------------------------------------------------------
     # Internal helpers for crash proofing and run tracking
@@ -1025,6 +1135,21 @@ class CoreAgent:
         if watchdog_interval_minutes == 5.0:
             watchdog_interval_minutes = default_watchdog
 
+        # Optional memory driven auto tuning before we choose runtime profile
+        if runtime_profile is None and self.config.get("auto_learn_from_memory", True):
+            try:
+                learned = self.learn_from_memory(domain=effective_domain)
+                lp = learned.get("recommended_runtime_profile")
+                if isinstance(lp, str):
+                    runtime_profile = lp
+                if stop_rye is None:
+                    lr = learned.get("recommended_stop_rye")
+                    if isinstance(lr, (int, float)):
+                        stop_rye = float(lr)
+            except Exception:
+                # Learning must never break the run
+                pass
+
         # Default runtime profile from domain preset if not provided
         if runtime_profile is None:
             runtime_profile = preset_cfg.get("default_runtime_profile")
@@ -1225,6 +1350,10 @@ class CoreAgent:
             except Exception:
                 pass
 
+        # Attach the last learned_from_memory snapshot for observability
+        if self.learned_from_memory:
+            run_metadata["learned_from_memory"] = dict(self.learned_from_memory)
+
         for s in summaries:
             if isinstance(s, dict):
                 s["run_metadata"] = dict(run_metadata)
@@ -1350,6 +1479,20 @@ class CoreAgent:
         default_watchdog = float(CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes))
         if watchdog_interval_minutes == 5.0:
             watchdog_interval_minutes = default_watchdog
+
+        # Optional memory driven auto tuning before runtime profile selection
+        if runtime_profile is None and self.config.get("auto_learn_from_memory", True):
+            try:
+                learned = self.learn_from_memory(domain=effective_domain)
+                lp = learned.get("recommended_runtime_profile")
+                if isinstance(lp, str):
+                    runtime_profile = lp
+                if stop_rye is None:
+                    lr = learned.get("recommended_stop_rye")
+                    if isinstance(lr, (int, float)):
+                        stop_rye = float(lr)
+            except Exception:
+                pass
 
         # Default runtime profile from domain preset if not provided
         if runtime_profile is None:
@@ -1538,6 +1681,10 @@ class CoreAgent:
                     run_metadata["run_health_score"] = health_score
             except Exception:
                 pass
+
+        # Attach the last learned_from_memory snapshot for observability
+        if self.learned_from_memory:
+            run_metadata["learned_from_memory"] = dict(self.learned_from_memory)
 
         for s in all_summaries:
             if isinstance(s, dict):
