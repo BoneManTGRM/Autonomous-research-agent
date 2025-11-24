@@ -13,13 +13,22 @@ It generates plausible, testable hypotheses from:
 - citations (web, PubMed, Semantic Scholar).
 
 TGRM uses this in the REPAIR / VERIFY phases to propose new directions.
-Later, you can upgrade this to call a language model, but this base
-version is fully self-contained and safe for very long autonomous runs.
+
+Tier and RYE awareness:
+- Each hypothesis carries:
+  - novelty, rye_relevance, priority, delta_r_hint
+  - a simple tier_label (tier1_candidate, tier2_candidate, tier3_candidate, or None)
+- Optional intelligence_profile lets you tune how strict the engine is:
+  - safety_bias: "low" | "medium" | "high"
+  - discovery_focus: 0.0-1.0 (more or fewer hypotheses)
+  - tier3_bias: 0.0-1.0 (push toward only strongest hypotheses)
+
+This base version is fully self-contained and safe for very long autonomous runs.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
 # Small domain keyword hints (mirrors presets but kept local and static)
@@ -221,7 +230,7 @@ def _estimate_delta_r_hint(
     elif r == "researcher":
         base *= 1.0
 
-    # Map to a gentle ΔR hint range, e.g. [0.0, 2.0]
+    # Map to a gentle ΔR hint range, for example [0.0, 2.0]
     return max(0.0, min(2.0, 2.0 * base))
 
 
@@ -631,6 +640,8 @@ def _build_tags(
     contradiction_sensitive: bool,
     domain: Optional[str],
     role: Optional[str],
+    swarm_size: Optional[int] = None,
+    tier_label: Optional[str] = None,
 ) -> List[str]:
     """Lightweight tags for downstream filtering or visualization."""
     tags: List[str] = []
@@ -660,7 +671,86 @@ def _build_tags(
     if r:
         tags.append(f"role:{r}")
 
+    if swarm_size is not None:
+        tags.append(f"swarm_size:{swarm_size}")
+
+    if tier_label:
+        tags.append(tier_label)
+
     return tags
+
+
+def _infer_tier_from_scores(
+    priority: float,
+    delta_r_hint: float,
+) -> Optional[str]:
+    """Rough tier style hint from priority and delta_r_hint.
+
+    This is deterministic and only uses local hypothesis metrics.
+    """
+    # Normalize delta_r_hint into an approximate [0,1] band
+    dr_norm = max(0.0, min(1.0, delta_r_hint / 2.0))
+
+    # Emphasize high priority and reasonable delta_r_hint
+    combined = 0.6 * priority + 0.4 * dr_norm
+
+    if combined >= 0.9:
+        return "tier3_candidate"
+    if combined >= 0.75:
+        return "tier2_candidate"
+    if combined >= 0.6:
+        return "tier1_candidate"
+    return None
+
+
+def _adapt_from_intelligence_profile(
+    max_hypotheses: int,
+    domain: Optional[str],
+    intelligence_profile: Optional[Dict[str, Any]],
+) -> Tuple[int, float]:
+    """Adjust max_hypotheses and novelty threshold based on intelligence profile.
+
+    Returns:
+        (adjusted_max_hypotheses, novelty_threshold)
+    """
+    max_h = int(max_hypotheses)
+    novelty_threshold = 0.10
+
+    if domain and domain.lower() in {"longevity", "math"}:
+        novelty_threshold = 0.18
+
+    if not intelligence_profile:
+        return max_h, novelty_threshold
+
+    safety_bias = str(intelligence_profile.get("safety_bias", "medium")).lower()
+    discovery_focus = float(intelligence_profile.get("discovery_focus", 0.5))
+    tier3_bias = float(intelligence_profile.get("tier3_bias", 0.0))
+
+    # Safety bias raises novelty requirement and reduces count
+    if safety_bias == "high":
+        novelty_threshold += 0.03
+        max_h = max(1, int(max_h * 0.7))
+    elif safety_bias == "low":
+        novelty_threshold = max(0.05, novelty_threshold - 0.03)
+        max_h = min(20, int(max_h * 1.2))
+
+    # Discovery focus widens or narrows beam
+    if discovery_focus > 0.75:
+        max_h = min(20, int(max_h * 1.4))
+        novelty_threshold = max(0.05, novelty_threshold - 0.02)
+    elif discovery_focus < 0.3:
+        max_h = max(1, int(max_h * 0.6))
+        novelty_threshold += 0.02
+
+    # Tier3 bias nudges toward only the very strongest
+    if tier3_bias > 0.6:
+        novelty_threshold += 0.03
+
+    # Clamp
+    max_h = max(1, min(32, max_h))
+    novelty_threshold = max(0.05, min(0.35, novelty_threshold))
+
+    return max_h, novelty_threshold
 
 
 # ---------------------------------------------------------------------
@@ -673,6 +763,9 @@ def generate_hypotheses(
     max_hypotheses: int = 5,
     domain: Optional[str] = None,
     role: Optional[str] = None,
+    *,
+    intelligence_profile: Optional[Dict[str, Any]] = None,
+    swarm_size: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Generate simple, structured hypotheses.
 
@@ -690,6 +783,15 @@ def generate_hypotheses(
         role:
             Optional swarm role label (researcher, critic, explorer, integrator, etc.).
             Used to mildly adjust confidence ranges and template style.
+        intelligence_profile:
+            Optional dict controlling strictness and breadth, e.g.:
+                {
+                  "safety_bias": "low" | "medium" | "high",
+                  "discovery_focus": 0.0-1.0,
+                  "tier3_bias": 0.0-1.0
+                }
+        swarm_size:
+            Optional swarm size hint for tagging and analysis.
 
     Returns:
         List of:
@@ -704,6 +806,7 @@ def generate_hypotheses(
               "priority": 0.0-1.0,
               "score": 0.0-1.0,              # alias of priority for reports/sorting
               "delta_r_hint": float,         # estimated ΔR contribution if confirmed
+              "tier_label": "tier1_candidate" | "tier2_candidate" | "tier3_candidate" | None,
               "classification": {
                   "kind": "...",
                   "focus": "...",
@@ -712,6 +815,8 @@ def generate_hypotheses(
               },
               "contradiction_sensitive": bool,
               "tags": [ ... ],
+              "swarm_size": int | None,
+              "intelligence_profile_used": { ... } | None,
             }
 
     Reparodynamics angle:
@@ -736,6 +841,13 @@ def generate_hypotheses(
             role = "critic"
         else:
             role = "researcher"
+
+    # Adapt max_hypotheses and novelty threshold from intelligence profile
+    max_hypotheses, base_novelty_threshold = _adapt_from_intelligence_profile(
+        max_hypotheses,
+        domain,
+        intelligence_profile,
+    )
 
     # 1) Build keyword pool from notes + citations
     note_terms = _extract_keywords_from_notes(notes, max_keywords=8)
@@ -792,11 +904,9 @@ def generate_hypotheses(
 
         # Novelty and echo checks
         novelty = _novelty_score(text, goal or "", keywords)
-        # For higher scrutiny domains, raise novelty requirement a bit
-        novelty_threshold = 0.10
-        d = (domain or "").lower()
-        if d in {"longevity", "math"}:
-            novelty_threshold = 0.18
+
+        # Raise or lower novelty threshold per intelligence profile and domain
+        novelty_threshold = base_novelty_threshold
 
         if _shares_too_much_with_goal(text, goal or "", threshold=0.75):
             idx += 1
@@ -826,6 +936,11 @@ def generate_hypotheses(
             role=role,
         )
 
+        tier_label = _infer_tier_from_scores(
+            priority=priority,
+            delta_r_hint=delta_r_hint,
+        )
+
         classification = _classify_hypothesis(
             text=text,
             domain=domain,
@@ -841,6 +956,8 @@ def generate_hypotheses(
             contradiction_sensitive=contradiction_sensitive,
             domain=domain,
             role=role,
+            swarm_size=swarm_size,
+            tier_label=tier_label,
         )
 
         used_texts.add(text)
@@ -856,9 +973,12 @@ def generate_hypotheses(
                 "priority": round(priority, 3),
                 "score": round(priority, 3),  # alias for compatibility with report sorters
                 "delta_r_hint": round(delta_r_hint, 3),
+                "tier_label": tier_label,
                 "classification": classification,
                 "contradiction_sensitive": bool(contradiction_sensitive),
                 "tags": tags,
+                "swarm_size": swarm_size,
+                "intelligence_profile_used": intelligence_profile or None,
             }
         )
 
