@@ -7,13 +7,14 @@ Presets act as domain specific profiles that define:
 - source controls
 - domain tags
 - query behavior
-- RYE weighting hints
+- RYE weighting hints and advanced RYE expectations
 - reporting structure
-- runtime profiles for 1h / 8h / 24h / 90 day / forever runs
+- runtime profiles for 1h / 8h / 24h / 1 week / 1 month / 90 day / forever runs
 - swarm role contracts and intelligence hints for multi agent operation
 - diagnostics cadence for advanced RYE metrics and stability tracking
+- learning and forgetting behavior for MemoryStore and vector memory
 
-These settings do NOT break existing code but unlock future power for:
+These settings do not break existing code but unlock future power for:
 - continuous mode tuning
 - energy aware TGRM behavior
 - long run reporting and summaries
@@ -21,16 +22,18 @@ These settings do NOT break existing code but unlock future power for:
 - cure or treatment extraction pipelines
 - stricter verification and smarter hypothesis selection
 - repair efficiency signatures per domain and per preset
+- adaptive learning based on RYE gradients and stability metrics
 """
 
 from __future__ import annotations
 from typing import Dict, Any, List, Optional
 
 # Simple version tag so the app and UI can display which preset set is loaded.
-PRESETS_VERSION: str = "2025-11-23"
+PRESETS_VERSION: str = "2025-11-23-max1"
 
 # ---------------------------------------------------------------------
 # Global Runtime Profiles (applies for all presets)
+# These are interpreted by CoreAgent and engine_worker.
 # ---------------------------------------------------------------------
 RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
     "1_hour": {
@@ -40,6 +43,9 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "energy_scaling": 1.0,
         "report_frequency": 1,
         "description": "Short diagnostic run for fast repair checks and a sanity pass.",
+        "use_advanced_rye": True,
+        "expected_equilibrium": "none",
+        "target_rye_range": [0.02, 0.15],
     },
     "8_hours": {
         "label": "8 Hour Run",
@@ -47,7 +53,10 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "rye_stop_threshold": 0.05,
         "energy_scaling": 1.2,
         "report_frequency": 1,
-        "description": "Medium autonomous session where stable equilibrium patterns can emerge.",
+        "description": "Medium autonomous session where early equilibrium patterns can emerge.",
+        "use_advanced_rye": True,
+        "expected_equilibrium": "transient_or_plateau",
+        "target_rye_range": [0.04, 0.18],
     },
     "24_hours": {
         "label": "24 Hour Run",
@@ -56,10 +65,13 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "energy_scaling": 1.4,
         "report_frequency": 2,
         "description": "Full daily autonomous research loop for equilibrium and deep repairs.",
+        "use_advanced_rye": True,
+        "expected_equilibrium": "plateau",
+        "target_rye_range": [0.06, 0.20],
     },
     "1_week": {
         "label": "1 Week Run",
-        "estimated_cycles": 7 * 600,  # approximate scale based on 24 hour profile
+        "estimated_cycles": 7 * 600,
         "rye_stop_threshold": 0.10,
         "energy_scaling": 1.5,
         "report_frequency": 6,
@@ -67,10 +79,13 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
             "Seven day continuous research profile tuned for medium term stability, "
             "repeated repair cycles, and detection of equilibrium windows."
         ),
+        "use_advanced_rye": True,
+        "expected_equilibrium": "plateau_or_high",
+        "target_rye_range": [0.08, 0.22],
     },
     "1_month": {
         "label": "1 Month Run",
-        "estimated_cycles": 30 * 600,  # approximate scale based on 24 hour profile
+        "estimated_cycles": 30 * 600,
         "rye_stop_threshold": 0.10,
         "energy_scaling": 1.6,
         "report_frequency": 12,
@@ -78,6 +93,9 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
             "Multi week deep autonomy profile for sustained Reparodynamics experiments, "
             "stack refinement, and long horizon repair efficiency tracking."
         ),
+        "use_advanced_rye": True,
+        "expected_equilibrium": "plateau_or_high",
+        "target_rye_range": [0.09, 0.24],
     },
     # Long horizon profile for Reparodynamics style experiments
     "90_days": {
@@ -90,6 +108,9 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
             "Long horizon stability experiment for Reparodynamics. "
             "Optimized for equilibrium, drift control, and repair efficiency over 90 days."
         ),
+        "use_advanced_rye": True,
+        "expected_equilibrium": "high_or_plateau",
+        "target_rye_range": [0.10, 0.28],
     },
     "forever": {
         "label": "Run Until Stopped",
@@ -98,6 +119,9 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "energy_scaling": 1.0,
         "report_frequency": 5,
         "description": "Unbounded autonomous operation until the user or environment stops it.",
+        "use_advanced_rye": True,
+        "expected_equilibrium": "mixed",
+        "target_rye_range": [0.04, 0.24],
     },
 }
 
@@ -114,6 +138,15 @@ DEFAULT_RYE_THRESHOLDS: Dict[str, float] = {
     "good": 0.10,
     # High efficiency zone, usually reached after strong repair phases
     "excellent": 0.20,
+}
+
+# Expectations for advanced RYE metrics where available
+DEFAULT_ADVANCED_RYE_EXPECTATIONS: Dict[str, Any] = {
+    "rolling_window_short": 10,
+    "rolling_window_long": 50,
+    "stability_index_target": 0.6,       # 0 to 1 scale
+    "recovery_momentum_target": 0.1,     # positive values show recovery after perturbation
+    "max_oscillation_std": 0.25,
 }
 
 # ---------------------------------------------------------------------
@@ -136,6 +169,15 @@ CONTINUOUS_MODE_DEFAULTS: Dict[str, Any] = {
         "single_default": False,
         "swarm_default": True,
         "wrap_up_buffer_minutes": 3.0,
+    },
+    # Learning based control hooks (core can use these if desired)
+    "learning_hooks": {
+        "use_advanced_rye_metrics": True,
+        "adapt_runtime_profile": True,
+        "adapt_maintenance_mode": True,
+        "adapt_swarm_size": True,
+        "rye_gradient_safety_margin": 0.01,
+        "stability_index_floor": 0.4,
     },
 }
 
@@ -278,7 +320,6 @@ SWARM_ROLES: List[Dict[str, Any]] = [
 
 SWARM_GLOBAL_HINTS: Dict[str, Any] = {
     # Hard safety ceiling for platform resources.
-    # App and core can still choose a lower local limit.
     "max_agents_safe": 32,
     # Good default for most presets when user clicks swarm.
     "default_agents": 5,
@@ -312,6 +353,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "identify similar frameworks in the literature, and produce a structured comparison table."
         ),
 
+        # These keys are used directly by TGRMLoop._normalise_source_controls
         "source_controls": {
             "web": True,
             "pubmed": False,
@@ -387,12 +429,29 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "write_frequency": "adaptive",  # low, medium, high, adaptive
             "compression_strategy": "semantic",  # none, simple, semantic
             "auto_summarize_every_n_cycles": 10,
-            "max_memory_items": 5000,
+            "max_memory_items": 5_000,
             "forgetting_policy": {
                 "enabled": True,
                 "threshold_rye_gain": 0.01,
                 "drop_low_value_notes": True,
                 "reinforce_high_value_notes": True,
+            },
+        },
+
+        # Learning hints that combine memory and advanced RYE metrics
+        "learning_hints": {
+            "use_advanced_rye_metrics": True,
+            "advanced_expectations": DEFAULT_ADVANCED_RYE_EXPECTATIONS,
+            "switch_to_maintenance_if": {
+                "avg_rye_above": 0.10,
+                "stability_index_above": 0.55,
+                "oscillation_std_below": 0.22,
+                "min_cycles": 25,
+            },
+            "trigger_exploration_if": {
+                "efficiency_trend_negative": True,
+                "recovery_momentum_below": 0.0,
+                "window": 20,
             },
         },
 
@@ -453,6 +512,7 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "default_runtime_profile": "8_hours",
         "default_rye_stop_threshold": None,
         "rye_thresholds": DEFAULT_RYE_THRESHOLDS,
+        "advanced_rye_expectations": DEFAULT_ADVANCED_RYE_EXPECTATIONS,
 
         # Repair efficiency diagnostics hints
         "run_diagnostics": {
@@ -627,12 +687,35 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "write_frequency": "high",
             "compression_strategy": "semantic",
             "auto_summarize_every_n_cycles": 8,
-            "max_memory_items": 8000,
+            "max_memory_items": 8_000,
             "forgetting_policy": {
                 "enabled": True,
                 "threshold_rye_gain": 0.02,
                 "drop_low_value_notes": True,
                 "reinforce_high_value_notes": True,
+            },
+        },
+
+        # Learning hints that combine advanced RYE metrics with biomarker and cure focus
+        "learning_hints": {
+            "use_advanced_rye_metrics": True,
+            "advanced_expectations": {
+                "rolling_window_short": 10,
+                "rolling_window_long": 50,
+                "stability_index_target": 0.55,
+                "recovery_momentum_target": 0.12,
+                "max_oscillation_std": 0.30,
+            },
+            "switch_to_maintenance_if": {
+                "avg_rye_above": 0.08,
+                "stability_index_above": 0.50,
+                "oscillation_std_below": 0.28,
+                "min_cycles": 40,
+            },
+            "trigger_exploration_if": {
+                "efficiency_trend_negative": True,
+                "recovery_momentum_below": 0.0,
+                "window": 25,
             },
         },
 
@@ -692,6 +775,13 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "default_runtime_profile": "24_hours",
         "default_rye_stop_threshold": 0.08,
         "rye_thresholds": DEFAULT_RYE_THRESHOLDS,
+        "advanced_rye_expectations": {
+            "rolling_window_short": 10,
+            "rolling_window_long": 100,
+            "stability_index_target": 0.55,
+            "recovery_momentum_target": 0.15,
+            "max_oscillation_std": 0.30,
+        },
 
         # Repair efficiency diagnostics hints
         "run_diagnostics": {
@@ -905,12 +995,35 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "write_frequency": "medium",
             "compression_strategy": "semantic",
             "auto_summarize_every_n_cycles": 12,
-            "max_memory_items": 4000,
+            "max_memory_items": 4_000,
             "forgetting_policy": {
                 "enabled": True,
                 "threshold_rye_gain": 0.015,
                 "drop_low_value_notes": True,
                 "reinforce_high_value_notes": True,
+            },
+        },
+
+        # Learning hints for mathematical refinement
+        "learning_hints": {
+            "use_advanced_rye_metrics": True,
+            "advanced_expectations": {
+                "rolling_window_short": 10,
+                "rolling_window_long": 40,
+                "stability_index_target": 0.65,
+                "recovery_momentum_target": 0.08,
+                "max_oscillation_std": 0.20,
+            },
+            "switch_to_maintenance_if": {
+                "avg_rye_above": 0.06,
+                "stability_index_above": 0.60,
+                "oscillation_std_below": 0.18,
+                "min_cycles": 30,
+            },
+            "trigger_exploration_if": {
+                "efficiency_trend_negative": True,
+                "recovery_momentum_below": 0.0,
+                "window": 20,
             },
         },
 
@@ -971,6 +1084,13 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "default_runtime_profile": "8_hours",
         "default_rye_stop_threshold": 0.05,
         "rye_thresholds": DEFAULT_RYE_THRESHOLDS,
+        "advanced_rye_expectations": {
+            "rolling_window_short": 10,
+            "rolling_window_long": 40,
+            "stability_index_target": 0.65,
+            "recovery_momentum_target": 0.08,
+            "max_oscillation_std": 0.20,
+        },
 
         # Repair efficiency diagnostics hints
         "run_diagnostics": {
@@ -1045,11 +1165,35 @@ PRESETS: Dict[str, Dict[str, Any]] = {
 }
 
 # ---------------------------------------------------------------------
+# Aliases so the app can treat different user labels as the same preset
+# ---------------------------------------------------------------------
+PRESET_ALIASES: Dict[str, str] = {
+    "antiaging": "longevity",
+    "anti_aging": "longevity",
+    "aging": "longevity",
+    "anti_ageing": "longevity",
+    "longevity_antiaging": "longevity",
+    "theory": "math",
+    "formal": "math",
+    "general_research": "general",
+}
+
+
+# ---------------------------------------------------------------------
 # Accessors
 # ---------------------------------------------------------------------
 def get_preset(name: str) -> Dict[str, Any]:
-    """Return a preset config, falling back to general if unknown."""
-    return PRESETS.get(name, PRESETS["general"])
+    """Return a preset config, falling back to general if unknown.
+
+    Aliases such as 'antiaging' or 'theory' are mapped to core presets.
+    """
+    key = (name or "general").lower()
+    if key in PRESETS:
+        return PRESETS[key]
+    alias_target = PRESET_ALIASES.get(key)
+    if alias_target and alias_target in PRESETS:
+        return PRESETS[alias_target]
+    return PRESETS["general"]
 
 
 def get_runtime_profile(name: str) -> Dict[str, Any]:
