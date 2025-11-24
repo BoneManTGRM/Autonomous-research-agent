@@ -19,33 +19,12 @@ This manager is wired for Reparodynamics style learning:
     - RYE aware hypothesis records (before/after, delta R, energy)
     - confidence, novelty, and evidence-strength fields
     - optional linkage to cycles and citations
+    - optional info_gain, search_energy, semantic_diversity for search quality
+    - optional swarm_size and swarm_config for swarm mode runs
     - integration hooks to:
         * discovery_log.DiscoveryLogger
         * MemoryStore.add_hypothesis / add_discovery (if provided)
     - auto evaluation helpers for promoting or rejecting pending ideas
-
-Typical usage:
-
-    from agent.hypothesis_manager import HypothesisManager
-
-    hm = HypothesisManager(run_id="run_001", domain="longevity", goal="extend_healthspan")
-
-    h = hm.create_hypothesis(
-        title="New candidate longevity pathway",
-        description="Reasoning and evidence here...",
-        cycle_index=128,
-        agent_role="Researcher",
-        rye_before=0.41,
-        rye_after=0.53,
-        tags=["longevity", "pathway_x"],
-        kind="mechanism",
-        confidence=0.65,
-        novelty=0.4,
-        evidence_strength=0.55,
-    )
-
-    hm.validate_hypothesis(h.hypothesis_id, note="Survived additional checks.")
-
 """
 
 from __future__ import annotations
@@ -67,7 +46,7 @@ REJECTED_DIR = ROOT_DIR / "rejected"
 for d in (PENDING_DIR, VALIDATED_DIR, REJECTED_DIR):
     d.mkdir(parents=True, exist_ok=True)
 
-HYPOTHESIS_SCHEMA_VERSION: int = 1
+HYPOTHESIS_SCHEMA_VERSION: int = 2
 
 
 def _utc_iso() -> str:
@@ -130,6 +109,15 @@ class HypothesisRecord:
     linked_cycles: Optional[List[int]] = None
 
     is_promising: Optional[bool] = None
+
+    # Search and information metrics
+    info_gain: Optional[float] = None
+    search_energy: Optional[float] = None
+    semantic_diversity: Optional[float] = None
+
+    # Swarm context
+    swarm_size: Optional[int] = None
+    swarm_config: Optional[Dict[str, Any]] = None
 
     schema_version: int = HYPOTHESIS_SCHEMA_VERSION
 
@@ -328,6 +316,15 @@ class HypothesisManager:
                 "evidence_strength": record.evidence_strength,
                 "rye_gain_estimate": record.rye_gain_estimate,
             },
+            goal=record.goal,
+            domain=record.domain,
+            severity=None,
+            confidence=record.confidence,
+            info_gain=record.info_gain,
+            search_energy=record.search_energy,
+            semantic_diversity=record.semantic_diversity,
+            swarm_size=record.swarm_size,
+            swarm_config=record.swarm_config,
         )
 
     def _push_to_memory_store_on_create(self, record: HypothesisRecord) -> None:
@@ -405,6 +402,11 @@ class HypothesisManager:
         linked_citations: Optional[List[Dict[str, Any]]] = None,
         linked_cycles: Optional[List[int]] = None,
         is_promising: Optional[bool] = None,
+        info_gain: Optional[float] = None,
+        search_energy: Optional[float] = None,
+        semantic_diversity: Optional[float] = None,
+        swarm_size: Optional[int] = None,
+        swarm_config: Optional[Dict[str, Any]] = None,
     ) -> HypothesisRecord:
         """
         Create a new pending hypothesis and write it to the pending folder.
@@ -451,6 +453,11 @@ class HypothesisManager:
             linked_citations=linked_citations or [],
             linked_cycles=linked_cycles or ([] if cycle_index is None else [cycle_index]),
             is_promising=is_promising,
+            info_gain=info_gain,
+            search_energy=search_energy,
+            semantic_diversity=semantic_diversity,
+            swarm_size=swarm_size,
+            swarm_config=swarm_config,
         )
 
         path = self._build_file_path("pending", title, hypothesis_id)
@@ -559,6 +566,11 @@ class HypothesisManager:
         domain: Optional[str] = None,
         goal: Optional[str] = None,
         is_promising: Optional[bool] = None,
+        info_gain: Optional[float] = None,
+        search_energy: Optional[float] = None,
+        semantic_diversity: Optional[float] = None,
+        swarm_size: Optional[int] = None,
+        swarm_config: Optional[Dict[str, Any]] = None,
     ) -> Optional[HypothesisRecord]:
         """
         Update metadata fields on a hypothesis without changing its status.
@@ -587,6 +599,16 @@ class HypothesisManager:
             record.goal = goal
         if is_promising is not None:
             record.is_promising = is_promising
+        if info_gain is not None:
+            record.info_gain = info_gain
+        if search_energy is not None:
+            record.search_energy = search_energy
+        if semantic_diversity is not None:
+            record.semantic_diversity = semantic_diversity
+        if swarm_size is not None:
+            record.swarm_size = swarm_size
+        if swarm_config is not None:
+            record.swarm_config = swarm_config
 
         record.updated_at = _utc_iso()
 
