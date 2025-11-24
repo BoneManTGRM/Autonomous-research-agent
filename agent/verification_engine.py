@@ -12,6 +12,9 @@ Purpose
       - optional code or data based checks
       - RYE and energy aware scoring
       - long run Tier classification hints (Tier 1 / 2 / 3 candidates)
+      - intelligence profile aware weighting
+      - history based learning over repeated verification attempts
+      - equilibrium and stability aware scoring
 
 This module does not call tools directly. Instead it expects you
 to give it callable hooks so it stays decoupled from specific APIs.
@@ -31,6 +34,13 @@ Typical usage:
         literature_check_fn=do_literature_check,
         critique_fn=do_swarm_critique,
         data_check_fn=run_data_checks,
+        # optional extra hooks:
+        # structural_check_fn=do_structural_check,
+        # plausibility_check_fn=do_plausibility_check,
+        # consensus_check_fn=do_consensus_check,
+        # memory_consistency_fn=do_memory_consistency_check,
+        # equilibrium_check_fn=do_equilibrium_check,
+        # intelligence_profile=intelligence_profile_dict,
     )
 
     ve.verify_pending(limit=3)
@@ -77,6 +87,8 @@ class VerificationEngine:
         structural_check_fn(h: HypothesisRecord) -> Dict
         plausibility_check_fn(h: HypothesisRecord) -> Dict
         consensus_check_fn(h: HypothesisRecord) -> Dict
+        memory_consistency_fn(h: HypothesisRecord) -> Dict
+        equilibrium_check_fn(h: HypothesisRecord) -> Dict
 
     Each function should return a dict like:
 
@@ -89,15 +101,18 @@ class VerificationEngine:
     The engine combines these into one final score using:
       - weighted aggregation
       - RYE and energy aware scoring
+      - intelligence-profile aware weighting
+      - history based learning and trend analysis
       - internal consistency heuristics
 
     Then it:
-      - validates the hypothesis if score >= validate_threshold
-      - rejects it if score <= reject_threshold
+      - validates the hypothesis if score >= validate_threshold (adaptive)
+      - rejects it if score <= reject_threshold (adaptive)
       - leaves it pending if in between (inconclusive)
 
-    This module is deliberately "maxed out" in logic, but optional hooks
-    mean you can start simple and grow into the full power over time.
+    This module is deliberately maxed out in logic, but all hooks
+    and intelligence integration are optional, so you can start
+    simple and grow into the full power over time.
     """
 
     def __init__(
@@ -111,9 +126,17 @@ class VerificationEngine:
         structural_check_fn: Optional[Callable[[HypothesisRecord], Dict[str, Any]]] = None,
         plausibility_check_fn: Optional[Callable[[HypothesisRecord], Dict[str, Any]]] = None,
         consensus_check_fn: Optional[Callable[[HypothesisRecord], Dict[str, Any]]] = None,
-        # Thresholds
+        # New optional hooks for learning and stability
+        memory_consistency_fn: Optional[Callable[[HypothesisRecord], Dict[str, Any]]] = None,
+        equilibrium_check_fn: Optional[Callable[[HypothesisRecord], Dict[str, Any]]] = None,
+        # Thresholds (base, before adaptive tuning)
         validate_threshold: float = 0.7,
         reject_threshold: float = 0.3,
+        # Intelligence profile (from intelligence_profiles.py) is optional
+        intelligence_profile: Optional[Dict[str, Any]] = None,
+        # Optional domain and runtime hints
+        domain: Optional[str] = None,
+        runtime_profile: Optional[str] = None,
         run_id: Optional[str] = None,
     ) -> None:
         self.hypothesis_manager = hypothesis_manager
@@ -129,10 +152,23 @@ class VerificationEngine:
         self.plausibility_check_fn = plausibility_check_fn
         self.consensus_check_fn = consensus_check_fn
 
-        # Score thresholds
+        # New learning and stability hooks
+        self.memory_consistency_fn = memory_consistency_fn
+        self.equilibrium_check_fn = equilibrium_check_fn
+
+        # Score thresholds (base values)
         self.validate_threshold = validate_threshold
         self.reject_threshold = reject_threshold
+
+        # Intelligence and context metadata
+        self.intelligence_profile = intelligence_profile or {}
+        self.domain = domain
+        self.runtime_profile = runtime_profile
         self.run_id = run_id
+
+        # In process verification history for learning and trend analysis
+        # Maps hypothesis_id -> list of past scores (most recent at end)
+        self._history: Dict[str, List[float]] = {}
 
     # ------------------------------------------------------------------
     # main public entry point
@@ -164,11 +200,23 @@ class VerificationEngine:
 
         This now includes:
           - user-provided checks (literature / critique / data / structural / plausibility / consensus)
+          - memory consistency and equilibrium checks (optional)
           - internal RYE and energy heuristic scoring
+          - history based trend scoring
+          - intelligence-profile guided weighting and thresholds
         """
         pieces: List[Dict[str, Any]] = []
         reasons: List[str] = []
         extra_all: Dict[str, Any] = {}
+
+        # 0) Resolve adaptive thresholds for this hypothesis
+        local_validate, local_reject = self._adapt_thresholds(hyp)
+        extra_all["thresholds"] = {
+            "base_validate": self.validate_threshold,
+            "base_reject": self.reject_threshold,
+            "local_validate": local_validate,
+            "local_reject": local_reject,
+        }
 
         # 1) literature check
         if self.literature_check_fn is not None:
@@ -212,18 +260,42 @@ class VerificationEngine:
             reasons.extend(cons_res.get("reasons", []))
             extra_all["consensus_check"] = cons_res
 
-        # 7) internal RYE + energy consistency scoring
+        # 7) memory consistency check (optional, learns from long term memory)
+        if self.memory_consistency_fn is not None:
+            mem_res = self._safe_call("memory_consistency", self.memory_consistency_fn, hyp)
+            pieces.append(self._tagged_piece("memory", mem_res))
+            reasons.extend(mem_res.get("reasons", []))
+            extra_all["memory_consistency_check"] = mem_res
+
+        # 8) equilibrium / stability check (optional)
+        if self.equilibrium_check_fn is not None:
+            eq_res = self._safe_call("equilibrium", self.equilibrium_check_fn, hyp)
+            pieces.append(self._tagged_piece("equilibrium", eq_res))
+            reasons.extend(eq_res.get("reasons", []))
+            extra_all["equilibrium_check"] = eq_res
+
+        # 9) internal RYE + energy consistency scoring
         rye_piece = self._compute_rye_energy_piece(hyp)
         pieces.append(rye_piece)
         reasons.extend(rye_piece.get("reasons", []))
         extra_all["rye_energy"] = rye_piece
 
+        # 10) history based trend and learning piece
+        history_piece = self._compute_history_piece(hyp)
+        if history_piece is not None:
+            pieces.append(history_piece)
+            reasons.extend(history_piece.get("reasons", []))
+            extra_all["history"] = history_piece
+
         # Combine to final score
         final_score, component_scores = self._combine_scores(pieces, hyp=hyp)
         status = "inconclusive"
 
+        # Update learning history
+        self._update_history(hyp, final_score)
+
         # Decide and propagate back into hypothesis manager + discovery log
-        if final_score >= self.validate_threshold:
+        if final_score >= local_validate:
             status = "validated"
             note = (
                 f"Validated by verification engine at {_utc_iso()} "
@@ -233,9 +305,16 @@ class VerificationEngine:
                 hyp.hypothesis_id,
                 note=note,
             )
-            self._log_validated(updated or hyp, final_score, reasons, extra_all, component_scores=component_scores)
+            self._log_validated(
+                updated or hyp,
+                final_score,
+                reasons,
+                extra_all,
+                component_scores=component_scores,
+                thresholds={"validate": local_validate, "reject": local_reject},
+            )
 
-        elif final_score <= self.reject_threshold:
+        elif final_score <= local_reject:
             status = "rejected"
             note = (
                 f"Rejected by verification engine at {_utc_iso()} "
@@ -245,12 +324,28 @@ class VerificationEngine:
                 hyp.hypothesis_id,
                 note=note,
             )
-            self._log_rejected(updated or hyp, final_score, reasons, extra_all, component_scores=component_scores)
+            self._log_rejected(
+                updated or hyp,
+                final_score,
+                reasons,
+                extra_all,
+                component_scores=component_scores,
+                thresholds={"validate": local_validate, "reject": local_reject},
+            )
         else:
             # still pending, but we log the attempt
-            self._log_inconclusive(hyp, final_score, reasons, extra_all, component_scores=component_scores)
+            self._log_inconclusive(
+                hyp,
+                final_score,
+                reasons,
+                extra_all,
+                component_scores=component_scores,
+                thresholds={"validate": local_validate, "reject": local_reject},
+            )
 
         extra_all["component_scores"] = component_scores
+        extra_all["final_score"] = final_score
+        extra_all["status"] = status
 
         return VerificationResult(
             hypothesis_id=hyp.hypothesis_id,
@@ -305,6 +400,9 @@ class VerificationEngine:
         out.setdefault("kind", kind)
         return out
 
+    # ------------------------------------------------------------------
+    # RYE / energy piece
+    # ------------------------------------------------------------------
     def _compute_rye_energy_piece(self, hyp: HypothesisRecord) -> Dict[str, Any]:
         """
         Build an internal score piece based on RYE and energy metadata
@@ -418,6 +516,152 @@ class VerificationEngine:
         }
 
     # ------------------------------------------------------------------
+    # History based learning piece
+    # ------------------------------------------------------------------
+    def _compute_history_piece(self, hyp: HypothesisRecord) -> Optional[Dict[str, Any]]:
+        """
+        Build a score piece based on prior verification attempts for
+        this hypothesis.
+
+        Behavior:
+          - First time: neutral score with explanatory reason
+          - Stable high scores over multiple attempts: boost
+          - Repeated low scores: penalize
+          - Improving trend: boost
+          - Deteriorating trend: penalize
+
+        History is in-process only. If you want persistent history
+        across runs, plug this engine into a higher level controller
+        that reloads and feeds historical scores.
+        """
+        hist = self._history.get(hyp.hypothesis_id, [])
+        attempts = len(hist)
+
+        reasons: List[str] = []
+        score = 0.5  # neutral default
+
+        if attempts == 0:
+            reasons.append("History: first verification attempt for this hypothesis.")
+            extra = {"attempts": 0, "trend": None, "avg_score": None}
+            return {
+                "kind": "history",
+                "score": score,
+                "reasons": reasons,
+                "extra": extra,
+            }
+
+        avg_score = sum(hist) / attempts
+        last_score = hist[-1]
+        first_score = hist[0]
+        trend = last_score - first_score
+
+        # Base on average
+        if avg_score >= 0.8 and attempts >= 2:
+            score = 0.80
+            reasons.append("History: consistently high verification scores across attempts.")
+        elif avg_score <= 0.35 and attempts >= 2:
+            score = 0.30
+            reasons.append("History: consistently low verification scores across attempts.")
+        elif 0.35 < avg_score < 0.8:
+            score = 0.55
+            reasons.append("History: mixed verification scores, slight positive weight.")
+
+        # Trend adjustment
+        if trend > 0.15:
+            score = max(score, 0.75)
+            reasons.append("History trend: verification scores improving over time.")
+        elif trend < -0.15:
+            score = min(score, 0.35)
+            reasons.append("History trend: verification scores worsening over time.")
+        else:
+            reasons.append("History trend: no strong trend detected.")
+
+        extra = {
+            "attempts": attempts,
+            "avg_score": avg_score,
+            "last_score": last_score,
+            "first_score": first_score,
+            "trend": trend,
+        }
+
+        return {
+            "kind": "history",
+            "score": float(score),
+            "reasons": reasons,
+            "extra": extra,
+        }
+
+    def _update_history(self, hyp: HypothesisRecord, score: float) -> None:
+        """
+        Update in-process history for this hypothesis.
+        Keeps last N entries to avoid unbounded growth.
+        """
+        hist = self._history.setdefault(hyp.hypothesis_id, [])
+        hist.append(float(score))
+        # keep only last 12 attempts for this hypothesis
+        if len(hist) > 12:
+            del hist[:-12]
+
+    # ------------------------------------------------------------------
+    # Adaptive thresholds
+    # ------------------------------------------------------------------
+    def _adapt_thresholds(self, hyp: HypothesisRecord) -> Tuple[float, float]:
+        """
+        Adapt validation and rejection thresholds based on:
+          - intelligence_profile
+          - domain (e.g., longevity, math)
+          - safety bias and required citations level
+        """
+        v = float(self.validate_threshold)
+        r = float(self.reject_threshold)
+
+        profile = self.intelligence_profile or {}
+        safety_bias = str(profile.get("safety_bias", "medium")).lower()
+        require_citations_level = str(profile.get("require_citations_level", "normal")).lower()
+        tier3_bias = float(profile.get("tier3_bias", 0.0))
+        discovery_focus = float(profile.get("discovery_focus", 0.0))
+
+        # Domain hint from engine plus hypothesis metadata
+        domain = self.domain or getattr(hyp, "domain", None) or getattr(hyp, "domain_tag", None)
+        domain_str = str(domain or "general").lower()
+
+        # Safety bias tuning
+        if safety_bias == "high":
+            v += 0.05  # require slightly higher score to validate
+            r -= 0.05  # reject a bit more aggressively
+        elif safety_bias == "low":
+            v -= 0.05
+            r += 0.05
+
+        # Citation strictness tuning
+        if require_citations_level in ("strict", "clinical"):
+            v += 0.03
+
+        # Domain specific tuning
+        if domain_str in ("longevity", "antiaging", "anti_aging"):
+            v += 0.03
+            r -= 0.03
+        elif domain_str in ("math", "theory"):
+            v += 0.02
+
+        # Tier3 and discovery focus can loosen validation slightly for breakthrough hunting
+        if tier3_bias > 0.7 and discovery_focus > 0.7:
+            v -= 0.02  # allow slightly more adventurous validation
+            # but keep rejection threshold similar for safety
+
+        # Clamp to sane range
+        v = max(0.55, min(0.95, v))
+        r = max(0.05, min(0.45, r))
+
+        # Ensure reject < validate
+        if r >= v:
+            mid = (v + r) / 2
+            r = max(0.05, mid - 0.10)
+            v = min(0.95, mid + 0.10)
+
+        return v, r
+
+    # ------------------------------------------------------------------
     # score combiner
     # ------------------------------------------------------------------
     def _combine_scores(
@@ -430,32 +674,48 @@ class VerificationEngine:
 
         Strategy:
           - attach a weight by kind
+          - adjust by intelligence_profile
           - normalize by sum of used weights
           - fall back to neutral if no scores
 
         Current weights are tuned to favor:
           - literature + critique + data for core validity
+          - memory and equilibrium for long-run stability
           - rye_energy for reparodynamic strength
           - structural / plausibility / consensus as strong modifiers
+          - history as a learning stabilizer
         """
         if not pieces:
             return 0.0, {}
 
         # Base weight map (can be adjusted over time)
         base_weights: Dict[str, float] = {
-            "literature": 0.22,
-            "critique": 0.18,
-            "data": 0.18,
+            "literature": 0.20,
+            "critique": 0.16,
+            "data": 0.16,
             "structural": 0.10,
             "plausibility": 0.08,
-            "consensus": 0.10,
-            "rye_energy": 0.14,
+            "consensus": 0.08,
+            "memory": 0.10,
+            "equilibrium": 0.08,
+            "rye_energy": 0.12,
+            "history": 0.08,
         }
 
         # If this is explicitly a math/theory hypothesis, increase structural weight
         domain = getattr(hyp, "domain", None) or getattr(hyp, "domain_tag", "general")
-        if str(domain).lower() in ("math", "theory"):
+        domain_str = str(domain).lower()
+        if domain_str in ("math", "theory"):
             base_weights["structural"] = 0.18
+
+        # Domain specific nudge for longevity (clinical focus)
+        if domain_str in ("longevity", "antiaging", "anti_aging"):
+            base_weights["literature"] += 0.03
+            base_weights["data"] += 0.03
+            base_weights["rye_energy"] += 0.02
+
+        # Adjust weights using intelligence profile (if present)
+        base_weights = self._adjust_weights_with_intelligence(base_weights)
 
         scores_by_kind: Dict[str, float] = {}
         used_weights: Dict[str, float] = {}
@@ -483,9 +743,79 @@ class VerificationEngine:
 
         return final_score, scores_by_kind
 
+    def _adjust_weights_with_intelligence(
+        self,
+        base_weights: Dict[str, float],
+    ) -> Dict[str, float]:
+        """
+        Modify base weights based on intelligence_profile hints:
+
+            depth
+            exploration
+            verification_intensity
+            discovery_focus
+            tier3_bias
+            equilibrium_focus
+            safety_bias
+            hallucination_tolerance
+            require_citations_level
+
+        Effect is soft: relative structure remains similar.
+        """
+        profile = self.intelligence_profile or {}
+        depth = str(profile.get("depth", "balanced"))
+        exploration = float(profile.get("exploration", 0.5))
+        verification_intensity = float(profile.get("verification_intensity", 0.5))
+        discovery_focus = float(profile.get("discovery_focus", 0.5))
+        equilibrium_focus = float(profile.get("equilibrium_focus", 0.5))
+        tier3_bias = float(profile.get("tier3_bias", 0.0))
+
+        # Deep / ultra_deep should favor structural, data, and memory
+        if depth in ("deep", "ultra_deep"):
+            base_weights["structural"] += 0.02
+            base_weights["data"] += 0.02
+            base_weights["memory"] += 0.02
+
+        # High verification intensity: push critique, plausibility, consensus
+        if verification_intensity > 0.7:
+            base_weights["critique"] += 0.03
+            base_weights["plausibility"] += 0.02
+            base_weights["consensus"] += 0.02
+
+        # High discovery focus: push literature, data, rye_energy
+        if discovery_focus > 0.7:
+            base_weights["literature"] += 0.02
+            base_weights["data"] += 0.02
+            base_weights["rye_energy"] += 0.02
+
+        # Equilibrium focus: reward equilibrium and history more
+        if equilibrium_focus > 0.6:
+            base_weights["equilibrium"] += 0.03
+            base_weights["history"] += 0.02
+
+        # Tier 3 bias: emphasize rye_energy and consensus (for strong discoveries)
+        if tier3_bias > 0.6:
+            base_weights["rye_energy"] += 0.02
+            base_weights["consensus"] += 0.02
+
+        return base_weights
+
     # ------------------------------------------------------------------
     # logging helpers
     # ------------------------------------------------------------------
+    def _infer_tier_label(self, score: float) -> Optional[str]:
+        """
+        Convert verification score into a Tier-style label.
+        These are soft hints for later classification and papers.
+        """
+        if score >= 0.9:
+            return "tier3_candidate"
+        if score >= 0.8:
+            return "tier2_candidate"
+        if score >= 0.65:
+            return "tier1_candidate"
+        return None
+
     def _log_validated(
         self,
         hyp: HypothesisRecord,
@@ -493,25 +823,31 @@ class VerificationEngine:
         reasons: List[str],
         extra: Dict[str, Any],
         component_scores: Optional[Dict[str, float]] = None,
+        thresholds: Optional[Dict[str, float]] = None,
     ) -> None:
         """
         Record a validated hypothesis in the discovery log.
 
-        High score hypotheses can be tagged as Tier 2/Tier 3 candidates.
+        High score hypotheses can be tagged as Tier 1 / Tier 2 / Tier 3 candidates.
         """
         component_scores = component_scores or {}
-        tier_tags: List[str] = []
+        thresholds = thresholds or {}
+        tier_label = self._infer_tier_label(score)
 
-        if score >= 0.9:
-            tier_tags.append("tier3_candidate")
-        elif score >= 0.8:
-            tier_tags.append("tier2_candidate")
+        tier_tags: List[str] = []
+        if tier_label:
+            tier_tags.append(tier_label)
 
         description_lines = [
             f"Validated hypothesis with final verification score {score:.3f}.",
-            "",
-            "Component scores:",
         ]
+        if thresholds:
+            description_lines.append(
+                f"Thresholds used — validate >= {thresholds.get('validate', self.validate_threshold):.3f}, "
+                f"reject <= {thresholds.get('reject', self.reject_threshold):.3f}."
+            )
+        description_lines.append("")
+        description_lines.append("Component scores:")
         for k, v in sorted(component_scores.items()):
             description_lines.append(f"- {k}: {v:.3f}")
         description_lines.append("")
@@ -538,6 +874,10 @@ class VerificationEngine:
                 "verification_score": score,
                 "component_scores": component_scores,
                 "checks": extra,
+                "thresholds": thresholds,
+                "tier_label": tier_label,
+                "run_id": self.run_id,
+                "logged_at": _utc_iso(),
             },
         )
 
@@ -548,17 +888,24 @@ class VerificationEngine:
         reasons: List[str],
         extra: Dict[str, Any],
         component_scores: Optional[Dict[str, float]] = None,
+        thresholds: Optional[Dict[str, float]] = None,
     ) -> None:
         """
         Record a rejected hypothesis in the discovery log.
         """
         component_scores = component_scores or {}
+        thresholds = thresholds or {}
 
         description_lines = [
             f"Rejected hypothesis with final verification score {score:.3f}.",
-            "",
-            "Component scores:",
         ]
+        if thresholds:
+            description_lines.append(
+                f"Thresholds used — validate >= {thresholds.get('validate', self.validate_threshold):.3f}, "
+                f"reject <= {thresholds.get('reject', self.reject_threshold):.3f}."
+            )
+        description_lines.append("")
+        description_lines.append("Component scores:")
         for k, v in sorted(component_scores.items()):
             description_lines.append(f"- {k}: {v:.3f}")
         description_lines.append("")
@@ -581,6 +928,9 @@ class VerificationEngine:
                 "verification_score": score,
                 "component_scores": component_scores,
                 "checks": extra,
+                "thresholds": thresholds,
+                "run_id": self.run_id,
+                "logged_at": _utc_iso(),
             },
         )
 
@@ -591,18 +941,25 @@ class VerificationEngine:
         reasons: List[str],
         extra: Dict[str, Any],
         component_scores: Optional[Dict[str, float]] = None,
+        thresholds: Optional[Dict[str, float]] = None,
     ) -> None:
         """
         Record an inconclusive verification attempt.
         The hypothesis stays pending but we keep a trail.
         """
         component_scores = component_scores or {}
+        thresholds = thresholds or {}
 
         description_lines = [
             f"Inconclusive verification with score {score:.3f}. Hypothesis remains pending.",
-            "",
-            "Component scores:",
         ]
+        if thresholds:
+            description_lines.append(
+                f"Thresholds used — validate >= {thresholds.get('validate', self.validate_threshold):.3f}, "
+                f"reject <= {thresholds.get('reject', self.reject_threshold):.3f}."
+            )
+        description_lines.append("")
+        description_lines.append("Component scores:")
         for k, v in sorted(component_scores.items()):
             description_lines.append(f"- {k}: {v:.3f}")
         description_lines.append("")
@@ -626,5 +983,8 @@ class VerificationEngine:
                 "verification_score": score,
                 "component_scores": component_scores,
                 "checks": extra,
+                "thresholds": thresholds,
+                "run_id": self.run_id,
+                "logged_at": _utc_iso(),
             },
         )
