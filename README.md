@@ -28,37 +28,37 @@ Reparodynamics is a claimed scientific trademark of Cody Ryan Jenkins.
 
 # 🚀 Overview
 
-This repository contains an **autonomous, long-run research engine** implementing the Reparodynamics framework.
+This repository contains an **autonomous long-run research engine** implementing the Reparodynamics framework.
 
-Every cycle executes the **TGRM loop**:
+Each cycle executes the **TGRM loop**:
 
 - **Test**  
 - **Detect**  
 - **Repair**  
 - **Verify**
 
-The system logs:
+And logs:
 - ΔR (improvement)  
-- E (energy cost)  
+- E (energy)  
 - RYE = ΔR / E  
 
-This allows the agent to self-monitor, self-correct, and optimize over long horizons.
+RYE and diagnostics allow the agent to continuously monitor its stability, efficiency, and progress over long horizons.
 
 ---
 
 # 🔥 Key Components
 
 ## ⭐ CoreAgent v3
-- Deterministic TGRM execution  
+- Full TGRM cycle execution  
+- RYE v3 (noise-resistant, domain-weighted)  
 - MemoryStore-driven long-term learning  
-- RYE v3 (noise-resistant)  
 - Stability-aware cycle control  
-- Automatic crash-safe snapshots  
+- Crash-safe checkpoints and run continuity  
 
 ---
 
 ## ⭐ Swarm Intelligence (5–32 Agents)
-Fully coordinated swarm mode with:
+Coordinated multi-agent execution with roles such as:
 - Researcher  
 - Critic  
 - Planner  
@@ -66,47 +66,46 @@ Fully coordinated swarm mode with:
 - Explorer  
 - Agent_01 … Agent_32  
 
-Swarm rounds produce:
-- Aggregated RYE  
+Produces:
+- Aggregated RYE per swarm round  
 - Consensus deltas  
-- Stability trends  
 - Discovery crosslinks  
+- Stability trends  
 
 ---
 
-## ⭐ Option C Diagnostics (Full System Meta-Intelligence)
+## ⭐ Option C Diagnostics (Full Meta-Analysis Layer)
 
-Automatically computes:
-- Rolling & Robust RYE  
+Provides deep system evaluation with:
+- Rolling / robust RYE  
 - Stability Index  
-- Regression Slope  
+- Regression trends  
 - Recovery Momentum  
 - Volatility Signature  
 - Equilibrium Detection  
 - TGRM Harmonic Index  
-- Breakthrough Probability  
-- 90-Day Breakthrough Likelihood  
+- Breakthrough estimators  
+- 90-day likelihood calculator  
 - Autonomy Safety Envelope  
 - Early Failure Warning  
-- Run Tier Classification (Tier 0–3)
+- Run Tier Classification  
 
-This gives the agent **self-awareness** over long runs.
+This gives the system detailed self-diagnostic visibility during long-duration runs.
 
 ---
 
 ## ⭐ Discovery Engine
-- Hypothesis generator  
-- VerificationEngine  
-- Novelty detection  
-- Discovery scoring  
-- RYE spike detector  
-- Discovery timeline  
+- Hypothesis generation  
+- Verification engine  
+- Novelty scoring  
+- Discovery timelines  
+- ΔR-based event tracking  
 
 ---
 
 ## ⭐ MemoryStore v3
-- Durable memory  
-- Tool event logs  
+- Long-term durable memory  
+- Tool event logging  
 - RYE-aware pruning  
 - Learning log integration  
 - Snapshot generation  
@@ -115,63 +114,33 @@ This gives the agent **self-awareness** over long runs.
 ---
 
 ## ⭐ Reporting System
-### Markdown Reporter
-Generates structured summaries for each run.
 
-### PDF Report Generator (`pdf_report.py`)
-Creates full reports including:
+### Markdown Reporter
+Generates full run summaries in `.md`.
+
+### PDF Reporter (`pdf_report.py`)
+Produces structured PDF reports including:
 - RYE signatures  
-- Stability & safety  
-- Breakthrough likelihood  
+- Stability metrics  
+- Diagnostic bundle  
 - Run tier  
-- Discovery lists  
-- Agent timeline  
+- Discovery list  
 - Recommendations  
 
 ---
 
-## ⭐ Long-Run Infrastructure
+# 🧩 Long-Run Runners
 
 ### `run_agent.py`
 Headless long-run executor for:
-- 1h  
-- 8h  
-- 24h  
-- 90 days  
-- Forever loops  
+- 1 hour  
+- 8 hours  
+- 24 hours  
+- 90-day missions  
+- “Forever” mode  
 
 ### `daily_runner.py`
-Runs 3 cycles daily for continuous learning.
-
----
-
-# 🧠 Effective Intelligence Estimate
-
-**Current estimated research-task IQ:** ~135–145  
-**After 4 months of training:** ~145–155  
-
-System intelligence > model intelligence because of:
-- memory  
-- diagnostics  
-- swarm coordination  
-- long-run stability  
-- continuous hypothesis generation  
-
----
-
-# 📈 90-Day Run Odds (Projected)
-
-| Run Type | Chance of Completing 90 Days | Chance of Breakthrough |
-|---------|------------------------------|------------------------|
-| Single Agent | 15–25 percent | 3–7 percent |
-| 5–7 Agent Swarm | 20–35 percent | 5–12 percent |
-| After 4–6 Weeks Training | 30–45 percent | 8–15 percent |
-
-A “breakthrough” here means:
-- Tier 3 classification  
-- verified novel structure / hypothesis  
-- stable RYE spike  
-- non-trivial discovery trace  
+Runs a short 3-cycle daily update for continuous learning.
 
 ---
 
@@ -205,7 +174,7 @@ ui/
     streamlit_app.py
 
 config/
-    app.yaml
+    settings.yaml
 ```
 
 ---
@@ -213,9 +182,8 @@ config/
 # 🛡️ License
 
 **Code:** MIT License  
-**Scientific Framework:** Attribution required. Commercial usage requires permission.
-
-MIT licensing applies only to your implementation—not the Reparodynamics framework.
+**Scientific Framework:** Attribution required.  
+The Reparodynamics theory itself is protected and may not be rebranded or repurposed without attribution.
 
 ---
 
@@ -223,5 +191,3 @@ MIT licensing applies only to your implementation—not the Reparodynamics frame
 
 **Reparodynamics Open Science Initiative**  
 Created by Cody Ryan Jenkins  
-
----
