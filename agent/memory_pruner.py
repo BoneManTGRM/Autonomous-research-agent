@@ -92,11 +92,11 @@ class MemoryPruner:
     MemoryPruner implements RYE aligned, stability preserving, discovery maximizing pruning.
 
     Integrated protections:
-        • Protect discoveries, hypotheses, validations
-        • Protect equilibrium zone notes (RYE stable windows)
-        • Protect high RYE entries
-        • Compress stale clusters instead of deleting them
-        • Bias toward keeping memory that is predicted to be useful in the next segment
+        - Protect discoveries, hypotheses, validations
+        - Protect equilibrium zone notes (RYE stable windows)
+        - Protect high RYE entries
+        - Compress stale clusters instead of deleting them
+        - Bias toward keeping memory that is predicted to be useful in the next segment
 
     Expected Memory Store API:
         memory_store.list_entries() -> list of dicts:
@@ -142,9 +142,12 @@ class MemoryPruner:
         self,
         memory_store: Any,
         run_id: Optional[str] = None,
+        discovery_logger: Optional[Any] = None,
     ) -> None:
         self.memory_store = memory_store
         self.run_id = run_id
+        self.discovery_logger = discovery_logger
+        self.last_summary: Optional[Dict[str, Any]] = None
 
         if not PRUNE_LOG_PATH.exists():
             self._write_header()
@@ -244,6 +247,7 @@ class MemoryPruner:
                 "max_drop_fraction": max_drop_fraction,
                 "reason": "below_minimum",
             }
+            self.last_summary = summary
             self._append_log(summary)
             self._log_to_discovery_log(summary)
             return summary
@@ -298,9 +302,27 @@ class MemoryPruner:
             "diagnostics": self._compute_prune_diagnostics(scored, keep_ids, drop_ids),
         }
 
+        self.last_summary = summary
         self._append_log(summary)
         self._log_to_discovery_log(summary)
         return summary
+
+    # Convenient helper if you want a hard cap instead of min_keep
+    def prune_if_needed(
+        self,
+        max_entries: int,
+        **kwargs: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Run prune only if memory size is above max_entries.
+
+        Returns pruning summary if pruning occurred, else None.
+        """
+        total = len(self.memory_store.list_entries())
+        if total <= max_entries:
+            return None
+        # use max_entries as a hard minimum to keep
+        return self.prune(min_keep=max_entries, **kwargs)
 
     # ------------------------------------------------------------
     #   INTELLIGENCE AND DIAGNOSTICS TUNING
@@ -681,13 +703,16 @@ class MemoryPruner:
     def _log_to_discovery_log(self, summary: Dict[str, Any]) -> None:
         """
         Optional integration with discovery_log for high level tracking.
+        Uses injected discovery_logger if present, else falls back to get_global_logger().
         """
-        try:
-            from .discovery_log import get_global_logger  # type: ignore[import]
-        except Exception:
-            return
+        logger = self.discovery_logger
+        if logger is None:
+            try:
+                from .discovery_log import get_global_logger  # type: ignore[import]
+                logger = get_global_logger(run_id=self.run_id)
+            except Exception:
+                return
 
-        logger = get_global_logger(run_id=self.run_id)
         diag = summary.get("diagnostics", {}) or {}
         description_lines = [
             "Memory pruning pass completed.",
