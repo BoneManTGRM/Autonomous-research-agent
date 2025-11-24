@@ -10,24 +10,33 @@ Goal:
     - well supported by cycle context
     - aligned with domain specific discovery classes
       (mechanism, intervention, treatment, biomarker_shift,
-       mathematical_structure, prediction, etc.)
+       mathematical_structure, prediction, equilibrium_shift, etc.)
+    - compatible with Tier 1 / Tier 2 / Tier 3 discovery hints
 
 Design:
     - Reads full cycle history from MemoryStore
-    - Computes simple baselines for RYE and delta_R
+    - Computes baselines for RYE and delta_R
     - Uses lightweight NLP heuristics and preset style hints
     - Avoids duplicates using text fingerprints
+    - Integrates optionally with:
+        * HypothesisManager (auto create pending hypotheses)
+        * DiscoveryLogger (Markdown log of discovery candidates)
+        * intelligence_profiles (adaptive thresholds and scoring)
     - Writes unified JSON discovery log to:
         logs/discovery/discovery_log.json
         logs/discovery_log.json   (compat with existing UI loader)
     - Exposes run_discovery_pass for worker or CoreAgent
 
-This module is intentionally self contained and does not depend
-on the UI. It only needs a MemoryStore like object with:
+This module is intentionally self contained with optional hooks.
+It only requires a MemoryStore like object with:
 
     memory_store.get_cycle_history() -> List[Dict[str, Any]]
 
-and optional presets like your existing PRESETS structure.
+and optional components:
+
+    hypothesis_manager: HypothesisManager
+    discovery_logger: DiscoveryLogger
+    intelligence_profile: Dict[str, Any] from intelligence_profiles.py
 """
 
 from __future__ import annotations
@@ -38,6 +47,14 @@ from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+
+try:
+    # Optional imports, only used if passed in via __init__
+    from .hypothesis_manager import HypothesisManager  # type: ignore
+    from .discovery_log import DiscoveryLogger  # type: ignore
+except Exception:  # pragma: no cover - keep import optional
+    HypothesisManager = Any  # type: ignore
+    DiscoveryLogger = Any  # type: ignore
 
 # Main canonical path plus a top level mirror so app_streamlit can read it
 DISCOVERY_DIR = Path("logs/discovery")
@@ -63,7 +80,7 @@ class Discovery:
 
     # Core content
     text: str
-    kind: str          # mechanism, intervention, treatment, biomarker_shift, mathematical_structure, prediction, other
+    kind: str          # mechanism, intervention, treatment, biomarker_shift, mathematical_structure, prediction, equilibrium_shift, framework, other
     source_type: str   # note, repair, hypothesis
 
     # Metrics
@@ -74,6 +91,9 @@ class Discovery:
     novelty_score: float
     support_score: float
     combined_score: float
+
+    # Tier heuristics
+    tier_label: Optional[str]
 
     # Optional extras
     tags: List[str]
@@ -136,10 +156,6 @@ def _save_discovery_log(entries: List[Dict[str, Any]]) -> None:
         pass
 
 
-# ------------------------------------------------------------
-# Heuristics for novelty, support, and classification
-# ------------------------------------------------------------
-
 def _text_fingerprint(text: str) -> str:
     """Very cheap fingerprint to avoid duplicates."""
     t = " ".join(text.lower().split())
@@ -170,8 +186,8 @@ def _keyword_hits(text: str, keywords: Iterable[str]) -> int:
 
 def _classify_kind(text: str, domain: str) -> Tuple[str, List[str]]:
     """
-    Very lightweight classifier to map text to discovery types plus tags.
-    Tuned for longevity and math, with a fallback class for everything else.
+    Lightweight classifier to map text to discovery types plus tags.
+    Tuned for longevity and math, with a fallback for everything else.
     """
     t = text.lower()
     tags: List[str] = []
@@ -179,13 +195,16 @@ def _classify_kind(text: str, domain: str) -> Tuple[str, List[str]]:
     # Longevity style cues
     lon_mech = ["pathway", "mechanism", "signaling", "axis", "cascade"]
     lon_int = ["intervention", "stack", "protocol", "treatment", "drug", "compound", "synergy"]
-    lon_bio = ["biomarker", "marker", "blood", "lab", "plasma", "serum", "cholesterol"]
-    lon_age = ["lifespan", "healthspan", "aging", "senescence", "autophagy", "mTOR", "rapamycin", "metformin", "NAD", "sirtuin"]
+    lon_bio = ["biomarker", "marker", "blood", "lab", "plasma", "serum", "cholesterol", "inflammation"]
+    lon_age = ["lifespan", "healthspan", "aging", "senescence", "autophagy", "mtor", "rapamycin", "metformin", "nad", "sirtuin", "telomere"]
 
     # Math style cues
     math_formal = ["theorem", "lemma", "corollary", "axiom", "proof", "conjecture"]
-    math_struct = ["structure", "operator", "measure", "functional", "stability", "equilibrium", "lyapunov", "martingale", "markov"]
-    prediction_terms = ["predict", "prediction", "forecast", "estimate", "expected", "likely"]
+    math_struct = ["structure", "operator", "measure", "functional", "stability", "equilibrium", "lyapunov", "martingale", "markov", "invariant"]
+    prediction_terms = ["predict", "prediction", "forecast", "estimate", "expected", "likely", "probability"]
+
+    # Reparodynamics specific cues
+    reparo_terms = ["rye", "repair yield", "delta_r", "energy", "equilibrium", "plateau", "coherence", "stability zone"]
 
     # Tag building
     if any(word in t for word in lon_age):
@@ -205,7 +224,12 @@ def _classify_kind(text: str, domain: str) -> Tuple[str, List[str]]:
     if any(word in t for word in prediction_terms):
         tags.append("prediction")
 
-    # Primary kind selection
+    if any(word in t for word in reparo_terms):
+        tags.append("reparodynamics")
+
+    # Primary kind selection by domain
+
+    # Math heavy
     if "math" in domain:
         if any(word in t for word in math_formal):
             return "mathematical_structure", tags or ["math"]
@@ -227,6 +251,11 @@ def _classify_kind(text: str, domain: str) -> Tuple[str, List[str]]:
             return "prediction", tags or ["prediction"]
         return "treatment", tags or ["longevity_candidate"]
 
+    # Reparodynamics equilibrium style
+    if "equilibrium" in t or "plateau" in t or "stability zone" in t:
+        tags.append("equilibrium")
+        return "equilibrium_shift", tags or ["equilibrium"]
+
     # Generic fallback
     if any(word in t for word in prediction_terms):
         return "prediction", tags or ["prediction"]
@@ -247,9 +276,9 @@ def _score_candidate(
     delta_mean: Optional[float],
     delta_std: Optional[float],
     seen_fingerprints: Set[str],
-) -> Tuple[float, float, float, float]:
+) -> Tuple[float, float, float, float, float]:
     """
-    Compute novelty_score, support_score, combined_score, and z_rye.
+    Compute novelty_score, support_score, combined_score, z_rye, z_delta.
 
     Heuristics:
         - novelty comes from uniqueness and richness of text
@@ -258,7 +287,7 @@ def _score_candidate(
     """
     t = text.strip()
     if not t:
-        return 0.0, 0.0, 0.0, 0.0
+        return 0.0, 0.0, 0.0, 0.0, 0.0
 
     fingerprint = _text_fingerprint(t)
     already_seen = fingerprint in seen_fingerprints
@@ -290,7 +319,34 @@ def _score_candidate(
     # Combined
     combined_score = max(0.0, min(1.0, 0.5 * novelty_score + 0.5 * support_score))
 
-    return novelty_score, support_score, combined_score, z_rye
+    return novelty_score, support_score, combined_score, z_rye, z_delta
+
+
+def _infer_tier_label(combined_score: float, z_rye: float) -> Optional[str]:
+    """
+    Rough Tier-style label for discoveries.
+    Uses combined_score and RYE z score to hint at Tier level.
+    """
+    # Strong RYE plus high combined score suggests higher Tier patterns
+    if combined_score >= 0.9 and z_rye >= 1.0:
+        return "tier3_candidate"
+    if combined_score >= 0.8 and z_rye >= 0.3:
+        return "tier2_candidate"
+    if combined_score >= 0.65:
+        return "tier1_candidate"
+    return None
+
+
+def _short_title_from_text(text: str, kind: str, domain: str) -> str:
+    """
+    Build a short title for auto created hypotheses.
+    """
+    t = " ".join(text.strip().split())
+    if len(t) > 120:
+        t = t[:117].rstrip() + "..."
+    base = kind.replace("_", " ").title()
+    dom = domain.split("/")[-1]
+    return f"{base} candidate in {dom}: {t}"
 
 
 # ------------------------------------------------------------
@@ -307,12 +363,115 @@ class DiscoveryEngine:
 
         de = DiscoveryEngine(memory_store=memory, presets=PRESETS)
         summary = de.run_pass()
+
+    You can optionally pass:
+        - hypothesis_manager for auto hypothesis creation
+        - discovery_logger for Markdown discovery logging
+        - intelligence_profile for adaptive thresholds
+        - run_id for traceability
     """
 
-    def __init__(self, memory_store: Any, presets: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+        self,
+        memory_store: Any,
+        presets: Optional[Dict[str, Any]] = None,
+        hypothesis_manager: Optional[HypothesisManager] = None,
+        discovery_logger: Optional[DiscoveryLogger] = None,
+        intelligence_profile: Optional[Dict[str, Any]] = None,
+        run_id: Optional[str] = None,
+        domain: Optional[str] = None,
+        runtime_profile: Optional[str] = None,
+    ) -> None:
         self.memory_store = memory_store
         self.presets = presets or {}
 
+        self.hypothesis_manager = hypothesis_manager
+        self.discovery_logger = discovery_logger
+        self.intelligence_profile = intelligence_profile or {}
+        self.run_id = run_id
+        self.domain_hint = domain
+        self.runtime_profile = runtime_profile
+
+    # --------------------------------------------------------
+    # Threshold adaptation using intelligence profile
+    # --------------------------------------------------------
+    def _adapt_thresholds(
+        self,
+        min_combined_score: float,
+        min_novelty_score: float,
+        min_support_score: float,
+    ) -> Tuple[float, float, float]:
+        """
+        Adapt thresholds based on intelligence_profile hints:
+            - safety_bias
+            - discovery_focus
+            - tier3_bias
+            - equilibrium_focus
+        """
+        profile = self.intelligence_profile or {}
+        safety_bias = str(profile.get("safety_bias", "medium")).lower()
+        discovery_focus = float(profile.get("discovery_focus", 0.5))
+        tier3_bias = float(profile.get("tier3_bias", 0.0))
+        equilibrium_focus = float(profile.get("equilibrium_focus", 0.5))
+
+        mc = float(min_combined_score)
+        mn = float(min_novelty_score)
+        ms = float(min_support_score)
+
+        # Safety high: require stronger evidence
+        if safety_bias == "high":
+            mc += 0.05
+            mn += 0.03
+            ms += 0.03
+        elif safety_bias == "low":
+            mc -= 0.04
+            mn -= 0.02
+            ms -= 0.02
+
+        # Discovery focus: allow more borderline candidates
+        if discovery_focus > 0.7:
+            mc -= 0.03
+            mn -= 0.02
+        elif discovery_focus < 0.3:
+            mc += 0.02
+
+        # Tier3 bias: push for strongest discoveries, fewer but higher quality
+        if tier3_bias > 0.6:
+            mc += 0.02
+            ms += 0.02
+
+        # Equilibrium focus: slightly prefer well supported discoveries
+        if equilibrium_focus > 0.6:
+            ms += 0.02
+
+        # Clamp
+        mc = max(0.40, min(0.95, mc))
+        mn = max(0.20, min(0.90, mn))
+        ms = max(0.20, min(0.90, ms))
+
+        return mc, mn, ms
+
+    def _adapt_max_candidates(self, max_candidates_per_cycle: int) -> int:
+        """
+        Adapt per cycle candidate cap based on discovery_focus.
+        """
+        profile = self.intelligence_profile or {}
+        discovery_focus = float(profile.get("discovery_focus", 0.5))
+
+        cap = int(max_candidates_per_cycle)
+
+        if discovery_focus > 0.8:
+            cap = int(cap * 1.5)
+        elif discovery_focus < 0.3:
+            cap = max(1, int(cap * 0.6))
+
+        # Keep sane bounds
+        cap = max(1, min(20, cap))
+        return cap
+
+    # --------------------------------------------------------
+    # Core pass
+    # --------------------------------------------------------
     def run_pass(
         self,
         domains: Optional[List[str]] = None,
@@ -320,11 +479,34 @@ class DiscoveryEngine:
         min_novelty_score: float = 0.45,
         min_support_score: float = 0.45,
         max_candidates_per_cycle: int = 5,
+        # New options
+        create_hypotheses: bool = False,
+        log_to_markdown: bool = True,
     ) -> Dict[str, Any]:
         """
         Scan full cycle history and append any new high quality discoveries.
 
         Returns a summary dict with counts and basic stats.
+
+        Arguments:
+            domains:
+                Optional list of allowed domain labels to include.
+
+            min_combined_score, min_novelty_score, min_support_score:
+                Base thresholds that will be adapted using intelligence_profile
+                if provided.
+
+            max_candidates_per_cycle:
+                Maximum number of discoveries per cycle before cutoff.
+                Also adapted by discovery_focus.
+
+            create_hypotheses:
+                If True and a HypothesisManager is attached, spawn pending
+                hypotheses for high tier discoveries.
+
+            log_to_markdown:
+                If True and a DiscoveryLogger is attached, mirror discoveries
+                into the Markdown discovery log.
         """
         history: List[Dict[str, Any]] = self.memory_store.get_cycle_history() or []
 
@@ -355,8 +537,16 @@ class DiscoveryEngine:
         # Domain filters
         allowed_domains = set(d.lower() for d in domains) if domains else None
 
+        # Adapt thresholds and caps based on intelligence profile
+        local_min_combined, local_min_novelty, local_min_support = self._adapt_thresholds(
+            min_combined_score,
+            min_novelty_score,
+            min_support_score,
+        )
+        local_max_candidates = self._adapt_max_candidates(max_candidates_per_cycle)
+
         for entry in history:
-            domain = str(entry.get("domain", "general"))
+            domain = str(entry.get("domain", self.domain_hint or "general"))
             if allowed_domains and domain.lower() not in allowed_domains:
                 continue
 
@@ -397,7 +587,7 @@ class DiscoveryEngine:
             cycle_new: List[Discovery] = []
 
             for source_type, text in candidates:
-                novelty_score, support_score, combined_score, z_rye_val = _score_candidate(
+                novelty_score, support_score, combined_score, z_rye_val, z_delta_val = _score_candidate(
                     text=text,
                     rye=rye,
                     delta_R=delta_R,
@@ -408,12 +598,12 @@ class DiscoveryEngine:
                     seen_fingerprints=existing_fp,
                 )
 
-                # Hard gate
-                if combined_score < min_combined_score:
+                # Hard gates using adapted thresholds
+                if combined_score < local_min_combined:
                     continue
-                if novelty_score < min_novelty_score:
+                if novelty_score < local_min_novelty:
                     continue
-                if support_score < min_support_score:
+                if support_score < local_min_support:
                     continue
 
                 fingerprint = _text_fingerprint(text)
@@ -421,6 +611,7 @@ class DiscoveryEngine:
                     continue
 
                 kind, tags = _classify_kind(text, domain=domain)
+                tier_label = _infer_tier_label(combined_score, z_rye_val)
 
                 disc = Discovery(
                     id=f"{domain}-{cycle_idx}-{kind}-{len(cycle_new)}",
@@ -437,16 +628,20 @@ class DiscoveryEngine:
                     novelty_score=novelty_score,
                     support_score=support_score,
                     combined_score=combined_score,
+                    tier_label=tier_label,
                     tags=tags,
                     extra={
                         "z_rye": z_rye_val,
+                        "z_delta": z_delta_val,
                         "length": len(text),
+                        "run_id": self.run_id,
+                        "runtime_profile": self.runtime_profile,
                     },
                 )
                 cycle_new.append(disc)
                 existing_fp.add(fingerprint)
 
-                if len(cycle_new) >= max_candidates_per_cycle:
+                if len(cycle_new) >= local_max_candidates:
                     break
 
             new_entries.extend(cycle_new)
@@ -456,21 +651,159 @@ class DiscoveryEngine:
                 "new_discoveries": 0,
                 "total_discoveries": len(existing),
                 "message": "No new discoveries above thresholds.",
+                "thresholds": {
+                    "min_combined_score": local_min_combined,
+                    "min_novelty_score": local_min_novelty,
+                    "min_support_score": local_min_support,
+                    "max_candidates_per_cycle": local_max_candidates,
+                },
+                "mean_rye": rye_mean,
+                "std_rye": rye_std,
+                "mean_delta_R": delta_mean,
+                "std_delta_R": delta_std,
             }
 
-        # Merge and save
+        # Optional: auto create hypotheses for high tier discoveries
+        created_hypotheses = 0
+        if create_hypotheses and self.hypothesis_manager is not None:
+            for disc in new_entries:
+                if self._maybe_create_hypothesis_for_discovery(disc):
+                    created_hypotheses += 1
+
+        # Optional: mirror into Markdown discovery log
+        if log_to_markdown and self.discovery_logger is not None:
+            for disc in new_entries:
+                self._log_discovery_markdown(disc)
+
+        # Merge and save JSON discovery log
         merged = existing + [asdict(d) for d in new_entries]
         _save_discovery_log(merged)
 
         return {
             "new_discoveries": len(new_entries),
             "total_discoveries": len(merged),
+            "created_hypotheses": created_hypotheses,
             "mean_rye": rye_mean,
             "std_rye": rye_std,
             "mean_delta_R": delta_mean,
             "std_delta_R": delta_std,
+            "thresholds": {
+                "min_combined_score": local_min_combined,
+                "min_novelty_score": local_min_novelty,
+                "min_support_score": local_min_support,
+                "max_candidates_per_cycle": local_max_candidates,
+            },
             "message": f"Discovery pass complete. Added {len(new_entries)} new discoveries.",
         }
+
+    # --------------------------------------------------------
+    # Optional integration hooks
+    # --------------------------------------------------------
+    def _maybe_create_hypothesis_for_discovery(self, disc: Discovery) -> bool:
+        """
+        Create a pending hypothesis for this discovery if it looks strong enough.
+        Uses tier_label and combined_score to decide.
+        """
+        if self.hypothesis_manager is None:
+            return False
+
+        # Only create hypotheses for Tier 1 and above
+        if disc.tier_label not in ("tier1_candidate", "tier2_candidate", "tier3_candidate"):
+            return False
+
+        # Basic description with metrics
+        description_lines = [
+            disc.text,
+            "",
+            "Metrics:",
+            f"- domain: {disc.domain}",
+            f"- kind: {disc.kind}",
+            f"- source_type: {disc.source_type}",
+            f"- RYE: {disc.rye}",
+            f"- delta_R: {disc.delta_R}",
+            f"- energy_E: {disc.energy_E}",
+            f"- novelty_score: {disc.novelty_score:.3f}",
+            f"- support_score: {disc.support_score:.3f}",
+            f"- combined_score: {disc.combined_score:.3f}",
+        ]
+        if disc.tier_label:
+            description_lines.append(f"- tier_label: {disc.tier_label}")
+
+        description = "\n".join(description_lines)
+
+        title = _short_title_from_text(
+            text=disc.text,
+            kind=disc.kind,
+            domain=disc.domain,
+        )
+
+        tags = list(set(disc.tags + ["discovery_candidate", disc.tier_label or "discovery"]))
+
+        try:
+            self.hypothesis_manager.create_hypothesis(
+                title=title,
+                description=description,
+                cycle_index=disc.cycle,
+                agent_role=disc.role,
+                rye_before=None,
+                rye_after=disc.rye,
+                delta_r=disc.delta_R,
+                energy=disc.energy_E,
+                tags=tags,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _log_discovery_markdown(self, disc: Discovery) -> None:
+        """
+        Mirror discovery into the Markdown discovery log using DiscoveryLogger.
+        """
+        if self.discovery_logger is None:
+            return
+
+        tier_str = disc.tier_label or "unclassified"
+        description_lines = [
+            f"Discovery candidate with combined_score {disc.combined_score:.3f} and tier label {tier_str}.",
+            "",
+            "Text:",
+            disc.text,
+            "",
+            "Metrics:",
+            f"- RYE: {disc.rye}",
+            f"- delta_R: {disc.delta_R}",
+            f"- energy_E: {disc.energy_E}",
+            f"- novelty_score: {disc.novelty_score:.3f}",
+            f"- support_score: {disc.support_score:.3f}",
+            f"- tier_label: {tier_str}",
+        ]
+        description = "\n".join(description_lines)
+
+        tags = list(set(disc.tags + ["discovery", "discovery_candidate", tier_str]))
+
+        try:
+            self.discovery_logger.log_event(
+                kind="discovery_candidate",
+                title=f"[Cycle {disc.cycle}] {disc.kind} candidate in {disc.domain}",
+                description=description,
+                cycle_index=disc.cycle,
+                agent_role=disc.role,
+                rye_before=None,
+                rye_after=disc.rye,
+                delta_r=disc.delta_R,
+                energy=disc.energy_E,
+                tags=tags,
+                extra={
+                    "discovery_id": disc.id,
+                    "tier_label": disc.tier_label,
+                    "domain": disc.domain,
+                    "role": disc.role,
+                    "run_id": self.run_id,
+                },
+            )
+        except Exception:
+            # Do not let logging failures break discovery pass
+            return
 
 
 # ------------------------------------------------------------
@@ -489,6 +822,14 @@ def run_discovery_pass(
         from agent.discovery_engine import run_discovery_pass
 
         summary = run_discovery_pass(memory_store)
+
+    Any extra kwargs are forwarded to DiscoveryEngine.run_pass, for example:
+        - min_combined_score
+        - min_novelty_score
+        - min_support_score
+        - max_candidates_per_cycle
+        - create_hypotheses
+        - log_to_markdown
     """
     engine = DiscoveryEngine(memory_store=memory_store, presets=presets)
     return engine.run_pass(domains=domains, **kwargs)
