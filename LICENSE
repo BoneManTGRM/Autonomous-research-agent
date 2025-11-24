@@ -36,8 +36,8 @@ in any form (source, binary, model-integrated, or hosted service):
    - the copyright notice above,
    - this full License text,
    - the NOTICE file included with this project,
-   - and the following credit in documentation, README, or public-facing
-     description of any derivative work:
+   - and the following credit in documentation, README, or any public
+     description of derivative work:
 
      "Based on the Reparodynamics Autonomous Research Agent created by
       Cody Ryan Jenkins, implementing Reparodynamics, TGRM, and RYE."
@@ -49,43 +49,41 @@ in any form (source, binary, model-integrated, or hosted service):
      - "Targeted Gradient Repair Mechanism" or "TGRM"
      - "Repair Yield per Energy" or "RYE"
 
-   are protected terminology identifying the underlying scientific
-   framework authored by Cody Ryan Jenkins.
+   are protected terminology identifying the scientific framework
+   authored by Cody Ryan Jenkins.
 
    You may *use* these terms in accurate descriptions, extensions,
    citations, or publications.
 
    You **may not**:
-   - remove these names from portions of the code that implement them,
-   - rename or rebrand these concepts as if they originated from
-     another creator,
-   - create alternative names for the purpose of obscuring origin,
-   - claim novelty or inventorship of these terms in scientific,
-     academic, or technical contexts.
+   - remove these names from code implementing those concepts,
+   - rename or rebrand these concepts as if they originated elsewhere,
+   - create alternative names intended to obscure origin,
+   - claim invention of these terms in scientific or technical settings.
 
-   Derivative works must clearly state that extensions are **extensions
-   of Reparodynamics** rather than independent inventions.
+   Extensions must clearly state they are extensions **of
+   Reparodynamics**, not independent inventions.
 
 
 3. **Publication / Research Requirement**
-   Any academic, scientific, or public research publication that makes
-   substantial use of Reparodynamics, TGRM, RYE, or this agent must cite
-   at least one primary Reparodynamics Zenodo record or paper authored
-   by Cody Ryan Jenkins.
+   Academic or scientific publications that make substantial use of
+   Reparodynamics, TGRM, RYE, or this agent must cite at least one
+   primary Reparodynamics Zenodo record or paper authored by
+   Cody Ryan Jenkins.
 
 
 4. **No Trademark License Granted**
-   The names “Reparodynamics”, “TGRM”, and “RYE” function as identifiers
-   of a scientific framework and are not licensed as trademarks.
+   The names “Reparodynamics”, “TGRM”, and “RYE” are not licensed as
+   trademarks.
 
-   You may describe your work as:
+   You may state:
      - “based on Reparodynamics”
      - “implements TGRM”
      - “uses RYE metrics”
 
-   but you may not present your derivative as the official
-   Reparodynamics project or use these names to brand a separate
-   commercial product or service without written permission.
+   You may not present derivatives as the official Reparodynamics
+   project or use these names as brands of separate commercial products
+   without written permission.
 
 
 5. **Commercial Use**
@@ -93,17 +91,17 @@ in any form (source, binary, model-integrated, or hosted service):
    integration into proprietary systems are fully permitted under Apache
    2.0, subject to the attribution and naming requirements above.
 
-   No royalties, payments, or proprietary licenses are required.
+   No royalties, payments, or proprietary license are required.
 
 
 
 ============================================================
 SUMMARY
 ============================================================
-This project remains **fully open**, **fully forkable**, and
-**commercial-friendly**, while ensuring:
+This project remains open, forkable, and commercially friendly, while
+ensuring that:
 
-- credit always stays with you  
-- Reparodynamics, TGRM, and RYE cannot be stolen or rebranded  
-- the scientific lineage stays intact across all future forks  
-- people can build products, companies, and research on it freely  
+- credit always remains with Cody Ryan Jenkins  
+- Reparodynamics, TGRM, and RYE cannot be renamed or claimed by others  
+- the scientific lineage is protected  
+- developers and companies can freely build atop the framework  
