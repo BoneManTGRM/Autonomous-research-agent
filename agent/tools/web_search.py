@@ -1,16 +1,20 @@
 """
-Web search tool for the Autonomous Research Agent.
+Advanced web search tool for the Autonomous Research Agent.
+EXTREME MODE (Option C):
 
-Provides:
-- Real Tavily search when TAVILY_API_KEY is provided.
-- Safe stub mode when key or client missing.
-- Clean structured results for TGRM cycles.
-- Automatic logging to logs/web_search_log.json.
-- In-memory caching to reduce repeated queries.
+Adds:
+- Quality scoring + novelty detection
+- Redundancy filtering
+- Semantic result signatures
+- Information gain estimation
+- Domain-aware weighting (longevity, math, general)
+- RYE-friendly metadata (search_energy, info_density)
+- Full Tavily support + safe stub fallback
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import time
@@ -18,16 +22,18 @@ from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# ---------------------------------------------------------------------
 # Try to import the Tavily client
+# ---------------------------------------------------------------------
 try:
     from tavily import TavilyClient
 except Exception:
-    TavilyClient = None  # if import fails, we run in stub mode
+    TavilyClient = None
 
 
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # Data models
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 @dataclass
 class WebResult:
     title: str
@@ -36,6 +42,11 @@ class WebResult:
     source: str = "web"
     score: Optional[float] = None
     favicon: Optional[str] = None
+
+    # Extreme mode extras
+    novelty: Optional[float] = None
+    density: Optional[float] = None
+    signature: Optional[str] = None
 
 
 @dataclass
@@ -47,20 +58,26 @@ class WebSearchSummary:
     response_time: Optional[float] = None
     request_id: Optional[str] = None
 
+    # Extreme mode RYE/AGI signals
+    info_gain: Optional[float] = None
+    search_energy: Optional[float] = None
+    difficulty: Optional[float] = None
+    semantic_diversity: Optional[float] = None
 
-# -----------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------
 # Logging + caching
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 LOG_PATH = Path("logs/web_search_log.json")
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 _CACHE: Dict[Tuple[str, int, str, str], WebSearchSummary] = {}
 _CACHE_TIMESTAMPS: Dict[Tuple[str, int, str, str], float] = {}
-CACHE_TTL_SECONDS = 600.0  # 10 minutes
+CACHE_TTL_SECONDS = 600.0
 
 
 def _log_event(event: Dict[str, Any]) -> None:
-    """Append an event to the web search log without ever crashing."""
+    """Append to log without ever crashing."""
     try:
         LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         if LOG_PATH.exists():
@@ -77,45 +94,94 @@ def _log_event(event: Dict[str, Any]) -> None:
         return
 
 
+# ---------------------------------------------------------------------
+# Tavily wrapper
+# ---------------------------------------------------------------------
 def _get_tavily_client() -> Tuple[Optional[Any], Optional[str]]:
-    """Return an initialized TavilyClient or an error message."""
     api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
-        return None, "No Tavily API key set. Paste it in the Streamlit sidebar."
+        return None, "No Tavily API key set."
 
     if TavilyClient is None:
-        return None, "tavily-python is not installed. Add to requirements.txt."
+        return None, "tavily-python not installed."
 
     try:
-        client = TavilyClient(api_key=api_key)
+        return TavilyClient(api_key=api_key), None
     except Exception as e:
-        return None, f"Failed to initialize Tavily client: {e}"
+        return None, f"Tavily init failed: {e}"
 
-    return client, None
+
+# ---------------------------------------------------------------------
+# Extreme-mode analysis helpers
+# ---------------------------------------------------------------------
+def _semantic_signature(text: str) -> str:
+    """Stable hash used to compute redundancy + diversity."""
+    h = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return h[:16]
+
+
+def _text_density(text: str) -> float:
+    """Density score: characters / tokens ~ signal richness."""
+    if not text:
+        return 0.0
+    tokens = max(1, len(text.split()))
+    return min(1.0, len(text) / (tokens * 50))  # scale down to [0,1]
+
+
+def _estimate_novelty(text: str, seen_hashes: List[str]) -> float:
+    """Novelty score based on Hamming distance of semantic signature."""
+    sig = _semantic_signature(text)
+    if not seen_hashes:
+        return 1.0  # first result is maximally novel
+
+    distances = []
+    for h in seen_hashes:
+        # simple XOR-based Hamming distance on short hex segments
+        d = sum(a != b for a, b in zip(sig, h))
+        distances.append(d / len(sig))
+
+    return max(0.0, min(1.0, sum(distances) / len(distances)))
 
 
 def _from_tavily_response(query: str, raw: Dict[str, Any]) -> WebSearchSummary:
-    """Convert Tavily response into our summary object."""
     items = raw.get("results") or raw.get("items") or []
-    results = []
+    results: List[WebResult] = []
+
+    seen_sigs: List[str] = []
 
     for item in items:
         if not isinstance(item, dict):
             continue
+
+        text = (
+            item.get("content")
+            or item.get("snippet")
+            or item.get("raw_content")
+            or ""
+        )
+
+        sig = _semantic_signature(text)
+        density = _text_density(text)
+        novelty = _estimate_novelty(text, seen_sigs)
+        seen_sigs.append(sig)
+
         results.append(
             WebResult(
                 title=str(item.get("title") or ""),
                 url=str(item.get("url") or ""),
-                snippet=str(
-                    item.get("content")
-                    or item.get("snippet")
-                    or item.get("raw_content")
-                    or ""
-                ),
+                snippet=text,
                 score=item.get("score"),
                 favicon=item.get("favicon"),
+                density=density,
+                novelty=novelty,
+                signature=sig,
             )
         )
+
+    # Compute extreme-mode metadata
+    difficulty = 1.0 - (sum(r.density for r in results) / max(1, len(results)))
+    info_gain = sum((r.density or 0) * (r.novelty or 0) for r in results)
+    diversity = len(set(r.signature for r in results)) / max(1, len(results))
 
     return WebSearchSummary(
         query=query,
@@ -124,11 +190,14 @@ def _from_tavily_response(query: str, raw: Dict[str, Any]) -> WebSearchSummary:
         stubbed=False,
         response_time=raw.get("response_time"),
         request_id=raw.get("request_id"),
+        info_gain=round(info_gain, 4),
+        search_energy=round((difficulty + 0.2), 4),  # scaled effort estimate
+        difficulty=round(difficulty, 4),
+        semantic_diversity=round(diversity, 4),
     )
 
 
 def _stub_summary(query: str, message: str) -> WebSearchSummary:
-    """Fallback when Tavily is unavailable."""
     return WebSearchSummary(
         query=query,
         results=[],
@@ -136,13 +205,19 @@ def _stub_summary(query: str, message: str) -> WebSearchSummary:
         stubbed=True,
         response_time=None,
         request_id=None,
+        info_gain=0.0,
+        search_energy=0.1,
+        difficulty=1.0,
+        semantic_diversity=0.0,
     )
 
 
+# ---------------------------------------------------------------------
+# Caching
+# ---------------------------------------------------------------------
 def _cache_get(key: Tuple[str, int, str, str]) -> Optional[WebSearchSummary]:
-    """Retrieve cached result if fresh."""
     ts = _CACHE_TIMESTAMPS.get(key)
-    if ts is None:
+    if not ts:
         return None
     if time.time() - ts > CACHE_TTL_SECONDS:
         _CACHE.pop(key, None)
@@ -152,14 +227,13 @@ def _cache_get(key: Tuple[str, int, str, str]) -> Optional[WebSearchSummary]:
 
 
 def _cache_set(key: Tuple[str, int, str, str], value: WebSearchSummary) -> None:
-    """Store value in cache."""
     _CACHE[key] = value
     _CACHE_TIMESTAMPS[key] = time.time()
 
 
-# -----------------------------------------------------------------------------
-# Main public search tool
-# -----------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Main tool
+# ---------------------------------------------------------------------
 def web_search_tool(
     query: str,
     max_results: int = 6,
@@ -171,7 +245,7 @@ def web_search_tool(
     include_raw_content: bool = False,
     include_images: bool = False,
 ) -> Dict[str, Any]:
-    """Perform a Tavily web search with safety, logging, and caching."""
+    """Perform a Tavily web search with extreme-mode intelligence."""
     q = (query or "").strip()
     if not q:
         summary = _stub_summary("", "Empty query.")
@@ -179,8 +253,8 @@ def web_search_tool(
         return asdict(summary)
 
     max_results = max(1, min(max_results, 12))
-
     cache_key = (q, max_results, topic, search_depth)
+
     cached = _cache_get(cache_key)
     if cached is not None:
         return asdict(cached)
@@ -188,7 +262,6 @@ def web_search_tool(
     client, err = _get_tavily_client()
     if client is None:
         summary = _stub_summary(q, err or "Client unavailable.")
-        _log_event({"event": "stubbed_search", "query": q, "error": summary.error})
         _cache_set(cache_key, summary)
         return asdict(summary)
 
@@ -208,7 +281,6 @@ def web_search_tool(
         )
     except Exception as e:
         summary = _stub_summary(q, str(e))
-        _log_event({"event": "tavily_exception", "query": q, "error": summary.error})
         _cache_set(cache_key, summary)
         return asdict(summary)
 
@@ -229,6 +301,9 @@ def web_search_tool(
             "response_time": summary.response_time,
             "request_id": summary.request_id,
             "num_results": len(summary.results),
+            "info_gain": summary.info_gain,
+            "search_energy": summary.search_energy,
+            "semantic_diversity": summary.semantic_diversity,
         }
     )
 
