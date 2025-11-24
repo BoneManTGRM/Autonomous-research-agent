@@ -402,7 +402,7 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
             findings.append(str(n))
         for r in e.get("repairs", []) or []:
             findings.append(str(r))
-        for h in e.get("hypotheses", []) or []:
+        for h in e.get("hypotheses") or []:
             if isinstance(h, dict):
                 txt = h.get("text", "")
             else:
@@ -450,7 +450,7 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
 
 
 # -------------------------------------------------------------------
-# Advanced log and snapshot helpers for Option C
+# Advanced log and snapshot helpers
 # -------------------------------------------------------------------
 def _load_json_file(path: Path) -> Optional[Any]:
     """Small helper to load a JSON file and return the decoded data."""
@@ -1339,7 +1339,7 @@ def main() -> None:
     if not history:
         st.write("No cycles yet.")
     else:
-        # Top level tabs for Option C
+        # Top level tabs
         tab_history, tab_discovery, tab_snapshots, tab_hypo, tab_memory, tab_verify, tab_graph = st.tabs(
             [
                 "Cycle history",
@@ -1426,6 +1426,35 @@ def main() -> None:
             if not discoveries:
                 st.info("No discovery log found yet. The worker will populate it once discovery logging is enabled.")
             else:
+                # High level stats for discoveries
+                total_disc = len(discoveries)
+                domains_disc = sorted({str(d.get("domain", "general")) for d in discoveries})
+                best_gain = None
+                best_label = None
+                for d in discoveries:
+                    gain = d.get("rye_gain") or d.get("delta_rye") or 0.0
+                    try:
+                        gain_f = float(gain)
+                    except Exception:
+                        gain_f = 0.0
+                    if best_gain is None or gain_f > best_gain:
+                        best_gain = gain_f
+                        best_label = d.get("title") or d.get("summary") or d.get("id") or "discovery"
+
+                col_d1, col_d2, col_d3 = st.columns(3)
+                with col_d1:
+                    st.metric("Total discoveries", total_disc)
+                with col_d2:
+                    st.metric("Domains with discoveries", len(domains_disc))
+                with col_d3:
+                    if best_gain is not None:
+                        st.metric("Best RYE gain", f"{best_gain:.3f}")
+                    else:
+                        st.metric("Best RYE gain", "n/a")
+
+                if best_label is not None and best_gain is not None:
+                    st.caption(f"Top discovery candidate: {str(best_label)[:80]}")
+
                 # Simple filters
                 domains_available = sorted(
                     {str(d.get("domain", "general")) for d in discoveries}
@@ -1487,6 +1516,24 @@ def main() -> None:
 
                 st.write(f"Total snapshots: {len(snapshots)}")
 
+                # Timeline view of equilibrium RYE across snapshots
+                rye_series = []
+                ts_series = []
+                for s in snapshots:
+                    eq = equilibrium_from_snapshot(s["data"])
+                    if eq["rye_avg"] is not None:
+                        rye_series.append(eq["rye_avg"])
+                        ts = s["timestamp"]
+                        if isinstance(ts, datetime):
+                            ts_series.append(ts.isoformat(timespec="seconds"))
+                        else:
+                            ts_series.append(s["name"])
+                if rye_series:
+                    st.markdown("#### Snapshot RYE timeline")
+                    timeline_data = {"RYE avg": rye_series}
+                    st.line_chart(timeline_data)
+                    st.caption("Approximate evolution of equilibrium RYE across saved snapshots.")
+
                 col_sel1, col_sel2 = st.columns(2)
                 with col_sel1:
                     idx1 = st.selectbox(
@@ -1522,6 +1569,7 @@ def main() -> None:
                 col_eq2[3].metric("Equilibrium fraction", f"{eq2['equilibrium_fraction']:.3f}" if eq2["equilibrium_fraction"] is not None else "n/a")
 
                 st.markdown("#### Equilibrium delta (snapshot2 - snapshot1)")
+
                 def _delta(a: Optional[float], b: Optional[float]) -> Optional[float]:
                     if a is None or b is None:
                         return None
