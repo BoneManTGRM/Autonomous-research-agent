@@ -1,31 +1,42 @@
 import io
 import json
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, List
 
 import pandas as pd
 
 try:
-    import PyPDF2  # type: ignore[import]
-except Exception:  # pragma: no cover
+    import PyPDF2  # type: ignore
+except Exception:
     PyPDF2 = None
+
+try:
+    from bs4 import BeautifulSoup  # type: ignore
+except Exception:
+    BeautifulSoup = None
+
+try:
+    import pyarrow  # noqa: F401
+except Exception:
+    pyarrow = None
 
 
 class DataConnectors:
     """
-    Unified interface for loading external data files.
-    Used by CoreAgent + Streamlit for ingestion.
+    Unified, Option-C hardened data ingestion layer.
 
-    Backwards compatible:
-        - load_pdf(pdf_bytes) -> {"ok": bool, "text" or "error": str}
-        - load_table(file_bytes, filename) -> DataFrame OR dict with "error"
+    Capabilities:
+        • Multi-page PDF text extraction
+        • CSV / TSV / XLSX / Parquet / Feather loading
+        • JSON / NDJSON structured ingestion
+        • HTML table extraction (best effort)
+        • TXT/MD/HTML text loading
+        • Unified load_any() returning {ok, kind, data, meta, error}
 
-    Extended capabilities:
-        - Multi-page PDF extraction with basic metadata
-        - CSV / TSV / XLSX table loading
-        - JSON structured loading (dict/list)
-        - TXT / MD / HTML lightweight text loading
-        - Parquet and Feather support when dependencies are present
-        - Generic load_any entry point that returns type and content
+    Fully backwards compatible:
+        • load_pdf()
+        • load_table()
+        • load_text()
+        • load_any()
     """
 
     # ------------------------------------------------------------------
@@ -33,68 +44,45 @@ class DataConnectors:
     # ------------------------------------------------------------------
     @staticmethod
     def load_pdf(pdf_bytes: bytes) -> Dict[str, Any]:
-        """
-        Load a PDF into plain text.
-
-        Returns:
-            {
-                "ok": bool,
-                "text": str,          # merged text from all pages
-                "pages": int,         # number of pages (if ok)
-                "meta": {...},        # basic pdf metadata (if available)
-                "error": str,         # on failure
-            }
-
-        Backwards compatibility:
-            Existing callers expecting {"ok": bool, "text": "..."} still work.
-        """
         if not PyPDF2:
             return {"ok": False, "error": "PyPDF2 not installed"}
 
         try:
             reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
-            texts = []
+            pages = []
             for page in reader.pages:
                 try:
-                    page_text = page.extract_text() or ""
+                    ptxt = page.extract_text() or ""
                 except Exception:
-                    page_text = ""
-                texts.append(page_text)
+                    ptxt = ""
+                pages.append(ptxt)
 
-            merged = "\n\n".join(texts).strip()
+            merged = "\n\n".join(pages).strip()
+
             meta_raw = getattr(reader, "metadata", None) or {}
+            meta: Dict[str, str] = {}
 
-            # Convert raw metadata to simple dict of str -> str
-            meta: Dict[str, Any] = {}
             if isinstance(meta_raw, dict):
                 for k, v in meta_raw.items():
-                    sk = str(k)
                     try:
-                        sv = str(v)
+                        meta[str(k)] = str(v)
                     except Exception:
-                        sv = repr(v)
-                    meta[sk] = sv
+                        meta[str(k)] = repr(v)
 
             return {
                 "ok": True,
                 "text": merged,
-                "pages": len(reader.pages),
+                "pages": len(pages),
                 "meta": meta,
             }
         except Exception as e:
-            return {"ok": False, "error": str(e)}
+            return {"ok": False, "error": f"PDF parse failed: {e}"}
 
     # ------------------------------------------------------------------
-    # Tabular / structured data
+    # JSON + NDJSON
     # ------------------------------------------------------------------
     @staticmethod
     def _load_json(file_bytes: bytes) -> Union[Dict[str, Any], Any]:
-        """
-        Load JSON content from bytes.
-
-        Returns dict/list or raises.
-        """
-        # Try text first, fall back to raw bytes decode
         try:
             text = file_bytes.decode("utf-8")
         except Exception:
@@ -102,54 +90,86 @@ class DataConnectors:
         return json.loads(text)
 
     @staticmethod
-    def _load_parquet(file_bytes: bytes):
-        """
-        Load Parquet file into a pandas DataFrame.
-
-        Uses pandas.read_parquet with in-memory buffer.
-        May require pyarrow or fastparquet to be installed.
-        """
+    def _load_ndjson(file_bytes: bytes) -> List[Any]:
         try:
-            buf = io.BytesIO(file_bytes)
-            return pd.read_parquet(buf)
+            text = file_bytes.decode("utf-8", errors="ignore")
+            items = []
+            for line in text.splitlines():
+                ln = line.strip()
+                if not ln:
+                    continue
+                try:
+                    items.append(json.loads(ln))
+                except Exception:
+                    continue
+            return items
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    # ------------------------------------------------------------------
+    # Parquet / Feather / DataFrame loaders
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _load_parquet(file_bytes: bytes):
+        try:
+            return pd.read_parquet(io.BytesIO(file_bytes))
         except Exception as e:
             return {"error": f"Parquet load failed: {e}"}
 
     @staticmethod
     def _load_feather(file_bytes: bytes):
-        """
-        Load Feather/Arrow file into a pandas DataFrame.
-        """
         try:
-            buf = io.BytesIO(file_bytes)
-            return pd.read_feather(buf)
+            return pd.read_feather(io.BytesIO(file_bytes))
         except Exception as e:
             return {"error": f"Feather load failed: {e}"}
 
+    # ------------------------------------------------------------------
+    # HTML table extraction (best effort)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _load_html_table(file_bytes: bytes):
+        if BeautifulSoup is None:
+            return {"error": "bs4 not installed for HTML table extraction"}
+
+        try:
+            text = file_bytes.decode("utf-8", errors="ignore")
+            soup = BeautifulSoup(text, "html.parser")
+            tables = soup.find_all("table")
+            if not tables:
+                return {"error": "No HTML <table> found"}
+
+            # Convert first table to DataFrame
+            rows = []
+            header = []
+
+            # Extract header
+            thead = tables[0].find("thead")
+            if thead:
+                ths = thead.find_all("th")
+                header = [th.get_text(strip=True) for th in ths]
+
+            # Extract body rows
+            trs = tables[0].find_all("tr")
+            for tr in trs:
+                cells = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+                if cells:
+                    rows.append(cells)
+
+            if not header and rows:
+                header = [f"col_{i}" for i in range(len(rows[0]))]
+
+            import pandas as _pd
+            df = _pd.DataFrame(rows, columns=header)
+            return df
+
+        except Exception as e:
+            return {"error": f"HTML table parse error: {e}"}
+
+    # ------------------------------------------------------------------
+    # Tabular unified loader
+    # ------------------------------------------------------------------
     @staticmethod
     def load_table(file_bytes: bytes, filename: str):
-        """
-        Load a tabular or structured file into a DataFrame or Python object.
-
-        Possible inputs:
-            - .csv   -> pandas.DataFrame
-            - .tsv   -> pandas.DataFrame
-            - .xlsx  -> pandas.DataFrame
-            - .json  -> dict/list (JSON)
-            - .parquet -> pandas.DataFrame (if supported)
-            - .feather / .ft   -> pandas.DataFrame (if supported)
-
-        Returns:
-            - On success:
-                * DataFrame for most table formats
-                * dict/list for JSON
-            - On failure:
-                {"error": "message"}
-
-        Backwards compatible with existing usage:
-            Existing code that expects DataFrame for CSV/TSV/XLSX will still work.
-            Existing code that expects {"error": "..."} still works.
-        """
         name = filename.lower().strip()
 
         try:
@@ -165,33 +185,28 @@ class DataConnectors:
             if name.endswith(".json"):
                 return DataConnectors._load_json(file_bytes)
 
+            if name.endswith(".ndjson"):
+                return DataConnectors._load_ndjson(file_bytes)
+
             if name.endswith(".parquet"):
                 return DataConnectors._load_parquet(file_bytes)
 
             if name.endswith(".feather") or name.endswith(".ft"):
                 return DataConnectors._load_feather(file_bytes)
 
+            if name.endswith(".html") or name.endswith(".htm"):
+                return DataConnectors._load_html_table(file_bytes)
+
         except Exception as e:
-            return {"error": str(e)}
+            return {"error": f"Table load failed: {e}"}
 
         return {"error": f"Unsupported file type for table load: {filename}"}
 
     # ------------------------------------------------------------------
-    # Text / generic loaders
+    # Text
     # ------------------------------------------------------------------
     @staticmethod
     def load_text(file_bytes: bytes, filename: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Load a simple text-like file: .txt, .md, .html, etc.
-
-        Returns:
-            {
-                "ok": bool,
-                "text": str,
-                "filename": str or None,
-                "error": str (if any),
-            }
-        """
         try:
             text = file_bytes.decode("utf-8")
         except Exception:
@@ -202,51 +217,46 @@ class DataConnectors:
 
         return {"ok": True, "text": text, "filename": filename}
 
+    # ------------------------------------------------------------------
+    # UNIVERSAL LOADER — Option C upgrade
+    # ------------------------------------------------------------------
     @staticmethod
     def load_any(file_bytes: bytes, filename: str) -> Dict[str, Any]:
-        """
-        Generic entry point that tries to infer how to load a file
-        based on its extension.
-
-        Returns:
-            {
-                "ok": bool,
-                "kind": "pdf" | "table" | "json" | "text" | "unknown",
-                "data": ...         # DataFrame / dict / list / text
-                "meta": {...},      # optional metadata
-                "error": str,       # on failure
-                "filename": str,
-            }
-        """
         name = filename.lower().strip()
 
-        # PDF
+        # 1. PDF
         if name.endswith(".pdf"):
-            pdf_res = DataConnectors.load_pdf(file_bytes)
-            if pdf_res.get("ok"):
+            pdf = DataConnectors.load_pdf(file_bytes)
+            if pdf.get("ok"):
                 return {
                     "ok": True,
                     "kind": "pdf",
-                    "data": pdf_res.get("text", ""),
+                    "data": pdf.get("text", ""),
                     "meta": {
-                        "pages": pdf_res.get("pages"),
-                        "meta": pdf_res.get("meta", {}),
+                        "pages": pdf.get("pages"),
+                        "metadata": pdf.get("meta", {}),
                     },
                     "filename": filename,
                 }
             return {
                 "ok": False,
                 "kind": "pdf",
-                "error": pdf_res.get("error", "unknown pdf error"),
+                "error": pdf.get("error", "pdf error"),
                 "filename": filename,
             }
 
-        # Table / structured
+        # 2. Structured / table
         if any(
             name.endswith(ext)
-            for ext in (".csv", ".tsv", ".xlsx", ".xls", ".json", ".parquet", ".feather", ".ft")
+            for ext in [
+                ".csv", ".tsv", ".xlsx", ".xls",
+                ".json", ".ndjson",
+                ".parquet", ".feather", ".ft",
+                ".html", ".htm",
+            ]
         ):
             table = DataConnectors.load_table(file_bytes, filename)
+
             if isinstance(table, dict) and "error" in table:
                 return {
                     "ok": False,
@@ -254,36 +264,39 @@ class DataConnectors:
                     "error": table["error"],
                     "filename": filename,
                 }
+
+            kind = "json" if isinstance(table, dict) else "table"
+
             return {
                 "ok": True,
-                "kind": "table" if not isinstance(table, dict) else "json",
+                "kind": kind,
                 "data": table,
                 "filename": filename,
                 "meta": {},
             }
 
-        # Text / markdown / html
-        if any(name.endswith(ext) for ext in (".txt", ".md", ".markdown", ".html", ".htm")):
-            txt_res = DataConnectors.load_text(file_bytes, filename)
-            if txt_res.get("ok"):
+        # 3. Text files
+        if any(name.endswith(ext) for ext in [".txt", ".md", ".markdown"]):
+            txt = DataConnectors.load_text(file_bytes, filename)
+            if txt.get("ok"):
                 return {
                     "ok": True,
                     "kind": "text",
-                    "data": txt_res["text"],
+                    "data": txt["text"],
                     "filename": filename,
                     "meta": {},
                 }
             return {
                 "ok": False,
                 "kind": "text",
-                "error": txt_res.get("error", "unknown text load error"),
+                "error": txt.get("error"),
                 "filename": filename,
             }
 
-        # Unknown type
+        # 4. Unknown
         return {
             "ok": False,
             "kind": "unknown",
-            "error": f"Unsupported or unknown file type: {filename}",
+            "error": f"Unsupported file type: {filename}",
             "filename": filename,
         }
