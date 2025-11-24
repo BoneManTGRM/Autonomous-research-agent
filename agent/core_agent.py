@@ -70,6 +70,7 @@ Discovery extensions:
         - SnapshotGenerator for weekly experiment summaries
         - MemoryPruner for long run memory health
         - VerificationEngine for deeper checks of promising hypotheses
+        - DiscoveryEngine (if available) for tiered discovery scoring
 
     These helpers sit on top of your existing TGRM loop and do not
     change its core behavior. They only consume the summary dicts and
@@ -105,9 +106,21 @@ except Exception:
 try:
     from . import rye_metrics as _rye_metrics_mod  # type: ignore
 except Exception:
-    _rye_metrics_mod = None
+    _rye_metrics_mod = None  # type: ignore
 
-# Discovery stack imports (new)
+# Optional intelligence profiles for tuning thresholds and behavior
+try:
+    from .intelligence_profiles import get_intelligence_profile  # type: ignore[attr-defined]
+except Exception:
+    get_intelligence_profile = None  # type: ignore
+
+# Optional discovery engine for higher level discovery scoring
+try:
+    from .discovery_engine import DiscoveryEngine  # type: ignore[attr-defined]
+except Exception:
+    DiscoveryEngine = None  # type: ignore
+
+# Discovery stack imports
 from .discovery_log import DiscoveryLogger, get_global_logger
 from .hypothesis_manager import HypothesisManager
 from .memory_pruner import MemoryPruner
@@ -224,7 +237,7 @@ class CoreAgent:
         self.agent_roles: List[str] = roles[: self.max_agents]
 
         # ------------------------------------------------------------------
-        # Discovery stack (new, sits on top of existing logic)
+        # Discovery stack (sits on top of existing logic)
         # ------------------------------------------------------------------
         # Track last RYE to detect spikes.
         self._last_rye: Optional[float] = None
@@ -248,6 +261,78 @@ class CoreAgent:
             data_check_fn=None,
             run_id=None,
         )
+
+        # Optional discovery engine for tiered scoring and more advanced
+        # "what counts as a major discovery" logic.
+        self.discovery_engine: Optional[Any] = None
+        if DiscoveryEngine is not None:
+            try:
+                self.discovery_engine = DiscoveryEngine(
+                    discovery_logger=self.discovery_logger,
+                    hypothesis_manager=self.hypothesis_manager,
+                    verification_engine=self.verification_engine,
+                    memory_store=self.memory_store,
+                    config=self.config,
+                )
+            except Exception:
+                self.discovery_engine = None
+
+        # ------------------------------------------------------------------
+        # Intelligence profile support
+        # ------------------------------------------------------------------
+        self.intelligence_profile_name: Optional[str] = self.config.get("intelligence_profile")
+        self.intelligence_profile: Dict[str, Any] = {}
+        self._memory_prune_cfg: Dict[str, Any] = {}
+        self._swarm_cfg: Dict[str, Any] = {}
+
+        if get_intelligence_profile is not None and self.intelligence_profile_name:
+            try:
+                self.intelligence_profile = get_intelligence_profile(self.intelligence_profile_name)
+            except Exception:
+                self.intelligence_profile = {}
+        else:
+            self.intelligence_profile = {}
+
+        self._apply_intelligence_profile()
+
+    # ------------------------------------------------------------------
+    # Intelligence profile helpers
+    # ------------------------------------------------------------------
+    def _apply_intelligence_profile(self) -> None:
+        """Apply intelligence profile settings to verification, pruning, swarm."""
+        profile = self.intelligence_profile or {}
+        ver_cfg = profile.get("verification", {})
+        if isinstance(ver_cfg, dict):
+            vt = ver_cfg.get("validate_threshold")
+            rt = ver_cfg.get("reject_threshold")
+            if isinstance(vt, (int, float)):
+                self.verification_engine.validate_threshold = float(vt)
+            if isinstance(rt, (int, float)):
+                self.verification_engine.reject_threshold = float(rt)
+
+        mem_cfg = profile.get("memory_pruning", {})
+        if isinstance(mem_cfg, dict):
+            self._memory_prune_cfg = dict(mem_cfg)
+        else:
+            self._memory_prune_cfg = {}
+
+        swarm_cfg = profile.get("swarm", {})
+        if isinstance(swarm_cfg, dict):
+            self._swarm_cfg = dict(swarm_cfg)
+        else:
+            self._swarm_cfg = {}
+
+    def set_intelligence_profile(self, name: str) -> None:
+        """Change the active intelligence profile at runtime."""
+        self.intelligence_profile_name = name
+        if get_intelligence_profile is not None:
+            try:
+                self.intelligence_profile = get_intelligence_profile(name)
+            except Exception:
+                self.intelligence_profile = {}
+        else:
+            self.intelligence_profile = {}
+        self._apply_intelligence_profile()
 
     # ------------------------------------------------------------------
     # Internal helpers for crash proofing and run tracking
@@ -329,7 +414,7 @@ class CoreAgent:
             return
 
     # ------------------------------------------------------------------
-    # Discovery helpers (new, non intrusive)
+    # Discovery helpers (non intrusive)
     # ------------------------------------------------------------------
     def _handle_post_cycle_discovery(
         self,
@@ -348,9 +433,25 @@ class CoreAgent:
         the TGRM core behavior.
 
         Current behavior:
+            - optional DiscoveryEngine tiered processing
             - detect RYE spikes and log them
             - register candidate hypotheses surfaced by the loop
         """
+        # First, allow DiscoveryEngine to see the full picture
+        if self.discovery_engine is not None:
+            try:
+                context = {
+                    "cycle_index": cycle_index,
+                    "role": role,
+                    "domain": domain,
+                    "run_id": run_id,
+                    "experiment_mode": experiment_mode,
+                }
+                # process_cycle signature is intentionally loose; any mismatch is caught.
+                self.discovery_engine.process_cycle(summary, context=context)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
         try:
             # Attach run_id into helpers if present
             if run_id is not None:
@@ -1231,6 +1332,20 @@ class CoreAgent:
             roles_seq = roles
         roles_list: List[str] = [str(r) for r in roles_seq][: self.max_agents]
 
+        # Apply swarm related overrides from intelligence profile if present
+        if self._swarm_cfg:
+            try:
+                if "max_rounds" in self._swarm_cfg and max_rounds == 50:
+                    mr = self._swarm_cfg.get("max_rounds")
+                    if isinstance(mr, int) and mr > 0:
+                        max_rounds = mr
+                if "stop_rye" in self._swarm_cfg and stop_rye is None:
+                    sr = self._swarm_cfg.get("stop_rye")
+                    if isinstance(sr, (int, float)):
+                        stop_rye = float(sr)
+            except Exception:
+                pass
+
         # Watchdog interval default from global config if caller did not override
         default_watchdog = float(CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes))
         if watchdog_interval_minutes == 5.0:
@@ -1522,9 +1637,32 @@ class CoreAgent:
         If pruning fails, it returns a small summary without raising.
         """
         try:
+            # Use profile based overrides if present
+            rye_w = 0.5
+            rec_w = 0.3
+            acc_w = 0.2
+            if self._memory_prune_cfg:
+                try:
+                    rye_w = float(self._memory_prune_cfg.get("rye_weight", rye_w))
+                    rec_w = float(self._memory_prune_cfg.get("recency_weight", rec_w))
+                    acc_w = float(self._memory_prune_cfg.get("access_weight", acc_w))
+                    if "min_keep" in self._memory_prune_cfg and min_keep == 1000:
+                        mk = self._memory_prune_cfg.get("min_keep")
+                        if isinstance(mk, int) and mk > 0:
+                            min_keep = mk
+                    if "max_drop_fraction" in self._memory_prune_cfg and max_drop_fraction == 0.3:
+                        mdf = self._memory_prune_cfg.get("max_drop_fraction")
+                        if isinstance(mdf, (int, float)) and 0.0 <= mdf <= 1.0:
+                            max_drop_fraction = float(mdf)
+                except Exception:
+                    pass
+
             summary = self.memory_pruner.prune(
                 min_keep=min_keep,
                 max_drop_fraction=max_drop_fraction,
+                rye_weight=rye_w,
+                recency_weight=rec_w,
+                access_weight=acc_w,
             )
             return summary
         except Exception as exc:
@@ -1599,7 +1737,15 @@ class CoreAgent:
         It is safe to call on a schedule from engine_worker.
         """
         try:
-            results = self.verification_engine.verify_pending(limit=limit)
+            effective_limit = limit
+            if effective_limit is None and self.intelligence_profile:
+                ver_cfg = self.intelligence_profile.get("verification", {})
+                if isinstance(ver_cfg, dict):
+                    bl = ver_cfg.get("batch_limit")
+                    if isinstance(bl, int) and bl > 0:
+                        effective_limit = bl
+
+            results = self.verification_engine.verify_pending(limit=effective_limit)
             return results
         except Exception:
             return []
