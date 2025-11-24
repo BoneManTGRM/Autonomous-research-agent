@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import os
 import sys
+import json
+import hashlib
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -316,6 +318,64 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
         return
 
 
+def _safe_agent_hook(agent: CoreAgent, hook_name: str, **kwargs: Any) -> Optional[Any]:
+    """
+    Best effort call into optional intelligence hooks on CoreAgent.
+
+    This allows us to integrate learning, discovery, and verification hooks
+    without requiring them to exist or changing CoreAgent's contract.
+    """
+    fn = getattr(agent, hook_name, None)
+    if not callable(fn):
+        return None
+    try:
+        return fn(**kwargs)
+    except Exception:
+        return None
+
+
+def _build_experiment_fingerprint(
+    *,
+    goal: str,
+    domain: str,
+    mode: str,
+    runtime_profile: Optional[str],
+    source_controls: Dict[str, bool],
+    roles: Optional[Sequence[str]] = None,
+    env_keys: Optional[Sequence[str]] = None,
+) -> str:
+    """
+    Build a reproducibility fingerprint for this run configuration.
+
+    This does not change behavior, it just records a hash of configuration
+    so long runs can be compared or replicated later.
+    """
+    payload: Dict[str, Any] = {
+        "goal": goal,
+        "domain": domain,
+        "mode": mode,
+        "runtime_profile": runtime_profile,
+        "source_controls": dict(sorted(source_controls.items())),
+    }
+    if roles is not None:
+        payload["roles"] = sorted(list(roles))
+
+    env_sample: Dict[str, str] = {}
+    if env_keys is not None:
+        for name in env_keys:
+            val = os.getenv(name)
+            if val is not None:
+                env_sample[name] = val
+    if env_sample:
+        payload["env"] = env_sample
+
+    try:
+        data = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
+        return hashlib.sha256(data).hexdigest()
+    except Exception:
+        return "unknown"
+
+
 def _log_run_manifest(
     agent: CoreAgent,
     run_id: str,
@@ -436,6 +496,61 @@ def _update_worker_state(
         return
 
 
+def _run_post_run_intelligence(
+    agent: CoreAgent,
+    *,
+    mode: str,
+    goal: str,
+    domain: str,
+    run_id: str,
+    history: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Optional learning, discovery, and verification pass after a run.
+
+    This function is strictly additive:
+    - It never changes run control flow.
+    - It only calls hooks if they exist on CoreAgent.
+    - It logs a milestone summarizing any returned intelligence.
+    """
+    info: Dict[str, Any] = {}
+    hooks = [
+        ("learn_from_run", "learning"),
+        ("run_discovery_pass", "discovery"),
+        ("run_verification_pass", "verification"),
+    ]
+
+    for hook_name, label in hooks:
+        result = _safe_agent_hook(
+            agent,
+            hook_name,
+            history=history,
+            mode=mode,
+            goal=goal,
+            domain=domain,
+            run_id=run_id,
+        )
+        if result is not None:
+            info[label] = result
+
+    if info:
+        try:
+            _log_milestone(
+                agent,
+                run_id=run_id,
+                goal=goal,
+                domain=domain,
+                label="post_run_intelligence",
+                description="Post run learning, discovery, and verification hooks executed.",
+                level="info",
+                extra={"intelligence": info},
+            )
+        except Exception:
+            pass
+
+    return info
+
+
 # ---------------------------------------------------------------------------
 # Simple classic engines (single and swarm)
 # ---------------------------------------------------------------------------
@@ -487,6 +602,28 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     tool_flags = detect_tools()
     run_id = _current_run_id("single")
 
+    env_keys_for_fingerprint = [
+        "WORKER_MAX_MINUTES",
+        "WORKER_STOP_RYE",
+        "WORKER_RUNTIME_PROFILE",
+        "WORKER_MODE",
+        "WORKER_SWARM",
+        "WORKER_META",
+        "WORKER_SOURCES",
+        "WORKER_SWARM_ROLES",
+        "WORKER_DOMAIN",
+        "WORKER_GOAL",
+    ]
+    experiment_fingerprint = _build_experiment_fingerprint(
+        goal=goal,
+        domain=domain,
+        mode="single",
+        runtime_profile=runtime_profile,
+        source_controls=source_controls,
+        roles=[role],
+        env_keys=env_keys_for_fingerprint,
+    )
+
     print("=== Autonomous Research Engine - Single Agent Mode ===")
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
@@ -501,6 +638,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Watchdog interval (min): {watchdog_minutes}")
     print(f"Source controls: {source_controls}")
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
+    print(f"Experiment fingerprint: {experiment_fingerprint}")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -515,6 +653,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="classic_single",
+        extra={"experiment_fingerprint": experiment_fingerprint},
     )
     _heartbeat(agent, label="worker_single_start", run_id=run_id)
 
@@ -530,6 +669,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="classic_single",
+        extra={"experiment_fingerprint": experiment_fingerprint},
     )
 
     summaries = agent.run_continuous(
@@ -552,6 +692,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
     print("=== Continuous run finished cleanly ===")
     print(f"Total completed cycles: {len(summaries)}")
+    diag: Dict[str, Any] = {}
     try:
         diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
         print(f"RYE avg: {diag.get('rye_avg')}")
@@ -559,6 +700,28 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         print(f"RYE last: {diag.get('rye_last')}")
         print(f"Stability index: {diag.get('stability_index')}")
         print(f"Recovery momentum: {diag.get('recovery_momentum')}")
+    except Exception:
+        print("Diagnostics computation failed, see logs for details.")
+
+    intelligence_info = _run_post_run_intelligence(
+        agent,
+        mode="single",
+        goal=goal,
+        domain=domain,
+        run_id=run_id,
+        history=summaries,
+    )
+
+    extra_manifest: Dict[str, Any] = {
+        "engine": "single",
+        "experiment_fingerprint": experiment_fingerprint,
+    }
+    if diag:
+        extra_manifest["diagnostics_snapshot"] = diag
+    if intelligence_info:
+        extra_manifest["intelligence"] = intelligence_info
+
+    try:
         _log_run_manifest(
             agent,
             run_id,
@@ -569,10 +732,10 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             stop_rye=stop_rye,
             max_minutes=max_minutes,
             summaries=summaries,
-            extra={"engine": "single"},
+            extra=extra_manifest,
         )
     except Exception:
-        print("Diagnostics computation failed, see logs for details.")
+        print("Manifest logging failed, see logs for details.")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -587,6 +750,11 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="classic_single",
+        extra={
+            "experiment_fingerprint": experiment_fingerprint,
+            "final_diagnostics": diag,
+            "intelligence": intelligence_info if intelligence_info else None,
+        },
     )
 
 
@@ -644,6 +812,30 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     tool_flags = detect_tools()
     run_id = _current_run_id("swarm")
 
+    env_keys_for_fingerprint = [
+        "WORKER_MAX_MINUTES",
+        "WORKER_STOP_RYE",
+        "WORKER_RUNTIME_PROFILE",
+        "WORKER_MODE",
+        "WORKER_SWARM",
+        "WORKER_META",
+        "WORKER_SOURCES",
+        "WORKER_SWARM_ROLES",
+        "WORKER_DOMAIN",
+        "WORKER_GOAL",
+        "WORKER_SHIFT_MINUTES",
+        "WORKER_REPEAT_SHIFTS",
+    ]
+    experiment_fingerprint = _build_experiment_fingerprint(
+        goal=goal,
+        domain=domain,
+        mode="swarm",
+        runtime_profile=runtime_profile,
+        source_controls=source_controls,
+        roles=roles_list,
+        env_keys=env_keys_for_fingerprint,
+    )
+
     print("=== Autonomous Research Engine - Swarm Mode ===")
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
@@ -660,6 +852,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     print(f"Shift minutes: {shift_minutes if shift_minutes is not None else 'None'}")
     print(f"Repeat shifts: {repeat_shifts}")
+    print(f"Experiment fingerprint: {experiment_fingerprint}")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -674,6 +867,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="classic_swarm",
+        extra={"experiment_fingerprint": experiment_fingerprint},
     )
     _heartbeat(agent, label="worker_swarm_start", run_id=run_id)
 
@@ -689,6 +883,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="classic_swarm",
+        extra={"experiment_fingerprint": experiment_fingerprint},
     )
 
     # New: support back to back swarm shifts
@@ -783,6 +978,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
     print("=== Swarm run finished cleanly ===")
     print(f"Total summaries produced across all roles and rounds: {len(summaries)}")
+    diag: Dict[str, Any] = {}
     try:
         diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
         print(f"RYE avg: {diag.get('rye_avg')}")
@@ -790,6 +986,31 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         print(f"RYE last: {diag.get('rye_last')}")
         print(f"Stability index: {diag.get('stability_index')}")
         print(f"Recovery momentum: {diag.get('recovery_momentum')}")
+    except Exception:
+        print("Diagnostics computation failed, see logs for details.")
+
+    intelligence_info = _run_post_run_intelligence(
+        agent,
+        mode="swarm",
+        goal=goal,
+        domain=domain,
+        run_id=run_id,
+        history=summaries,
+    )
+
+    extra_manifest: Dict[str, Any] = {
+        "engine": "swarm",
+        "roles": roles_list,
+        "shift_minutes": shift_minutes,
+        "repeat_shifts": repeat_shifts,
+        "experiment_fingerprint": experiment_fingerprint,
+    }
+    if diag:
+        extra_manifest["diagnostics_snapshot"] = diag
+    if intelligence_info:
+        extra_manifest["intelligence"] = intelligence_info
+
+    try:
         _log_run_manifest(
             agent,
             run_id,
@@ -800,15 +1021,10 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             stop_rye=stop_rye,
             max_minutes=max_minutes,
             summaries=summaries,
-            extra={
-                "engine": "swarm",
-                "roles": roles_list,
-                "shift_minutes": shift_minutes,
-                "repeat_shifts": repeat_shifts,
-            },
+            extra=extra_manifest,
         )
     except Exception:
-        print("Diagnostics computation failed, see logs for details.")
+        print("Manifest logging failed, see logs for details.")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -823,6 +1039,11 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="classic_swarm",
+        extra={
+            "experiment_fingerprint": experiment_fingerprint,
+            "final_diagnostics": diag,
+            "intelligence": intelligence_info if intelligence_info else None,
+        },
     )
 
 
@@ -1084,6 +1305,29 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     tool_flags = detect_tools()
     run_id = _current_run_id("meta")
 
+    env_keys_for_fingerprint = [
+        "WORKER_MAX_MINUTES",
+        "WORKER_STOP_RYE",
+        "WORKER_RUNTIME_PROFILE",
+        "WORKER_MODE",
+        "WORKER_SWARM",
+        "WORKER_META",
+        "WORKER_SOURCES",
+        "WORKER_SWARM_ROLES",
+        "WORKER_DOMAIN",
+        "WORKER_GOAL",
+        "WORKER_META_MAX_SEGMENTS",
+    ]
+    experiment_fingerprint = _build_experiment_fingerprint(
+        goal=goal,
+        domain=domain,
+        mode="meta",
+        runtime_profile=runtime_profile_env,
+        source_controls=source_controls,
+        roles=None,
+        env_keys=env_keys_for_fingerprint,
+    )
+
     print("=== Autonomous Research Engine - Meta Controller Mode (Option C) ===")
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
@@ -1097,6 +1341,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Watchdog interval (min): {watchdog_minutes}")
     print(f"Source controls: {source_controls}")
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
+    print(f"Experiment fingerprint: {experiment_fingerprint}")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -1111,6 +1356,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=total_budget_minutes,
         run_id=run_id,
         experiment_mode="meta_controller",
+        extra={"experiment_fingerprint": experiment_fingerprint},
     )
     _heartbeat(agent, label="worker_meta_start", run_id=run_id)
 
@@ -1143,6 +1389,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=total_budget_minutes,
         run_id=run_id,
         experiment_mode="meta_controller",
+        extra={"experiment_fingerprint": experiment_fingerprint},
     )
 
     for seg_index in range(meta_max_segments_int):
@@ -1302,30 +1549,49 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     for seg in segments_run:
         combined_history.extend(seg.get("summaries", []))
 
-    _log_run_manifest(
+    intelligence_info = _run_post_run_intelligence(
         agent,
-        run_id,
         mode="meta",
-        domain=domain,
         goal=goal,
-        runtime_profile=runtime_profile_env,
-        stop_rye=stop_rye_env,
-        max_minutes=total_budget_minutes,
-        summaries=combined_history,
-        extra={
-            "engine": "meta",
-            "segments": [
-                {
-                    "phase": seg.get("phase"),
-                    "mode": seg.get("mode"),
-                    "runtime_profile": seg.get("runtime_profile"),
-                    "minutes_requested": seg.get("minutes_requested"),
-                    "segment_items": len(seg.get("summaries", [])),
-                }
-                for seg in segments_run
-            ],
-        },
+        domain=domain,
+        run_id=run_id,
+        history=combined_history,
     )
+
+    extra_segments = [
+        {
+            "phase": seg.get("phase"),
+            "mode": seg.get("mode"),
+            "runtime_profile": seg.get("runtime_profile"),
+            "minutes_requested": seg.get("minutes_requested"),
+            "segment_items": len(seg.get("summaries", [])),
+        }
+        for seg in segments_run
+    ]
+
+    extra_manifest: Dict[str, Any] = {
+        "engine": "meta",
+        "segments": extra_segments,
+        "experiment_fingerprint": experiment_fingerprint,
+    }
+    if intelligence_info:
+        extra_manifest["intelligence"] = intelligence_info
+
+    try:
+        _log_run_manifest(
+            agent,
+            run_id,
+            mode="meta",
+            domain=domain,
+            goal=goal,
+            runtime_profile=runtime_profile_env,
+            stop_rye=stop_rye_env,
+            max_minutes=total_budget_minutes,
+            summaries=combined_history,
+            extra=extra_manifest,
+        )
+    except Exception:
+        print("Manifest logging failed, see logs for details.")
 
     _update_worker_state(
         agent,
@@ -1339,6 +1605,13 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=total_budget_minutes,
         run_id=run_id,
         experiment_mode="meta_controller",
+        extra={
+            "experiment_fingerprint": experiment_fingerprint,
+            "final_recent_rye": recent_avg_rye,
+            "total_segments": total_segments,
+            "total_summaries": total_summaries,
+            "intelligence": intelligence_info if intelligence_info else None,
+        },
     )
 
 
