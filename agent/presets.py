@@ -29,7 +29,7 @@ from __future__ import annotations
 from typing import Dict, Any, List, Optional
 
 # Simple version tag so the app and UI can display which preset set is loaded.
-PRESETS_VERSION: str = "2025-11-23-max1"
+PRESETS_VERSION: str = "2025-11-24-max2"
 
 # ---------------------------------------------------------------------
 # Global Runtime Profiles (applies for all presets)
@@ -147,6 +147,50 @@ DEFAULT_ADVANCED_RYE_EXPECTATIONS: Dict[str, Any] = {
     "stability_index_target": 0.6,       # 0 to 1 scale
     "recovery_momentum_target": 0.1,     # positive values show recovery after perturbation
     "max_oscillation_std": 0.25,
+}
+
+# ---------------------------------------------------------------------
+# Global PDF report defaults
+# These are read by the report generator to build summarized PDFs
+# including breakthrough hints, RYE charts, and discovery tables.
+# ---------------------------------------------------------------------
+PDF_REPORT_DEFAULTS: Dict[str, Any] = {
+    "enabled": True,
+    "engine_hint": "reportlab",  # or "fpdf" or any concrete implementation
+    "include_rye_charts": True,
+    "include_discovery_table": True,
+    "include_swarm_summary": True,
+    "include_runtime_profile": True,
+    "file_naming": {
+        # Engine can substitute {domain}, {runtime_profile}, {timestamp}, {run_id}
+        "pattern": "reports/{domain}_{runtime_profile}_{timestamp}.pdf"
+    },
+    "breakthrough_hints": {
+        # These are hints, not hard rules. The breakthrough engine can combine
+        # them with discovery metadata and intelligence profiles.
+        "tier1_thresholds": {
+            "min_high_value_discoveries": 1,
+            "min_peak_rye": 0.12,
+            "min_avg_rye": 0.06,
+        },
+        "tier2_thresholds": {
+            "min_high_value_discoveries": 3,
+            "min_peak_rye": 0.18,
+            "min_avg_rye": 0.10,
+        },
+        "tier3_thresholds": {
+            "min_high_value_discoveries": 5,
+            "min_peak_rye": 0.22,
+            "min_avg_rye": 0.12,
+            "min_stability_index": 0.55,
+        },
+        "use_domain_specific_overrides": True,
+        "label_fields": {
+            "include_text_label": True,
+            "include_numeric_score": True,
+            "include_explanation_block": True,
+        },
+    },
 }
 
 # ---------------------------------------------------------------------
@@ -508,6 +552,15 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "disallow_uncited_claims": True,
         },
 
+        # Biomarker intelligence (generic, mostly disabled in general mode)
+        "biomarker_intelligence": {
+            "enabled": False,
+            "panels": {},
+            "strictness": "informational",
+            "require_numeric_effect_size": False,
+            "link_to_cure_extraction": False,
+        },
+
         # Default runtime and RYE behavior for continuous mode
         "default_runtime_profile": "8_hours",
         "default_rye_stop_threshold": None,
@@ -540,6 +593,35 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         ],
         "report_style": "narrative",
         "report_frequency": 1,
+
+        # PDF report configuration for general preset
+        "pdf_report": {
+            "enabled": True,
+            "base_defaults": PDF_REPORT_DEFAULTS,
+            "sections": [
+                "summary",
+                "rye_statistics",
+                "notes",
+                "hypotheses",
+                "citations",
+            ],
+            "include_biomarker_panels": False,
+            "include_candidate_stacks": False,
+            "breakthrough_overrides": {
+                # General preset treats strong RYE and novelty as interesting,
+                # but breakthrough classification is softer than longevity.
+                "tier1_thresholds": {
+                    "min_high_value_discoveries": 1,
+                    "min_peak_rye": 0.10,
+                    "min_avg_rye": 0.05,
+                },
+                "tier2_thresholds": {
+                    "min_high_value_discoveries": 3,
+                    "min_peak_rye": 0.16,
+                    "min_avg_rye": 0.09,
+                },
+            },
+        },
 
         # Universal runtime profiles
         "runtime_profiles": RUNTIME_PROFILES,
@@ -679,6 +761,14 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                 "load_excel": True,
                 "load_sql": True,
                 "auto_detect_timeseries": True,
+                # Optional biomarker specific hints for pipelines
+                "biomarker_pipeline": {
+                    "expect_longitudinal": True,
+                    "align_by_patient_id": True,
+                    "align_by_visit_or_time": True,
+                    "compute_delta_per_biomarker": True,
+                    "compute_effect_sizes": True,
+                },
             },
         },
 
@@ -693,6 +783,85 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                 "threshold_rye_gain": 0.02,
                 "drop_low_value_notes": True,
                 "reinforce_high_value_notes": True,
+            },
+        },
+
+        # Biomarker intelligence (maxed out)
+        "biomarker_intelligence": {
+            "enabled": True,
+            "strictness": "clinical",
+            "require_numeric_effect_size": True,
+            "require_direction_of_change": True,
+            "min_effect_size_for_candidate": 0.10,
+            "min_sample_size_for_confidence": 20,
+            "link_to_cure_extraction": True,
+            "panel_priority_order": [
+                "core_aging",
+                "organ_function",
+                "inflammation",
+                "metabolic",
+                "lipids",
+                "hormones",
+                "other",
+            ],
+            "panels": {
+                "core_aging": [
+                    "epigenetic_age",
+                    "grim_age",
+                    "pheno_age",
+                    "telomere_length",
+                    "p16INK4a",
+                ],
+                "organ_function": [
+                    "eGFR",
+                    "creatinine",
+                    "ALT",
+                    "AST",
+                    "ALP",
+                    "bilirubin",
+                ],
+                "inflammation": [
+                    "CRP",
+                    "hsCRP",
+                    "IL6",
+                    "TNF_alpha",
+                    "ferritin",
+                ],
+                "metabolic": [
+                    "fasting_glucose",
+                    "HOMA_IR",
+                    "HbA1c",
+                    "insulin",
+                ],
+                "lipids": [
+                    "LDL",
+                    "HDL",
+                    "triglycerides",
+                    "ApoB",
+                ],
+                "hormones": [
+                    "IGF1",
+                    "DHEA_S",
+                    "testosterone",
+                    "estradiol",
+                    "TSH",
+                    "free_T4",
+                ],
+                "other": [
+                    "WBC",
+                    "RBC",
+                    "platelets",
+                    "vitamin_D_25OH",
+                ],
+            },
+            "biomarker_to_panel_overrides": {
+                "dnAmGrimAge": "core_aging",
+                "dnAmPhenoAge": "core_aging",
+            },
+            "flags": {
+                "highlight_biomarkers_with_large_shifts": True,
+                "highlight_conflicting_biomarker_movements": True,
+                "call_out_unrealistic_changes": True,
             },
         },
 
@@ -818,6 +987,45 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         ],
         "report_style": "structured",
         "report_frequency": 1,
+
+        # PDF report configuration for longevity preset
+        "pdf_report": {
+            "enabled": True,
+            "base_defaults": PDF_REPORT_DEFAULTS,
+            "sections": [
+                "summary",
+                "biomarkers",
+                "mechanisms",
+                "hypotheses",
+                "citations",
+                "rye_statistics",
+            ],
+            "include_biomarker_panels": True,
+            "include_candidate_stacks": True,
+            "include_clinical_evidence_table": True,
+            "include_swarm_summary": True,
+            "breakthrough_overrides": {
+                # Longevity breakthroughs lean heavily on biomarkers and RYE
+                "tier1_thresholds": {
+                    "min_high_value_discoveries": 2,
+                    "min_peak_rye": 0.14,
+                    "min_avg_rye": 0.08,
+                },
+                "tier2_thresholds": {
+                    "min_high_value_discoveries": 4,
+                    "min_peak_rye": 0.20,
+                    "min_avg_rye": 0.11,
+                    "min_biomarkers_with_positive_shift": 3,
+                },
+                "tier3_thresholds": {
+                    "min_high_value_discoveries": 6,
+                    "min_peak_rye": 0.24,
+                    "min_avg_rye": 0.13,
+                    "min_biomarkers_with_positive_shift": 5,
+                    "min_stability_index": 0.55,
+                },
+            },
+        },
 
         "runtime_profiles": RUNTIME_PROFILES,
 
@@ -1004,6 +1212,15 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             },
         },
 
+        # Biomarker intelligence stays off for math
+        "biomarker_intelligence": {
+            "enabled": False,
+            "panels": {},
+            "strictness": "informational",
+            "require_numeric_effect_size": False,
+            "link_to_cure_extraction": False,
+        },
+
         # Learning hints for mathematical refinement
         "learning_hints": {
             "use_advanced_rye_metrics": True,
@@ -1122,6 +1339,41 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "report_style": "technical",
         "report_frequency": 1,
 
+        # PDF report configuration for math preset
+        "pdf_report": {
+            "enabled": True,
+            "base_defaults": PDF_REPORT_DEFAULTS,
+            "sections": [
+                "summary",
+                "definitions",
+                "theorems",
+                "proof_sketches",
+                "citations",
+                "rye_statistics",
+            ],
+            "include_biomarker_panels": False,
+            "include_candidate_stacks": False,
+            "breakthrough_overrides": {
+                # Breakthrough here is about formal results and structures
+                "tier1_thresholds": {
+                    "min_high_value_discoveries": 1,
+                    "min_peak_rye": 0.08,
+                    "min_avg_rye": 0.05,
+                },
+                "tier2_thresholds": {
+                    "min_high_value_discoveries": 3,
+                    "min_peak_rye": 0.12,
+                    "min_avg_rye": 0.07,
+                },
+                "tier3_thresholds": {
+                    "min_high_value_discoveries": 5,
+                    "min_peak_rye": 0.15,
+                    "min_avg_rye": 0.09,
+                    "require_new_theorem_or_framework": True,
+                },
+            },
+        },
+
         "runtime_profiles": RUNTIME_PROFILES,
 
         # Swarm hints for math and theory
@@ -1229,6 +1481,7 @@ def describe_presets() -> List[Dict[str, Any]]:
                 "default_runtime_profile": cfg.get("default_runtime_profile"),
                 "supports_swarm": cfg.get("supports_swarm", False),
                 "supports_single_agent": cfg.get("supports_single_agent", True),
+                "pdf_report_enabled": cfg.get("pdf_report", {}).get("enabled", False),
             }
         )
     return summaries
