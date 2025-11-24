@@ -15,11 +15,11 @@ Without a key, the system automatically switches to offline stub mode.
 **Reparodynamics**, **TGRM**, and **RYE** were created and defined by **Cody Ryan Jenkins**.  
 These scientific terms:
 
-- cannot be renamed  
-- cannot be rebranded  
-- cannot be represented as originating from another individual or group  
-- must remain unchanged in forks, redistributions, or derivative systems  
-- require attribution in any scientific, academic, technical, or commercial use  
+• cannot be renamed  
+• cannot be rebranded  
+• cannot be represented as originating from another individual or group  
+• must remain unchanged in forks, redistributions, or derivative systems  
+• require attribution in any scientific, academic, technical, or commercial use  
 
 ### Required Citation  
 Jenkins, C. R. (2025). *Reparodynamics v2.2*  
@@ -31,22 +31,24 @@ Reparodynamics is a protected scientific identity describing a unified framework
 
 # 🚀 Overview
 
-This system is a **true autonomous research engine**, not a chatbot.  
-It performs real multi-step reasoning, scientific ingestion, and self-improving cycles governed by **TGRM** and measured by **RYE**.
+This system is a **fully autonomous research engine**, not a chatbot.  
+It executes multi-step scientific reasoning, literature ingestion, hypothesis refinement, and verification cycles using **TGRM** and **RYE** as its foundational laws of repair and efficiency.
 
 ### Core capabilities
-- Full TGRM cycle (Test → Detect → Repair → Verify)  
-- RYE computation each cycle  
-- Multi-agent reasoning and Swarm Intelligence  
-- PubMed & Semantic Scholar ingestion  
-- Real web search with Tavily  
-- PDF, CSV, TSV, XLSX, JSON ingestion  
-- Code-execution sandbox  
-- Vector memory + long-run memory store  
-- Background worker for multi-day or multi-month autonomy  
-- Meta-controller segmentation for intelligent phase control  
+• Full TGRM cycle (Test → Detect → Repair → Verify)  
+• RYE Level 3 computation every cycle  
+• Multi-agent reasoning and coordinated Swarm Intelligence  
+• PubMed and Semantic Scholar ingestion pipelines  
+• Real web search via Tavily  
+• PDF, CSV, TSV, XLSX, JSON, ZIP, GZ dataset ingestion  
+• Secure code-execution sandbox  
+• Vector memory with long-horizon memory store  
+• Background worker for multi-day to multi-month autonomy  
+• Meta-controller segmentation for stable long-run reasoning  
+• Self-diagnostic RYE suite with trends, stability, volatility, and equilibrium detection  
+• Domain-tuned intelligence profiles  
 
-The system is usable for rapid insight, hypothesis generation, or multi-month scientific investigations.
+This system can run rapid problem-solving cycles or long-term scientific investigations lasting weeks or months.
 
 ---
 
@@ -54,96 +56,108 @@ The system is usable for rapid insight, hypothesis generation, or multi-month sc
 
 ## 🔁 Full TGRM Loop
 
-Each cycle includes:
+Every cycle executes:
 
-1. **Test** — evaluate notes, sources, hypotheses  
-2. **Detect** — identify contradictions, gaps, low-support claims  
-3. **Repair** — gather new evidence, run code, perform reasoning  
-4. **Verify** — check improvements & eliminate regressions  
-5. **Compute RYE** — ΔR / E for each repair  
-6. **Log** — full transparency for reproducibility  
+1. **Test** — evaluate notes, beliefs, hypotheses, and evidence  
+2. **Detect** — find contradictions, unsupported claims, missing evidence  
+3. **Repair** — run tools, gather literature, refine logic, and correct errors  
+4. **Verify** — ensure improvements are real and regressions are prevented  
+5. **Compute RYE** — ΔR / E using swarm-aware energy modeling  
+6. **Log** — fully transparent records for reproducibility and audits  
 
-This produces an actual **self-correcting scientific system**.
+This creates a **self-correcting scientific system** capable of measurable improvement.
 
 ---
 
 ## 🌐 Literature & Data Pipelines
 
-- Tavily Web Search  
-- PubMed biomedical ingestion  
-- Semantic Scholar technical ingestion  
-- PDF parsing  
-- CSV / TSV / XLSX / JSON / ZIP / GZ dataset ingestion  
+Includes:
 
-All research is grounded in external sources and verifiable data.
+• Tavily Web Search  
+• PubMed biomedical ingestion  
+• Semantic Scholar ingestion  
+• PDF parsing  
+• CSV / TSV / XLSX / JSON ingestion  
+• ZIP / GZ compressed datasets  
+
+All research is grounded in external verifiable data and literature.
 
 ---
 
-## 🧪 Safe Code Sandbox
+## 🧪 Secure Code Sandbox
 
 Supports:
 
-- numerical experiments  
-- modeling  
-- statistics  
-- dataset analysis  
-- algorithm tests  
-- verification of hypotheses  
+• numerical experiments  
+• simulations  
+• statistical tests  
+• dataset analysis  
+• model evaluation  
+• hypothesis verification  
 
-Runs safely in isolation.
+All execution occurs in a controlled environment.
 
 ---
 
 ## 🧠 Swarm Intelligence (Multi-Agent)
 
-A coordinated multi-role architecture including:
+A structured multi-role swarm including:
 
-- Researcher  
-- Critic  
-- Planner  
-- Explorer  
-- Synthesizer  
-- Integrator  
+• Researcher  
+• Critic  
+• Planner  
+• Explorer  
+• Synthesizer  
+• Integrator  
 
-Each agent runs independent TGRM cycles and contributes into shared memory.  
-Swarm mode produces broader coverage, higher novelty, and stricter verification.
+Each agent runs its own TGRM loops and writes to shared memory.  
+This architecture increases:
+
+• coverage  
+• novelty  
+• verification strength  
+• reproducibility  
+• multi-perspective analysis  
 
 ---
 
 ## ⏳ Long-Run Engine (Background Worker)
 
-Includes:
+Supports:
 
-- Worker process running autonomous cycles
-- Multi-month autonomy (1 Week, 1 Month, 90 Days, Forever)
-- Crash recovery via checkpoints  
-- Watchdog and heartbeat monitoring  
-- Meta-controller for segmented reasoning  
-- Cross-segment stabilization, refinement, and equilibrium detection  
+• continuous runs (1 Week, 1 Month, 90 Days, Forever)  
+• checkpointing and crash recovery  
+• watchdog and heartbeat stability monitoring  
+• meta-controller segmentation (phases of research)  
+• equilibrium detection  
+• stability and volatility scoring  
+• long-run breakthroughs and drift prevention  
 
-This is what enables *true* long-duration Reparodynamics experiments.
+This enables **true multi-month autonomous research experiments**.
 
 ---
 
 ## 🧬 Domain Presets
 
-Optimized profiles for:
+Optimized intelligence profiles for:
 
-- General science  
-- Longevity & anti-aging  
-- Mathematics / theorem-building  
-- Biology  
-- Custom domains  
+• General science  
+• Longevity / anti-aging  
+• Mathematics / theorem-building  
+• Biology  
+• Custom user-defined domains  
 
-Each preset adjusts:
+Each preset configures:
 
-- ingestion sources  
-- TGRM behavior  
-- RYE weighting  
-- tool policies  
-- evidence strictness  
-- swarm orchestration  
+• ingestion sources  
+• TGRM routing  
+• RYE weighting  
+• evidence strictness  
+• tool usage policies  
+• swarm orchestration rules  
 
 ---
 
 # 📁 Repository Structure
+
+(To be filled in after folder structure is finalized)
