@@ -20,7 +20,8 @@ TGRM phases (implemented below)
     Test   : evaluate current notes and current state for this goal.
     Detect : find gaps, TODOs, unanswered questions, and contradictions.
     Repair : perform targeted web and scientific actions (web, PubMed,
-             Semantic Scholar, PDF ingestion) using the shared Toolbelt.
+             Semantic Scholar, PDF ingestion) using the shared Toolbelt or
+             tools registry.
     Verify : re test, compute delta_R and RYE, update history, and log a
              detailed cycle entry in the MemoryStore.
 
@@ -59,8 +60,9 @@ This module is designed to be called by:
 
 To support that:
     - Each run_cycle returns a machine log and a human summary.
-    - Both carry delta_R, energy_E, RYE, hypotheses, citations, candidate
-      interventions, and candidate_hypotheses for the discovery stack.
+    - Both carry delta_R, energy_E, Energy, RYE, hypotheses, citations,
+      candidate interventions, and candidate_hypotheses for the discovery
+      stack.
     - Extra fields expose RYE gradients, equilibrium status, and a
       breakthrough_score that higher level components can track over
       weeks or months.
@@ -78,7 +80,22 @@ from .tools_files import FileTool
 from .tools_pubmed import PubMedTool
 from .tools_semantic_scholar import SemanticScholarTool
 from .hypothesis_engine import generate_hypotheses
-from .tools import Toolbelt, ToolUsage
+
+# Optional Toolbelt / ToolUsage import to mirror CoreAgent behavior.
+try:
+    from .tools import Toolbelt, ToolUsage  # type: ignore[attr-defined]
+except Exception:
+    Toolbelt = None  # type: ignore[assignment]
+
+    class ToolUsage:  # type: ignore[no-redef]
+        """Minimal fallback usage tracker if tools.ToolUsage is unavailable."""
+        def __init__(self) -> None:
+            self.web_calls: int = 0
+            self.browser_actions: int = 0
+            self.code_execs: int = 0
+            self.sql_queries: int = 0
+            self.data_loads: int = 0
+            self.approx_tokens: int = 0
 
 
 class TGRMLoop:
@@ -88,20 +105,50 @@ class TGRMLoop:
     except for a few small caches such as _seen_questions. All long run
     state is stored in the MemoryStore so that CoreAgent and engine_worker
     can orchestrate continuous and swarm runs safely.
+
+    Tools:
+        - tools can be:
+            * a Toolbelt-like instance (with new_usage_tracker, browser, etc.)
+            * a plain dict/registry of tool callables
+            * None, in which case we try to instantiate Toolbelt if available
+              or fall back to an empty registry.
+
+        - For energy accounting we always create a ToolUsage-like tracker
+          via a local factory, even if no Toolbelt is present.
     """
 
     def __init__(
         self,
         memory_store: Any,
         config: Optional[Dict[str, Any]] = None,
-        tools: Optional[Toolbelt] = None,
+        tools: Optional[Any] = None,
     ) -> None:
         self.memory_store = memory_store
         self.config = config or {}
 
-        # Shared toolbelt (browser + sandbox + data pipelines).
-        # If CoreAgent passes one, we share it. Otherwise we create a local instance.
-        self.tools: Toolbelt = tools if tools is not None else Toolbelt()
+        # Shared tools layer (Toolbelt or registry/dict) mirroring CoreAgent.
+        if tools is not None:
+            self.tools = tools
+        else:
+            if Toolbelt is not None:
+                try:
+                    self.tools = Toolbelt()
+                except Exception:
+                    self.tools = {}
+            else:
+                self.tools = {}
+
+        # Usage tracker factory, so we can always track energy even if tools
+        # is just a dict or a minimal Toolbelt without tracking.
+        if hasattr(self.tools, "new_usage_tracker"):
+            # Toolbelt-style API
+            self._usage_factory = self.tools.new_usage_tracker  # type: ignore[assignment]
+        else:
+            # Local fallback
+            def _default_usage_factory() -> ToolUsage:
+                return ToolUsage()
+
+            self._usage_factory = _default_usage_factory
 
         # Core tools
         self.web_tool = WebResearchTool()
@@ -435,7 +482,7 @@ class TGRMLoop:
         domain_tag = domain or "general"
 
         # Per cycle tool usage tracker (for energy E and diagnostics)
-        tool_usage: ToolUsage = self.tools.new_usage_tracker()
+        tool_usage: ToolUsage = self._usage_factory()
 
         # Long run context: fetch RYE stats for this goal if available
         avg_rye: Optional[float] = None
@@ -657,6 +704,7 @@ class TGRMLoop:
             "delta_R": delta_r,
             "delta_R_components": delta_r_components,
             "energy_E": energy_e,
+            "Energy": energy_e,  # mirror CoreAgent expectations
             "RYE": rye_value,
             # RYE gradient and equilibrium/breakthrough
             "equilibrium": equilibrium_info,
@@ -665,8 +713,8 @@ class TGRMLoop:
             "tool_usage": {
                 "web_calls": tool_usage.web_calls,
                 "browser_actions": tool_usage.browser_actions,
-                "code_execs": tool_usage.code_execs,
-                "sql_queries": tool_usage.sql_queries,
+                "code_execs": getattr(tool_usage, "code_execs", 0),
+                "sql_queries": getattr(tool_usage, "sql_queries", 0),
                 "data_loads": tool_usage.data_loads,
                 "approx_tokens": tool_usage.approx_tokens,
             },
@@ -696,6 +744,7 @@ class TGRMLoop:
             "repairs": [a.get("description", "") for a in repair_actions],
             "delta_R": delta_r,
             "energy_E": energy_e,
+            "Energy": energy_e,  # mirror CoreAgent discovery expectations
             "RYE": rye_value,
             "delta_R_components": delta_r_components,
             "equilibrium": equilibrium_info,
@@ -1247,20 +1296,24 @@ class TGRMLoop:
                     first_url = url
             note_lines.append("")
 
-        # Optional headless browser deep dive on the top URL
-        if first_url:
+        # Optional headless browser deep dive on the top URL (only if browser exists)
+        if first_url and hasattr(self.tools, "browser"):
             try:
-                browser_result = self.tools.browser.fetch_page(first_url)
+                browser = self.tools.browser  # type: ignore[attr-defined]
+                browser_result = browser.fetch_page(first_url)
                 stats["browser_actions"] += 1
                 if tool_usage is not None:
                     tool_usage.browser_actions += 1
-                    tool_usage.approx_tokens += self._estimate_tokens(browser_result.text_snippet)
+                    tool_usage.approx_tokens += self._estimate_tokens(
+                        getattr(browser_result, "text_snippet", "") or ""
+                    )
 
                 note_lines.append(f"Browser deep dive snippet from: {browser_result.url}")
-                if browser_result.error:
+                if getattr(browser_result, "error", None):
                     note_lines.append(f"(Browser error: {browser_result.error})")
                 else:
-                    note_lines.append(browser_result.text_snippet[:2000])
+                    snippet = getattr(browser_result, "text_snippet", "") or ""
+                    note_lines.append(snippet[:2000])
                 note_lines.append("")
             except Exception:
                 # Browser failures must not break the cycle
