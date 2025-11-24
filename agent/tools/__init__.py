@@ -9,15 +9,19 @@ the background worker, and the Streamlit UI can all use to:
 - Toggle tools on/off via environment variables
 - Stay backward compatible with older imports (BrowserTool, CodeSandbox, DataConnectors)
 
-Nothing in here should ever crash import-time. If a tool class is missing
-or fails to initialize, it is simply skipped and the rest of the system
-continues to work.
+Design goals:
+- Import-time MUST NEVER crash (missing deps are handled gracefully)
+- Registry entries are descriptors (kind/cls/description/tags), not instances
+- Engine worker + UI can reliably detect:
+    * web / browser capability
+    * sandbox / code execution capability
+    * data loading / connectors capability
 """
 
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Type
 
 from .browser_tool import BrowserTool
 from .code_sandbox import CodeSandbox
@@ -58,8 +62,8 @@ __all__ = [
 #       browser = build_tool_instance("browser", api_key="...")
 #       result = browser.search("reparodynamics RYE TGRM")
 #
-# The Streamlit UI only checks for the presence of certain keys to
-# display status messages, so it does not care about the descriptor shape.
+# The Streamlit UI and engine_worker.detect_tools() mostly care about
+# the *names* (keys) existing, not the exact descriptor shape.
 # -------------------------------------------------------------------
 
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {}
@@ -124,10 +128,10 @@ _safe_register(
     kind="browser",
     cls=BrowserTool if browser_enabled else None,
     description="HTTP web search and browsing helper (Tavily or equivalent).",
-    tags=["web", "search", "tavily"],
+    tags=["web", "search", "browser"],
 )
 
-# Aliases so the UI detect_tools() sees them
+# Aliases so detect_tools() and the UI can see web capability
 _safe_register(
     "web",
     kind="browser",
@@ -183,25 +187,41 @@ _safe_register(
 
 # Data connectors
 data_enabled = not _env_flag("DISABLE_DATA_TOOLS", default=False)
+
+# Primary data tool
 _safe_register(
     "data_connectors",
     kind="data",
     cls=DataConnectors if data_enabled else None,
-    description="Unified CSV/XLSX/TSV data loader for experiments and analysis.",
+    description=(
+        "Unified data connector: CSV/XLSX/TSV (and optionally JSON/Parquet/SQL) "
+        "for experiments and RYE analysis."
+    ),
     tags=["data", "csv", "xlsx", "tsv"],
 )
+
+# Generic "data" alias so other components can just check for "data"
+_safe_register(
+    "data",
+    kind="data",
+    cls=DataConnectors if data_enabled else None,
+    description="Alias for unified data connectors.",
+    tags=["data", "alias"],
+)
+
+# More specific aliases (for UI/agent hints)
 _safe_register(
     "data_csv",
     kind="data",
     cls=DataConnectors if data_enabled else None,
-    description="CSV focused connector (alias of DataConnectors).",
+    description="CSV-focused connector (alias of DataConnectors).",
     tags=["data", "csv", "alias"],
 )
 _safe_register(
     "data_xlsx",
     kind="data",
     cls=DataConnectors if data_enabled else None,
-    description="XLSX focused connector (alias of DataConnectors).",
+    description="XLSX-focused connector (alias of DataConnectors).",
     tags=["data", "xlsx", "alias"],
 )
 
