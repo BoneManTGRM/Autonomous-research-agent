@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-INTELLIGENCE_VERSION: str = "2025-11-23-max1"
+INTELLIGENCE_VERSION: str = "2025-11-24-max2"
 
 
 # -------------------------------------------------------------------
@@ -750,7 +750,8 @@ PROFILE_ALIASES: Dict[str, str] = {
 # -------------------------------------------------------------------
 def get_intelligence_profile(name: str) -> Dict[str, Any]:
     """
-    Return a profile config. If unknown, fall back to baseline.
+    Return a profile config, annotated with profile_name.
+    If unknown, fall back to baseline.
 
     Name resolution order:
       1) direct key in INTELLIGENCE_PROFILES
@@ -758,12 +759,23 @@ def get_intelligence_profile(name: str) -> Dict[str, Any]:
       3) baseline
     """
     key = (name or "baseline").strip().lower()
+    profile_name: str
+
     if key in INTELLIGENCE_PROFILES:
-        return INTELLIGENCE_PROFILES[key]
-    alias = PROFILE_ALIASES.get(key)
-    if alias and alias in INTELLIGENCE_PROFILES:
-        return INTELLIGENCE_PROFILES[alias]
-    return INTELLIGENCE_PROFILES["baseline"]
+        profile_name = key
+        cfg = INTELLIGENCE_PROFILES[profile_name]
+    else:
+        alias = PROFILE_ALIASES.get(key)
+        if alias and alias in INTELLIGENCE_PROFILES:
+            profile_name = alias
+            cfg = INTELLIGENCE_PROFILES[profile_name]
+        else:
+            profile_name = "baseline"
+            cfg = INTELLIGENCE_PROFILES[profile_name]
+
+    prof = dict(cfg)
+    prof.setdefault("profile_name", profile_name)
+    return prof
 
 
 def resolve_profile_for_domain(domain: Optional[str]) -> Dict[str, Any]:
