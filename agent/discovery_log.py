@@ -6,11 +6,16 @@ Centralized discovery logging for the Autonomous Research Agent.
 This module writes human readable Markdown entries to:
     logs/discovery_log.md
 
+It can also mirror structured JSONL entries to:
+    logs/discovery_log.jsonl
+
 It is designed for:
     - Hypotheses (pending, validated, rejected)
     - High RYE events and delta R spikes
     - Contradictions resolved or repaired
     - Notable insights and structural discoveries
+    - Mechanisms, treatments, biomarkers, and cure candidates
+    - Run milestones and swarm or tool events
 
 Typical usage from TGRM or CoreAgent:
 
@@ -31,8 +36,8 @@ Typical usage from TGRM or CoreAgent:
         tags=["longevity", "pathway_x", "hypothesis"]
     )
 
-All entries are appended to a single Markdown file so you can
-review discoveries after a 90 day run and export them into papers.
+All entries are appended so you can review discoveries after a long run
+and export them into papers or structured summaries.
 """
 
 from __future__ import annotations
@@ -47,6 +52,8 @@ from typing import Any, Dict, List, Optional
 
 LOG_DIR_DEFAULT = Path("logs")
 LOG_FILE_NAME_DEFAULT = "discovery_log.md"
+LOG_JSON_FILE_NAME_DEFAULT = "discovery_log.jsonl"
+DISCOVERY_LOG_VERSION = "2025-11-23-max1"
 
 
 def _utc_iso() -> str:
@@ -63,17 +70,34 @@ class DiscoveryEvent:
     description: str
 
     timestamp: str
+
+    # Run and cycle context
     run_id: Optional[str] = None
     cycle_index: Optional[int] = None
     agent_role: Optional[str] = None
+    goal: Optional[str] = None
+    domain: Optional[str] = None
 
+    # RYE and repair metrics
     rye_before: Optional[float] = None
     rye_after: Optional[float] = None
     delta_r: Optional[float] = None
     energy: Optional[float] = None
 
+    # Classification and metadata
     tags: Optional[List[str]] = None
+    severity: Optional[str] = None       # "info", "notice", "major", "critical"
+    confidence: Optional[float] = None   # 0 to 1
     extra: Optional[Dict[str, Any]] = None
+
+    def rye_ratio(self) -> Optional[float]:
+        """Return delta R per unit energy if both are available and energy is non zero."""
+        if self.delta_r is None or self.energy in (None, 0):
+            return None
+        try:
+            return float(self.delta_r) / float(self.energy)
+        except Exception:
+            return None
 
     def to_markdown(self) -> str:
         """Render this event as a Markdown block."""
@@ -93,6 +117,10 @@ class DiscoveryEvent:
             lines.append(f"- Cycle: `{self.cycle_index}`")
         if self.agent_role:
             lines.append(f"- Agent role: `{self.agent_role}`")
+        if self.goal:
+            lines.append(f"- Goal: `{self.goal}`")
+        if self.domain:
+            lines.append(f"- Domain: `{self.domain}`")
 
         if self.rye_before is not None or self.rye_after is not None:
             before = (
@@ -113,13 +141,25 @@ class DiscoveryEvent:
         if self.energy is not None:
             lines.append(f"- Energy: `{self.energy}`")
 
+        rr = self.rye_ratio()
+        if rr is not None:
+            lines.append(f"- R per energy (RYE ratio): `{rr:.4f}`")
+
+        if self.severity:
+            lines.append(f"- Severity: `{self.severity}`")
+        if isinstance(self.confidence, (int, float)):
+            lines.append(f"- Confidence: `{self.confidence:.2f}`")
+
         if self.tags:
             tag_str = ", ".join(sorted(set(self.tags)))
             lines.append(f"- Tags: `{tag_str}`")
 
         if self.extra:
             # Store extra as compact JSON for debug and later analysis
-            extra_json = json.dumps(self.extra, ensure_ascii=False, sort_keys=True)
+            try:
+                extra_json = json.dumps(self.extra, ensure_ascii=False, sort_keys=True)
+            except Exception:
+                extra_json = str(self.extra)
             lines.append(f"- Extra: `{extra_json}`")
 
         lines.append("")
@@ -132,14 +172,25 @@ class DiscoveryEvent:
 
         return "\n".join(lines)
 
+    def to_json_ready(self) -> Dict[str, Any]:
+        """
+        Return a dict ready for JSONL logging.
+        Includes explicit R per energy and log version for later parsing.
+        """
+        data = asdict(self)
+        data["rye_ratio"] = self.rye_ratio()
+        data["log_version"] = DISCOVERY_LOG_VERSION
+        return data
+
 
 class DiscoveryLogger:
     """
     Discovery logger for Reparodynamics experiments.
 
     Responsibilities:
-        - Ensure log directory and file exist.
+        - Ensure log directory and files exist.
         - Write well structured Markdown entries for discovery events.
+        - Optionally mirror structured JSONL entries for machine analysis.
         - Provide convenience methods for common event types.
 
     You can use one shared logger per process or per run_id.
@@ -151,10 +202,14 @@ class DiscoveryLogger:
         file_name: str = LOG_FILE_NAME_DEFAULT,
         run_id: Optional[str] = None,
         auto_header: bool = True,
+        json_mirror: bool = True,
+        json_file_name: str = LOG_JSON_FILE_NAME_DEFAULT,
     ) -> None:
         self.log_dir = Path(log_dir)
         self.file_path = self.log_dir / file_name
+        self.json_file_path = self.log_dir / json_file_name
         self.run_id = run_id
+        self.json_mirror = json_mirror
 
         self.log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -164,11 +219,47 @@ class DiscoveryLogger:
     @classmethod
     def default(cls, run_id: Optional[str] = None) -> "DiscoveryLogger":
         """
-        Return a default logger that writes to logs/discovery_log.md.
+        Return a default logger that writes to logs/discovery_log.md
+        and logs/discovery_log.jsonl.
 
         You can call this from anywhere without worrying about paths.
         """
-        return cls(log_dir=LOG_DIR_DEFAULT, file_name=LOG_FILE_NAME_DEFAULT, run_id=run_id)
+        return cls(
+            log_dir=LOG_DIR_DEFAULT,
+            file_name=LOG_FILE_NAME_DEFAULT,
+            run_id=run_id,
+            json_mirror=True,
+            json_file_name=LOG_JSON_FILE_NAME_DEFAULT,
+        )
+
+    @classmethod
+    def from_config(
+        cls,
+        base_dir: Path | str,
+        run_id: Optional[str] = None,
+        for_worker: bool = False,
+    ) -> "DiscoveryLogger":
+        """
+        Helper for engine_worker or CoreAgent to create a logger that
+        lives alongside other run specific logs.
+
+        If for_worker is True, uses a slightly different file name.
+        """
+        base = Path(base_dir)
+        logs_dir = base / "logs"
+        if for_worker:
+            md_name = "discovery_log_worker.md"
+            json_name = "discovery_log_worker.jsonl"
+        else:
+            md_name = LOG_FILE_NAME_DEFAULT
+            json_name = LOG_JSON_FILE_NAME_DEFAULT
+        return cls(
+            log_dir=logs_dir,
+            file_name=md_name,
+            run_id=run_id,
+            json_mirror=True,
+            json_file_name=json_name,
+        )
 
     def _write_header(self) -> None:
         """Write an initial header for the discovery log if the file is new."""
@@ -180,7 +271,10 @@ class DiscoveryLogger:
             "by the Autonomous Research Agent running under Reparodynamics.",
             "",
             "Each entry is appended with a timestamp so you can reconstruct",
-            "what the agent discovered during long runs such as a 90 day experiment.",
+            "what the agent discovered during long runs, including 24 hour",
+            "or 90 day stability experiments.",
+            "",
+            f"Log schema version: `{DISCOVERY_LOG_VERSION}`",
             "",
             "---",
             "",
@@ -193,6 +287,17 @@ class DiscoveryLogger:
             f.write(text)
             if not text.endswith("\n"):
                 f.write("\n")
+
+    def _append_json(self, event: DiscoveryEvent) -> None:
+        """Append a JSON line representation of the event if json mirroring is enabled."""
+        if not self.json_mirror:
+            return
+        record = event.to_json_ready()
+        line = json.dumps(record, ensure_ascii=False)
+        with self.json_file_path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+    # Core logging primitive
 
     def log_event(
         self,
@@ -208,12 +313,16 @@ class DiscoveryLogger:
         tags: Optional[List[str]] = None,
         extra: Optional[Dict[str, Any]] = None,
         timestamp: Optional[str] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        severity: Optional[str] = None,
+        confidence: Optional[float] = None,
     ) -> DiscoveryEvent:
         """
         Log a generic discovery event.
 
         This is the core lower level method. Other helpers call this with
-        pre filled kind values for hypotheses, RYE spikes, etc.
+        pre filled kind values for hypotheses, RYE spikes, mechanisms, etc.
         """
         event = DiscoveryEvent(
             kind=kind,
@@ -223,18 +332,25 @@ class DiscoveryLogger:
             run_id=self.run_id,
             cycle_index=cycle_index,
             agent_role=agent_role,
+            goal=goal,
+            domain=domain,
             rye_before=rye_before,
             rye_after=rye_after,
             delta_r=delta_r,
             energy=energy,
             tags=tags,
+            severity=severity,
+            confidence=confidence,
             extra=extra,
         )
         md = event.to_markdown()
         self._append_markdown(md)
+        self._append_json(event)
         return event
 
-    # Convenience helpers
+    # ------------------------------------------------------------------
+    # Convenience helpers for hypotheses
+    # ------------------------------------------------------------------
 
     def log_hypothesis(
         self,
@@ -248,6 +364,9 @@ class DiscoveryLogger:
         energy: Optional[float] = None,
         tags: Optional[List[str]] = None,
         extra: Optional[Dict[str, Any]] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        confidence: Optional[float] = None,
     ) -> DiscoveryEvent:
         """Log a new candidate hypothesis."""
         combined_tags = (tags or []) + ["hypothesis", "pending"]
@@ -263,6 +382,10 @@ class DiscoveryLogger:
             energy=energy,
             tags=combined_tags,
             extra=extra,
+            goal=goal,
+            domain=domain,
+            severity="info",
+            confidence=confidence,
         )
 
     def log_validated_hypothesis(
@@ -277,6 +400,9 @@ class DiscoveryLogger:
         energy: Optional[float] = None,
         tags: Optional[List[str]] = None,
         extra: Optional[Dict[str, Any]] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        confidence: Optional[float] = None,
     ) -> DiscoveryEvent:
         """Log a hypothesis that passed additional checks or verification."""
         combined_tags = (tags or []) + ["hypothesis", "validated"]
@@ -292,6 +418,10 @@ class DiscoveryLogger:
             energy=energy,
             tags=combined_tags,
             extra=extra,
+            goal=goal,
+            domain=domain,
+            severity="major",
+            confidence=confidence,
         )
 
     def log_rejected_hypothesis(
@@ -302,6 +432,9 @@ class DiscoveryLogger:
         agent_role: Optional[str] = None,
         tags: Optional[List[str]] = None,
         extra: Optional[Dict[str, Any]] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        confidence: Optional[float] = None,
     ) -> DiscoveryEvent:
         """Log a hypothesis that was rejected after critique or contradiction."""
         combined_tags = (tags or []) + ["hypothesis", "rejected"]
@@ -313,7 +446,15 @@ class DiscoveryLogger:
             agent_role=agent_role,
             tags=combined_tags,
             extra=extra,
+            goal=goal,
+            domain=domain,
+            severity="notice",
+            confidence=confidence,
         )
+
+    # ------------------------------------------------------------------
+    # RYE spikes and major repair events
+    # ------------------------------------------------------------------
 
     def log_rye_spike(
         self,
@@ -327,6 +468,10 @@ class DiscoveryLogger:
         energy: Optional[float] = None,
         tags: Optional[List[str]] = None,
         extra: Optional[Dict[str, Any]] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        severity: str = "major",
+        confidence: Optional[float] = None,
     ) -> DiscoveryEvent:
         """
         Log a high RYE event, likely associated with a significant repair or insight.
@@ -344,7 +489,15 @@ class DiscoveryLogger:
             energy=energy,
             tags=combined_tags,
             extra=extra,
+            goal=goal,
+            domain=domain,
+            severity=severity,
+            confidence=confidence,
         )
+
+    # ------------------------------------------------------------------
+    # Contradictions and repairs
+    # ------------------------------------------------------------------
 
     def log_contradiction_resolved(
         self,
@@ -354,6 +507,10 @@ class DiscoveryLogger:
         agent_role: Optional[str] = None,
         tags: Optional[List[str]] = None,
         extra: Optional[Dict[str, Any]] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        severity: str = "info",
+        confidence: Optional[float] = None,
     ) -> DiscoveryEvent:
         """Log an event where a contradiction or inconsistency was resolved."""
         combined_tags = (tags or []) + ["contradiction_resolved"]
@@ -365,10 +522,326 @@ class DiscoveryLogger:
             agent_role=agent_role,
             tags=combined_tags,
             extra=extra,
+            goal=goal,
+            domain=domain,
+            severity=severity,
+            confidence=confidence,
+        )
+
+    # ------------------------------------------------------------------
+    # Mechanisms, treatments, biomarkers, and structures
+    # These align with MemoryStore.add_discovery classification.
+    # ------------------------------------------------------------------
+
+    def log_mechanism(
+        self,
+        label: str,
+        evidence_summary: str,
+        cycle_index: Optional[int] = None,
+        agent_role: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        confidence: Optional[float] = None,
+    ) -> DiscoveryEvent:
+        """Log a mechanism discovery or candidate mechanism."""
+        extra: Dict[str, Any] = {"citations": citations or []}
+        combined_tags = (tags or []) + ["mechanism", "discovery"]
+        return self.log_event(
+            kind="mechanism",
+            title=label,
+            description=evidence_summary,
+            cycle_index=cycle_index,
+            agent_role=agent_role,
+            tags=combined_tags,
+            extra=extra,
+            goal=goal,
+            domain=domain,
+            severity="major",
+            confidence=confidence,
+        )
+
+    def log_treatment_candidate(
+        self,
+        label: str,
+        evidence_summary: str,
+        cycle_index: Optional[int] = None,
+        agent_role: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        confidence: Optional[float] = None,
+    ) -> DiscoveryEvent:
+        """Log a treatment or stack candidate for cure extraction pipelines."""
+        extra: Dict[str, Any] = {"citations": citations or []}
+        combined_tags = (tags or []) + ["treatment", "candidate", "intervention"]
+        return self.log_event(
+            kind="treatment_candidate",
+            title=label,
+            description=evidence_summary,
+            cycle_index=cycle_index,
+            agent_role=agent_role,
+            tags=combined_tags,
+            extra=extra,
+            goal=goal,
+            domain=domain,
+            severity="major",
+            confidence=confidence,
+        )
+
+    def log_cure_candidate(
+        self,
+        label: str,
+        evidence_summary: str,
+        cycle_index: Optional[int] = None,
+        agent_role: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        citations: Optional[List[Dict[str, Any]]] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        confidence: Optional[float] = None,
+    ) -> DiscoveryEvent:
+        """Log a very strong cure candidate with high RYE and verification needs."""
+        extra: Dict[str, Any] = {"citations": citations or []}
+        combined_tags = (tags or []) + ["cure_candidate", "high_stakes"]
+        return self.log_event(
+            kind="cure_candidate",
+            title=label,
+            description=evidence_summary,
+            cycle_index=cycle_index,
+            agent_role=agent_role,
+            tags=combined_tags,
+            extra=extra,
+            goal=goal,
+            domain=domain,
+            severity="critical",
+            confidence=confidence,
+        )
+
+    def log_biomarker_shift(
+        self,
+        label: str,
+        description: str,
+        cycle_index: Optional[int] = None,
+        agent_role: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        confidence: Optional[float] = None,
+    ) -> DiscoveryEvent:
+        """Log a notable biomarker pattern or shift."""
+        combined_tags = (tags or []) + ["biomarker_shift"]
+        return self.log_event(
+            kind="biomarker_shift",
+            title=label,
+            description=description,
+            cycle_index=cycle_index,
+            agent_role=agent_role,
+            tags=combined_tags,
+            extra=extra,
+            goal=goal,
+            domain=domain,
+            severity="notice",
+            confidence=confidence,
+        )
+
+    def log_structure_discovery(
+        self,
+        label: str,
+        description: str,
+        cycle_index: Optional[int] = None,
+        agent_role: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        confidence: Optional[float] = None,
+    ) -> DiscoveryEvent:
+        """Log a structural discovery such as a mathematical framework or pattern."""
+        combined_tags = (tags or []) + ["mathematical_structure", "pattern"]
+        return self.log_event(
+            kind="structure_discovery",
+            title=label,
+            description=description,
+            cycle_index=cycle_index,
+            agent_role=agent_role,
+            tags=combined_tags,
+            extra=extra,
+            goal=goal,
+            domain=domain,
+            severity="major",
+            confidence=confidence,
+        )
+
+    # ------------------------------------------------------------------
+    # Run milestones and swarm or tool events
+    # ------------------------------------------------------------------
+
+    def log_run_milestone(
+        self,
+        label: str,
+        description: str,
+        cycle_index: Optional[int] = None,
+        run_id: Optional[str] = None,
+        tags: Optional[List[str]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        severity: str = "info",
+    ) -> DiscoveryEvent:
+        """Log a run milestone such as best RYE so far or phase shift detection."""
+        if run_id is not None:
+            self.run_id = run_id
+        combined_tags = (tags or []) + ["milestone"]
+        return self.log_event(
+            kind="run_milestone",
+            title=label,
+            description=description,
+            cycle_index=cycle_index,
+            agent_role=None,
+            tags=combined_tags,
+            extra=extra,
+            goal=goal,
+            domain=domain,
+            severity=severity,
+        )
+
+    def log_swarm_event(
+        self,
+        label: str,
+        description: str,
+        cycle_index: Optional[int] = None,
+        tags: Optional[List[str]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        severity: str = "info",
+    ) -> DiscoveryEvent:
+        """Log a swarm related event, such as rebalancing or consensus switch."""
+        combined_tags = (tags or []) + ["swarm_event"]
+        return self.log_event(
+            kind="swarm_event",
+            title=label,
+            description=description,
+            cycle_index=cycle_index,
+            agent_role="swarm_controller",
+            tags=combined_tags,
+            extra=extra,
+            goal=goal,
+            domain=domain,
+            severity=severity,
+        )
+
+    def log_tool_event(
+        self,
+        tool_name: str,
+        description: str,
+        cycle_index: Optional[int] = None,
+        status: str = "success",
+        duration_seconds: Optional[float] = None,
+        energy_cost: Optional[float] = None,
+        rye_delta: Optional[float] = None,
+        tags: Optional[List[str]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> DiscoveryEvent:
+        """
+        Log a tool event that is particularly important for discovery,
+        for example a long browser crawl or a large data pipeline run.
+        """
+        tool_tags = (tags or []) + ["tool_event", tool_name, status]
+        payload: Dict[str, Any] = extra.copy() if extra else {}
+        payload.update(
+            {
+                "tool_name": tool_name,
+                "status": status,
+                "duration_seconds": duration_seconds,
+                "energy_cost": energy_cost,
+                "rye_delta": rye_delta,
+            }
+        )
+        severity = "info" if status == "success" else "notice"
+        if status == "error":
+            severity = "major"
+        return self.log_event(
+            kind="tool_event",
+            title=f"Tool {tool_name} {status}",
+            description=description,
+            cycle_index=cycle_index,
+            tags=tool_tags,
+            extra=payload,
+            goal=goal,
+            domain=domain,
+            severity=severity,
+        )
+
+    # ------------------------------------------------------------------
+    # Integration helpers for MemoryStore style discovery entries
+    # ------------------------------------------------------------------
+
+    def log_from_memory_discovery(self, entry: Dict[str, Any]) -> DiscoveryEvent:
+        """
+        Bridge helper to log a discovery entry coming from MemoryStore.
+
+        Expected MemoryStore shape (best effort, all optional):
+            {
+                "timestamp": str,
+                "goal": str,
+                "kind": str,
+                "label": str,
+                "evidence_summary": str,
+                "score": float | None,
+                "tags": list,
+                "citations": list,
+                "domain": str | None,
+            }
+        """
+        kind = str(entry.get("kind", "discovery") or "discovery")
+        label = str(entry.get("label", "(no label)") or "(no label)")
+        evidence = str(entry.get("evidence_summary", "") or "")
+        ts = str(entry.get("timestamp") or _utc_iso())
+        goal = entry.get("goal")
+        domain = entry.get("domain")
+        tags = list(entry.get("tags") or [])
+        citations = entry.get("citations") or []
+        score = entry.get("score")
+
+        extra: Dict[str, Any] = {
+            "citations": citations,
+            "memory_entry": entry,
+        }
+
+        severity = "major"
+        if kind == "cure_candidate":
+            severity = "critical"
+        elif kind == "treatment":
+            severity = "major"
+        elif kind in ("mechanism", "biomarker"):
+            severity = "major"
+        else:
+            severity = "info"
+
+        return self.log_event(
+            kind=kind,
+            title=label,
+            description=evidence,
+            cycle_index=None,
+            agent_role=None,
+            tags=tags,
+            extra=extra,
+            timestamp=ts,
+            goal=goal,
+            domain=domain,
+            severity=severity,
+            confidence=score if isinstance(score, (int, float)) else None,
         )
 
 
-# Optional: singleton style logger for very simple integrations
+# Optional singleton style logger for very simple integrations
 
 _GLOBAL_LOGGER: Optional[DiscoveryLogger] = None
 
