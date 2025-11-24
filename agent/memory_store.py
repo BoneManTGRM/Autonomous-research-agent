@@ -55,7 +55,7 @@ except Exception:  # pragma: no cover
 # ----------------------------------------------------------------------
 # Schema and global caps
 # ----------------------------------------------------------------------
-MEMORY_SCHEMA_VERSION = 2
+MEMORY_SCHEMA_VERSION = 3
 
 # Hard but generous caps for 24-90 day or long runs
 # These mirror the events and discoveries bounding you already had.
@@ -107,6 +107,11 @@ class MemoryStore:
         - worker_state and events for live status and debugging
         - bounded growth of logs (notes, cycles, hypotheses, citations, events, tool_events)
         - per run manifests and milestones for report generation
+
+    Advanced learning layer:
+        - goal_index tracks best RYE, last RYE, and basic phase hints
+        - optional advanced RYE metrics for learning curves
+        - learning profiles and leaderboards for goals and roles
     """
 
     def __init__(self, memory_file: str) -> None:
@@ -331,6 +336,9 @@ class MemoryStore:
         delta_cycles: int = 0,
         rye_value: Optional[float] = None,
         domain: Optional[str] = None,
+        equilibrium_label: Optional[str] = None,
+        breakthrough_score: Optional[float] = None,
+        cycle_index: Optional[int] = None,
     ) -> None:
         """Update compact per goal stats for swarms and analytics.
 
@@ -338,6 +346,8 @@ class MemoryStore:
             - note_count, cycle_count
             - per role counts and avg_rye
             - goal level avg_rye, min_rye, max_rye, rye_count
+            - best and last RYE per goal
+            - last equilibrium label and basic breakthrough info
         """
         gi = self._data.setdefault("goal_index", {})
         entry = gi.get(goal) or {}
@@ -387,18 +397,19 @@ class MemoryStore:
         if rye_value is not None:
             prev_avg = entry.get("avg_rye")
             prev_n = int(entry.get("rye_count", 0))
+            v = float(rye_value)
+
             if isinstance(prev_avg, (int, float)) and prev_n > 0:
-                new_avg = (prev_avg * prev_n + float(rye_value)) / float(prev_n + 1)
+                new_avg = (prev_avg * prev_n + v) / float(prev_n + 1)
                 entry["avg_rye"] = new_avg
                 entry["rye_count"] = prev_n + 1
             else:
-                entry["avg_rye"] = float(rye_value)
+                entry["avg_rye"] = v
                 entry["rye_count"] = 1
 
             # Track min and max RYE at the goal index level as well
             prev_min = entry.get("min_rye")
             prev_max = entry.get("max_rye")
-            v = float(rye_value)
             if isinstance(prev_min, (int, float)):
                 entry["min_rye"] = min(float(prev_min), v)
             else:
@@ -407,6 +418,27 @@ class MemoryStore:
                 entry["max_rye"] = max(float(prev_max), v)
             else:
                 entry["max_rye"] = v
+
+            # Track best RYE and cycle index for fast learning profile
+            best_rye = entry.get("best_rye")
+            if not isinstance(best_rye, (int, float)) or v > float(best_rye):
+                entry["best_rye"] = v
+                if cycle_index is not None:
+                    entry["best_cycle_index"] = int(cycle_index)
+
+            entry["last_rye"] = v
+            if cycle_index is not None:
+                entry["last_cycle_index"] = int(cycle_index)
+
+        # Learning hints from equilibrium and breakthrough
+        if equilibrium_label:
+            entry["last_equilibrium_label"] = equilibrium_label
+
+        if isinstance(breakthrough_score, (int, float)):
+            entry["last_breakthrough_score"] = float(breakthrough_score)
+            prev_best_bs = entry.get("best_breakthrough_score")
+            if not isinstance(prev_best_bs, (int, float)) or breakthrough_score > float(prev_best_bs):
+                entry["best_breakthrough_score"] = float(breakthrough_score)
 
         gi[goal] = entry
         self._data["goal_index"] = gi
@@ -476,7 +508,12 @@ class MemoryStore:
         return [n for n in notes if n.get("goal") == goal]
 
     def search_notes(self, query: str, top_k: int = 5, goal: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Search notes either via vector memory (if available) or simple keyword search."""
+        """Search notes either via vector memory (if available) or simple keyword search.
+
+        Fallback keyword search is learning aware:
+            - ranks by importance
+            - breaks ties by recency
+        """
         if not query:
             return []
 
@@ -495,11 +532,18 @@ class MemoryStore:
             except Exception:
                 pass
 
-        # Keyword based fallback
+        # Keyword based fallback with basic ranking
         notes = self.get_notes(goal)
         query_lower = query.lower()
         matched = [n for n in notes if query_lower in str(n.get("content", "")).lower()]
-        return matched[:top_k]
+
+        def _note_key(n: Dict[str, Any]) -> Tuple[float, str]:
+            importance = float(n.get("importance", 1.0))
+            ts = str(n.get("timestamp", ""))
+            return (importance, ts)
+
+        matched_sorted = sorted(matched, key=_note_key, reverse=True)
+        return matched_sorted[:top_k]
 
     # ------------------------------------------------------------------
     # Hypotheses
@@ -620,18 +664,41 @@ class MemoryStore:
     # Cycle logs
     # ------------------------------------------------------------------
     def log_cycle(self, cycle_data: Dict[str, Any]) -> None:
-        """Append cycle data to the cycle log."""
+        """Append cycle data to the cycle log and update learning signals."""
         self._data.setdefault("cycles", []).append(cycle_data)
 
         # Bound cycles growth
         if len(self._data["cycles"]) > MAX_CYCLES:
             self._data["cycles"] = self._data["cycles"][-MAX_CYCLES:]
 
-        # Update compact goal index for swarms
+        # Update compact goal index for swarms and learning
         goal = str(cycle_data.get("goal", ""))
         role = str(cycle_data.get("role", "agent"))
         domain = cycle_data.get("domain")
         rye_val = cycle_data.get("RYE")
+        cycle_index = None
+        try:
+            if "cycle" in cycle_data:
+                cycle_index = int(cycle_data.get("cycle"))
+        except Exception:
+            cycle_index = None
+
+        equilibrium_label = None
+        breakthrough_score = None
+        try:
+            eq = cycle_data.get("equilibrium") or {}
+            if isinstance(eq, dict):
+                equilibrium_label = eq.get("equilibrium_label")
+        except Exception:
+            equilibrium_label = None
+
+        try:
+            br = cycle_data.get("breakthrough") or {}
+            if isinstance(br, dict):
+                breakthrough_score = br.get("breakthrough_score")
+        except Exception:
+            breakthrough_score = None
+
         if goal:
             try:
                 if isinstance(rye_val, (int, float)):
@@ -646,9 +713,40 @@ class MemoryStore:
                     delta_cycles=1,
                     rye_value=rye_float,
                     domain=domain,
+                    equilibrium_label=equilibrium_label,
+                    breakthrough_score=breakthrough_score,
+                    cycle_index=cycle_index,
                 )
             except Exception:
                 pass
+
+        # Optional automatic milestone when breakthrough_score is high
+        try:
+            if isinstance(breakthrough_score, (int, float)) and breakthrough_score >= 0.8 and goal:
+                flags = []
+                br = cycle_data.get("breakthrough") or {}
+                if isinstance(br, dict):
+                    flags = br.get("flags") or []
+                desc = f"Cycle {cycle_index} reached breakthrough_score {breakthrough_score:.3f}"
+                if flags:
+                    desc += f" with flags {flags}"
+                self.log_milestone(
+                    run_id=cycle_data.get("run_id"),
+                    goal=goal,
+                    domain=domain,
+                    label="high_breakthrough_score",
+                    description=desc,
+                    level="info",
+                    role=role,
+                    cycle_index=cycle_index,
+                    extra={
+                        "equilibrium_label": equilibrium_label,
+                        "flags": flags,
+                        "rye": rye_val,
+                    },
+                )
+        except Exception:
+            pass
 
         self._save()
 
@@ -1189,11 +1287,9 @@ class MemoryStore:
                  },
                  "sandbox": { ... },
                  ...
-              }
+              },
+              "tool_rye": { ... }  # if provided by rye_metrics
             }
-
-        If rye_metrics exposes a compute_tool_rye helper in the future,
-        it can be integrated here with best effort.
         """
         events = self._data.get("tool_events", [])
         if not isinstance(events, list):
@@ -1229,7 +1325,7 @@ class MemoryStore:
 
         result: Dict[str, Any] = {"tools": stats}
 
-        # Optional future hook for per tool RYE
+        # Optional per tool RYE and learning metrics if rye_metrics provides it
         if _rye_metrics is not None and hasattr(_rye_metrics, "compute_tool_rye"):
             try:
                 result["tool_rye"] = _rye_metrics.compute_tool_rye(
@@ -1413,6 +1509,115 @@ class MemoryStore:
 
         return metrics
 
+    def get_learning_profile(
+        self,
+        goal: Optional[str] = None,
+        role: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return a learning focused profile for a goal and optional role.
+
+        Includes:
+            - counts and basic RYE stats
+            - advanced RYE metrics
+            - early vs late RYE averages
+            - best cycle summary
+            - last few equilibrium labels and breakthrough scores
+        """
+        history = self._data.get("cycles", [])
+        if goal is not None:
+            history = [c for c in history if c.get("goal") == goal]
+        if role is not None:
+            history = [c for c in history if c.get("role") == role]
+
+        total_cycles = len(history)
+        avg_rye, min_rye, max_rye, rye_count = self.get_rye_stats(goal=goal, role=role)
+        adv = self.get_advanced_rye_metrics(goal=goal, role=role)
+
+        # Early vs late RYE averages for learning curve shape
+        early_avg = None
+        late_avg = None
+        if history:
+            sorted_hist = sorted(history, key=lambda c: c.get("cycle", 0))
+            n = len(sorted_hist)
+            k = max(1, n // 4)
+            early_slice = sorted_hist[:k]
+            late_slice = sorted_hist[-k:]
+
+            def _avg_rye_slice(slice_hist: List[Dict[str, Any]]) -> Optional[float]:
+                vals: List[float] = []
+                for c in slice_hist:
+                    v = c.get("RYE")
+                    if isinstance(v, (int, float)):
+                        vals.append(float(v))
+                if not vals:
+                    return None
+                return sum(vals) / len(vals)
+
+            early_avg = _avg_rye_slice(early_slice)
+            late_avg = _avg_rye_slice(late_slice)
+
+        # Best cycle by RYE
+        best_cycle: Optional[Dict[str, Any]] = None
+        best_rye_val: Optional[float] = None
+        for c in history:
+            v = c.get("RYE")
+            if isinstance(v, (int, float)):
+                v_float = float(v)
+                if best_rye_val is None or v_float > best_rye_val:
+                    best_rye_val = v_float
+                    best_cycle = c
+
+        # Recent phase info
+        recent_eq_labels: List[str] = []
+        recent_breakthrough_scores: List[float] = []
+        for c in sorted(history, key=lambda c: c.get("timestamp", ""), reverse=True)[:50]:
+            eq = c.get("equilibrium") or {}
+            if isinstance(eq, dict):
+                lbl = eq.get("equilibrium_label")
+                if isinstance(lbl, str):
+                    recent_eq_labels.append(lbl)
+            br = c.get("breakthrough") or {}
+            if isinstance(br, dict):
+                bs = br.get("breakthrough_score")
+                if isinstance(bs, (int, float)):
+                    recent_breakthrough_scores.append(float(bs))
+
+        profile: Dict[str, Any] = {
+            "scope": {
+                "goal": goal,
+                "role": role,
+            },
+            "counts": {
+                "cycles": total_cycles,
+                "rye_count": rye_count,
+            },
+            "rye_basic": {
+                "avg": avg_rye,
+                "min": min_rye,
+                "max": max_rye,
+            },
+            "rye_advanced": adv,
+            "rye_curve": {
+                "early_avg": early_avg,
+                "late_avg": late_avg,
+                "delta": (late_avg - early_avg) if (early_avg is not None and late_avg is not None) else None,
+            },
+            "best_cycle": {
+                "cycle_index": best_cycle.get("cycle") if isinstance(best_cycle, dict) else None,
+                "RYE": best_rye_val,
+                "timestamp": best_cycle.get("timestamp") if isinstance(best_cycle, dict) else None,
+                "equilibrium": best_cycle.get("equilibrium") if isinstance(best_cycle, dict) else None,
+                "breakthrough": best_cycle.get("breakthrough") if isinstance(best_cycle, dict) else None,
+            }
+            if best_cycle is not None
+            else {},
+            "recent_phase": {
+                "equilibrium_labels": recent_eq_labels,
+                "breakthrough_scores": recent_breakthrough_scores,
+            },
+        }
+        return profile
+
     def build_text_report(self, goal: Optional[str] = None) -> str:
         """Build a simple text or markdown report for a goal or all goals."""
         if goal:
@@ -1582,6 +1787,7 @@ class MemoryStore:
             "rye_basic": {},
             "rye_advanced": {},
             "counts": {},
+            "learning_profile": {},
         }
 
         gi = self._data.get("goal_index") or {}
@@ -1598,6 +1804,7 @@ class MemoryStore:
             "count": count,
         }
         summary["rye_advanced"] = self.get_advanced_rye_metrics(goal=goal)
+        summary["learning_profile"] = self.get_learning_profile(goal=goal)
 
         notes = self.get_notes(goal=goal)
         hyps = self.get_hypotheses(goal=goal)
@@ -1636,6 +1843,10 @@ class MemoryStore:
                     "note_count": int(entry.get("note_count", 0)),
                     "cycle_count": int(entry.get("cycle_count", 0)),
                     "domain": entry.get("domain"),
+                    "best_rye": float(entry.get("best_rye")) if isinstance(entry.get("best_rye"), (int, float)) else None,
+                    "best_breakthrough_score": float(entry.get("best_breakthrough_score"))
+                    if isinstance(entry.get("best_breakthrough_score"), (int, float))
+                    else None,
                 }
             )
 
