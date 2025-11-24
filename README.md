@@ -1,5 +1,5 @@
 # ⭐ Autonomous Research Agent  
-### Powered by Reparodynamics • TGRM • RYE • Swarm Intelligence
+### Powered by Reparodynamics • TGRM • RYE • Swarm Intelligence • Meta-Control • Long-Run Autonomy
 
 Live Deployment  
 https://autonomous-research-agent-hqby.onrender.com
@@ -15,40 +15,34 @@ Without a key, the system automatically switches to offline stub mode.
 **Reparodynamics**, **TGRM**, and **RYE** were created and defined by **Cody Ryan Jenkins**.  
 These scientific terms:
 
-• cannot be renamed  
-• cannot be rebranded  
-• cannot be represented as originating from another individual or group  
-• must remain unchanged in forks, redistributions, or derivative systems  
-• require attribution in any scientific, academic, technical, or commercial use  
+- cannot be renamed  
+- cannot be rebranded  
+- cannot be repurposed  
+- cannot be represented as originating from another individual or group  
+- must remain unchanged in forks, redistributions, or derivative systems  
+- require attribution in all scientific, academic, technical, and commercial contexts  
 
 ### Required Citation  
 Jenkins, C. R. (2025). *Reparodynamics v2.2*  
 DOI: https://doi.org/10.5281/zenodo.17653046
 
-Reparodynamics is a protected scientific identity describing a unified framework for autonomous repair, stability, and long-run self-improvement.
+Reparodynamics describes a unified framework for autonomous repair, stability, and long-run self-improvement.
 
 ---
 
 # 🚀 Overview
 
-This system is a **fully autonomous research engine**, not a chatbot.  
-It executes multi-step scientific reasoning, literature ingestion, hypothesis refinement, and verification cycles using **TGRM** and **RYE** as its foundational laws of repair and efficiency.
+This system is a **true autonomous research engine**, not a chatbot.  
+It performs multi-step scientific reasoning, continuous self-repair, evidence-driven correction loops, and long-run learning governed by **TGRM** and measured by **RYE**.
 
-### Core capabilities
-• Full TGRM cycle (Test → Detect → Repair → Verify)  
-• RYE Level 3 computation every cycle  
-• Multi-agent reasoning and coordinated Swarm Intelligence  
-• PubMed and Semantic Scholar ingestion pipelines  
-• Real web search via Tavily  
-• PDF, CSV, TSV, XLSX, JSON, ZIP, GZ dataset ingestion  
-• Secure code-execution sandbox  
-• Vector memory with long-horizon memory store  
-• Background worker for multi-day to multi-month autonomy  
-• Meta-controller segmentation for stable long-run reasoning  
-• Self-diagnostic RYE suite with trends, stability, volatility, and equilibrium detection  
-• Domain-tuned intelligence profiles  
+It now supports:
 
-This system can run rapid problem-solving cycles or long-term scientific investigations lasting weeks or months.
+- Single-agent research  
+- Multi-agent swarms (5–32 agents)  
+- Meta-controller orchestration  
+- Long-run background execution (1 day → 90 days → forever)  
+
+This enables real scientific autonomy.
 
 ---
 
@@ -56,108 +50,210 @@ This system can run rapid problem-solving cycles or long-term scientific investi
 
 ## 🔁 Full TGRM Loop
 
-Every cycle executes:
+Each cycle executes:
 
-1. **Test** — evaluate notes, beliefs, hypotheses, and evidence  
-2. **Detect** — find contradictions, unsupported claims, missing evidence  
-3. **Repair** — run tools, gather literature, refine logic, and correct errors  
-4. **Verify** — ensure improvements are real and regressions are prevented  
-5. **Compute RYE** — ΔR / E using swarm-aware energy modeling  
-6. **Log** — fully transparent records for reproducibility and audits  
+1. **Test** — analyze notes, hypotheses, contradictions  
+2. **Detect** — find gaps, conflicts, unsupported claims  
+3. **Repair** — gather new evidence, reasoning, code execution  
+4. **Verify** — confirm improvements and reject regressions  
+5. **RYE computation** — ΔR / E with swarm-aware energy costs  
+6. **Logging** — full-cycle transcript, summary, and metrics  
 
-This creates a **self-correcting scientific system** capable of measurable improvement.
+This implements a **self-correcting scientific engine**.
 
 ---
 
-## 🌐 Literature & Data Pipelines
+# 🧠 Swarm Intelligence (Multi-Agent)
+
+A coordinated multi-agent system with roles such as:
+
+- Researcher  
+- Critic  
+- Planner  
+- Explorer  
+- Synthesizer  
+- Integrator  
+- Evidence Specialist  
+- Hypothesis QA  
+- Stability Monitor  
+
+Each agent runs its own TGRM loop, contributes to shared memory, and enhances collective intelligence.
+
+Swarm benefits:
+
+- broader search  
+- higher novelty  
+- stronger verification  
+- more robust stability  
+- deeper ΔR signals  
+- improved RYE signatures  
+
+---
+
+# 🤖 Meta-Controller (Autonomy Director)
+
+The meta-engine:
+
+- segments long runs  
+- adjusts goals dynamically  
+- tunes TGRM behavior  
+- changes domain presets  
+- detects equilibrium phases  
+- enforces stability  
+- recovers from drift  
+- optimizes research direction  
+
+This is required for **week- to month-scale autonomy**.
+
+---
+
+# ⏳ Long-Run Engine (Background Worker)
+
+Your system includes:
+
+- background autonomous cycles  
+- checkpointing every cycle  
+- watchdog heartbeat  
+- crash & restart recovery  
+- memory compaction  
+- environment reloading  
+- rolling diagnostics  
+- 90-day safe architecture  
+
+Run durations:
+
+- 1 hour  
+- 8 hours  
+- 24 hours  
+- 1 week  
+- 1 month  
+- 90 days  
+- Forever mode  
+
+This is the core of the high-stability research engine.
+
+---
+
+# 📊 RYE Metrics (Level 3, Swarm-Aware)
+
+Advanced ΔR and E signals:
+
+- multisignal ΔR  
+- swarm-layer energy  
+- tokens + tool cost model  
+- novelty & coherence gain  
+- contradiction resolution impact  
+- energy normalization  
+
+Advanced RYE methods:
+
+- raw RYE  
+- weighted RYE  
+- rolling RYE  
+- robust rolling RYE  
+- median RYE  
+- percentiles  
+- stability index  
+- recovery momentum  
+- volatility signature  
+- regression slope  
+- equilibrium detection  
+- TGRM harmonic index  
+- breakthrough probability  
+- early failure warning  
+- 90-day breakthrough likelihood  
+- run tier classifier (Tier 0 → Tier 3)  
+
+This is your scientific measurement core.
+
+---
+
+# 🌐 Literature & Data Pipelines
+
+Supports ingestion from:
+
+- Tavily web search  
+- PubMed articles  
+- Semantic Scholar papers  
+- PDF parsing  
+- CSV, TSV, XLSX datasets  
+- JSON, ZIP, GZ files  
+- Markdown and text documents  
+
+All research is grounded in external verifiable sources.
+
+---
+
+# 🧪 Code Sandbox (Safe Execution)
+
+Supports isolated execution of:
+
+- mathematical tests  
+- modeling  
+- numerical experiments  
+- dataset analysis  
+- algorithm evaluation  
+- hypothesis verification  
+
+All sandbox events are RYE-scored.
+
+---
+
+# 💾 Memory Architecture
 
 Includes:
 
-• Tavily Web Search  
-• PubMed biomedical ingestion  
-• Semantic Scholar ingestion  
-• PDF parsing  
-• CSV / TSV / XLSX / JSON ingestion  
-• ZIP / GZ compressed datasets  
+- vector memory  
+- long-run JSON memory  
+- cycle logs  
+- swarm summaries  
+- tool events  
+- run summaries  
+- diagnostics bundles  
+- RYE signatures  
+- memory migration  
+- memory compaction  
+- self-healing formats  
 
-All research is grounded in external verifiable data and literature.
-
----
-
-## 🧪 Secure Code Sandbox
-
-Supports:
-
-• numerical experiments  
-• simulations  
-• statistical tests  
-• dataset analysis  
-• model evaluation  
-• hypothesis verification  
-
-All execution occurs in a controlled environment.
+Designed for **multi-week or multi-month** stability.
 
 ---
 
-## 🧠 Swarm Intelligence (Multi-Agent)
+# 🧬 Domain Presets
 
-A structured multi-role swarm including:
+Optimized presets for:
 
-• Researcher  
-• Critic  
-• Planner  
-• Explorer  
-• Synthesizer  
-• Integrator  
+- General science  
+- Longevity / anti-aging  
+- Mathematics & proofs  
+- Biology  
+- Custom fields  
 
-Each agent runs its own TGRM loops and writes to shared memory.  
-This architecture increases:
+Each preset modifies:
 
-• coverage  
-• novelty  
-• verification strength  
-• reproducibility  
-• multi-perspective analysis  
+- source ingestion  
+- TGRM routing  
+- RYE weighting  
+- evidence strictness  
+- multi-agent orchestration  
 
 ---
 
-## ⏳ Long-Run Engine (Background Worker)
+# 🧠 Learning Engine (Memory-Weighted Adaptation)
 
-Supports:
+Features:
 
-• continuous runs (1 Week, 1 Month, 90 Days, Forever)  
-• checkpointing and crash recovery  
-• watchdog and heartbeat stability monitoring  
-• meta-controller segmentation (phases of research)  
-• equilibrium detection  
-• stability and volatility scoring  
-• long-run breakthroughs and drift prevention  
+- long-run memory accumulation  
+- weighted learning  
+- stability-aware adaptation  
+- high-signal retention  
+- low-signal pruning  
+- domain-aligned drift prevention  
 
-This enables **true multi-month autonomous research experiments**.
-
----
-
-## 🧬 Domain Presets
-
-Optimized intelligence profiles for:
-
-• General science  
-• Longevity / anti-aging  
-• Mathematics / theorem-building  
-• Biology  
-• Custom user-defined domains  
-
-Each preset configures:
-
-• ingestion sources  
-• TGRM routing  
-• RYE weighting  
-• evidence strictness  
-• tool usage policies  
-• swarm orchestration rules  
+This lets the system “improve how it improves.”
 
 ---
 
 # 📁 Repository Structure
 
-(To be filled in after folder structure is finalized)
+(When copied into your repository, your folder structure will auto-populate here.)
