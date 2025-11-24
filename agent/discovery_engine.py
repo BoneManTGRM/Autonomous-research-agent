@@ -92,6 +92,15 @@ class Discovery:
     support_score: float
     combined_score: float
 
+    # Search and information metrics
+    info_gain: Optional[float]
+    search_energy: Optional[float]
+    semantic_diversity: Optional[float]
+
+    # Swarm context
+    swarm_size: Optional[int]
+    swarm_config: Optional[Dict[str, Any]]
+
     # Tier heuristics
     tier_label: Optional[str]
 
@@ -239,7 +248,7 @@ def _classify_kind(text: str, domain: str) -> Tuple[str, List[str]]:
             return "prediction", tags or ["math_prediction"]
         return "framework", tags or ["math_candidate"]
 
-    # Longevity / biology like domains
+    # Longevity or biology like domains
     if "longevity" in domain or "bio" in domain or "aging" in domain:
         if any(word in t for word in lon_bio):
             return "biomarker_shift", tags or ["biomarker"]
@@ -324,7 +333,7 @@ def _score_candidate(
 
 def _infer_tier_label(combined_score: float, z_rye: float) -> Optional[str]:
     """
-    Rough Tier-style label for discoveries.
+    Rough Tier style label for discoveries.
     Uses combined_score and RYE z score to hint at Tier level.
     """
     # Strong RYE plus high combined score suggests higher Tier patterns
@@ -556,6 +565,20 @@ class DiscoveryEngine:
             delta_R = float(entry["delta_R"]) if isinstance(entry.get("delta_R"), (int, float)) else None
             energy_E = float(entry["energy_E"]) if isinstance(entry.get("energy_E"), (int, float)) else None
 
+            # Search and swarm metrics if present in cycle history
+            info_gain = entry.get("info_gain")
+            if info_gain is None:
+                info_gain = entry.get("search_info_gain")
+
+            search_energy = entry.get("search_energy")
+            if search_energy is None:
+                search_energy = entry.get("search_cost")
+
+            semantic_diversity = entry.get("semantic_diversity")
+
+            swarm_size = entry.get("swarm_size")
+            swarm_config = entry.get("swarm_config")
+
             # Collect all candidate texts
             notes = entry.get("notes_added") or []
             repairs = entry.get("repairs") or []
@@ -628,6 +651,11 @@ class DiscoveryEngine:
                     novelty_score=novelty_score,
                     support_score=support_score,
                     combined_score=combined_score,
+                    info_gain=info_gain if isinstance(info_gain, (int, float)) else None,
+                    search_energy=search_energy if isinstance(search_energy, (int, float)) else None,
+                    semantic_diversity=semantic_diversity if isinstance(semantic_diversity, (int, float)) else None,
+                    swarm_size=int(swarm_size) if isinstance(swarm_size, int) else None,
+                    swarm_config=swarm_config if isinstance(swarm_config, dict) else None,
                     tier_label=tier_label,
                     tags=tags,
                     extra={
@@ -636,6 +664,10 @@ class DiscoveryEngine:
                         "length": len(text),
                         "run_id": self.run_id,
                         "runtime_profile": self.runtime_profile,
+                        "info_gain": info_gain,
+                        "search_energy": search_energy,
+                        "semantic_diversity": semantic_diversity,
+                        "swarm_size": swarm_size,
                     },
                 )
                 cycle_new.append(disc)
@@ -728,6 +760,14 @@ class DiscoveryEngine:
         ]
         if disc.tier_label:
             description_lines.append(f"- tier_label: {disc.tier_label}")
+        if disc.info_gain is not None:
+            description_lines.append(f"- info_gain: {disc.info_gain}")
+        if disc.search_energy is not None:
+            description_lines.append(f"- search_energy: {disc.search_energy}")
+        if disc.semantic_diversity is not None:
+            description_lines.append(f"- semantic_diversity: {disc.semantic_diversity}")
+        if disc.swarm_size is not None:
+            description_lines.append(f"- swarm_size: {disc.swarm_size}")
 
         description = "\n".join(description_lines)
 
@@ -750,6 +790,11 @@ class DiscoveryEngine:
                 delta_r=disc.delta_R,
                 energy=disc.energy_E,
                 tags=tags,
+                info_gain=disc.info_gain,
+                search_energy=disc.search_energy,
+                semantic_diversity=disc.semantic_diversity,
+                swarm_size=disc.swarm_size,
+                swarm_config=disc.swarm_config,
             )
             return True
         except Exception:
@@ -777,6 +822,15 @@ class DiscoveryEngine:
             f"- support_score: {disc.support_score:.3f}",
             f"- tier_label: {tier_str}",
         ]
+        if disc.info_gain is not None:
+            description_lines.append(f"- info_gain: {disc.info_gain}")
+        if disc.search_energy is not None:
+            description_lines.append(f"- search_energy: {disc.search_energy}")
+        if disc.semantic_diversity is not None:
+            description_lines.append(f"- semantic_diversity: {disc.semantic_diversity}")
+        if disc.swarm_size is not None:
+            description_lines.append(f"- swarm_size: {disc.swarm_size}")
+
         description = "\n".join(description_lines)
 
         tags = list(set(disc.tags + ["discovery", "discovery_candidate", tier_str]))
@@ -799,6 +853,10 @@ class DiscoveryEngine:
                     "domain": disc.domain,
                     "role": disc.role,
                     "run_id": self.run_id,
+                    "info_gain": disc.info_gain,
+                    "search_energy": disc.search_energy,
+                    "semantic_diversity": disc.semantic_diversity,
+                    "swarm_size": disc.swarm_size,
                 },
             )
         except Exception:
