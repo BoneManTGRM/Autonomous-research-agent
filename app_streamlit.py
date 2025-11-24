@@ -400,7 +400,7 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
     for e in history:
         for n in e.get("notes_added", []) or []:
             findings.append(str(n))
-        for r in e.get("repairs", []) or []:
+        for r in e.get("repairs") or []:
             findings.append(str(r))
         for h in e.get("hypotheses") or []:
             if isinstance(h, dict):
@@ -661,6 +661,137 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
     dot_lines.extend(edges)
     dot_lines.append("}")
     return "\n".join(dot_lines)
+
+
+def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[Dict[str, Any]]) -> str:
+    """Build a markdown style breakthrough snapshot from history and discovery log."""
+    lines: List[str] = []
+    lines.append("# Breakthrough snapshot report\n")
+
+    if not history and not discoveries:
+        lines.append("No cycles or discoveries recorded yet.")
+        return "\n".join(lines)
+
+    lines.append(
+        "This report highlights candidate breakthroughs based on high RYE, strong delta_R, "
+        "and discovery log entries. It is an autonomous research artifact, not medical advice.\n"
+    )
+
+    # Top cycles by RYE
+    scored_cycles: List[Tuple[float, Dict[str, Any]]] = []
+    for e in history:
+        rye_val = e.get("RYE")
+        d_r = e.get("delta_R")
+        if isinstance(rye_val, (int, float)):
+            score = float(rye_val)
+        elif isinstance(d_r, (int, float)):
+            score = float(d_r)
+        else:
+            continue
+        scored_cycles.append((score, e))
+
+    scored_cycles.sort(key=lambda x: x[0], reverse=True)
+    top_cycles = [e for _, e in scored_cycles[:10]]
+
+    lines.append("## Top cycles by efficiency and improvement\n")
+    if not top_cycles:
+        lines.append("No cycles with numeric RYE or delta_R found.\n")
+    else:
+        for e in top_cycles:
+            cycle_idx = e.get("cycle")
+            role = e.get("role", "agent")
+            domain = e.get("domain", "general")
+            rye_val = e.get("RYE")
+            d_r = e.get("delta_R")
+            energy_e = e.get("energy_E")
+            ts = e.get("timestamp")
+
+            header = f"- Cycle {cycle_idx} [{domain}/{role}]"
+            metrics_parts = []
+            if isinstance(rye_val, (int, float)):
+                metrics_parts.append(f"RYE={rye_val:.3f}")
+            if isinstance(d_r, (int, float)):
+                metrics_parts.append(f"delta_R={d_r:.3f}")
+            if isinstance(energy_e, (int, float)):
+                metrics_parts.append(f"E={energy_e:.3f}")
+            if ts:
+                metrics_parts.append(f"time={ts}")
+            if metrics_parts:
+                header += " (" + ", ".join(metrics_parts) + ")"
+            lines.append(header)
+
+            # Attach one or two short notes or hypotheses as evidence
+            notes = e.get("notes_added") or []
+            hyps = e.get("hypotheses") or []
+            details_added = 0
+            for n in notes:
+                txt = str(n).strip()
+                if not txt:
+                    continue
+                if len(txt) > 220:
+                    txt = txt[:220] + "..."
+                lines.append(f"  - Note: {txt}")
+                details_added += 1
+                if details_added >= 2:
+                    break
+            if details_added < 2:
+                for h in hyps:
+                    if isinstance(h, dict):
+                        txt = h.get("text", "")
+                    else:
+                        txt = str(h)
+                    txt = txt.strip()
+                    if not txt:
+                        continue
+                    if len(txt) > 220:
+                        txt = txt[:220] + "..."
+                    lines.append(f"  - Hypothesis: {txt}")
+                    details_added += 1
+                    if details_added >= 2:
+                        break
+
+    # Pull best discoveries from discovery log
+    lines.append("\n## Discovery log highlights\n")
+    if not discoveries:
+        lines.append("No discovery log entries found.\n")
+    else:
+        scored_disc: List[Tuple[float, Dict[str, Any]]] = []
+        for d in discoveries:
+            gain = d.get("rye_gain") or d.get("delta_rye") or 0.0
+            try:
+                gain_f = float(gain)
+            except Exception:
+                gain_f = 0.0
+            scored_disc.append((gain_f, d))
+        scored_disc.sort(key=lambda x: x[0], reverse=True)
+        top_disc = [d for _, d in scored_disc[:10]]
+
+        for d in top_disc:
+            dom = d.get("domain", "general")
+            label = d.get("title") or d.get("summary") or d.get("id") or "discovery"
+            gain = d.get("rye_gain") or d.get("delta_rye") or 0.0
+            try:
+                gain_f = float(gain)
+                gain_txt = f"{gain_f:.3f}"
+            except Exception:
+                gain_txt = str(gain)
+
+            header = f"- [{dom}] {label} (approx RYE gain {gain_txt})"
+            lines.append(header)
+
+            desc = d.get("description") or d.get("details") or ""
+            if desc:
+                txt = str(desc).strip()
+                if len(txt) > 260:
+                    txt = txt[:260] + "..."
+                lines.append(f"  - Description: {txt}")
+
+    lines.append(
+        "\nThis snapshot is designed to give a human reviewer a short list of high impact cycles "
+        "and discovery candidates to investigate further."
+    )
+
+    return "\n".join(lines)
 
 
 # -------------------------------------------------------------------
@@ -1893,6 +2024,17 @@ def main() -> None:
                 st.info(str(e))
             except Exception:
                 st.info("PDF generation failed unexpectedly. Check server logs for details.")
+
+        if st.button("Breakthrough snapshot report"):
+            discoveries = load_discovery_log()
+            breakthrough_md = build_breakthrough_report(memory.get_cycle_history(), discoveries)
+            st.markdown(breakthrough_md)
+            st.download_button(
+                "Download breakthrough snapshot",
+                data=breakthrough_md,
+                file_name="autonomous_breakthrough_snapshot.md",
+                mime="text/markdown",
+            )
 
 
 if __name__ == "__main__":
