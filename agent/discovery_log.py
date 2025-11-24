@@ -16,6 +16,7 @@ It is designed for:
     - Notable insights and structural discoveries
     - Mechanisms, treatments, biomarkers, and cure candidates
     - Run milestones and swarm or tool events
+    - Long run stability and phase shifts
 
 Typical usage from TGRM or CoreAgent:
 
@@ -43,7 +44,7 @@ and export them into papers or structured summaries.
 from __future__ import annotations
 
 import json
-import os
+import uuid
 from dataclasses import dataclass, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -53,12 +54,17 @@ from typing import Any, Dict, List, Optional
 LOG_DIR_DEFAULT = Path("logs")
 LOG_FILE_NAME_DEFAULT = "discovery_log.md"
 LOG_JSON_FILE_NAME_DEFAULT = "discovery_log.jsonl"
-DISCOVERY_LOG_VERSION = "2025-11-23-max1"
+DISCOVERY_LOG_VERSION = "2025-11-23-max2"
 
 
 def _utc_iso() -> str:
     """Return an ISO formatted UTC timestamp."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _new_event_id() -> str:
+    """Generate a short stable event id for cross references."""
+    return uuid.uuid4().hex[:12]
 
 
 @dataclass
@@ -70,6 +76,9 @@ class DiscoveryEvent:
     description: str
 
     timestamp: str
+
+    # Unique identifier for cross linking
+    event_id: str
 
     # Run and cycle context
     run_id: Optional[str] = None
@@ -83,6 +92,15 @@ class DiscoveryEvent:
     rye_after: Optional[float] = None
     delta_r: Optional[float] = None
     energy: Optional[float] = None
+
+    # Search and information quality metrics
+    info_gain: Optional[float] = None
+    search_energy: Optional[float] = None
+    semantic_diversity: Optional[float] = None
+
+    # Swarm context
+    swarm_size: Optional[int] = None
+    swarm_config: Optional[Dict[str, Any]] = None
 
     # Classification and metadata
     tags: Optional[List[str]] = None
@@ -109,6 +127,7 @@ class DiscoveryEvent:
         # Heading
         lines.append(f"## [{self.timestamp}] {header_kind}: {header_title}")
         lines.append("")
+        lines.append(f"- Event ID: `{self.event_id}`")
 
         # Meta info as bullet list
         if self.run_id:
@@ -122,6 +141,17 @@ class DiscoveryEvent:
         if self.domain:
             lines.append(f"- Domain: `{self.domain}`")
 
+        # Swarm context
+        if self.swarm_size is not None:
+            lines.append(f"- Swarm size: `{self.swarm_size}`")
+        if self.swarm_config:
+            try:
+                swarm_json = json.dumps(self.swarm_config, ensure_ascii=False, sort_keys=True)
+            except Exception:
+                swarm_json = str(self.swarm_config)
+            lines.append(f"- Swarm config: `{swarm_json}`")
+
+        # RYE metrics
         if self.rye_before is not None or self.rye_after is not None:
             before = (
                 f"{self.rye_before:.4f}"
@@ -144,6 +174,14 @@ class DiscoveryEvent:
         rr = self.rye_ratio()
         if rr is not None:
             lines.append(f"- R per energy (RYE ratio): `{rr:.4f}`")
+
+        # Search and information quality
+        if self.info_gain is not None:
+            lines.append(f"- Info gain: `{self.info_gain}`")
+        if self.search_energy is not None:
+            lines.append(f"- Search energy: `{self.search_energy}`")
+        if self.semantic_diversity is not None:
+            lines.append(f"- Semantic diversity: `{self.semantic_diversity}`")
 
         if self.severity:
             lines.append(f"- Severity: `{self.severity}`")
@@ -272,7 +310,7 @@ class DiscoveryLogger:
             "",
             "Each entry is appended with a timestamp so you can reconstruct",
             "what the agent discovered during long runs, including 24 hour",
-            "or 90 day stability experiments.",
+            "or 90 day stability and swarm experiments.",
             "",
             f"Log schema version: `{DISCOVERY_LOG_VERSION}`",
             "",
@@ -317,18 +355,33 @@ class DiscoveryLogger:
         domain: Optional[str] = None,
         severity: Optional[str] = None,
         confidence: Optional[float] = None,
+        info_gain: Optional[float] = None,
+        search_energy: Optional[float] = None,
+        semantic_diversity: Optional[float] = None,
+        swarm_size: Optional[int] = None,
+        swarm_config: Optional[Dict[str, Any]] = None,
+        event_id: Optional[str] = None,
     ) -> DiscoveryEvent:
         """
         Log a generic discovery event.
 
         This is the core lower level method. Other helpers call this with
         pre filled kind values for hypotheses, RYE spikes, mechanisms, etc.
+
+        New optional fields:
+            info_gain, search_energy, semantic_diversity:
+                Used to mirror web search and TGRM stack quality metrics.
+            swarm_size, swarm_config:
+                Used to tag swarm scale and configuration for the event.
+            event_id:
+                Optional override if caller wants to set a fixed id.
         """
         event = DiscoveryEvent(
             kind=kind,
             title=title,
             description=description,
             timestamp=timestamp or _utc_iso(),
+            event_id=event_id or _new_event_id(),
             run_id=self.run_id,
             cycle_index=cycle_index,
             agent_role=agent_role,
@@ -342,6 +395,11 @@ class DiscoveryLogger:
             severity=severity,
             confidence=confidence,
             extra=extra,
+            info_gain=info_gain,
+            search_energy=search_energy,
+            semantic_diversity=semantic_diversity,
+            swarm_size=swarm_size,
+            swarm_config=swarm_config,
         )
         md = event.to_markdown()
         self._append_markdown(md)
@@ -367,6 +425,10 @@ class DiscoveryLogger:
         goal: Optional[str] = None,
         domain: Optional[str] = None,
         confidence: Optional[float] = None,
+        info_gain: Optional[float] = None,
+        search_energy: Optional[float] = None,
+        semantic_diversity: Optional[float] = None,
+        swarm_size: Optional[int] = None,
     ) -> DiscoveryEvent:
         """Log a new candidate hypothesis."""
         combined_tags = (tags or []) + ["hypothesis", "pending"]
@@ -386,6 +448,10 @@ class DiscoveryLogger:
             domain=domain,
             severity="info",
             confidence=confidence,
+            info_gain=info_gain,
+            search_energy=search_energy,
+            semantic_diversity=semantic_diversity,
+            swarm_size=swarm_size,
         )
 
     def log_validated_hypothesis(
@@ -403,6 +469,10 @@ class DiscoveryLogger:
         goal: Optional[str] = None,
         domain: Optional[str] = None,
         confidence: Optional[float] = None,
+        info_gain: Optional[float] = None,
+        search_energy: Optional[float] = None,
+        semantic_diversity: Optional[float] = None,
+        swarm_size: Optional[int] = None,
     ) -> DiscoveryEvent:
         """Log a hypothesis that passed additional checks or verification."""
         combined_tags = (tags or []) + ["hypothesis", "validated"]
@@ -422,6 +492,10 @@ class DiscoveryLogger:
             domain=domain,
             severity="major",
             confidence=confidence,
+            info_gain=info_gain,
+            search_energy=search_energy,
+            semantic_diversity=semantic_diversity,
+            swarm_size=swarm_size,
         )
 
     def log_rejected_hypothesis(
@@ -435,6 +509,10 @@ class DiscoveryLogger:
         goal: Optional[str] = None,
         domain: Optional[str] = None,
         confidence: Optional[float] = None,
+        info_gain: Optional[float] = None,
+        search_energy: Optional[float] = None,
+        semantic_diversity: Optional[float] = None,
+        swarm_size: Optional[int] = None,
     ) -> DiscoveryEvent:
         """Log a hypothesis that was rejected after critique or contradiction."""
         combined_tags = (tags or []) + ["hypothesis", "rejected"]
@@ -450,6 +528,10 @@ class DiscoveryLogger:
             domain=domain,
             severity="notice",
             confidence=confidence,
+            info_gain=info_gain,
+            search_energy=search_energy,
+            semantic_diversity=semantic_diversity,
+            swarm_size=swarm_size,
         )
 
     # ------------------------------------------------------------------
@@ -472,6 +554,10 @@ class DiscoveryLogger:
         domain: Optional[str] = None,
         severity: str = "major",
         confidence: Optional[float] = None,
+        info_gain: Optional[float] = None,
+        search_energy: Optional[float] = None,
+        semantic_diversity: Optional[float] = None,
+        swarm_size: Optional[int] = None,
     ) -> DiscoveryEvent:
         """
         Log a high RYE event, likely associated with a significant repair or insight.
@@ -493,6 +579,10 @@ class DiscoveryLogger:
             domain=domain,
             severity=severity,
             confidence=confidence,
+            info_gain=info_gain,
+            search_energy=search_energy,
+            semantic_diversity=semantic_diversity,
+            swarm_size=swarm_size,
         )
 
     # ------------------------------------------------------------------
@@ -511,6 +601,8 @@ class DiscoveryLogger:
         domain: Optional[str] = None,
         severity: str = "info",
         confidence: Optional[float] = None,
+        info_gain: Optional[float] = None,
+        search_energy: Optional[float] = None,
     ) -> DiscoveryEvent:
         """Log an event where a contradiction or inconsistency was resolved."""
         combined_tags = (tags or []) + ["contradiction_resolved"]
@@ -526,11 +618,12 @@ class DiscoveryLogger:
             domain=domain,
             severity=severity,
             confidence=confidence,
+            info_gain=info_gain,
+            search_energy=search_energy,
         )
 
     # ------------------------------------------------------------------
     # Mechanisms, treatments, biomarkers, and structures
-    # These align with MemoryStore.add_discovery classification.
     # ------------------------------------------------------------------
 
     def log_mechanism(
@@ -691,6 +784,7 @@ class DiscoveryLogger:
         goal: Optional[str] = None,
         domain: Optional[str] = None,
         severity: str = "info",
+        swarm_size: Optional[int] = None,
     ) -> DiscoveryEvent:
         """Log a run milestone such as best RYE so far or phase shift detection."""
         if run_id is not None:
@@ -707,6 +801,7 @@ class DiscoveryLogger:
             goal=goal,
             domain=domain,
             severity=severity,
+            swarm_size=swarm_size,
         )
 
     def log_swarm_event(
@@ -719,6 +814,8 @@ class DiscoveryLogger:
         goal: Optional[str] = None,
         domain: Optional[str] = None,
         severity: str = "info",
+        swarm_size: Optional[int] = None,
+        swarm_config: Optional[Dict[str, Any]] = None,
     ) -> DiscoveryEvent:
         """Log a swarm related event, such as rebalancing or consensus switch."""
         combined_tags = (tags or []) + ["swarm_event"]
@@ -733,6 +830,8 @@ class DiscoveryLogger:
             goal=goal,
             domain=domain,
             severity=severity,
+            swarm_size=swarm_size,
+            swarm_config=swarm_config,
         )
 
     def log_tool_event(
@@ -748,6 +847,8 @@ class DiscoveryLogger:
         extra: Optional[Dict[str, Any]] = None,
         goal: Optional[str] = None,
         domain: Optional[str] = None,
+        info_gain: Optional[float] = None,
+        search_energy: Optional[float] = None,
     ) -> DiscoveryEvent:
         """
         Log a tool event that is particularly important for discovery,
@@ -777,6 +878,8 @@ class DiscoveryLogger:
             goal=goal,
             domain=domain,
             severity=severity,
+            info_gain=info_gain,
+            search_energy=search_energy,
         )
 
     # ------------------------------------------------------------------
@@ -856,7 +959,6 @@ def get_global_logger(run_id: Optional[str] = None) -> DiscoveryLogger:
     if _GLOBAL_LOGGER is None:
         _GLOBAL_LOGGER = DiscoveryLogger.default(run_id=run_id)
     else:
-        # If a run_id is provided later, update it
         if run_id is not None:
             _GLOBAL_LOGGER.run_id = run_id
     return _GLOBAL_LOGGER
