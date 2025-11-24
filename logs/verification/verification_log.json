@@ -1,0 +1,79 @@
+[
+  {
+    "kind": "verification_log_meta",
+    "id": "bootstrap_meta_verification_001",
+    "run_id": "default",
+    "timestamp_utc": "2025-01-01T00:00:00Z",
+    "schema_version": "2.0",
+    "domain": "meta",
+    "title": "Verification log initialized",
+    "summary": "This file records all deep verification events for hypotheses discovered by the Autonomous Research Agent. Entries appended here include validated hypotheses, rejected hypotheses, and inconclusive verification attempts, with full scoring and reasoning.",
+    
+    "engine_info": {
+      "tgrm_version": "3.0",
+      "verification_engine": "max_mode",
+      "supports_multi_agent": true,
+      "supports_swarm_voting": true,
+      "supports_cluster_mode": true,
+      "supports_cross_domain_verification": true
+    },
+
+    "fields_help": {
+      "kind": "Event type. One of: validated | rejected | verification_inconclusive | meta",
+      
+      "hypothesis_id": "Unique ID of the hypothesis being evaluated",
+      "title": "Human-readable short name of the hypothesis",
+      "description": "Full summary of the verification result, reasoning, and any contradictions found",
+
+      "verification_score": "Final combined verification score after merging all sub-checks (0–1)",
+      "score_components": {
+        "literature_check": "Score + reasons produced from literature evidence retrieval and matching",
+        "critique_check": "Score + reasons from cross-agent or swarm critique analysis",
+        "data_check": "Score + reasons from dataset checks, computations, or simulations",
+        "consistency_check": "Internal check for contradictions against memory, vector store, or domain constraints",
+        "novelty_check": "Optional novelty measurement ensuring the hypothesis is not trivial or redundant"
+      },
+
+      "weighted_score_breakdown": {
+        "method": "How each score component is weighted",
+        "weights": {
+          "literature": "Weight for literature evidence",
+          "critique": "Weight for agent/swam critique",
+          "data": "Weight for computational or dataset checks",
+          "consistency": "Weight for internal contradiction checking",
+          "novelty": "Weight for cross-domain novelty rating"
+        }
+      },
+
+      "run_id": "Logical experiment run identifier (e.g., run_001, longevity_90day_01)",
+      "domain": "Domain associated with this hypothesis: longevity, math, biology, ai_safety, reparodynamics, general, etc.",
+
+      "rye_effect": "RYE impact of this verification. Positive indicates improved repair efficiency, negative indicates wasted energy",
+      "delta_rye": "Alias for rye_effect",
+      "delta_R": "Change in the repair/stability score for this event",
+      "energy_cost": "Computed energy cost of the verification process inside TGRM's Repair–Verify phase",
+
+      "agent_role": "Role of the originating agent (researcher, critic, explorer, planner, integrator, swarm_n)",
+      "agent_confidence": "Internal confidence measure of the agent that produced the hypothesis",
+      "cycle_index": "Cycle number during which this hypothesis was logged",
+
+      "swarm_metadata": {
+        "swarm_size": "How many agents participated in the critique or verification vote",
+        "agreement": "Fraction of agent consensus (0–1)",
+        "voting_method": "Consensus model: majority, weighted_vote, critical_role_preference"
+      },
+
+      "source_links": "Optional list of source URLs or citation IDs used in verification",
+      "evidence_hash": "Optional SHA-256 hash tying this verification to exact evidence (audit trail)",
+      
+      "tags": "Categorization labels such as ['verification','longevity','mechanism','high_confidence']",
+      "notes": "Extra human- or machine-readable details, debug info, or next-steps for downstream agents",
+
+      "audit": {
+        "created_by": "Name of module writing the event",
+        "created_at_utc": "Timestamp of the log entry",
+        "integrity_version": "Version of integrity and anti-fabrication checks applied"
+      }
+    }
+  }
+]
