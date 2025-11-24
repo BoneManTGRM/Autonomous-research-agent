@@ -1,9 +1,14 @@
 import os
 import json
 import time
-import requests
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
+
+# Optional HTTP client
+try:
+    import requests  # type: ignore
+except Exception:
+    requests = None  # type: ignore
 
 try:
     # Optional Tavily client (preferred when installed)
@@ -19,11 +24,12 @@ class BrowserTool:
     Features:
         - Tavily based web search with answer mode and metadata
         - Support for topic, time_range, search depth, auto parameters, images
-        - Stubbed offline mode when no API key is available
+        - Stubbed offline mode when no API key is available or stub mode is forced
         - Simple URL fetch for quick page inspection
         - Normalized result shape for the agent
         - Basic logging to logs/web_search_log.json
         - In memory cache to avoid paying twice for identical queries
+        - Environment-aware configuration for cache TTL and stub mode
 
     Backwards compatibility:
         - Existing calls using search(query, max_results=5) still work
@@ -47,6 +53,8 @@ class BrowserTool:
         default_max_results: int = 5,
         timeout: float = 12.0,
         verify_ssl: bool = True,
+        cache_ttl_seconds: Optional[float] = None,
+        force_stub: Optional[bool] = None,
     ) -> None:
         """
         Args:
@@ -60,12 +68,39 @@ class BrowserTool:
                 HTTP timeout in seconds for both search and fetch.
             verify_ssl:
                 Whether to verify SSL certificates.
+            cache_ttl_seconds:
+                Override cache TTL (seconds). Falls back to env or default.
+            force_stub:
+                If True, always run in stub mode even if a key is present.
         """
         self.api_key = api_key or os.getenv("TAVILY_API_KEY")
         self.endpoint = endpoint or self.TAVILY_ENDPOINT
         self.default_max_results = int(default_max_results)
         self.timeout = float(timeout)
         self.verify_ssl = bool(verify_ssl)
+
+        # Cache TTL: instance override -> env -> class default
+        env_ttl = os.getenv("BROWSER_CACHE_TTL_SECONDS")
+        if cache_ttl_seconds is not None:
+            self.cache_ttl_seconds = float(cache_ttl_seconds)
+        elif env_ttl is not None:
+            try:
+                self.cache_ttl_seconds = float(env_ttl)
+            except Exception:
+                self.cache_ttl_seconds = self.CACHE_TTL_SECONDS
+        else:
+            self.cache_ttl_seconds = self.CACHE_TTL_SECONDS
+
+        # Stub / offline mode:
+        # - Explicit argument wins
+        # - Otherwise check env flags
+        if force_stub is not None:
+            self.force_stub = bool(force_stub)
+        else:
+            self.force_stub = bool(
+                os.getenv("TAVILY_STUB_MODE")
+                or os.getenv("DISABLE_WEB_SEARCH")
+            )
 
         # Ensure log directory exists
         try:
@@ -77,8 +112,18 @@ class BrowserTool:
     # Key and status helpers
     # ------------------------------------------------------------------
     def has_real_search(self) -> bool:
-        """Return True if a Tavily key is available."""
-        return bool(self.api_key)
+        """Return True if a Tavily key is available and not forced into stub mode."""
+        return bool(self.api_key) and not self.force_stub
+
+    def is_stub_mode(self) -> bool:
+        """
+        Return True if the tool is currently in stub mode.
+
+        Stub mode is active if:
+            - force_stub is True, or
+            - no Tavily API key is configured.
+        """
+        return self.force_stub or not self.api_key
 
     def key_tail(self) -> Optional[str]:
         """Return last 4 characters of the key for display, or None."""
@@ -88,11 +133,22 @@ class BrowserTool:
 
     def status(self) -> Dict[str, Any]:
         """Return a small status summary used by the UI."""
+        mode = "real" if self.has_real_search() else "stub"
+        stub_reason: Optional[str] = None
+        if not self.api_key:
+            stub_reason = "no_api_key"
+        elif self.force_stub:
+            stub_reason = "forced_stub_mode"
+
         return {
-            "has_key": self.has_real_search(),
+            "has_key": bool(self.api_key),
             "key_tail": self.key_tail(),
             "endpoint": self.endpoint,
-            "mode": "real" if self.has_real_search() else "stub",
+            "mode": mode,
+            "stub_reason": stub_reason,
+            "cache_ttl_seconds": self.cache_ttl_seconds,
+            "log_path": str(self.LOG_PATH),
+            "requests_available": requests is not None,
         }
 
     # ------------------------------------------------------------------
@@ -101,6 +157,12 @@ class BrowserTool:
     def _log_event(self, event: Dict[str, Any]) -> None:
         """Append an event to the web search log without ever crashing."""
         try:
+            base = {
+                "timestamp": time.time(),
+                "mode": "real" if self.has_real_search() else "stub",
+            }
+            event_full = {**base, **event}
+
             if self.LOG_PATH.exists():
                 with self.LOG_PATH.open("r", encoding="utf_8") as f:
                     data = json.load(f)
@@ -108,7 +170,7 @@ class BrowserTool:
                     data = []
             else:
                 data = []
-            data.append(event)
+            data.append(event_full)
             with self.LOG_PATH.open("w", encoding="utf_8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
         except Exception:
@@ -121,7 +183,7 @@ class BrowserTool:
         ts = self._cache_ts.get(key)
         if ts is None:
             return None
-        if time.time() - ts > self.CACHE_TTL_SECONDS:
+        if time.time() - ts > self.cache_ttl_seconds:
             self._cache.pop(key, None)
             self._cache_ts.pop(key, None)
             return None
@@ -147,6 +209,9 @@ class BrowserTool:
         """
         if not self.api_key:
             return {"error": "No Tavily API key configured."}
+
+        if requests is None:
+            return {"error": "requests library is not available."}
 
         try:
             headers = {
@@ -294,7 +359,7 @@ class BrowserTool:
                     "score": float or None,
                 }
 
-        When no API key is present, returns a single stub entry.
+        When in stub mode, returns a single stub entry.
         """
         query = (query or "").strip()
         max_results = max(1, int(max_results or self.default_max_results))
@@ -302,14 +367,17 @@ class BrowserTool:
         if not query:
             return []
 
-        # Stub when no key
-        if not self.api_key:
+        # Stub when no key or forced stub
+        if self.is_stub_mode():
             stub = [
                 {
                     "source": "stub",
                     "title": f"Stubbed search result for: {query}",
                     "url": "https://example.com/stub",
-                    "snippet": "No Tavily key provided. Configure TAVILY_API_KEY to enable real web search.",
+                    "snippet": (
+                        "Stubbed search. Configure TAVILY_API_KEY and "
+                        "disable TAVILY_STUB_MODE/DISABLE_WEB_SEARCH to enable real web search."
+                    ),
                     "score": None,
                 }
             ]
@@ -365,6 +433,9 @@ class BrowserTool:
             return error_result
 
         results = self._normalize_results(data.get("results", data))
+        # Safety: enforce max_results cap in case the backend returns more.
+        if len(results) > max_results:
+            results = results[:max_results]
 
         self._log_event(
             {
@@ -407,7 +478,15 @@ class BrowserTool:
         if not query:
             return {"answer": None, "results": []}
 
-        if not self.api_key:
+        # Stub when no key or forced stub
+        if self.is_stub_mode():
+            self._log_event(
+                {
+                    "event": "stub_search_with_answer",
+                    "query": query,
+                    "max_results": max_results,
+                }
+            )
             return {
                 "answer": None,
                 "results": [
@@ -415,7 +494,10 @@ class BrowserTool:
                         "source": "stub",
                         "title": f"Stubbed search result for: {query}",
                         "url": "https://example.com/stub",
-                        "snippet": "No Tavily key provided. Configure TAVILY_API_KEY to enable real web search.",
+                        "snippet": (
+                            "Stubbed search. Configure TAVILY_API_KEY and "
+                            "disable TAVILY_STUB_MODE/DISABLE_WEB_SEARCH to enable real web search."
+                        ),
                         "score": None,
                     }
                 ],
@@ -459,6 +541,8 @@ class BrowserTool:
 
         answer = data.get("answer") if isinstance(data, dict) else None
         results = self._normalize_results(data.get("results", data))
+        if len(results) > max_results:
+            results = results[:max_results]
 
         self._log_event(
             {
@@ -490,10 +574,39 @@ class BrowserTool:
                 "content_type": str or None,
             }
         """
+        if requests is None:
+            err_msg = "requests library is not available."
+            self._log_event(
+                {
+                    "event": "fetch_error",
+                    "url": url,
+                    "error": err_msg,
+                }
+            )
+            return {
+                "url": url,
+                "status": "error",
+                "content": err_msg,
+                "content_type": None,
+            }
+
         try:
+            start = time.time()
             r = requests.get(url, timeout=self.timeout, verify=self.verify_ssl)
+            elapsed = time.time() - start
             content_type = r.headers.get("Content-Type", "")
             text = r.text or ""
+
+            self._log_event(
+                {
+                    "event": "fetch_url",
+                    "url": url,
+                    "status": r.status_code,
+                    "elapsed_sec": elapsed,
+                    "content_type": content_type,
+                }
+            )
+
             return {
                 "url": url,
                 "status": r.status_code,
@@ -501,6 +614,13 @@ class BrowserTool:
                 "content_type": content_type,
             }
         except Exception as e:
+            self._log_event(
+                {
+                    "event": "fetch_error",
+                    "url": url,
+                    "error": str(e),
+                }
+            )
             return {
                 "url": url,
                 "status": "error",
