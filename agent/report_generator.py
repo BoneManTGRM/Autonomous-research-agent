@@ -755,10 +755,17 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> s
         return "# Findings Report\n\nNo cycles found."
 
     timestamps: List[str] = []
+    all_citations: List[Dict[str, Any]] = []
+
     for c in cycles:
         ts = c.get("timestamp")
         if ts:
             timestamps.append(ts)
+
+        cits = c.get("citations") or []
+        for ct in cits:
+            if isinstance(ct, dict):
+                all_citations.append(ct)
 
     runtime = _extract_session_runtime(timestamps)
 
@@ -814,19 +821,19 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> s
         def _disc_key(d: Dict[str, Any]) -> Tuple[float, str]:
             score = d.get("score")
             s_val = float(score) if isinstance(score, (int, float)) else 0.0
-            ts = str(d.get("timestamp", ""))
-            return (-s_val, ts)
+            ts_local = str(d.get("timestamp", ""))
+            return (-s_val, ts_local)
 
         sorted_disc = sorted(structured, key=_disc_key)
         for i, d in enumerate(sorted_disc[:50], start=1):
             kind = d.get("kind", "")
             label = d.get("label", "")
             score = d.get("score")
-            ts = d.get("timestamp", "")
+            ts_local = d.get("timestamp", "")
             score_str = f" (score {score:.2f})" if isinstance(score, (int, float)) else ""
             lines.append(f"{i}. [{kind}] {label}{score_str}")
-            if ts:
-                lines.append(f"   - recorded at `{ts}`")
+            if ts_local:
+                lines.append(f"   - recorded at `{ts_local}`")
         if len(sorted_disc) > 50:
             lines.append(f"... and {len(sorted_disc) - 50} more structured discoveries.\n")
 
@@ -847,6 +854,29 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> s
             lines.append(f"{i}. {f}")
         if len(unique_findings) > 80:
             lines.append(f"... and {len(unique_findings) - 80} more hypotheses mentioning treatments or mechanisms.\n")
+
+    # Citations that back these findings
+    lines.append("\n## Key citations supporting findings\n")
+    if not all_citations:
+        lines.append("No citations recorded for these cycles.\n")
+    else:
+        seen = set()
+        unique_cites: List[Dict[str, Any]] = []
+        for ct in all_citations:
+            key = (ct.get("source"), ct.get("title"), ct.get("url"))
+            if key not in seen:
+                seen.add(key)
+                unique_cites.append(ct)
+
+        for i, ct in enumerate(unique_cites[:50], start=1):
+            src = ct.get("source", "web")
+            title = ct.get("title", "Untitled")
+            url = ct.get("url", "")
+            lines.append(f"{i}. **[{src}]** {title}")
+            if url:
+                lines.append(f"   - {url}")
+        if len(unique_cites) > 50:
+            lines.append(f"... and {len(unique_cites) - 50} more.\n")
 
     return "\n".join(lines)
 
