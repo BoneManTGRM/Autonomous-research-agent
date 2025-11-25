@@ -185,6 +185,45 @@ class TGRMLoop:
         return max(1, len(text) // 4)
 
     # ------------------------------------------------------------------
+    # Citation helpers
+    # ------------------------------------------------------------------
+    def _tag_citations(
+        self,
+        citations: List[Dict[str, Any]],
+        *,
+        goal: str,
+        query: str,
+        channel: str,
+        phase: str,
+    ) -> List[Dict[str, Any]]:
+        """Ensure every citation has minimal provenance fields.
+
+        Fields added:
+            - goal: research goal for this cycle
+            - query: text used to fetch this citation
+            - channel: "web", "pubmed", "semantic", "pdf", etc
+            - phase: "initial", "targeted", "strengthen", "gap_repair"
+            - created_at: ISO timestamp
+        """
+        stamped: List[Dict[str, Any]] = []
+        created_at = datetime.utcnow().isoformat() + "Z"
+
+        for c in citations or []:
+            if not isinstance(c, dict):
+                c = {"title": str(c)}
+            c = dict(c)  # shallow copy
+            c.setdefault("goal", goal)
+            c.setdefault("query", query)
+            c.setdefault("channel", channel)
+            c.setdefault("phase", phase)
+            c.setdefault("created_at", created_at)
+            if not c.get("source"):
+                c["source"] = channel
+            stamped.append(c)
+
+        return stamped
+
+    # ------------------------------------------------------------------
     # History helpers for RYE gradients and equilibrium status
     # ------------------------------------------------------------------
     def _get_recent_history_for_goal(
@@ -604,7 +643,7 @@ class TGRMLoop:
                 }
             )
 
-            # Store minimal hypothesis text in MemoryStore for long-run learning
+            # Store minimal hypothesis text in MemoryStore for long run learning
             try:
                 self.memory_store.add_hypothesis(goal, text, score=conf)
             except Exception:
@@ -945,7 +984,7 @@ class TGRMLoop:
         """Apply repairs to address detected issues."""
         repair_actions: List[Dict[str, str]] = []
         notes_added: List[str] = []
-        citations: List[Dict[str, str]] = []
+        citations: List[Dict[str, Any]] = []
 
         # Stats for RYE energy and improvement
         stats: Dict[str, Any] = {
@@ -982,7 +1021,7 @@ class TGRMLoop:
         descriptions_to_handle = descriptions[:max_issues]
 
         # Helper to register citations into MemoryStore
-        def _log_citations(cites: List[Dict[str, str]]) -> None:
+        def _log_citations(cites: List[Dict[str, Any]]) -> None:
             for c in cites:
                 self.memory_store.add_citation(goal, c)
 
@@ -1243,10 +1282,10 @@ class TGRMLoop:
         domain: Optional[str],
         maintenance_mode: bool,
         tool_usage: Optional[ToolUsage] = None,
-    ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
+    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """Perform the initial multi source research when there are no notes."""
-        citations: List[Dict[str, str]] = []
-        stats = {
+        citations: List[Dict[str, Any]] = []
+        stats: Dict[str, int] = {
             "web_calls": 0,
             "pubmed_calls": 0,
             "semantic_calls": 0,
@@ -1279,7 +1318,14 @@ class TGRMLoop:
                 tool_usage.web_calls += 1
 
             web_summary = self.web_tool.summarize_results(web_results)
-            web_cites = self.web_tool.to_citations(web_results)
+            web_cites_raw = self.web_tool.to_citations(web_results)
+            web_cites = self._tag_citations(
+                web_cites_raw,
+                goal=goal,
+                query=goal,
+                channel="web",
+                phase="initial",
+            )
             citations.extend(web_cites)
 
             if tool_usage is not None:
@@ -1323,14 +1369,21 @@ class TGRMLoop:
         if source_controls.get("pubmed", False):
             pubmed_results = self.pubmed_tool.search(goal, max_results=5)
             stats["pubmed_calls"] += 1
-            citations.extend(pubmed_results)
+            pubmed_cites = self._tag_citations(
+                pubmed_results,
+                goal=goal,
+                query=goal,
+                channel="pubmed",
+                phase="initial",
+            )
+            citations.extend(pubmed_cites)
 
             if tool_usage is not None:
                 titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
                 tool_usage.approx_tokens += self._estimate_tokens(titles)
 
             note_lines.append("PubMed sources:")
-            for r in pubmed_results:
+            for r in pubmed_cites:
                 note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
             note_lines.append("")
 
@@ -1338,14 +1391,21 @@ class TGRMLoop:
         if source_controls.get("semantic", False):
             sem_results = self.semantic_tool.search(goal, max_results=5)
             stats["semantic_calls"] += 1
-            citations.extend(sem_results)
+            sem_cites = self._tag_citations(
+                sem_results,
+                goal=goal,
+                query=goal,
+                channel="semantic",
+                phase="initial",
+            )
+            citations.extend(sem_cites)
 
             if tool_usage is not None:
                 titles = " ".join(r.get("title", "") or "" for r in sem_results)
                 tool_usage.approx_tokens += self._estimate_tokens(titles)
 
             note_lines.append("Semantic Scholar sources:")
-            for r in sem_results:
+            for r in sem_cites:
                 note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
             note_lines.append("")
 
@@ -1410,10 +1470,10 @@ class TGRMLoop:
         maintenance_mode: bool = False,
         domain: Optional[str] = None,
         tool_usage: Optional[ToolUsage] = None,
-    ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
+    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """Perform focused multi source research on open questions or TODOs."""
-        citations: List[Dict[str, str]] = []
-        stats = {
+        citations: List[Dict[str, Any]] = []
+        stats: Dict[str, int] = {
             "web_calls": 0,
             "pubmed_calls": 0,
             "semantic_calls": 0,
@@ -1466,7 +1526,14 @@ class TGRMLoop:
                     tool_usage.web_calls += 1
 
                 web_summary = self.web_tool.summarize_results(web_results)
-                web_cites = self.web_tool.to_citations(web_results)
+                web_cites_raw = self.web_tool.to_citations(web_results)
+                web_cites = self._tag_citations(
+                    web_cites_raw,
+                    goal=goal,
+                    query=q,
+                    channel="web",
+                    phase="targeted",
+                )
                 citations.extend(web_cites)
 
                 if tool_usage is not None:
@@ -1482,28 +1549,42 @@ class TGRMLoop:
             if source_controls.get("pubmed", False):
                 pubmed_results = self.pubmed_tool.search(q, max_results=5)
                 stats["pubmed_calls"] += 1
-                citations.extend(pubmed_results)
+                pubmed_cites = self._tag_citations(
+                    pubmed_results,
+                    goal=goal,
+                    query=q,
+                    channel="pubmed",
+                    phase="targeted",
+                )
+                citations.extend(pubmed_cites)
 
                 if tool_usage is not None:
                     titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
                     tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                 note_lines.append("PubMed sources:")
-                for r in pubmed_results:
+                for r in pubmed_cites:
                     note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
                 note_lines.append("")
 
             if source_controls.get("semantic", False):
                 sem_results = self.semantic_tool.search(q, max_results=5)
                 stats["semantic_calls"] += 1
-                citations.extend(sem_results)
+                sem_cites = self._tag_citations(
+                    sem_results,
+                    goal=goal,
+                    query=q,
+                    channel="semantic",
+                    phase="targeted",
+                )
+                citations.extend(sem_cites)
 
                 if tool_usage is not None:
                     titles = " ".join(r.get("title", "") or "" for r in sem_results)
                     tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                 note_lines.append("Semantic Scholar sources:")
-                for r in sem_results:
+                for r in sem_cites:
                     note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
                 note_lines.append("")
 
@@ -1517,10 +1598,10 @@ class TGRMLoop:
         source_controls: Dict[str, bool],
         domain: Optional[str],
         tool_usage: Optional[ToolUsage] = None,
-    ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
+    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """Specialized repair step for 'under_cited' issues."""
-        citations: List[Dict[str, str]] = []
-        stats = {
+        citations: List[Dict[str, Any]] = []
+        stats: Dict[str, int] = {
             "web_calls": 0,
             "pubmed_calls": 0,
             "semantic_calls": 0,
@@ -1554,7 +1635,14 @@ class TGRMLoop:
                 tool_usage.web_calls += 1
 
             web_summary = self.web_tool.summarize_results(web_results)
-            web_cites = self.web_tool.to_citations(web_results)
+            web_cites_raw = self.web_tool.to_citations(web_results)
+            web_cites = self._tag_citations(
+                web_cites_raw,
+                goal=goal,
+                query=query,
+                channel="web",
+                phase="strengthen",
+            )
             citations.extend(web_cites)
 
             if tool_usage is not None:
@@ -1570,28 +1658,42 @@ class TGRMLoop:
         if source_controls.get("pubmed", False):
             pubmed_results = self.pubmed_tool.search(query, max_results=10)
             stats["pubmed_calls"] += 1
-            citations.extend(pubmed_results)
+            pubmed_cites = self._tag_citations(
+                pubmed_results,
+                goal=goal,
+                query=query,
+                channel="pubmed",
+                phase="strengthen",
+            )
+            citations.extend(pubmed_cites)
 
             if tool_usage is not None:
                 titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
                 tool_usage.approx_tokens += self._estimate_tokens(titles)
 
             note_lines.append("PubMed sources (stronger evidence):")
-            for r in pubmed_results:
+            for r in pubmed_cites:
                 note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
             note_lines.append("")
 
         if source_controls.get("semantic", False):
             sem_results = self.semantic_tool.search(query, max_results=10)
             stats["semantic_calls"] += 1
-            citations.extend(sem_results)
+            sem_cites = self._tag_citations(
+                sem_results,
+                goal=goal,
+                query=query,
+                channel="semantic",
+                phase="strengthen",
+            )
+            citations.extend(sem_cites)
 
             if tool_usage is not None:
                 titles = " ".join(r.get("title", "") or "" for r in sem_results)
                 tool_usage.approx_tokens += self._estimate_tokens(titles)
 
             note_lines.append("Semantic Scholar sources (stronger evidence):")
-            for r in sem_results:
+            for r in sem_cites:
                 note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
             note_lines.append("")
 
@@ -1607,11 +1709,11 @@ class TGRMLoop:
         source_controls: Dict[str, bool],
         domain: Optional[str],
         tool_usage: Optional[ToolUsage] = None,
-    ) -> Tuple[str, List[Dict[str, str]], Dict[str, int]]:
+    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """Generic helper to fill domain specific gaps."""
         dom = (domain or "general").lower()
-        citations: List[Dict[str, str]] = []
-        stats = {
+        citations: List[Dict[str, Any]] = []
+        stats: Dict[str, int] = {
             "web_calls": 0,
             "pubmed_calls": 0,
             "semantic_calls": 0,
@@ -1672,7 +1774,14 @@ class TGRMLoop:
                 tool_usage.web_calls += 1
 
             web_summary = self.web_tool.summarize_results(web_results)
-            web_cites = self.web_tool.to_citations(web_results)
+            web_cites_raw = self.web_tool.to_citations(web_results)
+            web_cites = self._tag_citations(
+                web_cites_raw,
+                goal=goal,
+                query=query,
+                channel="web",
+                phase="gap_repair",
+            )
             citations.extend(web_cites)
 
             if tool_usage is not None:
@@ -1688,28 +1797,42 @@ class TGRMLoop:
         if dom == "longevity" and source_controls.get("pubmed", False):
             pubmed_results = self.pubmed_tool.search(query, max_results=10)
             stats["pubmed_calls"] += 1
-            citations.extend(pubmed_results)
+            pubmed_cites = self._tag_citations(
+                pubmed_results,
+                goal=goal,
+                query=query,
+                channel="pubmed",
+                phase="gap_repair",
+            )
+            citations.extend(pubmed_cites)
 
             if tool_usage is not None:
                 titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
                 tool_usage.approx_tokens += self._estimate_tokens(titles)
 
             note_lines.append("PubMed sources (gap repair):")
-            for r in pubmed_results:
+            for r in pubmed_cites:
                 note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
             note_lines.append("")
 
         if source_controls.get("semantic", False):
             sem_results = self.semantic_tool.search(query, max_results=10)
             stats["semantic_calls"] += 1
-            citations.extend(sem_results)
+            sem_cites = self._tag_citations(
+                sem_results,
+                goal=goal,
+                query=query,
+                channel="semantic",
+                phase="gap_repair",
+            )
+            citations.extend(sem_cites)
 
             if tool_usage is not None:
                 titles = " ".join(r.get("title", "") or "" for r in sem_results)
                 tool_usage.approx_tokens += self._estimate_tokens(titles)
 
             note_lines.append("Semantic Scholar sources (gap repair):")
-            for r in sem_results:
+            for r in sem_cites:
                 note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
             note_lines.append("")
 
