@@ -4,6 +4,13 @@ Outputs:
 1. Full Reparodynamics Report (rich RYE and swarm analytics, including Option C meta segments)
 2. Targeted Findings Report (cures, treatments, mechanisms, interventions)
 3. Optional PDF exports for both reports (if reportlab is available)
+
+10x learning mode:
+    This module now consumes the full Option C RYE diagnostics bundle
+    (run tier, safety envelope, early failure warning, breakthrough
+    probability, equilibrium and volatility) so the agent and human
+    operator can see how quickly the system is learning and how safe
+    the autonomy regime is.
 """
 
 from __future__ import annotations
@@ -19,6 +26,7 @@ from .rye_metrics import (
     robust_rolling_rye,
     build_run_diagnostics,
     rye_percentiles,
+    build_option_c_signature,
 )
 
 import textwrap
@@ -75,6 +83,35 @@ def _extract_session_runtime(timestamps: List[str]) -> Optional[str]:
         hours = diff.total_seconds() / 3600.0
         minutes = diff.total_seconds() / 60.0
         return f"{hours:.2f} hours ({minutes:.1f} minutes)"
+    except Exception:
+        return None
+
+
+def _compute_session_hours(timestamps: List[str]) -> Optional[float]:
+    """Return numeric session length in hours if timestamps exist."""
+    if not timestamps:
+        return None
+
+    from datetime import datetime
+
+    fmts = ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ")
+
+    def _parse(ts: str) -> Optional[datetime]:
+        for fmt in fmts:
+            try:
+                return datetime.strptime(ts, fmt)
+            except Exception:
+                continue
+        return None
+
+    try:
+        parsed = [p for t in sorted(timestamps) if (p := _parse(t)) is not None]
+        if not parsed:
+            return None
+        first = parsed[0]
+        last = parsed[-1]
+        diff = last - first
+        return diff.total_seconds() / 3600.0
     except Exception:
         return None
 
@@ -402,12 +439,15 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     domain_stats, role_stats = _domain_and_role_stats(cycles)
     primary_domain = _primary_domain_from_stats(domain_stats)
 
-    # Diagnostics bundle (uses robust rolling, trend, slope, stability, momentum, percentiles)
-    diagnostics = build_run_diagnostics(
-        history=cycles,
+    # Diagnostics bundle (10x Option C signature)
+    hours_run = _compute_session_hours(timestamps)
+    option_c_sig = build_option_c_signature(
+        cycles,
         domain=primary_domain,
+        hours_run_so_far=hours_run,
         window=10,
     )
+    diagnostics = option_c_sig.get("diagnostics", {}) or {}
 
     roll = diagnostics.get("rolling_rye")
     robust_roll = diagnostics.get("robust_rolling_rye")
@@ -587,6 +627,58 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     lines.append(f"- Phase classification: **{phase_label}**")
     lines.append("")
 
+    # Option C / 10x learning snapshot
+    lines.append("## Option C self diagnosis (10x learning signals)\n")
+    run_tier = option_c_sig.get("run_tier") or {}
+    env = option_c_sig.get("autonomy_safety_envelope") or {}
+    early_fail = option_c_sig.get("early_failure_warning") or {}
+    bp = option_c_sig.get("breakthrough_probability") or {}
+    bp90 = option_c_sig.get("breakthrough_likelihood_90d") or {}
+    equilibrium = option_c_sig.get("equilibrium") or {}
+    volatility = option_c_sig.get("volatility") or {}
+    harmonic = option_c_sig.get("tgrm_harmonic_index")
+
+    tier_label = run_tier.get("tier")
+    tier_reason = run_tier.get("reason")
+    if tier_label:
+        lines.append(f"- Run tier: **{tier_label}** ({tier_reason})")
+
+    env_state = env.get("state")
+    env_details = env.get("details") or {}
+    if env_state:
+        reason = env_details.get("reason", "")
+        lines.append(f"- Autonomy safety envelope: **{env_state}** ({reason})")
+
+    early_score = early_fail.get("score")
+    if isinstance(early_score, (int, float)):
+        lines.append(f"- Early failure warning score: **{early_score:.3f}** (higher means more risk)")
+
+    bp_val = bp.get("probability")
+    if isinstance(bp_val, (int, float)):
+        lines.append(f"- Near term breakthrough probability (heuristic): **{bp_val:.3f}**")
+
+    bp90_val = bp90.get("probability")
+    if isinstance(bp90_val, (int, float)):
+        lines.append(f"- 90 day breakthrough likelihood (heuristic): **{bp90_val:.3f}**")
+
+    eq_flag = equilibrium.get("in_equilibrium")
+    eq_reason = equilibrium.get("reason")
+    if eq_flag is not None:
+        state_txt = "yes" if eq_flag else "no"
+        lines.append(f"- RYE equilibrium detected: **{state_txt}** (reason: {eq_reason})")
+
+    vol_score = volatility.get("volatility_score")
+    if isinstance(vol_score, (int, float)):
+        lines.append(f"- Local volatility score: **{vol_score:.3f}** (1.0 very stable, 0.0 very noisy)")
+
+    if isinstance(harmonic, (int, float)):
+        lines.append(f"- TGRM harmonic index: **{harmonic:.3f}** (proxy for coherent self repair)")
+
+    if hours_run is not None:
+        lines.append(f"- Hours run so far (approx): **{hours_run:.2f} h**")
+
+    lines.append("")
+
     # Domain level view
     lines.append("## Domain level RYE profile\n")
     if not domain_stats:
@@ -612,11 +704,15 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     # Option C meta segments
     lines.append("## Meta controller segments (Option C)\n")
     if not meta_segments:
-        lines.append("No meta segments detected in run_metadata. This may mean classic mode was used, or the worker did not record segment indices.\n")
+        lines.append(
+            "No meta segments detected in run_metadata. This may mean classic mode was used, "
+            "or the worker did not record segment indices.\n"
+        )
     else:
         lines.append(
             "These segment level statistics are inferred from per cycle run_metadata. "
-            "Each segment usually corresponds to a meta phase such as exploration, stabilization, or refinement."
+            "Each segment usually corresponds to a meta phase such as exploration, "
+            "stabilization, or refinement."
         )
         lines.append("")
         lines.append("| Segment | Phase | Mode | Runtime profile | Cycles | Avg RYE | Best RYE |")
@@ -723,9 +819,10 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     lines.append(
         "This session reflects a sequence of TGRM cycles (Test → Detect → Repair → Verify). "
         "RYE quantifies how much verified improvement (ΔR) occurred per unit energy (E). "
-        "The stability index, momentum, and trend signals together indicate whether the system "
-        "is moving toward a stable high repair yield equilibrium or oscillating in a more "
-        "exploratory regime."
+        "The stability index, momentum, trend, and Option C safety envelope together indicate "
+        "whether the system is moving toward a stable high repair yield equilibrium or oscillating "
+        "in a more exploratory regime. Run tier and breakthrough likelihood give a fast, "
+        "human friendly summary of where this experiment sits in the Reparodynamics landscape."
     )
 
     return "\n".join(lines)
