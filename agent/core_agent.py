@@ -331,6 +331,14 @@ class CoreAgent:
         # Last high-level learning plan produced by optimize_learning_pipeline().
         self.learning_plan: Dict[str, Any] = {}
 
+        # ------------------------------------------------------------------
+        # Citation tracking configuration
+        # ------------------------------------------------------------------
+        # If enabled, CoreAgent will propagate any citations returned by TGRMLoop
+        # into summaries, state, and run metadata so the UI and report
+        # generator can show clear source provenance.
+        self.citations_enabled: bool = bool(self.config.get("citations_enabled", True))
+
         self._apply_intelligence_profile()
 
     # ------------------------------------------------------------------
@@ -926,6 +934,12 @@ class CoreAgent:
         if isinstance(rye_val, (int, float)):
             state["last_rye"] = float(rye_val)
 
+        # Mirror last citations into state if present
+        if self.citations_enabled and isinstance(summary, dict):
+            citations = summary.get("citations")
+            if isinstance(citations, list):
+                state["last_citations"] = citations
+
         # Mark as still in progress; the worker or UI can toggle this off if needed
         state["in_progress"] = True
 
@@ -1044,6 +1058,12 @@ class CoreAgent:
             tool_stats = result.get("tool_stats")
             if tool_stats is not None and "tool_stats" not in summary:
                 summary["tool_stats"] = tool_stats
+
+            # If citations are returned by TGRMLoop, mirror them into the summary
+            if self.citations_enabled:
+                citations = result.get("citations")
+                if isinstance(citations, list):
+                    summary.setdefault("citations", citations)
 
             # Discovery aware post processing (new hook, does not change core behavior)
             self._handle_post_cycle_discovery(
@@ -1364,6 +1384,16 @@ class CoreAgent:
                     run_metadata["run_health_score"] = health_score
             except Exception:
                 pass
+
+        # Total citations across this continuous run
+        if self.citations_enabled:
+            total_citations = 0
+            for s in summaries:
+                if isinstance(s, dict):
+                    c = s.get("citations")
+                    if isinstance(c, list):
+                        total_citations += len(c)
+            run_metadata["total_citations"] = total_citations
 
         # Attach the last learned_from_memory snapshot for observability
         if self.learned_from_memory:
@@ -1696,6 +1726,16 @@ class CoreAgent:
                     run_metadata["run_health_score"] = health_score
             except Exception:
                 pass
+
+        # Total citations across the swarm run
+        if self.citations_enabled:
+            total_citations = 0
+            for s in all_summaries:
+                if isinstance(s, dict):
+                    c = s.get("citations")
+                    if isinstance(c, list):
+                        total_citations += len(c)
+            run_metadata["total_citations"] = total_citations
 
         # Attach the last learned_from_memory snapshot for observability
         if self.learned_from_memory:
@@ -2178,7 +2218,7 @@ class CoreAgent:
                 if tier:
                     actions.append(f"Current run tier according to Option C: {tier}.")
                 if env_state:
-                    actions.append(f"Autonomy–stability safety envelope is classified as: {env_state}.")
+                    actions.append(f"Autonomy-stability safety envelope is classified as: {env_state}.")
             except Exception:
                 pass
 
