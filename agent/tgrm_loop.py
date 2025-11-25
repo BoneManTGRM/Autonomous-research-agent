@@ -66,6 +66,14 @@ To support that:
     - Extra fields expose RYE gradients, equilibrium status, and a
       breakthrough_score that higher level components can track over
       weeks or months.
+
+Ultra mode
+----------
+When config["ultra_speed"] is true the loop:
+    - handles more issues per cycle before maintenance mode
+    - exposes a compact `short_view` block for fast UI and logging
+    - adds `meta_signals` for the meta controller to read RYE and
+      contradiction rates without parsing full logs.
 """
 
 from __future__ import annotations
@@ -109,7 +117,7 @@ class TGRMLoop:
     Tools:
         - tools can be:
             * a Toolbelt-like instance (with new_usage_tracker, browser, etc.)
-            * a plain dict/registry of tool callables
+            * a plain dict or registry of tool callables
             * None, in which case we try to instantiate Toolbelt if available
               or fall back to an empty registry.
 
@@ -126,7 +134,7 @@ class TGRMLoop:
         self.memory_store = memory_store
         self.config = config or {}
 
-        # Shared tools layer (Toolbelt or registry/dict) mirroring CoreAgent.
+        # Shared tools layer (Toolbelt or registry or dict) mirroring CoreAgent.
         if tools is not None:
             self.tools = tools
         else:
@@ -138,10 +146,10 @@ class TGRMLoop:
             else:
                 self.tools = {}
 
-        # Usage tracker factory, so we can always track energy even if tools
+        # Usage tracker factory so we can always track energy even if tools
         # is just a dict or a minimal Toolbelt without tracking.
         if hasattr(self.tools, "new_usage_tracker"):
-            # Toolbelt-style API
+            # Toolbelt style API
             self._usage_factory = self.tools.new_usage_tracker  # type: ignore[assignment]
         else:
             # Local fallback
@@ -173,6 +181,10 @@ class TGRMLoop:
 
         # Sliding window size for short term RYE gradient estimates
         self.rye_window_size: int = int(self.config.get("rye_window_size", 20))
+
+        # Ultra speed mode and strict pipeline flag (used by meta controller and UI)
+        self.ultra_speed: bool = bool(self.config.get("ultra_speed", False))
+        self.strict_pipeline: bool = bool(self.config.get("strict_pipeline", True))
 
     # ------------------------------------------------------------------
     # Small helper for token estimation (for energy accounting)
@@ -514,7 +526,8 @@ class TGRMLoop:
                 {
                   "summary": human facing summary,
                   "log":     full cycle log,
-                  "tool_stats": per cycle tool stats
+                  "tool_stats": per cycle tool stats,
+                  "citations": list of citation dicts
                 }
         """
         src_ctrl = self._normalise_source_controls(source_controls)
@@ -547,12 +560,23 @@ class TGRMLoop:
         ):
             maintenance_mode = True
 
+        # Strict pipeline phase log for Ultra mode and debugging
+        phases: Dict[str, Any] = {}
+
         # TEST phase
         prior_notes = self.memory_store.get_notes(goal)
         status_report = self._test(goal, prior_notes)
+        phases["test_before"] = {
+            "known_notes_count": status_report.get("known_notes_count", 0),
+            "approx_citation_markers": status_report.get("approx_citation_markers"),
+        }
 
         # DETECT phase
         issues, issue_descriptions = self._detect(status_report, domain=domain_tag)
+        phases["detect_before"] = {
+            "issue_codes": issues,
+            "issue_descriptions": issue_descriptions,
+        }
 
         # Discovery friendly issue structure before repair
         issue_code_counts_before: Dict[str, int] = {}
@@ -588,11 +612,23 @@ class TGRMLoop:
             domain=domain_tag,
             tool_usage=tool_usage,
         )
+        phases["repair"] = {
+            "handled_issue_codes": [a.get("issue") for a in repair_actions],
+            "notes_added_count": len(notes_added),
+            "citations_added_count": len(citations),
+        }
 
         # VERIFY phase
         new_notes = self.memory_store.get_notes(goal)
         new_status_report = self._test(goal, new_notes)
         issues_after, _ = self._detect(new_status_report, domain=domain_tag)
+
+        phases["test_after"] = {
+            "known_notes_count": new_status_report.get("known_notes_count", len(new_notes)),
+        }
+        phases["detect_after"] = {
+            "issue_codes": issues_after,
+        }
 
         issue_code_counts_after: Dict[str, int] = {}
         for code in issues_after:
@@ -603,7 +639,7 @@ class TGRMLoop:
         has_todos_after = "todo_item" in issues_after
         has_contradictions_after = "contradiction" in issues_after
 
-        # Hypothesis generation (now structured for discovery / learning)
+        # Hypothesis generation (now structured for discovery and learning)
         max_h = 3 if self.tgrm_level == 1 else 5
         raw_hypotheses = generate_hypotheses(goal, new_notes, citations, max_hypotheses=max_h)
 
@@ -709,6 +745,38 @@ class TGRMLoop:
             citations=citations,
         )
 
+        # Short structured view - tuned for Ultra mode and UI
+        short_view = {
+            "cycle": cycle_index,
+            "goal": goal,
+            "role": role,
+            "domain": domain_tag,
+            "ultra_speed": self.ultra_speed,
+            "maintenance_mode": maintenance_mode,
+            "issues_before": issues,
+            "issues_after": issues_after,
+            "repairs": [a.get("description", "") for a in repair_actions][:5],
+            "delta_R": delta_r,
+            "energy_E": energy_e,
+            "RYE": rye_value,
+            "equilibrium_label": equilibrium_info.get("equilibrium_label"),
+            "breakthrough_score": breakthrough_info.get("breakthrough_score"),
+        }
+
+        # Meta controller friendly signals
+        meta_signals = {
+            "rye": rye_value,
+            "delta_R": delta_r,
+            "energy_E": energy_e,
+            "equilibrium_label": equilibrium_info.get("equilibrium_label"),
+            "equilibrium_score": equilibrium_info.get("equilibrium_score"),
+            "oscillation_score": equilibrium_info.get("oscillation_score"),
+            "open_questions": issue_code_counts_after.get("question_mark", 0),
+            "todo_items": issue_code_counts_after.get("todo_item", 0),
+            "contradictions": issue_code_counts_after.get("contradiction", 0),
+            "sources_used": stats.get("sources_used", 0),
+        }
+
         # Machine facing log
         cycle_summary = {
             "cycle": cycle_index,
@@ -717,6 +785,7 @@ class TGRMLoop:
             "role": role,
             "domain": domain_tag,
             "tgrm_level": self.tgrm_level,
+            "ultra_speed": self.ultra_speed,
             # Issues before and after
             "issues_before": issue_descriptions,
             "issues_after": issues_after,
@@ -745,7 +814,7 @@ class TGRMLoop:
             "energy_E": energy_e,
             "Energy": energy_e,  # mirror CoreAgent expectations
             "RYE": rye_value,
-            # RYE gradient and equilibrium/breakthrough
+            # RYE gradient and equilibrium and breakthrough
             "equilibrium": equilibrium_info,
             "breakthrough": breakthrough_info,
             # Tool usage details for this cycle
@@ -763,6 +832,10 @@ class TGRMLoop:
             "maintenance_mode": maintenance_mode,
             # Optional biomarker snapshot for longevity style goals
             "biomarker_snapshot": biomarker_snapshot,
+            # Strict pipeline and short view
+            "phases": phases,
+            "short_view": short_view,
+            "meta_signals": meta_signals,
         }
 
         # Log cycle into memory
@@ -796,14 +869,18 @@ class TGRMLoop:
             "maintenance_mode": maintenance_mode,
             "tgrm_level": self.tgrm_level,
             "tool_usage": cycle_summary["tool_usage"],
+            "short_view": short_view,
+            "meta_signals": meta_signals,
+            "phases": phases,
         }
 
-        # Expose stats at the top level so CoreAgent / UI can see them without
-        # digging into the machine log.
+        # Expose stats and citations at the top level so CoreAgent and the UI
+        # can see them without digging into the machine log.
         return {
             "summary": human_summary,
             "log": cycle_summary,
             "tool_stats": stats,
+            "citations": citations,
         }
 
     # ------------------------------------------------------------------
@@ -1005,6 +1082,10 @@ class TGRMLoop:
             base_max_issues = 2
         else:
             base_max_issues = 5
+
+        # Ultra mode pushes a bit harder before maintenance
+        if self.ultra_speed and not maintenance_mode:
+            base_max_issues += 2
 
         # Role based adjustment
         role_lower = (role or "agent").lower()
