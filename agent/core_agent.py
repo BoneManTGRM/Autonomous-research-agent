@@ -86,6 +86,18 @@ Learning from memory history:
     This learning is optional, conservative, and backward compatible:
         - If rye_metrics is unavailable, the feature is a no-op.
         - If config["auto_learn_from_memory"] is False, it is disabled.
+
+Ultra speed profiles:
+    CoreAgent also supports speed modes for learning optimization:
+        - "standard": original behavior
+        - "accelerated": tighter cycles and more aggressive use of
+          learned runtime profiles
+        - "ultra": prepared for aggressive speculative cycles plus a
+          verification heavy pipeline in TGRMLoop and related modules
+
+    Speed modes are exposed via config["speed_mode"] and do not break
+    existing callers. When other modules are upgraded, they can read
+    this mode to coordinate ultra fast, high accuracy runs.
 """
 
 from __future__ import annotations
@@ -152,6 +164,12 @@ class CoreAgent:
         - code execution sandbox
         - data pipelines (CSV / Excel / SQLite)
         - registry based tools via TOOL_REGISTRY
+
+    Speed modes:
+        - standard: baseline behavior
+        - accelerated: advisory auto tuning is more active
+        - ultra: advisory auto tuning plus extra meta statistics
+                 intended for upgraded TGRM and swarm modules
     """
 
     def __init__(self, memory_store: MemoryStore, config: Optional[Dict[str, Any]] = None) -> None:
@@ -317,7 +335,7 @@ class CoreAgent:
         self.learned_from_memory: Dict[str, Any] = {}
 
         # ------------------------------------------------------------------
-        # Agent-level training / learning configuration (added)
+        # Agent-level training / learning configuration
         # ------------------------------------------------------------------
         # Learning is at the agent level (TGRM + RYE + memory), not model weights.
         self.learning_enabled: bool = bool(self.config.get("learning_enabled", True))
@@ -326,7 +344,7 @@ class CoreAgent:
         if self.min_training_history < 0:
             self.min_training_history = 0
 
-        # Last training burst summary (short diagnostic/optimization runs).
+        # Last training burst summary (short diagnostic or optimization runs).
         self.training_profile: Dict[str, Any] = {}
         # Last high-level learning plan produced by optimize_learning_pipeline().
         self.learning_plan: Dict[str, Any] = {}
@@ -338,6 +356,31 @@ class CoreAgent:
         # into summaries, state, and run metadata so the UI and report
         # generator can show clear source provenance.
         self.citations_enabled: bool = bool(self.config.get("citations_enabled", True))
+
+        # ------------------------------------------------------------------
+        # Speed and meta controller configuration
+        # ------------------------------------------------------------------
+        # Speed mode is advisory and backward compatible.
+        # Other modules can read this to tune how aggressive they are.
+        self.speed_mode: str = str(self.config.get("speed_mode", "standard")).lower()
+        if self.speed_mode not in {"standard", "accelerated", "ultra"}:
+            self.speed_mode = "standard"
+
+        # Meta state keeps lightweight, run level stats for future
+        # Ultra controllers. This does not change behavior by itself,
+        # but gives TGRM and UI a place to read speed related context.
+        self._meta_state: Dict[str, Any] = {
+            "speed_mode": self.speed_mode,
+            "last_update_ts": time.time(),
+            "single_run_stats": {
+                "recent_rye": [],
+                "recent_contradictions": [],
+            },
+            "swarm_run_stats": {
+                "recent_round_rye": [],
+                "recent_round_contradictions": [],
+            },
+        }
 
         self._apply_intelligence_profile()
 
@@ -379,6 +422,74 @@ class CoreAgent:
         else:
             self.intelligence_profile = {}
         self._apply_intelligence_profile()
+
+    # ------------------------------------------------------------------
+    # Speed mode and meta helpers
+    # ------------------------------------------------------------------
+    def get_speed_mode(self) -> str:
+        """Return current speed mode (standard, accelerated, ultra)."""
+        return self.speed_mode
+
+    def set_speed_mode(self, mode: str) -> None:
+        """Update speed mode at runtime in a safe and conservative way."""
+        m = str(mode).lower()
+        if m not in {"standard", "accelerated", "ultra"}:
+            return
+        self.speed_mode = m
+        self._meta_state["speed_mode"] = m
+        self._meta_state["last_update_ts"] = time.time()
+
+    def _meta_note_single_cycle(self, rye_value: Optional[float], contradictions: Optional[int]) -> None:
+        """Internal helper for tracking recent single agent RYE and contradictions.
+
+        This does not change behavior. It simply stores short windows
+        of stats that can be used by upgraded TGRM loops or UI panels.
+        """
+        try:
+            stats = self._meta_state.get("single_run_stats") or {}
+            recent_rye = stats.get("recent_rye") or []
+            recent_contra = stats.get("recent_contradictions") or []
+
+            if isinstance(rye_value, (int, float)):
+                recent_rye.append(float(rye_value))
+                if len(recent_rye) > 20:
+                    recent_rye.pop(0)
+
+            if isinstance(contradictions, (int, float)):
+                recent_contra.append(float(contradictions))
+                if len(recent_contra) > 20:
+                    recent_contra.pop(0)
+
+            stats["recent_rye"] = recent_rye
+            stats["recent_contradictions"] = recent_contra
+            self._meta_state["single_run_stats"] = stats
+            self._meta_state["last_update_ts"] = time.time()
+        except Exception:
+            return
+
+    def _meta_note_swarm_round(self, avg_round_rye: Optional[float], avg_round_contradictions: Optional[float]) -> None:
+        """Internal helper for tracking swarm round RYE and contradictions."""
+        try:
+            stats = self._meta_state.get("swarm_run_stats") or {}
+            recent_rye = stats.get("recent_round_rye") or []
+            recent_contra = stats.get("recent_round_contradictions") or []
+
+            if isinstance(avg_round_rye, (int, float)):
+                recent_rye.append(float(avg_round_rye))
+                if len(recent_rye) > 20:
+                    recent_rye.pop(0)
+
+            if isinstance(avg_round_contradictions, (int, float)):
+                recent_contra.append(float(avg_round_contradictions))
+                if len(recent_contra) > 20:
+                    recent_contra.pop(0)
+
+            stats["recent_round_rye"] = recent_rye
+            stats["recent_round_contradictions"] = recent_contra
+            self._meta_state["swarm_run_stats"] = stats
+            self._meta_state["last_update_ts"] = time.time()
+        except Exception:
+            return
 
     # ------------------------------------------------------------------
     # Learning from memory history
@@ -940,6 +1051,17 @@ class CoreAgent:
             if isinstance(citations, list):
                 state["last_citations"] = citations
 
+        # Meta note for single cycle (used by ultra controllers and UI)
+        if isinstance(summary, dict):
+            contradictions = None
+            contr_val = summary.get("contradictions")
+            if isinstance(contr_val, (int, float)):
+                contradictions = int(contr_val)
+            self._meta_note_single_cycle(
+                rye_value=rye_val if isinstance(rye_val, (int, float)) else None,
+                contradictions=contradictions,
+            )
+
         # Mark as still in progress; the worker or UI can toggle this off if needed
         state["in_progress"] = True
 
@@ -1185,6 +1307,13 @@ class CoreAgent:
                 # Learning must never break the run
                 pass
 
+        # If speed_mode is accelerated or ultra and runtime_profile is still None,
+        # prefer longer profiles for high stability domains.
+        if runtime_profile is None and self.speed_mode in {"accelerated", "ultra"}:
+            default_profile = preset_cfg.get("default_runtime_profile")
+            if isinstance(default_profile, str):
+                runtime_profile = default_profile
+
         # Default runtime profile from domain preset if not provided
         if runtime_profile is None:
             runtime_profile = preset_cfg.get("default_runtime_profile")
@@ -1315,6 +1444,7 @@ class CoreAgent:
                     "recent_rye": recent_rye[-10:],
                     "last_heartbeat_ts": time.time(),
                     "runtime_profile": runtime_profile,
+                    "speed_mode": self.speed_mode,
                 }
                 self._save_checkpoint(checkpoint_state)
                 # Use MemoryStore watchdog as an additional heartbeat
@@ -1374,6 +1504,7 @@ class CoreAgent:
             "stop_rye": stop_rye,
             "stop_reason": stop_reason,
             "runtime_profile": runtime_profile,
+            "speed_mode": self.speed_mode,
         }
 
         # Optional run health score or diagnostics if rye_metrics provides them
@@ -1539,6 +1670,13 @@ class CoreAgent:
             except Exception:
                 pass
 
+        # If speed_mode is accelerated or ultra and runtime_profile is still None,
+        # prefer the domain default profile from presets.
+        if runtime_profile is None and self.speed_mode in {"accelerated", "ultra"}:
+            default_profile = preset_cfg.get("default_runtime_profile")
+            if isinstance(default_profile, str):
+                runtime_profile = default_profile
+
         # Default runtime profile from domain preset if not provided
         if runtime_profile is None:
             runtime_profile = preset_cfg.get("default_runtime_profile")
@@ -1651,6 +1789,7 @@ class CoreAgent:
                     "recent_round_rye": recent_round_rye[-10:],
                     "last_heartbeat_ts": time.time(),
                     "runtime_profile": runtime_profile,
+                    "speed_mode": self.speed_mode,
                 }
                 self._save_checkpoint(checkpoint_state)
                 try:
@@ -1678,22 +1817,34 @@ class CoreAgent:
 
             # Compute average RYE across roles for this round
             round_ryes: List[float] = []
+            round_contras: List[float] = []
             for s in round_summaries:
                 rv = s.get("RYE")
                 if isinstance(rv, (int, float)):
                     round_ryes.append(float(rv))
+                cv = s.get("contradictions")
+                if isinstance(cv, (int, float)):
+                    round_contras.append(float(cv))
 
+            avg_round_rye = None
+            avg_round_contra = None
             if round_ryes:
                 avg_round_rye = sum(round_ryes) / len(round_ryes)
                 recent_round_rye.append(avg_round_rye)
                 if len(recent_round_rye) > 10:
                     recent_round_rye.pop(0)
 
-                if stop_rye is not None and recent_round_rye:
-                    avg_recent = sum(recent_round_rye) / len(recent_round_rye)
-                    if avg_recent < stop_rye:
-                        stop_reason = "rye_threshold"
-                        break
+            if round_contras:
+                avg_round_contra = sum(round_contras) / len(round_contras)
+
+            # Note swarm stats in meta state for ultra controllers and UI
+            self._meta_note_swarm_round(avg_round_rye, avg_round_contra)
+
+            if stop_rye is not None and recent_round_rye:
+                avg_recent = sum(recent_round_rye) / len(recent_round_rye)
+                if avg_recent < stop_rye:
+                    stop_reason = "rye_threshold"
+                    break
 
             round_idx += 1
 
@@ -1716,6 +1867,7 @@ class CoreAgent:
             "stop_rye": stop_rye,
             "stop_reason": stop_reason,
             "runtime_profile": runtime_profile,
+            "speed_mode": self.speed_mode,
         }
 
         # Optional run health score or diagnostics if rye_metrics provides them
@@ -1953,7 +2105,7 @@ class CoreAgent:
             return []
 
     # ------------------------------------------------------------------
-    # Agent-level training / learning helpers (added)
+    # Agent-level training / learning helpers
     # ------------------------------------------------------------------
     def get_learning_status(self) -> Dict[str, Any]:
         """Return a compact view of the agent-level learning state.
@@ -1972,12 +2124,24 @@ class CoreAgent:
             "learned_from_memory": dict(self.learned_from_memory) if self.learned_from_memory else {},
             "training_profile": dict(self.training_profile) if self.training_profile else {},
             "learning_plan": dict(self.learning_plan) if self.learning_plan else {},
+            "speed_mode": self.speed_mode,
         }
         try:
             history = self.memory_store.get_cycle_history()
             status["total_cycles"] = len(history)
         except Exception:
             status["total_cycles"] = None
+
+        # Attach recent meta stats for Ultra viewers
+        try:
+            status["meta_state"] = {
+                "speed_mode": self._meta_state.get("speed_mode"),
+                "single_run_recent_rye": (self._meta_state.get("single_run_stats") or {}).get("recent_rye", []),
+                "swarm_recent_round_rye": (self._meta_state.get("swarm_run_stats") or {}).get("recent_round_rye", []),
+            }
+        except Exception:
+            pass
+
         return status
 
     def _update_training_profile_from_summaries(
@@ -1990,7 +2154,7 @@ class CoreAgent:
     ) -> None:
         """Internal helper: derive a training profile snapshot after a burst.
 
-        This consumes the *end state* (history + summaries) and creates
+        This consumes the end state (history plus summaries) and creates
         a compact record in self.training_profile. It does not change
         core behavior or external state.
         """
@@ -2012,7 +2176,7 @@ class CoreAgent:
             profile["burst_rye_avg"] = sum(rye_vals) / len(rye_vals)
             profile["burst_rye_last"] = rye_vals[-1]
 
-        # Use full history + rye_metrics to attach richer diagnostics if available
+        # Use full history plus rye_metrics to attach richer diagnostics if available
         history: List[Dict[str, Any]] = []
         try:
             history = self.memory_store.get_cycle_history()
@@ -2067,13 +2231,13 @@ class CoreAgent:
     ) -> List[Dict[str, Any]]:
         """Run a short, focused training burst.
 
-        This is where *agent-level* learning happens in practice:
+        This is where agent-level learning happens in practice:
         - It writes new structured knowledge into MemoryStore.
         - It exercises TGRM and tools on a focused goal.
         - It updates self.training_profile and leaves self.learned_from_memory
           available for later calls.
 
-        It does NOT change model weights. It only improves the agent's
+        It does not change model weights. It only improves the agent's
         internal state and history.
 
         Typical use:
@@ -2092,7 +2256,7 @@ class CoreAgent:
             if runtime_profile not in RUNTIME_PROFILES:
                 runtime_profile = "1_hour"
 
-        # Default bounds for a "burst": conservative, safe, cheap
+        # Default bounds for a burst: conservative, safe, cheap
         if max_cycles is None:
             # Use profile estimate if present, otherwise a small number
             est_cfg = RUNTIME_PROFILES.get(runtime_profile, {})
@@ -2131,7 +2295,7 @@ class CoreAgent:
             experiment_mode=experiment_mode,
         )
 
-        # After the burst, update training profile from full history + this burst
+        # After the burst, update training profile from full history plus this burst
         self._update_training_profile_from_summaries(
             summaries,
             domain=effective_domain,
@@ -2147,7 +2311,7 @@ class CoreAgent:
     ) -> Dict[str, Any]:
         """Derive a high-level learning plan from existing history.
 
-        This is the "Nova, optimize my learning pipeline" entry point.
+        This is the "optimize my learning pipeline" entry point.
 
         It:
             - calls learn_from_memory(domain)
@@ -2160,13 +2324,16 @@ class CoreAgent:
         plan: Dict[str, Any] = {
             "domain": domain or "general",
             "learning_enabled": self.learning_enabled,
+            "speed_mode": self.speed_mode,
             "actions": [],
             "learned_from_memory": {},
             "option_c_signature": None,
         }
 
         if not self.learning_enabled:
-            plan["actions"].append("Learning is disabled in config (learning_enabled=False). Enable it to train the agent.")
+            plan["actions"].append(
+                "Learning is disabled in config (learning_enabled=False). Enable it to train the agent."
+            )
             self.learning_plan = plan
             return plan
 
