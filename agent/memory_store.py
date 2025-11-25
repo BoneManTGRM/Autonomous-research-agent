@@ -227,6 +227,15 @@ class MemoryStore:
         if not isinstance(self._data.get("schema_version"), int):
             self._data["schema_version"] = MEMORY_SCHEMA_VERSION
 
+        # Ensure learning_burst has minimal shape
+        lb = self._data.get("learning_burst")
+        if not isinstance(lb, dict):
+            lb = {}
+        lb.setdefault("active", False)
+        lb.setdefault("cycles_remaining", None)
+        lb.setdefault("burst_index", None)
+        self._data["learning_burst"] = lb
+
     def _load(self) -> None:
         """Load memory from disk if the file exists."""
         if os.path.exists(self.memory_file):
@@ -837,11 +846,43 @@ class MemoryStore:
             },
         )
 
+        # Learning burst step: decrement cycles_remaining if active
+        try:
+            lb = self._data.get("learning_burst") or {}
+            if isinstance(lb, dict) and lb.get("active"):
+                remaining = lb.get("cycles_remaining")
+                if isinstance(remaining, int):
+                    if remaining > 1:
+                        lb["cycles_remaining"] = remaining - 1
+                    else:
+                        lb["cycles_remaining"] = 0
+                        lb["active"] = False
+                lb["last_updated"] = _utc_now_iso()
+                self._data["learning_burst"] = lb
+        except Exception:
+            pass
+
         self._save()
 
     def get_cycle_history(self) -> List[Dict[str, Any]]:
         """Return the history of cycles."""
         return self._data.get("cycles", [])
+
+    def get_cycle_history_for_goal(self, goal: str, limit: int = 200) -> List[Dict[str, Any]]:
+        """Return recent cycles for a goal, oldest to newest, up to limit.
+
+        This helper is used by TGRM learning functions that need an
+        ordered recent window for RYE gradient and equilibrium signals.
+        """
+        history = [c for c in self._data.get("cycles", []) if c.get("goal") == goal]
+        history_sorted = sorted(
+            history,
+            key=lambda c: c.get("timestamp", ""),
+            reverse=True,
+        )
+        # Take most recent limit and reverse so oldest is first
+        window = list(reversed(history_sorted[:limit]))
+        return window
 
     def get_recent_cycles(
         self,
@@ -1551,6 +1592,77 @@ class MemoryStore:
         return filtered_sorted[:limit]
 
     # ------------------------------------------------------------------
+    # Learning burst helpers
+    # ------------------------------------------------------------------
+    def start_learning_burst(
+        self,
+        *,
+        cycles: Optional[int] = None,
+        burst_index: Optional[int] = None,
+        goal: Optional[str] = None,
+        role: Optional[str] = None,
+        domain: Optional[str] = None,
+        mode: Optional[str] = None,
+    ) -> None:
+        """Activate a learning burst window for TGRM tuning.
+
+        This is a small state flag that other components can read to run
+        more intense repair cycles or different presets for a short period.
+        """
+        now = _utc_now_iso()
+        lb = {
+            "active": True,
+            "cycles_remaining": cycles,
+            "burst_index": burst_index,
+            "goal": goal,
+            "role": role,
+            "domain": domain,
+            "mode": mode,
+            "started_at": now,
+            "last_updated": now,
+        }
+        self._data["learning_burst"] = lb
+        self._save()
+
+    def stop_learning_burst(self) -> None:
+        """Deactivate any active learning burst."""
+        lb = self._data.get("learning_burst") or {}
+        if not isinstance(lb, dict):
+            lb = {}
+        lb["active"] = False
+        lb["cycles_remaining"] = 0
+        lb["last_updated"] = _utc_now_iso()
+        self._data["learning_burst"] = lb
+        self._save()
+
+    def update_learning_burst(
+        self,
+        *,
+        cycles_remaining: Optional[int] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Update the learning_burst state without recreating it."""
+        lb = self._data.get("learning_burst") or {}
+        if not isinstance(lb, dict):
+            lb = {"active": False, "cycles_remaining": None, "burst_index": None}
+        if cycles_remaining is not None:
+            lb["cycles_remaining"] = cycles_remaining
+        if extra:
+            payload = dict(lb.get("extra", {}))
+            payload.update(extra)
+            lb["extra"] = payload
+        lb["last_updated"] = _utc_now_iso()
+        self._data["learning_burst"] = lb
+        self._save()
+
+    def get_learning_burst_state(self) -> Dict[str, Any]:
+        """Return the current learning_burst state."""
+        lb = self._data.get("learning_burst") or {}
+        if not isinstance(lb, dict):
+            lb = {}
+        return dict(lb)
+
+    # ------------------------------------------------------------------
     # Reporting helpers (for long autonomous runs)
     # ------------------------------------------------------------------
     def get_rye_stats(
@@ -1792,6 +1904,7 @@ class MemoryStore:
             title += "RYE: no data available\n"
         title += "\n"
 
+        # Advanced metrics
         adv = self.get_advanced_rye_metrics(goal=goal)
         if any(v is not None for v in adv.values()):
             title += "Advanced RYE metrics:\n"
@@ -1809,6 +1922,29 @@ class MemoryStore:
                 title += f"- Stability index: {adv['stability_index']:.3f}\n"
             if adv.get("recovery_momentum") is not None:
                 title += f"- Recovery momentum: {adv['recovery_momentum']:.3f}\n"
+            title += "\n"
+
+        # Learning profile snapshot
+        profile = self.get_learning_profile(goal=goal)
+        curve = profile.get("rye_curve", {}) if isinstance(profile, dict) else {}
+        best_cycle = profile.get("best_cycle", {}) if isinstance(profile, dict) else {}
+        if profile:
+            early_avg = curve.get("early_avg")
+            late_avg = curve.get("late_avg")
+            delta = curve.get("delta")
+            title += "Learning curve snapshot:\n"
+            if early_avg is not None:
+                title += f"- Early RYE avg: {early_avg:.3f}\n"
+            if late_avg is not None:
+                title += f"- Late RYE avg: {late_avg:.3f}\n"
+            if delta is not None:
+                title += f"- RYE delta (late - early): {delta:.3f}\n"
+            if best_cycle:
+                bc_idx = best_cycle.get("cycle_index")
+                bc_rye = best_cycle.get("RYE")
+                bc_ts = best_cycle.get("timestamp")
+                if bc_idx is not None and bc_rye is not None:
+                    title += f"- Best cycle: {bc_idx} with RYE {bc_rye:.3f} at {bc_ts}\n"
             title += "\n"
 
         notes = self.get_notes(goal=goal)
@@ -1994,6 +2130,64 @@ class MemoryStore:
                     "best_breakthrough_score": float(entry.get("best_breakthrough_score"))
                     if isinstance(entry.get("best_breakthrough_score"), (int, float))
                     else None,
+                }
+            )
+
+        rows_sorted = sorted(rows, key=lambda r: (r["avg_rye"], r["rye_count"]), reverse=True)
+        return rows_sorted[:limit]
+
+    def get_role_leaderboard(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return a leaderboard of logical roles aggregated across goals.
+
+        Aggregates avg_rye and counts for each role in goal_index["roles"].
+        """
+        gi = self._data.get("goal_index") or {}
+        if not isinstance(gi, dict):
+            return []
+
+        agg: Dict[str, Dict[str, Any]] = {}
+        for goal, entry in gi.items():
+            if not isinstance(entry, dict):
+                continue
+            roles = entry.get("roles") or {}
+            if not isinstance(roles, dict):
+                continue
+            for role, r_stats in roles.items():
+                if not isinstance(r_stats, dict):
+                    continue
+                avg_rye = r_stats.get("avg_rye")
+                rye_count = r_stats.get("rye_count")
+                if not isinstance(avg_rye, (int, float)) or not isinstance(rye_count, int) or rye_count <= 0:
+                    continue
+                row = agg.get(role) or {
+                    "role": role,
+                    "rye_sum": 0.0,
+                    "rye_count": 0,
+                    "note_count": 0,
+                    "cycle_count": 0,
+                    "goals_seen": 0,
+                }
+                row["rye_sum"] += float(avg_rye) * float(rye_count)
+                row["rye_count"] += int(rye_count)
+                row["note_count"] += int(r_stats.get("note_count", 0))
+                row["cycle_count"] += int(r_stats.get("cycle_count", 0))
+                row["goals_seen"] += 1
+                agg[role] = row
+
+        rows: List[Dict[str, Any]] = []
+        for role, row in agg.items():
+            total_rye_count = row.get("rye_count", 0)
+            if total_rye_count <= 0:
+                continue
+            avg_rye_global = row["rye_sum"] / float(total_rye_count)
+            rows.append(
+                {
+                    "role": role,
+                    "avg_rye": avg_rye_global,
+                    "rye_count": total_rye_count,
+                    "note_count": row.get("note_count", 0),
+                    "cycle_count": row.get("cycle_count", 0),
+                    "goals_seen": row.get("goals_seen", 0),
                 }
             )
 
