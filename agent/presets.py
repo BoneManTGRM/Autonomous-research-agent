@@ -29,7 +29,7 @@ from __future__ import annotations
 from typing import Dict, Any, List, Optional
 
 # Simple version tag so the app and UI can display which preset set is loaded.
-PRESETS_VERSION: str = "2025-11-24-max2"
+PRESETS_VERSION: str = "2025-11-25-10x"
 
 # ---------------------------------------------------------------------
 # Global Runtime Profiles (applies for all presets)
@@ -46,6 +46,10 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "none",
         "target_rye_range": [0.02, 0.15],
+        # Faster learning hints
+        "learning_speed_factor": 2.0,
+        "burst_profile_hint": "light",
+        "spread_of_learning_strength": 0.4,
     },
     "8_hours": {
         "label": "8 Hour Run",
@@ -57,6 +61,9 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "transient_or_plateau",
         "target_rye_range": [0.04, 0.18],
+        "learning_speed_factor": 4.0,
+        "burst_profile_hint": "light",
+        "spread_of_learning_strength": 0.6,
     },
     "24_hours": {
         "label": "24 Hour Run",
@@ -68,6 +75,9 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "plateau",
         "target_rye_range": [0.06, 0.20],
+        "learning_speed_factor": 6.0,
+        "burst_profile_hint": "balanced",
+        "spread_of_learning_strength": 0.8,
     },
     "1_week": {
         "label": "1 Week Run",
@@ -82,6 +92,9 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "plateau_or_high",
         "target_rye_range": [0.08, 0.22],
+        "learning_speed_factor": 8.0,
+        "burst_profile_hint": "balanced",
+        "spread_of_learning_strength": 1.0,
     },
     "1_month": {
         "label": "1 Month Run",
@@ -96,6 +109,9 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "plateau_or_high",
         "target_rye_range": [0.09, 0.24],
+        "learning_speed_factor": 9.0,
+        "burst_profile_hint": "aggressive",
+        "spread_of_learning_strength": 1.2,
     },
     # Long horizon profile for Reparodynamics style experiments
     "90_days": {
@@ -111,6 +127,9 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "high_or_plateau",
         "target_rye_range": [0.10, 0.28],
+        "learning_speed_factor": 10.0,
+        "burst_profile_hint": "aggressive",
+        "spread_of_learning_strength": 1.5,
     },
     "forever": {
         "label": "Run Until Stopped",
@@ -122,6 +141,9 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "mixed",
         "target_rye_range": [0.04, 0.24],
+        "learning_speed_factor": 5.0,
+        "burst_profile_hint": "balanced",
+        "spread_of_learning_strength": 1.0,
     },
 }
 
@@ -222,6 +244,37 @@ CONTINUOUS_MODE_DEFAULTS: Dict[str, Any] = {
         "adapt_swarm_size": True,
         "rye_gradient_safety_margin": 0.01,
         "stability_index_floor": 0.4,
+        # Ten times faster learning layer
+        "enable_learning_bursts": True,
+        "learning_speed_factor_default": 10.0,
+        "use_goal_leaderboard": True,
+        "spread_of_learning_mode": "cross_goal",
+        "max_parent_goals_for_copy": 3,
+        "min_parent_avg_rye": 0.08,
+        "min_parent_stability_index": 0.5,
+        "learning_burst_profiles": {
+            # Light burst mode for short runs
+            "light": {
+                "cycles": 5,
+                "delta_novelty": 0.05,
+                "delta_critic_strength": 0.1,
+                "delta_verification_rigidity": 0.05,
+            },
+            # Balanced bursts for 24 hour to 1 month profiles
+            "balanced": {
+                "cycles": 10,
+                "delta_novelty": 0.08,
+                "delta_critic_strength": 0.15,
+                "delta_verification_rigidity": 0.08,
+            },
+            # Aggressive bursts for 90 day stability experiments
+            "aggressive": {
+                "cycles": 20,
+                "delta_novelty": 0.12,
+                "delta_critic_strength": 0.20,
+                "delta_verification_rigidity": 0.10,
+            },
+        },
     },
 }
 
@@ -496,6 +549,29 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                 "efficiency_trend_negative": True,
                 "recovery_momentum_below": 0.0,
                 "window": 20,
+            },
+            # Ten times faster learning hints
+            "learning_speed_factor": 8.0,
+            "enable_learning_bursts": True,
+            "burst_modes": {
+                "default": {
+                    "profile": "balanced",
+                    "min_cycles_between_bursts": 15,
+                    "max_bursts_per_100_cycles": 5,
+                },
+                "stagnation_recovery": {
+                    "profile": "aggressive",
+                    "trigger_if_no_rye_gain_cycles": 20,
+                    "trigger_if_efficiency_trend_negative": True,
+                },
+            },
+            "spread_of_learning": {
+                "enable_cross_goal_copy": True,
+                "max_parent_goals": 3,
+                "min_parent_avg_rye": 0.08,
+                "min_parent_stability_index": 0.5,
+                "reuse_best_equilibrium_labels": True,
+                "reuse_best_swarm_contracts": True,
             },
         },
 
@@ -886,6 +962,35 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                 "recovery_momentum_below": 0.0,
                 "window": 25,
             },
+            "learning_speed_factor": 10.0,
+            "enable_learning_bursts": True,
+            "burst_modes": {
+                "default": {
+                    "profile": "balanced",
+                    "min_cycles_between_bursts": 12,
+                    "max_bursts_per_100_cycles": 8,
+                },
+                "stagnation_recovery": {
+                    "profile": "aggressive",
+                    "trigger_if_no_rye_gain_cycles": 15,
+                    "trigger_if_efficiency_trend_negative": True,
+                    "require_stability_index_below": 0.55,
+                },
+                "biomarker_focus": {
+                    "profile": "balanced",
+                    "trigger_if_few_positive_biomarker_shifts": 2,
+                    "lookback_cycles": 30,
+                },
+            },
+            "spread_of_learning": {
+                "enable_cross_goal_copy": True,
+                "max_parent_goals": 3,
+                "min_parent_avg_rye": 0.09,
+                "min_parent_stability_index": 0.55,
+                "reuse_best_equilibrium_labels": True,
+                "reuse_best_swarm_contracts": True,
+                "reuse_best_biomarker_panels": True,
+            },
         },
 
         # Discovery engine (strong focus on interventions and biomarkers)
@@ -1241,6 +1346,28 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                 "efficiency_trend_negative": True,
                 "recovery_momentum_below": 0.0,
                 "window": 20,
+            },
+            "learning_speed_factor": 9.0,
+            "enable_learning_bursts": True,
+            "burst_modes": {
+                "default": {
+                    "profile": "balanced",
+                    "min_cycles_between_bursts": 20,
+                    "max_bursts_per_100_cycles": 6,
+                },
+                "stagnation_recovery": {
+                    "profile": "aggressive",
+                    "trigger_if_no_rye_gain_cycles": 25,
+                    "trigger_if_efficiency_trend_negative": True,
+                },
+            },
+            "spread_of_learning": {
+                "enable_cross_goal_copy": True,
+                "max_parent_goals": 2,
+                "min_parent_avg_rye": 0.07,
+                "min_parent_stability_index": 0.6,
+                "reuse_best_equilibrium_labels": True,
+                "reuse_best_swarm_contracts": True,
             },
         },
 
