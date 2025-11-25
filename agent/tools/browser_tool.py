@@ -1,6 +1,7 @@
 import os
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -15,6 +16,16 @@ try:
     from tavily import TavilyClient
 except Exception:
     TavilyClient = None  # type: ignore[assignment]
+
+
+@dataclass
+class BrowserPage:
+    """Lightweight page snapshot used by TGRM for deep dives."""
+    url: str
+    text_snippet: str
+    status: Any
+    content_type: Optional[str] = None
+    error: Optional[str] = None
 
 
 class BrowserTool:
@@ -36,6 +47,7 @@ class BrowserTool:
         - Existing calls using fetch_url(url) still work
         - Existing calls using search_with_answer(...) still work
         - Existing code can also call the instance directly: browser("query")
+        - New fetch_page(url) returns a BrowserPage object for TGRM deep dives
     """
 
     TAVILY_ENDPOINT = "https://api.tavily.com/search"
@@ -216,7 +228,7 @@ class BrowserTool:
         try:
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
-                "X-API-Key": self.api_key,  # compatible with newer Tavily API wrappers
+                "X-API-Key": self.api_key,
                 "Content-Type": "application/json",
             }
             resp = requests.post(
@@ -243,7 +255,6 @@ class BrowserTool:
 
         try:
             client = TavilyClient(api_key=self.api_key)  # type: ignore[call-arg]
-            # Map payload into client.search parameters
             resp = client.search(
                 query=payload.get("query", ""),
                 max_results=payload.get("max_results", self.default_max_results),
@@ -433,7 +444,6 @@ class BrowserTool:
             return error_result
 
         results = self._normalize_results(data.get("results", data))
-        # Safety: enforce max_results cap in case the backend returns more.
         if len(results) > max_results:
             results = results[:max_results]
 
@@ -627,6 +637,63 @@ class BrowserTool:
                 "content": str(e),
                 "content_type": None,
             }
+
+    def fetch_page(self, url: str) -> BrowserPage:
+        """
+        New helper used by TGRM for deep single page inspection.
+
+        Wraps fetch_url and returns a BrowserPage object with:
+            url, text_snippet, status, content_type, error
+        """
+        result = self.fetch_url(url)
+        status = result.get("status")
+        content_type = result.get("content_type")
+        content = result.get("content", "") or ""
+        error: Optional[str] = None
+
+        if status == "error" or isinstance(status, str):
+            error = content or "fetch_error"
+            text_snippet = ""
+        else:
+            text_snippet = str(content)[:2000]
+
+        return BrowserPage(
+            url=result.get("url", url),
+            text_snippet=text_snippet,
+            status=status,
+            content_type=content_type,
+            error=error,
+        )
+
+    # ------------------------------------------------------------------
+    # Optional helpers for summaries and citations
+    # ------------------------------------------------------------------
+    def summarize_results(self, results: List[Dict[str, Any]]) -> str:
+        """Create a simple multi line summary from normalized results."""
+        if not results:
+            return "No results found."
+
+        lines: List[str] = []
+        for idx, r in enumerate(results[:6], start=1):
+            title = r.get("title") or "(no title)"
+            snippet = (r.get("snippet") or "").replace("\n", " ").strip()
+            lines.append(f"{idx}. {title}: {snippet[:300]}")
+
+        return "\n".join(lines)
+
+    def to_citations(self, results: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        """Convert normalized results into standard citation objects."""
+        cites: List[Dict[str, str]] = []
+        for r in results:
+            cites.append(
+                {
+                    "source": r.get("source") or "web",
+                    "title": r.get("title") or "",
+                    "url": r.get("url") or "",
+                    "snippet": r.get("snippet") or "",
+                }
+            )
+        return cites
 
     # Small aliases so other parts of the agent can call more flexibly
     def __call__(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
