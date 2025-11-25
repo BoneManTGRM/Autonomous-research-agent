@@ -7,9 +7,10 @@ Adds:
 - Redundancy filtering
 - Semantic result signatures
 - Information gain estimation
-- Domain-aware weighting (longevity, math, general)
-- RYE-friendly metadata (search_energy, info_density)
+- Domain aware weighting (longevity, math, general)
+- RYE friendly metadata (search_energy, info_density)
 - Full Tavily support + safe stub fallback
+- Learning aware search energy and info_gain_per_energy for 10x modes
 """
 
 from __future__ import annotations
@@ -64,6 +65,79 @@ class WebSearchSummary:
     difficulty: Optional[float] = None
     semantic_diversity: Optional[float] = None
 
+    # Learning aware extensions
+    learning_speed_factor: Optional[float] = None
+    burst_profile_hint: Optional[str] = None
+    info_gain_per_energy: Optional[float] = None
+    effective_info_gain: Optional[float] = None
+
+
+# ---------------------------------------------------------------------
+# Learning profiles for 10x modes
+# These are soft hints that the TGRM loop and presets can override.
+# ---------------------------------------------------------------------
+LEARNING_TOPIC_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "general": {
+        "learning_speed_factor": 1.0,
+        "burst_profile_hint": "balanced",
+    },
+    "longevity": {
+        # Longevity stacks, biomarkers, and clinical trials
+        # tend to benefit from deeper learning bursts.
+        "learning_speed_factor": 1.4,
+        "burst_profile_hint": "aggressive",
+    },
+    "math": {
+        # Math prefers precision and careful refinement.
+        "learning_speed_factor": 1.2,
+        "burst_profile_hint": "precision",
+    },
+    "default": {
+        "learning_speed_factor": 1.0,
+        "burst_profile_hint": "balanced",
+    },
+}
+
+
+def _compute_learning_context(
+    topic: str,
+    override_factor: Optional[float],
+    override_burst_profile: Optional[str],
+) -> Dict[str, Any]:
+    """Resolve effective learning context for this search.
+
+    Priority:
+        1) Explicit overrides from caller (TGRM, CoreAgent, SwarmManager)
+        2) Topic based defaults (general, longevity, math)
+        3) Environment multiplier AGENT_LEARNING_SPEED_FACTOR
+
+    The final factor is clamped to [0.1, 10.0].
+    """
+    topic_key = (topic or "general").lower()
+    base = LEARNING_TOPIC_DEFAULTS.get(topic_key, LEARNING_TOPIC_DEFAULTS["default"])
+
+    factor = override_factor if override_factor is not None else float(
+        base.get("learning_speed_factor", 1.0)
+    )
+    burst = override_burst_profile or str(base.get("burst_profile_hint", "balanced"))
+
+    # Optional global multiplier from environment for experiments
+    env_factor_raw = os.getenv("AGENT_LEARNING_SPEED_FACTOR")
+    if env_factor_raw:
+        try:
+            env_factor = float(env_factor_raw)
+            factor *= env_factor
+        except Exception:
+            pass
+
+    # Clamp to a safe range so 10x modes do not blow up metrics
+    factor = max(0.1, min(factor, 10.0))
+
+    return {
+        "learning_speed_factor": factor,
+        "burst_profile_hint": burst,
+    }
+
 
 # ---------------------------------------------------------------------
 # Logging + caching
@@ -115,17 +189,17 @@ def _get_tavily_client() -> Tuple[Optional[Any], Optional[str]]:
 # Extreme-mode analysis helpers
 # ---------------------------------------------------------------------
 def _semantic_signature(text: str) -> str:
-    """Stable hash used to compute redundancy + diversity."""
+    """Stable hash used to compute redundancy and diversity."""
     h = hashlib.sha256(text.encode("utf-8")).hexdigest()
     return h[:16]
 
 
 def _text_density(text: str) -> float:
-    """Density score: characters / tokens ~ signal richness."""
+    """Density score: characters per token as a crude signal richness proxy."""
     if not text:
         return 0.0
     tokens = max(1, len(text.split()))
-    return min(1.0, len(text) / (tokens * 50))  # scale down to [0,1]
+    return min(1.0, len(text) / (tokens * 50))  # scale down to [0, 1]
 
 
 def _estimate_novelty(text: str, seen_hashes: List[str]) -> float:
@@ -143,6 +217,12 @@ def _estimate_novelty(text: str, seen_hashes: List[str]) -> float:
 
 
 def _from_tavily_response(query: str, raw: Dict[str, Any]) -> WebSearchSummary:
+    """Build a base summary where learning_speed_factor is conceptually 1.0.
+
+    Learning aware adjustments (10x modes) are applied later so the
+    cache can safely reuse this neutral summary and the caller can
+    reweight search_energy without hitting Tavily again.
+    """
     items = raw.get("results") or raw.get("items") or []
     results: List[WebResult] = []
 
@@ -178,8 +258,11 @@ def _from_tavily_response(query: str, raw: Dict[str, Any]) -> WebSearchSummary:
         )
 
     difficulty = 1.0 - (sum(r.density for r in results) / max(1, len(results)))
-    info_gain = sum((r.density or 0) * (r.novelty or 0) for r in results)
+    info_gain = sum((r.density or 0.0) * (r.novelty or 0.0) for r in results)
     diversity = len(set(r.signature for r in results)) / max(1, len(results))
+
+    # Base search_energy before learning speed adjustments
+    base_search_energy = round((difficulty + 0.2), 4)
 
     return WebSearchSummary(
         query=query,
@@ -189,13 +272,14 @@ def _from_tavily_response(query: str, raw: Dict[str, Any]) -> WebSearchSummary:
         response_time=raw.get("response_time"),
         request_id=raw.get("request_id"),
         info_gain=round(info_gain, 4),
-        search_energy=round((difficulty + 0.2), 4),
+        search_energy=base_search_energy,
         difficulty=round(difficulty, 4),
         semantic_diversity=round(diversity, 4),
     )
 
 
 def _stub_summary(query: str, message: str) -> WebSearchSummary:
+    """Base stub summary (learning speed will be applied later)."""
     return WebSearchSummary(
         query=query,
         results=[],
@@ -208,6 +292,52 @@ def _stub_summary(query: str, message: str) -> WebSearchSummary:
         difficulty=1.0,
         semantic_diversity=0.0,
     )
+
+
+def _clone_summary(summary: WebSearchSummary) -> WebSearchSummary:
+    """Deep clone via dataclass serialization to avoid mutating cache entries."""
+    return WebSearchSummary(**asdict(summary))
+
+
+def _apply_learning_speed(
+    summary: WebSearchSummary,
+    learning_speed_factor: float,
+    burst_profile_hint: Optional[str],
+) -> WebSearchSummary:
+    """Reweight search_energy and info_gain for 10x learning aware modes.
+
+    The idea:
+        - Base Tavily cost approximates raw energy spent.
+        - Faster learning means more yield per unit energy.
+        - We keep info_gain as is (what the web returned) and treat
+          search_energy as an effective cost divided by learning_speed_factor.
+
+    This is compatible with RYE:
+        RYE_search = info_gain / search_energy
+        RYE_search_10x = info_gain / (search_energy / factor)
+    """
+    factor = max(0.1, min(float(learning_speed_factor or 1.0), 10.0))
+
+    base_energy = summary.search_energy if summary.search_energy is not None else 1.0
+    if base_energy <= 0:
+        base_energy = 1.0
+
+    effective_energy = base_energy / factor
+
+    summary.learning_speed_factor = factor
+    summary.burst_profile_hint = burst_profile_hint
+
+    summary.search_energy = round(effective_energy, 4)
+
+    if summary.info_gain is not None:
+        if effective_energy > 0:
+            summary.info_gain_per_energy = round(summary.info_gain / effective_energy, 4)
+        else:
+            summary.info_gain_per_energy = None
+
+        summary.effective_info_gain = round(summary.info_gain * factor, 4)
+
+    return summary
 
 
 # ---------------------------------------------------------------------
@@ -242,11 +372,54 @@ def web_search_tool(
     include_answer: bool = False,
     include_raw_content: bool = False,
     include_images: bool = False,
+    # Learning aware parameters (wired from presets, CoreAgent, or SwarmManager)
+    learning_speed_factor: Optional[float] = None,
+    burst_profile_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Perform a Tavily web search with extreme-mode intelligence."""
+    """Perform a Tavily web search with extreme mode and learning aware intelligence.
+
+    Parameters
+    ----------
+    query:
+        Natural language search query.
+    max_results:
+        Upper bound on number of results to request from Tavily.
+    topic:
+        Tavily topic hint (general, news, finance, health, etc) but
+        also used as a domain key (general, longevity, math) for
+        learning aware defaults.
+    search_depth:
+        Tavily search depth ("basic" or "advanced").
+    time_range:
+        Optional Tavily time range string.
+    auto_parameters:
+        Let Tavily auto tune some parameters when True.
+    include_answer:
+        Request Tavily synthesized answer when True.
+    include_raw_content:
+        Include raw page content when available.
+    include_images:
+        Include Tavily image results when available.
+    learning_speed_factor:
+        Optional override from TGRM or swarm for 10x learning modes.
+        If None, topic defaults and environment multipliers apply.
+    burst_profile_hint:
+        Optional runtime profile hint, for example "light", "balanced",
+        or "aggressive". Stored for downstream analysis and UI but not
+        required by Tavily.
+    """
     q = (query or "").strip()
+    learning_ctx = _compute_learning_context(
+        topic=topic,
+        override_factor=learning_speed_factor,
+        override_burst_profile=burst_profile_hint,
+    )
+    eff_factor = learning_ctx["learning_speed_factor"]
+    eff_burst = learning_ctx["burst_profile_hint"]
+
     if not q:
-        summary = _stub_summary("", "Empty query.")
+        summary_base = _stub_summary("", "Empty query.")
+        summary = _apply_learning_speed(_clone_summary(summary_base), eff_factor, eff_burst)
         _log_event({"event": "empty_query", "summary": asdict(summary)})
         return asdict(summary)
 
@@ -255,12 +428,14 @@ def web_search_tool(
 
     cached = _cache_get(cache_key)
     if cached is not None:
-        return asdict(cached)
+        summary = _apply_learning_speed(_clone_summary(cached), eff_factor, eff_burst)
+        return asdict(summary)
 
     client, err = _get_tavily_client()
     if client is None:
-        summary = _stub_summary(q, err or "Client unavailable.")
-        _cache_set(cache_key, summary)
+        summary_base = _stub_summary(q, err or "Client unavailable.")
+        _cache_set(cache_key, summary_base)
+        summary = _apply_learning_speed(_clone_summary(summary_base), eff_factor, eff_burst)
         return asdict(summary)
 
     start = time.time()
@@ -278,16 +453,19 @@ def web_search_tool(
             include_images=include_images,
         )
     except Exception as e:
-        summary = _stub_summary(q, str(e))
-        _cache_set(cache_key, summary)
+        summary_base = _stub_summary(q, str(e))
+        _cache_set(cache_key, summary_base)
+        summary = _apply_learning_speed(_clone_summary(summary_base), eff_factor, eff_burst)
         return asdict(summary)
 
     elapsed = time.time() - start
 
-    summary = _from_tavily_response(q, raw)
-    summary.response_time = summary.response_time or elapsed
+    summary_base = _from_tavily_response(q, raw)
+    summary_base.response_time = summary_base.response_time or elapsed
 
-    _cache_set(cache_key, summary)
+    _cache_set(cache_key, summary_base)
+
+    summary = _apply_learning_speed(_clone_summary(summary_base), eff_factor, eff_burst)
 
     _log_event(
         {
@@ -302,6 +480,10 @@ def web_search_tool(
             "info_gain": summary.info_gain,
             "search_energy": summary.search_energy,
             "semantic_diversity": summary.semantic_diversity,
+            "learning_speed_factor": summary.learning_speed_factor,
+            "burst_profile_hint": summary.burst_profile_hint,
+            "info_gain_per_energy": summary.info_gain_per_energy,
+            "effective_info_gain": summary.effective_info_gain,
         }
     )
 
@@ -312,7 +494,7 @@ def web_search_tool(
 # ADDITIONS REQUIRED BY TGRM LOOP
 # ---------------------------------------------------------------------
 def summarize_results(raw: Dict[str, Any]) -> str:
-    """Convert raw Tavily extreme-mode results into a readable text block."""
+    """Convert raw Tavily extreme mode results into a readable text block."""
     if not raw or raw.get("error"):
         return f"Search failed: {raw.get('error', 'unknown error')}"
 
@@ -331,8 +513,8 @@ def summarize_results(raw: Dict[str, Any]) -> str:
 
 
 def to_citations(raw: Dict[str, Any]) -> List[Dict[str, str]]:
-    """Convert raw results into agent-standard citation objects."""
-    out = []
+    """Convert raw results into agent standard citation objects."""
+    out: List[Dict[str, str]] = []
     results = raw.get("results") or []
 
     for r in results:
