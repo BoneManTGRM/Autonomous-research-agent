@@ -1,4 +1,3 @@
-# agent_report_builder.py
 """
 Advanced Report Builder for the Autonomous Research Agent (Option C Edition)
 
@@ -12,8 +11,8 @@ This combines:
 - PDF-ready structured fields
 - Markdown builder for Streamlit + headless use
 
-This replaces NOTHING.
-It is a NEW MODULE that supercharges your existing report_generator.
+This replaces nothing.
+It is a new module that supercharges your existing report_generator.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from agent.rye_metrics import (
+from .rye_metrics import (
     build_run_diagnostics,
     rye_volatility_signature,
     detect_rye_equilibrium,
@@ -36,7 +35,7 @@ from agent.rye_metrics import (
     build_option_c_signature,
 )
 
-from agent.memory_store import MemoryStore
+from .memory_store import MemoryStore
 
 
 # -------------------------------------------------------------
@@ -73,11 +72,11 @@ def build_agent_report(
     biomarker_snapshot: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
-    Generates a FULL Option C scientific report:
+    Generates a full Option C scientific report:
 
     - Cycle history summary
     - RYE diagnostics bundle
-    - Stability & trend analysis
+    - Stability and trend analysis
     - Option C composite signature
     - Breakthrough estimators
     - Run tier classification
@@ -107,6 +106,16 @@ def build_agent_report(
         hours_run_so_far=hours_run_so_far,
     )
 
+    # Lightweight learning speed summary for quick inspection
+    learning_speed_summary: Dict[str, Any] = {
+        "trend_slope": diag.get("trend_slope"),
+        "recovery_momentum": diag.get("recovery_momentum"),
+        "stability_index": diag.get("stability_index"),
+        "breakthrough_probability": bp.get("probability"),
+        "breakthrough_likelihood_90d": bp90.get("probability"),
+        "run_tier": tier.get("tier"),
+    }
+
     # -------------------------------------------------------
     # Build Markdown
     # -------------------------------------------------------
@@ -114,7 +123,7 @@ def build_agent_report(
     lines: List[str] = []
 
     # Header
-    lines.append(f"# Autonomous Research Agent — Full Option C Report")
+    lines.append("# Autonomous Research Agent - Full Option C Report")
     lines.append(f"**Timestamp:** { _iso_now() }")
     if goal:
         lines.append(f"**Goal:** {goal}")
@@ -139,46 +148,49 @@ def build_agent_report(
     # 2. RYE Diagnostics
     lines.append(_md_section("RYE Diagnostics", _json(diag)))
 
-    # 3. Volatility
+    # 3. Learning Speed Summary (10x signals)
+    lines.append(_md_section("Learning Speed Summary", _json(learning_speed_summary)))
+
+    # 4. Volatility
     lines.append(_md_section("Volatility Signature", _json(vol)))
 
-    # 4. Equilibrium Detection
+    # 5. Equilibrium Detection
     lines.append(_md_section("Equilibrium Detection", _json(eq)))
 
-    # 5. TGRM Harmonic Index
+    # 6. TGRM Harmonic Index
     lines.append(_md_section("TGRM Harmonic Index", _json({"harmonic_index": harm})))
 
-    # 6. Breakthrough Probability (near term)
+    # 7. Breakthrough Probability (near term)
     lines.append(_md_section("Breakthrough Probability (Short-Term)", _json(bp)))
 
-    # 7. 90-Day Breakthrough Likelihood
+    # 8. 90-Day Breakthrough Likelihood
     lines.append(_md_section("90-Day Breakthrough Likelihood", _json(bp90)))
 
-    # 8. Autonomy Safety Envelope
-    lines.append(_md_section("Autonomy–Stability Envelope", _json(env)))
+    # 9. Autonomy Stability Envelope
+    lines.append(_md_section("Autonomy Stability Envelope", _json(env)))
 
-    # 9. Early Failure Warning Score
+    # 10. Critical-Failure Early Warning
     lines.append(_md_section("Critical-Failure Early Warning", _json(fail)))
 
-    # 10. Run Tier Classification
+    # 11. Run Tier Classification
     lines.append(_md_section("Run Tier Classification", _json(tier)))
 
-    # 11. Option C Composite Signature
+    # 12. Option C Composite Signature
     lines.append(_md_section("Option C Composite Signature", _json(option_c_signature)))
 
-    # 12. Tool Diagnostics
+    # 13. Tool Diagnostics
     lines.append(_md_section("Tool Diagnostics", _json(tool_stats)))
 
-    # 13. Swarm Stats
+    # 14. Swarm Stats
     lines.append(_md_section("Swarm Stats", _json(swarm_stats or {})))
 
-    # 14. Intelligence Profile
+    # 15. Intelligence Profile
     lines.append(_md_section("Intelligence Profile", _json(intelligence_profile or {})))
 
-    # 15. Biomarker Snapshot (Longevity Mode)
+    # 16. Biomarker Snapshot (Longevity Mode)
     lines.append(_md_section("Biomarker Snapshot", _json(biomarker_snapshot or {})))
 
-    # 16. Raw Cycle History (Optional)
+    # 17. Raw Cycle History (condensed)
     lines.append(
         _md_section(
             "Cycle History (condensed)",
