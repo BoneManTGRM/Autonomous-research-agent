@@ -136,7 +136,6 @@ def _estimate_novelty(text: str, seen_hashes: List[str]) -> float:
 
     distances = []
     for h in seen_hashes:
-        # simple XOR-based Hamming distance on short hex segments
         d = sum(a != b for a, b in zip(sig, h))
         distances.append(d / len(sig))
 
@@ -178,7 +177,6 @@ def _from_tavily_response(query: str, raw: Dict[str, Any]) -> WebSearchSummary:
             )
         )
 
-    # Compute extreme-mode metadata
     difficulty = 1.0 - (sum(r.density for r in results) / max(1, len(results)))
     info_gain = sum((r.density or 0) * (r.novelty or 0) for r in results)
     diversity = len(set(r.signature for r in results)) / max(1, len(results))
@@ -191,7 +189,7 @@ def _from_tavily_response(query: str, raw: Dict[str, Any]) -> WebSearchSummary:
         response_time=raw.get("response_time"),
         request_id=raw.get("request_id"),
         info_gain=round(info_gain, 4),
-        search_energy=round((difficulty + 0.2), 4),  # scaled effort estimate
+        search_energy=round((difficulty + 0.2), 4),
         difficulty=round(difficulty, 4),
         semantic_diversity=round(diversity, 4),
     )
@@ -308,3 +306,43 @@ def web_search_tool(
     )
 
     return asdict(summary)
+
+
+# ---------------------------------------------------------------------
+# ADDITIONS REQUIRED BY TGRM LOOP
+# ---------------------------------------------------------------------
+def summarize_results(raw: Dict[str, Any]) -> str:
+    """Convert raw Tavily extreme-mode results into a readable text block."""
+    if not raw or raw.get("error"):
+        return f"Search failed: {raw.get('error', 'unknown error')}"
+
+    results = raw.get("results") or []
+    if not results:
+        return "No results found."
+
+    lines = []
+    for idx, r in enumerate(results[:6], start=1):
+        title = r.get("title") or "(no title)"
+        snippet = r.get("snippet") or ""
+        snippet = snippet.replace("\n", " ").strip()
+        lines.append(f"{idx}. {title}: {snippet[:300]}")
+
+    return "\n".join(lines)
+
+
+def to_citations(raw: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Convert raw results into agent-standard citation objects."""
+    out = []
+    results = raw.get("results") or []
+
+    for r in results:
+        out.append(
+            {
+                "source": "web",
+                "title": r.get("title") or "",
+                "url": r.get("url") or "",
+                "snippet": r.get("snippet") or "",
+            }
+        )
+
+    return out
