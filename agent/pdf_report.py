@@ -11,6 +11,8 @@ Design goals:
 - Simple: one main function generate_pdf_report(...) that returns a Path.
 - Friendly: includes an optional "Plain English Summary" section so a
   non technical reader can understand what the metrics mean.
+- Transparent: can optionally append a "Sources and Citations" section
+  so a reader can see where information was obtained.
 
 To fully enable PDF export, add this to requirements.txt:
 
@@ -26,7 +28,7 @@ from __future__ import annotations
 import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 
 # Try to import reportlab. If not available, we degrade gracefully.
 try:
@@ -42,6 +44,7 @@ except Exception:
 # --------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------
+
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -74,9 +77,8 @@ def _split_markdown_into_sections(markdown_text: str) -> Tuple[str, str]:
     if not lines:
         return "", ""
 
-    # First non empty lines as header block
-    header_lines = []
-    body_lines = []
+    header_lines: List[str] = []
+    body_lines: List[str] = []
     passed_header = False
 
     for line in lines:
@@ -107,7 +109,7 @@ def _build_plain_english_summary(
     This does not try to be numerically exact. It is a clear
     interpretation layer for humans.
     """
-    lines = []
+    lines: List[str] = []
 
     lines.append("Plain English Summary")
     lines.append("")
@@ -200,19 +202,23 @@ def _build_plain_english_summary(
             lines.append(f"Run tier: {run_tier}.")
             if run_tier == "Tier 0":
                 lines.append(
-                    "Tier 0 means the run is unstable or too early to call. It behaves like a normal tool, not a self repairing system yet."
+                    "Tier 0 means the run is unstable or too early to call. "
+                    "It behaves like a normal tool, not a self repairing system yet."
                 )
             elif run_tier == "Tier 1":
                 lines.append(
-                    "Tier 1 means the agent is working and making positive progress, but it is still in a basic, early stage."
+                    "Tier 1 means the agent is working and making positive progress, "
+                    "but it is still in a basic, early stage."
                 )
             elif run_tier == "Tier 2":
                 lines.append(
-                    "Tier 2 means the agent behaves like a genuine self repairing system over long runs. It is consistently improving its own knowledge."
+                    "Tier 2 means the agent behaves like a genuine self repairing system over long runs. "
+                    "It is consistently improving its own knowledge."
                 )
             elif run_tier == "Tier 3":
                 lines.append(
-                    "Tier 3 means the run is in a major breakthrough zone: high stability, positive trend, and strong repair yield."
+                    "Tier 3 means the run is in a major breakthrough zone: high stability, "
+                    "positive trend, and strong repair yield."
                 )
 
         if env_state:
@@ -220,23 +226,28 @@ def _build_plain_english_summary(
             lines.append(f"Autonomy safety envelope: {env_state}.")
             if env_state == "stable":
                 lines.append(
-                    "Stable means the system is running in a safe, predictable band with no signs of collapse or runaway behavior."
+                    "Stable means the system is running in a safe, predictable band with no signs of collapse "
+                    "or runaway behavior."
                 )
             elif env_state == "healthy_growth":
                 lines.append(
-                    "Healthy growth means the system is both stable and trending upward, which is the ideal regime for long experiments."
+                    "Healthy growth means the system is both stable and trending upward, "
+                    "which is the ideal regime for long experiments."
                 )
             elif env_state == "oscillatory":
                 lines.append(
-                    "Oscillatory means the system swings between good and bad patches. It may still be useful, but needs monitoring."
+                    "Oscillatory means the system swings between good and bad patches. "
+                    "It may still be useful, but needs monitoring."
                 )
             elif env_state == "collapsing":
                 lines.append(
-                    "Collapsing means performance is trending downward in an unstable way. This usually needs human intervention."
+                    "Collapsing means performance is trending downward in an unstable way. "
+                    "This usually needs human intervention."
                 )
             elif env_state == "explosive":
                 lines.append(
-                    "Explosive means the spread of RYE values is very high. This can be a sign of risky or uncontrolled behavior."
+                    "Explosive means the spread of RYE values is very high. "
+                    "This can be a sign of risky or uncontrolled behavior."
                 )
             else:
                 lines.append(
@@ -245,7 +256,8 @@ def _build_plain_english_summary(
 
     lines.append("")
     lines.append(
-        "In short: this summary tells you whether the agent is mostly stable, mostly improving, and whether it ever reaches strong bursts of efficiency that could hide real discoveries."
+        "In short: this summary tells you whether the agent is mostly stable, mostly improving, "
+        "and whether it ever reaches strong bursts of efficiency that could hide real discoveries."
     )
 
     return "\n".join(lines)
@@ -257,7 +269,7 @@ def _wrap_text_for_pdf(text: str, max_width_chars: int = 90) -> str:
     fixed width font style for simplicity, so this approximation is
     enough for readable output.
     """
-    wrapped_lines: list[str] = []
+    wrapped_lines: List[str] = []
     for line in text.splitlines():
         if not line.strip():
             wrapped_lines.append("")
@@ -297,6 +309,7 @@ def _draw_text_block(
 # Public API
 # --------------------------------------------------------------------
 
+
 def generate_pdf_report(
     *,
     markdown_report: str,
@@ -305,6 +318,7 @@ def generate_pdf_report(
     domain: Optional[str] = None,
     diagnostics: Optional[Dict[str, Any]] = None,
     option_c_signature: Optional[Dict[str, Any]] = None,
+    citations: Optional[List[Dict[str, Any]]] = None,
 ) -> Path:
     """
     Generate a PDF report from a markdown style report plus optional
@@ -324,6 +338,10 @@ def generate_pdf_report(
             Optional diagnostics dict from rye_metrics.build_run_diagnostics.
         option_c_signature:
             Optional bundle from rye_metrics.build_option_c_signature.
+        citations:
+            Optional list of citation dicts with at least title and url fields.
+            If provided, a "Sources and Citations" section is appended to
+            the report so humans can see where information came from.
 
     Returns:
         Path to the generated PDF file. If reportlab is not installed,
@@ -342,7 +360,22 @@ def generate_pdf_report(
     # If reportlab is not available, fall back to markdown file export.
     if not _REPORTLAB_AVAILABLE:
         fallback = out_path.with_suffix(".md")
-        fallback.write_text(markdown_report, encoding="utf-8")
+        # If citations are provided, append them in markdown so we still
+        # preserve transparency in fallback mode.
+        combined_markdown = markdown_report
+        if citations:
+            combined_markdown += "\n\n---\n\n## Sources and Citations\n\n"
+            for idx, c in enumerate(citations, start=1):
+                title = str(c.get("title") or "").strip()
+                url = str(c.get("url") or "").strip()
+                src = str(c.get("source") or "").strip()
+                line = f"{idx}. {title}"
+                if src:
+                    line += f" [{src}]"
+                if url:
+                    line += f" - {url}"
+                combined_markdown += line + "\n"
+        fallback.write_text(combined_markdown, encoding="utf-8")
         return fallback
 
     # Build a plain english summary section
@@ -355,7 +388,7 @@ def generate_pdf_report(
 
     header, body = _split_markdown_into_sections(markdown_report)
 
-    combined_text_parts: list[str] = []
+    combined_text_parts: List[str] = []
 
     # Top level header
     combined_text_parts.append("Autonomous Research Agent - PDF Report")
@@ -387,6 +420,25 @@ def generate_pdf_report(
         combined_text_parts.append("Full Technical Report")
         combined_text_parts.append("")
         combined_text_parts.append(body)
+        combined_text_parts.append("")
+        combined_text_parts.append("=" * 70)
+        combined_text_parts.append("")
+
+    # Optional explicit citation section so the PDF always tells
+    # where the information was obtained.
+    if citations:
+        combined_text_parts.append("Sources and Citations")
+        combined_text_parts.append("")
+        for idx, c in enumerate(citations, start=1):
+            title = str(c.get("title") or "").strip()
+            url = str(c.get("url") or "").strip()
+            src = str(c.get("source") or "").strip()
+            row = f"{idx}. {title}" if title else f"{idx}. (untitled)"
+            if src:
+                row += f" [{src}]"
+            if url:
+                row += f" - {url}"
+            combined_text_parts.append(row)
 
     full_text = "\n".join(combined_text_parts)
     wrapped_text = _wrap_text_for_pdf(full_text)
