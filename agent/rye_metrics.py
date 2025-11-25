@@ -1,5 +1,5 @@
 """
-RYE Metrics (Level 3, Swarm Aware, 90 Day Safe)
+RYE Metrics (Level 3, Swarm Aware, 90 Day Safe, Learning Aware 10x Ready)
 
 This upgraded module introduces:
 --------------------------------
@@ -18,11 +18,13 @@ This upgraded module introduces:
 • Per cycle RYE summaries (NEW)
 • Run level diagnostics bundle (NEW)
 • Tool RYE diagnostics for tool_events (NEW)
+• Learning adjusted RYE fields for 10x style cognitive speed factors (NEW)
 
 Backwards compatibility:
     Existing callers that only pass the original arguments still work:
     - compute_delta_r(...) can be called without novelty_score or coherence_gain.
     - compute_energy(...) can be called without swarm_size or swarm_layering.
+    - build_cycle_rye_summary(...) can be called without learning_speed_factor.
 """
 
 from __future__ import annotations
@@ -47,6 +49,11 @@ def normalize_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     This makes downstream metrics more robust and predictable for long runs
     where some cycles might be missing RYE or contain partial data.
+
+    Note:
+        This operates on the canonical "RYE" key. Learning adjusted
+        variants are handled separately and do not change this function
+        to keep legacy behavior stable.
     """
     if not isinstance(history, list):
         return []
@@ -430,7 +437,7 @@ def rye_percentiles(
 
 
 # ---------------------------------------------------------------------------
-# Per cycle helper: full RYE summary with domain weighting
+# Per cycle helper: full RYE summary with domain weighting and learning factor
 # ---------------------------------------------------------------------------
 
 def build_cycle_rye_summary(
@@ -441,6 +448,9 @@ def build_cycle_rye_summary(
     role: Optional[str] = None,
     cycle_index: Optional[int] = None,
     extra_signals: Optional[Dict[str, Any]] = None,
+    # Learning aware fields (for 10x modes)
+    learning_speed_factor: Optional[float] = None,
+    learning_profile_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Build a structured per cycle RYE summary used by TGRM and CoreAgent.
@@ -449,7 +459,15 @@ def build_cycle_rye_summary(
     - compute raw RYE
     - apply domain weighting
     - attach basic metadata (domain, role, cycle_index)
+    - attach learning aware RYE (10x modes) when a learning_speed_factor is provided
     - carry forward any extra signals (novelty, coherence, biomarkers, etc)
+
+    Learning logic:
+        rye_raw = ΔR / E
+        rye_learning_adjusted = rye_raw * learning_speed_factor
+
+    Where learning_speed_factor > 1.0 represents faster learning
+    (more repair yield per unit energy).
     """
     rye_raw = compute_rye(delta_r, energy_e)
     rye_weighted = apply_domain_weight(rye_raw, domain)
@@ -471,6 +489,25 @@ def build_cycle_rye_summary(
     if extra_signals:
         for k, v in extra_signals.items():
             summary[k] = v
+
+    # Learning aware RYE enrichment (10x ready)
+    if learning_speed_factor is not None:
+        try:
+            factor = float(learning_speed_factor)
+        except Exception:
+            factor = 1.0
+
+        factor = max(0.1, min(factor, 10.0))
+
+        summary["learning_speed_factor"] = factor
+        if learning_profile_hint is not None:
+            summary["learning_profile_hint"] = str(learning_profile_hint)
+
+        rye_learning_adjusted = rye_raw * factor
+        summary["RYE_learning_adjusted"] = rye_learning_adjusted
+        summary["RYE_learning_adjusted_weighted"] = apply_domain_weight(
+            rye_learning_adjusted, domain
+        )
 
     return summary
 
@@ -557,6 +594,8 @@ def build_run_diagnostics(
           "mid_percentile": Optional[float],
           "high_percentile": Optional[float],
           "domain": Optional[str],
+          "rye_avg_weighted": Optional[float],
+          "learning_adjusted": { ... }  # only present if RYE_learning_adjusted exists
         }
     """
     norm = normalize_history(history)
@@ -597,6 +636,52 @@ def build_run_diagnostics(
     if rye_avg is not None and domain is not None:
         diagnostics["rye_avg_weighted"] = apply_domain_weight(rye_avg, domain)
 
+    # Learning adjusted diagnostics (10x aware) if the history contains RYE_learning_adjusted
+    la_hist: List[Dict[str, Any]] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        v = _safe_float(entry.get("RYE_learning_adjusted"))
+        if v is None:
+            continue
+        # Keep chronological order but use canonical RYE key internally
+        la_hist.append({"RYE": v})
+
+    if la_hist:
+        la_norm = normalize_history(la_hist)
+        la_count = len(la_norm)
+
+        la_rolling = rolling_rye(la_norm, window=window)
+        la_robust_rolling = robust_rolling_rye(la_norm, window=window)
+        la_med = median_rye(la_norm)
+        la_trend = efficiency_trend(la_norm)
+        la_slope = regression_rye_slope(la_norm)
+        la_stab = stability_index(la_norm)
+        la_rec = recovery_momentum(la_norm)
+        la_low, la_mid, la_high = rye_percentiles(la_norm)
+
+        la_vals = [float(e["RYE"]) for e in la_norm]
+        la_avg = sum(la_vals) / len(la_vals) if la_vals else None
+        la_last = la_vals[-1] if la_vals else None
+
+        learning_diag: Dict[str, Any] = {
+            "count": la_count,
+            "rye_avg": la_avg,
+            "rye_median": la_med,
+            "rye_last": la_last,
+            "rolling_rye": la_rolling,
+            "robust_rolling_rye": la_robust_rolling,
+            "trend_simple": la_trend,
+            "trend_slope": la_slope,
+            "stability_index": la_stab,
+            "recovery_momentum": la_rec,
+            "low_percentile": la_low,
+            "mid_percentile": la_mid,
+            "high_percentile": la_high,
+        }
+
+        diagnostics["learning_adjusted"] = learning_diag
+
     return diagnostics
 
 
@@ -625,6 +710,7 @@ def compute_tool_rye(
           "duration_seconds": Optional[float],
           "energy_cost": Optional[float],
           "rye_delta": Optional[float],
+          "learning_speed_factor": Optional[float],  # optional 10x style hint
           "error": Optional[str],
           "extra": Optional[dict],
         }
@@ -638,15 +724,8 @@ def compute_tool_rye(
         - rye_avg: sum_delta_r / sum_energy if possible
         - rye_median: median per event rye_delta / energy_cost when both exist
         - rye_last: last per event ratio when both exist
-
-    Returns:
-        {
-          "tools": {
-             "browser": { ... },
-             "sandbox": { ... },
-             ...
-          }
-        }
+        - rye_median_learning: median per event ratio * learning_speed_factor (if available)
+        - rye_last_learning: last per event ratio * learning_speed_factor (if available)
     """
     if not isinstance(tool_events, list):
         tool_events = []
@@ -669,7 +748,8 @@ def compute_tool_rye(
             "error_events": 0,
             "sum_delta_r": 0.0,
             "sum_energy": 0.0,
-            "ratios": [],       # per event delta_r / energy_e
+            "ratios": [],             # per event delta_r / energy_e
+            "ratios_learning": [],    # per event learning adjusted ratios
             "last_timestamp": None,
         }
 
@@ -683,6 +763,7 @@ def compute_tool_rye(
 
         delta_r = _safe_float(ev.get("rye_delta"))
         energy_e = _safe_float(ev.get("energy_cost"))
+        lsf = _safe_float(ev.get("learning_speed_factor"))
 
         if delta_r is not None:
             t["sum_delta_r"] = float(t.get("sum_delta_r", 0.0)) + delta_r
@@ -690,7 +771,12 @@ def compute_tool_rye(
             t["sum_energy"] = float(t.get("sum_energy", 0.0)) + energy_e
 
         if delta_r is not None and energy_e is not None and energy_e > 0:
-            t["ratios"].append(delta_r / energy_e)
+            ratio = delta_r / energy_e
+            t["ratios"].append(ratio)
+
+            if lsf is not None:
+                factor = max(0.1, min(float(lsf), 10.0))
+                t["ratios_learning"].append(ratio * factor)
 
         ts = ev.get("timestamp")
         if isinstance(ts, str):
@@ -708,6 +794,11 @@ def compute_tool_rye(
             float(r) for r in ratios_raw if isinstance(r, (int, float))
         ]
 
+        ratios_learning_raw = t.get("ratios_learning", [])
+        ratios_learning: List[float] = [
+            float(r) for r in ratios_learning_raw if isinstance(r, (int, float))
+        ]
+
         sum_energy = float(t.get("sum_energy", 0.0))
         sum_delta_r = float(t.get("sum_delta_r", 0.0))
 
@@ -715,12 +806,19 @@ def compute_tool_rye(
         rye_median_val: Optional[float] = None
         rye_last: Optional[float] = None
 
+        rye_median_learning: Optional[float] = None
+        rye_last_learning: Optional[float] = None
+
         if sum_energy > 0 and sum_delta_r != 0:
             rye_avg = sum_delta_r / sum_energy
 
         if ratios:
             rye_median_val = statistics.median(ratios)
             rye_last = ratios[-1]
+
+        if ratios_learning:
+            rye_median_learning = statistics.median(ratios_learning)
+            rye_last_learning = ratios_learning[-1]
 
         events = int(t.get("events", 0))
         ok_events = int(t.get("ok_events", 0))
@@ -741,6 +839,8 @@ def compute_tool_rye(
             "rye_avg": rye_avg,
             "rye_median": rye_median_val,
             "rye_last": rye_last,
+            "rye_median_learning": rye_median_learning,
+            "rye_last_learning": rye_last_learning,
             "last_timestamp": last_timestamp,
         }
 
@@ -1204,7 +1304,7 @@ def build_option_c_signature(
     High-level Option C self-diagnosis snapshot.
 
     Combines:
-        - run diagnostics
+        - run diagnostics (including learning adjusted sub block if present)
         - volatility signature
         - equilibrium detection
         - TGRM harmonic index
