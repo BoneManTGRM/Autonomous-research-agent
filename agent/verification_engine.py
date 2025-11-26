@@ -178,9 +178,15 @@ class VerificationEngine:
         Run verification on pending hypotheses.
 
         If limit is provided, verify only up to that many items.
+        The pending list is first prioritized for learning speed,
+        so high impact and high information hypotheses are handled first.
         Returns a list of VerificationResult objects.
         """
         pending = self.hypothesis_manager.list_hypotheses("pending")
+
+        # Prioritize for learning speed: high impact, strong RYE, recent items first
+        pending = self._prioritize_pending(pending)
+
         if limit is not None:
             pending = pending[:limit]
 
@@ -211,16 +217,21 @@ class VerificationEngine:
         """
         Run all available checks on a single hypothesis and decide outcome.
 
-        This now includes:
-          - user-provided checks (literature / critique / data / structural / plausibility / consensus)
-          - memory consistency and equilibrium checks (optional)
+        Learning speed upgrades:
+          - compute fast internal RYE and history score first
+          - use those to attempt a low cost early decision
+          - only call expensive external hooks if needed
+
+        The full flow includes:
           - internal RYE and energy heuristic scoring
           - history based trend scoring
+          - user-provided checks (literature, critique, data, structural, plausibility, consensus)
+          - memory consistency and equilibrium checks (optional)
           - intelligence-profile guided weighting and thresholds
         """
-        pieces: List[Dict[str, Any]] = []
         reasons: List[str] = []
         extra_all: Dict[str, Any] = {}
+        pieces: List[Dict[str, Any]] = []
 
         # 0) Resolve adaptive thresholds for this hypothesis
         local_validate, local_reject = self._adapt_thresholds(hyp)
@@ -231,78 +242,146 @@ class VerificationEngine:
             "local_reject": local_reject,
         }
 
-        # 1) literature check
-        if self.literature_check_fn is not None:
-            lit_res = self._safe_call("literature_check", self.literature_check_fn, hyp)
-            pieces.append(self._tagged_piece("literature", lit_res))
-            reasons.extend(lit_res.get("reasons", []))
-            extra_all["literature_check"] = lit_res
-
-        # 2) critique check (swarm or specialist critic role)
-        if self.critique_fn is not None:
-            crit_res = self._safe_call("critique", self.critique_fn, hyp)
-            pieces.append(self._tagged_piece("critique", crit_res))
-            reasons.extend(crit_res.get("reasons", []))
-            extra_all["critique"] = crit_res
-
-        # 3) data / code check
-        if self.data_check_fn is not None:
-            data_res = self._safe_call("data_check", self.data_check_fn, hyp)
-            pieces.append(self._tagged_piece("data", data_res))
-            reasons.extend(data_res.get("reasons", []))
-            extra_all["data_check"] = data_res
-
-        # 4) structural / formal check (optional)
-        if self.structural_check_fn is not None:
-            struct_res = self._safe_call("structural", self.structural_check_fn, hyp)
-            pieces.append(self._tagged_piece("structural", struct_res))
-            reasons.extend(struct_res.get("reasons", []))
-            extra_all["structural_check"] = struct_res
-
-        # 5) plausibility check (optional: domain-aware, safety-aware)
-        if self.plausibility_check_fn is not None:
-            plaus_res = self._safe_call("plausibility", self.plausibility_check_fn, hyp)
-            pieces.append(self._tagged_piece("plausibility", plaus_res))
-            reasons.extend(plaus_res.get("reasons", []))
-            extra_all["plausibility_check"] = plaus_res
-
-        # 6) consensus/alignment check (optional: multi-agent agreement)
-        if self.consensus_check_fn is not None:
-            cons_res = self._safe_call("consensus", self.consensus_check_fn, hyp)
-            pieces.append(self._tagged_piece("consensus", cons_res))
-            reasons.extend(cons_res.get("reasons", []))
-            extra_all["consensus_check"] = cons_res
-
-        # 7) memory consistency check (optional, learns from long term memory)
-        if self.memory_consistency_fn is not None:
-            mem_res = self._safe_call("memory_consistency", self.memory_consistency_fn, hyp)
-            pieces.append(self._tagged_piece("memory", mem_res))
-            reasons.extend(mem_res.get("reasons", []))
-            extra_all["memory_consistency_check"] = mem_res
-
-        # 8) equilibrium / stability check (optional)
-        if self.equilibrium_check_fn is not None:
-            eq_res = self._safe_call("equilibrium", self.equilibrium_check_fn, hyp)
-            pieces.append(self._tagged_piece("equilibrium", eq_res))
-            reasons.extend(eq_res.get("reasons", []))
-            extra_all["equilibrium_check"] = eq_res
-
-        # 9) internal RYE + energy consistency scoring
+        # 1) Always compute internal RYE and history pieces first
         rye_piece = self._compute_rye_energy_piece(hyp)
         pieces.append(rye_piece)
         reasons.extend(rye_piece.get("reasons", []))
         extra_all["rye_energy"] = rye_piece
 
-        # 10) history based trend and learning piece
         history_piece = self._compute_history_piece(hyp)
         if history_piece is not None:
             pieces.append(history_piece)
             reasons.extend(history_piece.get("reasons", []))
             extra_all["history"] = history_piece
 
-        # Combine to final score
+        # 2) Try a fast path decision using only internal pieces
+        pre_score, pre_component_scores = self._combine_scores(pieces, hyp=hyp)
+        extra_all["fast_path_score"] = pre_score
+        extra_all["fast_path_components"] = pre_component_scores
+
+        fast_margin = 0.15  # how far beyond threshold we require for early decision
+        fast_status: Optional[str] = None
+
+        if pre_score >= (local_validate + fast_margin):
+            fast_status = "validated"
+        elif pre_score <= (local_reject - fast_margin):
+            fast_status = "rejected"
+
+        if fast_status is not None:
+            # Fast path: skip external costly checks, but still update history and logs
+            self._update_history(hyp, pre_score)
+            tier_label = self._infer_tier_label(pre_score)
+            extra_all["tier_label"] = tier_label
+            extra_all["fast_path_used"] = True
+
+            if fast_status == "validated":
+                note = (
+                    f"Fast path validation by verification engine at {_utc_iso()} "
+                    f"with score {pre_score:.3f}"
+                )
+                updated = self.hypothesis_manager.validate_hypothesis(
+                    hyp.hypothesis_id,
+                    note=note,
+                )
+                self._log_validated(
+                    updated or hyp,
+                    pre_score,
+                    reasons,
+                    extra_all,
+                    component_scores=pre_component_scores,
+                    thresholds={"validate": local_validate, "reject": local_reject},
+                )
+            else:
+                note = (
+                    f"Fast path rejection by verification engine at {_utc_iso()} "
+                    f"with score {pre_score:.3f}"
+                )
+                updated = self.hypothesis_manager.reject_hypothesis(
+                    hyp.hypothesis_id,
+                    note=note,
+                )
+                self._log_rejected(
+                    updated or hyp,
+                    pre_score,
+                    reasons,
+                    extra_all,
+                    component_scores=pre_component_scores,
+                    thresholds={"validate": local_validate, "reject": local_reject},
+                )
+
+            extra_all["component_scores"] = pre_component_scores
+            extra_all["final_score"] = pre_score
+            extra_all["status"] = fast_status
+
+            return VerificationResult(
+                hypothesis_id=hyp.hypothesis_id,
+                status=fast_status,
+                score=pre_score,
+                reasons=reasons,
+                extra=extra_all,
+            )
+
+        # 3) Full verification path - external checks only if fast path did not decide
+        extra_all["fast_path_used"] = False
+
+        # literature check
+        if self.literature_check_fn is not None:
+            lit_res = self._safe_call("literature_check", self.literature_check_fn, hyp)
+            pieces.append(self._tagged_piece("literature", lit_res))
+            reasons.extend(lit_res.get("reasons", []))
+            extra_all["literature_check"] = lit_res
+
+        # critique check
+        if self.critique_fn is not None:
+            crit_res = self._safe_call("critique", self.critique_fn, hyp)
+            pieces.append(self._tagged_piece("critique", crit_res))
+            reasons.extend(crit_res.get("reasons", []))
+            extra_all["critique"] = crit_res
+
+        # data / code check
+        if self.data_check_fn is not None:
+            data_res = self._safe_call("data_check", self.data_check_fn, hyp)
+            pieces.append(self._tagged_piece("data", data_res))
+            reasons.extend(data_res.get("reasons", []))
+            extra_all["data_check"] = data_res
+
+        # structural check
+        if self.structural_check_fn is not None:
+            struct_res = self._safe_call("structural_check", self.structural_check_fn, hyp)
+            pieces.append(self._tagged_piece("structural", struct_res))
+            reasons.extend(struct_res.get("reasons", []))
+            extra_all["structural_check"] = struct_res
+
+        # plausibility check
+        if self.plausibility_check_fn is not None:
+            plaus_res = self._safe_call("plausibility_check", self.plausibility_check_fn, hyp)
+            pieces.append(self._tagged_piece("plausibility", plaus_res))
+            reasons.extend(plaus_res.get("reasons", []))
+            extra_all["plausibility_check"] = plaus_res
+
+        # consensus check
+        if self.consensus_check_fn is not None:
+            cons_res = self._safe_call("consensus_check", self.consensus_check_fn, hyp)
+            pieces.append(self._tagged_piece("consensus", cons_res))
+            reasons.extend(cons_res.get("reasons", []))
+            extra_all["consensus_check"] = cons_res
+
+        # memory consistency check
+        if self.memory_consistency_fn is not None:
+            mem_res = self._safe_call("memory_consistency_check", self.memory_consistency_fn, hyp)
+            pieces.append(self._tagged_piece("memory", mem_res))
+            reasons.extend(mem_res.get("reasons", []))
+            extra_all["memory_consistency_check"] = mem_res
+
+        # equilibrium / stability check
+        if self.equilibrium_check_fn is not None:
+            eq_res = self._safe_call("equilibrium_check", self.equilibrium_check_fn, hyp)
+            pieces.append(self._tagged_piece("equilibrium", eq_res))
+            reasons.extend(eq_res.get("reasons", []))
+            extra_all["equilibrium_check"] = eq_res
+
+        # 4) Combine all scores
         final_score, component_scores = self._combine_scores(pieces, hyp=hyp)
-        status = "inconclusive"
 
         # Update learning history
         self._update_history(hyp, final_score)
@@ -311,7 +390,9 @@ class VerificationEngine:
         tier_label = self._infer_tier_label(final_score)
         extra_all["tier_label"] = tier_label
 
-        # Decide and propagate back into hypothesis manager + discovery log
+        status = "inconclusive"
+
+        # Decide and propagate back into hypothesis manager and discovery log
         if final_score >= local_validate:
             status = "validated"
             note = (
@@ -330,7 +411,6 @@ class VerificationEngine:
                 component_scores=component_scores,
                 thresholds={"validate": local_validate, "reject": local_reject},
             )
-
         elif final_score <= local_reject:
             status = "rejected"
             note = (
@@ -350,7 +430,6 @@ class VerificationEngine:
                 thresholds={"validate": local_validate, "reject": local_reject},
             )
         else:
-            # still pending, but we log the attempt
             self._log_inconclusive(
                 hyp,
                 final_score,
@@ -390,7 +469,7 @@ class VerificationEngine:
         except Exception as e:
             return {
                 "score": 0.0,
-                "reasons": [f"{name} check failed with error: {e}"],
+                "reasons": [f"{name} failed with error: {e}"],
                 "extra": {"error": str(e)},
             }
 
@@ -418,6 +497,68 @@ class VerificationEngine:
         return out
 
     # ------------------------------------------------------------------
+    # pending prioritization for learning speed
+    # ------------------------------------------------------------------
+    def _prioritize_pending(
+        self,
+        hypotheses: List[HypothesisRecord],
+    ) -> List[HypothesisRecord]:
+        """
+        Sort pending hypotheses so the engine learns faster.
+
+        Priority rules (all best effort and defensive):
+            - higher estimated impact first
+            - higher RYE or delta_R first
+            - more recent hypotheses first
+        """
+        def _impact_score(h: HypothesisRecord) -> float:
+            val = getattr(h, "impact", None)
+            if isinstance(val, (int, float)):
+                return float(val)
+            val = getattr(h, "estimated_impact", None)
+            if isinstance(val, (int, float)):
+                return float(val)
+            return 0.0
+
+        def _rye_score(h: HypothesisRecord) -> float:
+            try:
+                rye = getattr(h, "rye_after", None)
+                if rye is None:
+                    rye = getattr(h, "RYE", None)
+                if rye is not None:
+                    return float(rye)
+            except Exception:
+                pass
+            try:
+                dr = getattr(h, "delta_r", None)
+                if dr is not None:
+                    return float(dr)
+            except Exception:
+                pass
+            return 0.0
+
+        def _timestamp_score(h: HypothesisRecord) -> float:
+            ts = getattr(h, "created_at", None) or getattr(h, "timestamp", None)
+            if isinstance(ts, (int, float)):
+                return float(ts)
+            if isinstance(ts, str):
+                try:
+                    return datetime.fromisoformat(ts).timestamp()
+                except Exception:
+                    return 0.0
+            return 0.0
+
+        scored = []
+        for h in hypotheses:
+            s_imp = _impact_score(h)
+            s_rye = _rye_score(h)
+            s_ts = _timestamp_score(h)
+            scored.append((s_imp, s_rye, s_ts, h))
+
+        scored.sort(key=lambda x: (x[0], x[1], x[2]), reverse=True)
+        return [h for _, _, _, h in scored]
+
+    # ------------------------------------------------------------------
     # RYE / energy piece
     # ------------------------------------------------------------------
     def _compute_rye_energy_piece(self, hyp: HypothesisRecord) -> Dict[str, Any]:
@@ -433,7 +574,7 @@ class VerificationEngine:
 
         This is where Reparodynamics is explicitly wired into verification.
         High RYE, sustained RYE, and positive delta_R give strong boosts
-        toward Tier 2 / Tier 3 style discoveries.
+        toward Tier 2 and Tier 3 style discoveries.
         """
         reasons: List[str] = []
         score = 0.5  # neutral default
@@ -461,7 +602,7 @@ class VerificationEngine:
 
             if dr <= 0:
                 score = 0.10
-                reasons.append("RYE: hypothesis associated with non-positive delta_R, penalized.")
+                reasons.append("RYE: hypothesis associated with non positive delta_R, penalized.")
             elif dr < 0.01:
                 score = 0.45
                 reasons.append("RYE: very small positive delta_R, slight boost.")
@@ -482,10 +623,10 @@ class VerificationEngine:
             except Exception:
                 rv = 0.0
 
-            # For a research agent, RYE in about 0.02 to 0.20 is realistic high-efficiency zone.
+            # For a research agent, RYE in about 0.02 to 0.20 is realistic high efficiency zone.
             if rv <= 0:
                 score = min(score, 0.15)
-                reasons.append("Energy: non-positive RYE, downgraded.")
+                reasons.append("Energy: non positive RYE, downgraded.")
             elif rv < 0.01:
                 reasons.append("Energy: low but positive RYE, weak efficiency.")
             elif rv < 0.05:
@@ -695,16 +836,16 @@ class VerificationEngine:
           - fall back to neutral if no scores
 
         Current weights are tuned to favor:
-          - literature + critique + data for core validity
+          - literature, critique and data for core validity
           - memory and equilibrium for long-run stability
           - rye_energy for reparodynamic strength
-          - structural / plausibility / consensus as strong modifiers
+          - structural, plausibility and consensus as strong modifiers
           - history as a learning stabilizer
         """
         if not pieces:
             return 0.0, {}
 
-        # Base weight map (can be adjusted over time)
+        # Base weight map
         base_weights: Dict[str, float] = {
             "literature": 0.20,
             "critique": 0.16,
@@ -718,13 +859,13 @@ class VerificationEngine:
             "history": 0.08,
         }
 
-        # If this is explicitly a math/theory hypothesis, increase structural weight
+        # If this is explicitly a math or theory hypothesis, increase structural weight
         domain = getattr(hyp, "domain", None) or getattr(hyp, "domain_tag", "general")
         domain_str = str(domain).lower()
         if domain_str in ("math", "theory"):
             base_weights["structural"] = 0.18
 
-        # Domain specific nudge for longevity (clinical focus)
+        # Domain specific nudge for longevity
         if domain_str in ("longevity", "antiaging", "anti_aging"):
             base_weights["literature"] += 0.03
             base_weights["data"] += 0.03
@@ -744,7 +885,6 @@ class VerificationEngine:
             weight = base_weights.get(kind, 0.05)
 
             scores_by_kind[kind] = raw_score
-
             weighted_sum += raw_score * weight
             total_weight += weight
             used_weights[kind] = used_weights.get(kind, 0.0) + weight
@@ -754,7 +894,6 @@ class VerificationEngine:
         else:
             final_score = weighted_sum / total_weight
 
-        # Tiny safety clamp
         final_score = max(0.0, min(1.0, final_score))
 
         return final_score, scores_by_kind
@@ -786,7 +925,7 @@ class VerificationEngine:
         equilibrium_focus = float(profile.get("equilibrium_focus", 0.5))
         tier3_bias = float(profile.get("tier3_bias", 0.0))
 
-        # Deep or ultra_deep should favor structural, data, and memory
+        # Deep or ultra_deep should favor structural, data and memory
         if depth in ("deep", "ultra_deep"):
             base_weights["structural"] += 0.02
             base_weights["data"] += 0.02
@@ -809,10 +948,15 @@ class VerificationEngine:
             base_weights["equilibrium"] += 0.03
             base_weights["history"] += 0.02
 
-        # Tier 3 bias: emphasize rye_energy and consensus (for strong discoveries)
+        # Tier 3 bias: emphasize rye_energy and consensus
         if tier3_bias > 0.6:
             base_weights["rye_energy"] += 0.02
             base_weights["consensus"] += 0.02
+
+        # Exploration knob could slightly push literature and data higher
+        if exploration > 0.7:
+            base_weights["literature"] += 0.01
+            base_weights["data"] += 0.01
 
         return base_weights
 
@@ -821,7 +965,7 @@ class VerificationEngine:
     # ------------------------------------------------------------------
     def _infer_tier_label(self, score: float) -> Optional[str]:
         """
-        Convert verification score into a Tier-style label.
+        Convert verification score into a Tier style label.
         These are soft hints for later classification and papers.
         """
         if score >= 0.9:
@@ -844,7 +988,7 @@ class VerificationEngine:
         """
         Record a validated hypothesis in the discovery log.
 
-        High score hypotheses can be tagged as Tier 1 / Tier 2 / Tier 3 candidates.
+        High score hypotheses can be tagged as Tier 1, Tier 2 or Tier 3 candidates.
         """
         component_scores = component_scores or {}
         thresholds = thresholds or {}
