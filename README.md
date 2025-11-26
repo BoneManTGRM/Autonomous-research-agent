@@ -216,3 +216,122 @@ Performs micro-updates to grow long-run stability curves.
 ---
 
 # 🧩 Repository Structure
+
+Autonomous-research-agent/
+│
+├── Config/
+│   └── settings.yaml
+│
+├── agent/
+│   ├── core_agent.py
+│   ├── tgrm_loop.py
+│   ├── memory_store.py
+│   ├── presets.py
+│   ├── rye_metrics.py
+│   ├── contradictions.py
+│   ├── discovery_engine.py
+│   ├── discovery_log.py
+│   ├── verification_engine.py
+│   ├── hypothesis_engine.py
+│   ├── hypothesis_manager.py
+│   ├── snapshot_generator.py
+│   ├── strategy_profiles.py
+│   ├── meta_controller.py
+│   ├── gold_notebook.py
+│   ├── report_generator.py
+│   ├── report_builder.py
+│   ├── pdf_report.py
+│   ├── pdf_reporter.py
+│   ├── replay_buffer.py
+│   ├── memory_pruner.py
+│   ├── mechanism_builder.py
+│   ├── mechanism_graph_engine.py
+│   ├── mechanism_evolution_engine.py
+│   ├── mechanism_hyperstack.py
+│   ├── mechanism_compression_engine.py
+│   ├── hallmarks_profiles.py
+│   ├── intelligence_profiles.py
+│   ├── multi_hallmark_pipeline.py
+│   │
+│   ├── specialists/
+│   │   ├── biomarker_agent.py
+│   │   ├── critic_agent.py
+│   │   ├── meta_evaluator.py
+│   │   ├── pdf_summarizer_agent.py
+│   │   └── synergy_agent.py
+│   │
+│   └── tools/
+│       ├── browser_tool.py
+│       ├── code_sandbox.py
+│       ├── data_connectors.py
+│       ├── pdf_reporter.py
+│       ├── tool_router.py
+│       └── web_search.py
+│
+├── scripts/
+│   ├── compact_memory.py
+│   └── migrate_memory.py
+│
+├── swarm/
+│   └── swarm_coordinator.py
+│
+├── logs/
+│   ├── discovery/
+│   └── verification/
+│
+├── tests/
+│   ├── test_citations.py
+│   ├── test_curriculum.py
+│   └── test_replay_buffer.py
+│
+├── app_streamlit.py
+├── engine_worker.py
+├── daily_runner.py
+├── run_agent.py
+├── config.py
+├── settings.py
+├── storage.py
+├── main.py
+├── render.yaml
+├── .env.example
+├── requirements.txt
+└── README.md
+
+---
+
+# 🛡 Licensing (Option C — Strong Legal Tone)
+
+**This software is PROPRIETARY. All rights are reserved.**
+
+Two licenses govern this project:
+
+### **1. ARA-FCCL (Full-Control License)**  
+- No redistribution, sublicensing, resale, publication, or hosting.  
+- No public or private forks for distribution.  
+- No derivative commercialization.  
+- No competing systems may be created using this software.  
+- All derivative works are the property of **Cody Ryan Jenkins**.  
+- License may be revoked at any time for violation.  
+
+This is the strictest license and applies to all non-commercial users.
+
+---
+
+### **2. ARA-Commercial License**  
+For organizations, companies, and paid users.  
+Includes:
+
+- Single-seat commercial use  
+- Non-transferable, non-sublicensable  
+- Subject to audit  
+- Royalties may apply  
+- Revocable upon breach  
+
+---
+
+**Use of this software constitutes full acceptance of these licenses.**  
+See `LICENSE` and `COMMERCIAL_LICENSE.md` for complete terms.
+
+---
+
+# ✔ End of README
