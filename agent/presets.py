@@ -29,11 +29,13 @@ from __future__ import annotations
 from typing import Dict, Any, List, Optional
 
 # Simple version tag so the app and UI can display which preset set is loaded.
-PRESETS_VERSION: str = "2025-11-25-10x"
+PRESETS_VERSION: str = "2025-11-26-10x-speed"
 
 # ---------------------------------------------------------------------
 # Global Runtime Profiles (applies for all presets)
 # These are interpreted by CoreAgent and engine_worker.
+# Each profile now also carries learning speed hints that can be used
+# by the learning_burst layer and MemoryStore learning profiles.
 # ---------------------------------------------------------------------
 RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
     "1_hour": {
@@ -274,6 +276,15 @@ CONTINUOUS_MODE_DEFAULTS: Dict[str, Any] = {
                 "delta_critic_strength": 0.20,
                 "delta_verification_rigidity": 0.10,
             },
+        },
+        # Fast path integration with MemoryStore goal_index and learning profiles
+        "fast_path_goal_index": True,
+        "use_learning_profiles": True,
+        "learning_profile_reporting": {
+            "enabled": True,
+            "report_every_n_cycles": 25,
+            "include_goal_leaderboard": True,
+            "include_role_leaderboard": True,
         },
     },
 }
