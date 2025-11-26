@@ -1,108 +1,139 @@
-Commercial License Agreement (CLA)
-Version 1.0 — 2025
-For the Reparodynamics Autonomous Research Agent
-Copyright © 2025
-Licensor: Cody Ryan Jenkins
+Autonomous Research Agent Full-Control Commercial License (ARA-FCCL) v2.0
+Copyright (c) 2025 Cody Ryan Jenkins. All rights reserved.
 
-====================================================================
-1. GRANT OF LICENSE
-====================================================================
+This is a proprietary commercial license. All rights not expressly granted 
+are reserved by Cody Ryan Jenkins.
 
-The Licensor grants the Licensee a **non-exclusive, non-transferable,
-non-sublicensable commercial license** to use the Software for
-**Production Use** prior to January 1, 2029.
+1. Ownership
 
-This includes:
+   The Autonomous Research Agent (“Software”), including but not limited to
+   all source code, mechanisms, Reparodynamics, TGRM, RYE, MSIL, swarm 
+   coordination systems, reporting engines, diagnostics, discovery logic, 
+   AI reasoning models, and any derivative intellectual property, is the sole 
+   property of Cody Ryan Jenkins.
 
-  ✔ Internal enterprise or organizational use  
-  ✔ Cloud or on-premise deployment  
-  ✔ Integration into research workflows  
-  ✔ Use for scientific, analytical, or decision-making purposes  
-  ✔ Use in commercial environments  
+   The Licensee receives NO ownership rights. All rights remain exclusively 
+   with the Licensor.
 
-This license supersedes the restrictions in Section 2 of the RBSL.
+2. Grant of Commercial Rights (Extremely Limited)
 
+   Subject to full compliance with this License and payment of all commercial 
+   fees and royalties, the Licensee is granted a:
 
-====================================================================
-2. RESTRICTIONS
-====================================================================
+     ONE-SEAT, NON-TRANSFERABLE, NON-SUBLICENSABLE, NON-EXCLUSIVE,
+     REVOCABLE COMMERCIAL USE LICENSE
 
-The Licensee MAY NOT:
+   permitted for:
+     a. Internal commercial use on ONE server/environment.
+     b. Integration into ONE internal product or workflow.
 
-  ✘ Fork the Software  
-  ✘ Modify or create derivative works  
-  ✘ Redistribute the Software  
-  ✘ Rebrand or rename Reparodynamics, TGRM, or RYE  
-  ✘ Sell the Software or offer it as a service  
-  ✘ Build competing research agents, frameworks, or tools  
-  ✘ Provide access to third parties  
-  ✘ Train models using any proprietary outputs without permission  
+   No other rights are granted.
 
-Any violation revokes the license immediately.
+3. Restrictions
 
+   The Licensee may NOT:
 
-====================================================================
-3. TERM
-====================================================================
+     a. Sell, distribute, sublicense, rent, lease, or share the Software.
+     b. Publish, host, open-source, or make the Software available to any 
+        third party.
+     c. Create forks, derivative works, or modified versions for distribution.
+     d. Use the Software to create competing AI agents or longevity systems.
+     e. Rebrand or claim authorship of the Software or scientific terms.
+     f. Allow customers, clients, contractors, or partners to access the Software.
+     g. File patents or claim intellectual property over any derivative work.
+     h. Use the Software in any way not explicitly approved by Cody Ryan Jenkins.
 
-This commercial license is valid **until the Change Date**:
+4. Derivative Works
 
-    January 1, 2029
+   Every modification, improvement, enhancement, or derivative created by the 
+   Licensee:
 
-After that date, the Software becomes Apache 2.0 licensed for all
-users, but the Licensee must still maintain scientific attribution.
+     a. Automatically becomes the sole property of Cody Ryan Jenkins.
+     b. May only be used internally unless further commercial rights are purchased.
+     c. Must be provided to the Licensor upon request during audit.
 
+5. Royalties and Fees
 
-====================================================================
-4. FEES
-====================================================================
+   Commercial use requires paid licensing and continuing royalties as defined 
+   in separate commercial agreements.
 
-License fees are negotiated individually and may include:
+   The Licensor may adjust royalty rates at any time with written notice.
 
-  - One-time commercial usage fee  
-  - Annual renewal  
-  - Enterprise support package  
-  - Priority feature requests  
-  - Extended swarm capabilities  
-  - Option C diagnostics training  
+   No commercial rights are granted without paid status.
 
+6. Confidentiality
 
-====================================================================
-5. SUPPORT
-====================================================================
+   The Software is proprietary trade-secret material.
+   The Licensee must ensure strict confidentiality and prevent any unauthorized 
+   access, exposure, or dissemination.
 
-Commercial Licensees may optionally receive:
+7. Audit Rights
 
-  ✔ Integration guidance  
-  ✔ Stability tracking assistance  
-  ✔ RYE/TGRM tuning  
-  ✔ Swarm orchestration optimization  
-  ✔ Breakthrough diagnostics support  
+   The Licensor may audit the Licensee’s systems and usage at any time to 
+   ensure compliance.
 
+   Failure to comply with an audit request constitutes breach.
 
-====================================================================
-6. OWNERSHIP
-====================================================================
+8. Enforcement, Legal Rights, and Remedies
 
-All rights not expressly granted remain with the Licensor.
+   If the Licensee violates this License, the Licensor is entitled to:
 
-Reparodynamics, TGRM, and RYE remain the intellectual property of
-**Cody Ryan Jenkins**, and no ownership transfer is implied.
+     a. Immediate termination of all rights.
+     b. A court-ordered injunction preventing further use.
+     c. DMCA takedowns against any hosting, forks, publications, or uploads.
+     d. Monetary damages for:
+         - Lost profits
+         - Licensing fees
+         - Royalty theft
+         - Statutory damages under copyright law
+         - Punitive damages where applicable
+     e. Recovery of all legal fees, attorney fees, and court costs.
+     f. Seizure or destruction of unauthorized copies.
+     g. Forced compliance orders.
 
+   The Licensee acknowledges that unauthorized use, copying, distribution, 
+   or sublicensing constitutes BOTH:
 
-====================================================================
-7. CONTACT
-====================================================================
+     - Breach of contract  
+     - Copyright infringement  
 
-To obtain a license:
+   and agrees the Licensor may sue in either or both categories.
 
-**Email:**  
-reparodynamics@proton.me
+9. Revocation
 
-**Subject Line:**  
-Commercial License Request — Autonomous Research Agent
+   The Licensor may revoke this License immediately for:
 
+     - Any violation
+     - Non-payment
+     - Unauthorized redistribution
+     - Competitive use
+     - Attempted sublicensing
+     - Failure to maintain confidentiality
 
-====================================================================
-END OF AGREEMENT
-====================================================================
+   After revocation, the Licensee must:
+
+     - Immediately cease all use
+     - Delete all copies
+     - Destroy derivatives
+     - Certify destruction in writing
+
+10. Warranty Disclaimer
+
+   The Software is provided “AS IS” without warranty.
+
+11. Limitation of Liability
+
+   The Licensor is not liable for any indirect or consequential damages.
+
+12. Governing Law
+
+   This License is governed exclusively by the laws chosen by Cody Ryan Jenkins.
+
+13. Acceptance
+
+   Use of the Software in ANY capacity constitutes full acceptance of this License.
+
+For commercial licensing, enterprise rights, or multi-seat licensing,
+contact:
+   Cody Ryan Jenkins
+   (insert your preferred contact method)
