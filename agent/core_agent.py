@@ -98,6 +98,12 @@ Ultra speed profiles:
     Speed modes are exposed via config["speed_mode"] and do not break
     existing callers. When other modules are upgraded, they can read
     this mode to coordinate ultra fast, high accuracy runs.
+
+Citation tracking:
+    When citations are enabled, CoreAgent will propagate any citations
+    returned by TGRMLoop into per cycle summaries, run state, and
+    continuous run metadata so that the UI and report generator can
+    display clear source provenance.
 """
 
 from __future__ import annotations
@@ -422,6 +428,39 @@ class CoreAgent:
         else:
             self.intelligence_profile = {}
         self._apply_intelligence_profile()
+
+    # ------------------------------------------------------------------
+    # Source controls helpers
+    # ------------------------------------------------------------------
+    def set_source_controls(self, controls: Dict[str, bool]) -> None:
+        """Replace the default source controls with a validated copy.
+
+        Keys should be strings and values should be bools.
+        This does not affect any existing saved state, only future runs.
+        """
+        if not isinstance(controls, dict):
+            return
+        cleaned: Dict[str, bool] = {}
+        for k, v in controls.items():
+            key = str(k)
+            if isinstance(v, bool):
+                cleaned[key] = v
+        self.source_controls = cleaned
+
+    def update_source_controls(self, controls: Dict[str, bool]) -> None:
+        """Update existing source controls with a partial override dict."""
+        if not isinstance(controls, dict):
+            return
+        current = dict(self.source_controls)
+        for k, v in controls.items():
+            key = str(k)
+            if isinstance(v, bool):
+                current[key] = v
+        self.source_controls = current
+
+    def get_source_controls(self) -> Dict[str, bool]:
+        """Return a shallow copy of the current default source controls."""
+        return dict(self.source_controls)
 
     # ------------------------------------------------------------------
     # Speed mode and meta helpers
@@ -809,12 +848,59 @@ class CoreAgent:
         except Exception:
             return
 
+    # Public discovery status helper
+    def get_discovery_status(self) -> Dict[str, Any]:
+        """Return a compact view of discovery and hypothesis state.
+
+        Safe to call from the UI. Never raises.
+        """
+        status: Dict[str, Any] = {
+            "last_rye": self._last_rye,
+            "pending_hypotheses": None,
+            "validated_hypotheses": None,
+            "rejected_hypotheses": None,
+        }
+        try:
+            hyp_summary = self.hypothesis_manager.summary_strings()
+            if isinstance(hyp_summary, dict):
+                pending = hyp_summary.get("pending", []) or []
+                validated = hyp_summary.get("validated", []) or []
+                rejected = hyp_summary.get("rejected", []) or []
+                status["pending_hypotheses"] = len(pending)
+                status["validated_hypotheses"] = len(validated)
+                status["rejected_hypotheses"] = len(rejected)
+        except Exception:
+            pass
+
+        try:
+            if hasattr(self.discovery_logger, "run_id"):
+                status["current_run_id"] = getattr(self.discovery_logger, "run_id", None)
+        except Exception:
+            pass
+
+        return status
+
     # ------------------------------------------------------------------
     # Multi-agent utilities
     # ------------------------------------------------------------------
     def get_agent_roles(self) -> List[str]:
         """Return the configured logical agent roles (capped at max_agents)."""
         return list(self.agent_roles[: self.max_agents])
+
+    def get_swarm_status(self) -> Dict[str, Any]:
+        """Return a compact view of swarm configuration and recent stats."""
+        status: Dict[str, Any] = {
+            "max_agents": self.max_agents,
+            "agent_roles": list(self.agent_roles[: self.max_agents]),
+            "speed_mode": self.speed_mode,
+            "recent_round_rye": [],
+        }
+        try:
+            swarm_stats = self._meta_state.get("swarm_run_stats") or {}
+            status["recent_round_rye"] = swarm_stats.get("recent_round_rye", []) or []
+        except Exception:
+            pass
+        return status
 
     def spawn_child_agent(self, extra_config: Optional[Dict[str, Any]] = None) -> "CoreAgent":
         """Create a new CoreAgent that shares the same MemoryStore.
@@ -2125,6 +2211,7 @@ class CoreAgent:
             "training_profile": dict(self.training_profile) if self.training_profile else {},
             "learning_plan": dict(self.learning_plan) if self.learning_plan else {},
             "speed_mode": self.speed_mode,
+            "citations_enabled": self.citations_enabled,
         }
         try:
             history = self.memory_store.get_cycle_history()
