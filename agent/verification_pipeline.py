@@ -30,7 +30,6 @@ This file is written to be optional:
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
-import math
 import statistics
 from datetime import datetime
 
@@ -392,12 +391,12 @@ class VerificationPipeline:
 
     def _same_target(self, a: str, b: str) -> bool:
         """Heuristic target matching."""
-        if "mTOR" in a or "mtor" in a:
-            return ("mtor" in b) or ("mTOR" in b)
-        if "NAD" in a or "nad" in a:
-            return ("nad" in b) or ("NAD" in b)
-        if "senescence" in a:
-            return "senescence" in b
+        if "mtor" in a or "mtor" in b:
+            return ("mtor" in b) or ("mtor" in a)
+        if "nad" in a or "nad" in b:
+            return ("nad" in b) or ("nad" in a)
+        if "senescence" in a and "senescence" in b:
+            return True
         return False
 
     # ------------------------------------------------------------------
@@ -639,7 +638,7 @@ class VerificationPipeline:
         verification_score: float,
     ) -> None:
         """Send high value motifs to replay buffer if available."""
-        if not self.replay:
+        if self.replay_buffer is None:
             return
 
         if rye_value < self.min_rye_for_motif:
@@ -662,7 +661,7 @@ class VerificationPipeline:
                         domain,
                     ],
                 }
-                self.replay.add_item(item)  # type: ignore[attr-defined]
+                self.replay_buffer.add_item(item)  # type: ignore[attr-defined]
             except Exception:
                 # Motif routing must never break the main pipeline
                 continue
