@@ -1572,7 +1572,7 @@ def main() -> None:
             with adv_cols[4]:
                 st.metric("Recovery momentum", f"{momentum_val:.3f}" if momentum_val is not None else "n/a")
 
-            # Learning speed and breakthrough profile
+            # Learning speed and breakthrough profile plus 10x Option C view
             st.markdown("### Learning speed and breakthrough profile")
 
             hours_run = compute_run_hours(history)
@@ -1613,11 +1613,89 @@ def main() -> None:
             with ls_cols[3]:
                 st.metric("Run tier", tier_label or "n/a")
 
+            # New Option C style 10x learning dashboard
+            st.markdown("#### 10x learning dashboard (Option C signals)")
+
+            # Volatility
+            volatility_info: Dict[str, Any] = {}
+            try:
+                volatility_info = rye_volatility_signature(diagnostics)
+            except TypeError:
+                try:
+                    volatility_info = rye_volatility_signature(history=history, domain=None, window=10)  # type: ignore[call-arg]
+                except Exception:
+                    volatility_info = {}
+            except Exception:
+                volatility_info = {}
+
+            # Equilibrium detection
+            equilibrium_info: Dict[str, Any] = {}
+            try:
+                equilibrium_info = detect_rye_equilibrium(diagnostics)
+            except TypeError:
+                try:
+                    equilibrium_info = detect_rye_equilibrium(history=history, domain=None, window=10)  # type: ignore[call-arg]
+                except Exception:
+                    equilibrium_info = {}
+            except Exception:
+                equilibrium_info = {}
+
+            # Harmonic index
+            harmonic_val: Optional[float] = None
+            try:
+                harmonic_val = tgrm_harmonic_index(diagnostics)
+            except TypeError:
+                try:
+                    harmonic_val = tgrm_harmonic_index(history=history, domain=None, window=10)  # type: ignore[call-arg]
+                except Exception:
+                    harmonic_val = None
+            except Exception:
+                harmonic_val = None
+
+            vol_score = volatility_info.get("volatility_score")
+            vol_regime = volatility_info.get("regime") or volatility_info.get("label")
+            eq_flag = equilibrium_info.get("in_equilibrium")
+            eq_reason = equilibrium_info.get("reason")
+            eq_state_text = "unknown"
+            if isinstance(eq_flag, bool):
+                eq_state_text = "yes" if eq_flag else "no"
+
+            oc_cols = st.columns(3)
+            with oc_cols[0]:
+                st.metric("Equilibrium detected", eq_state_text)
+            with oc_cols[1]:
+                if isinstance(vol_score, (int, float)):
+                    st.metric("Volatility score", f"{vol_score:.3f}")
+                else:
+                    st.metric("Volatility score", "n/a")
+            with oc_cols[2]:
+                if isinstance(harmonic_val, (int, float)):
+                    st.metric("TGRM harmonic index", f"{harmonic_val:.3f}")
+                else:
+                    st.metric("TGRM harmonic index", "n/a")
+
+            if vol_regime:
+                st.caption(f"Volatility regime: {vol_regime}")
+            if eq_reason:
+                st.caption(f"Equilibrium reasoning: {eq_reason}")
+
             with st.expander("Autonomy safety and failure envelope"):
                 st.write("Autonomy safety envelope:")
                 st.json(env)
                 st.write("Early failure warning score:")
                 st.json(fail)
+
+            with st.expander("Raw Option C style signals"):
+                raw_signals = {
+                    "diagnostics": diagnostics,
+                    "volatility": volatility_info,
+                    "equilibrium": equilibrium_info,
+                    "harmonic_index": harmonic_val,
+                    "breakthrough_near_term": bp_short,
+                    "breakthrough_90d": bp90,
+                    "run_tier": tier_info,
+                }
+                st.code(json.dumps(raw_signals, indent=2), language="json")
 
             with st.expander("Raw history JSON"):
                 st.code(json.dumps(history, indent=2), language="json")
