@@ -188,7 +188,7 @@ Creates publication-ready PDFs with:
 
 # 🧩 Long-Run Runners & Presets
 
-### run_agent.py  
+### `run_agent.py`  
 Supports:
 
 - 1 hour  
@@ -201,7 +201,7 @@ Supports:
 
 Cycle and effort allocation adapt to live RYE throughput.
 
-### daily_runner.py  
+### `daily_runner.py`  
 Performs micro-updates to grow long-run stability curves.
 
 ### Presets  
@@ -216,49 +216,3 @@ Performs micro-updates to grow long-run stability curves.
 ---
 
 # 🧩 Repository Structure
-
-/agent  
- core_agent.py  
- tgrm_loop.py  
- memory_store.py  
- presets.py  
- rye_metrics.py  
- discovery_log.py  
- verification_engine.py  
- hypothesis_manager.py  
- pdf_reporter.py  
- markdown_reporter.py  
- strategy_profiles.py  
- meta_controller.py  
- contradictions.py  
- gold_notebook.py  
- tools/  
-  browser.py  
-  sandbox.py  
-  pdf_parse.py  
-
-/config  
- config.py  
- settings.py  
- settings.yaml  
-
-/logs  
- sessions/  
- discovery/  
- snapshots/  
- verification/  
-
-engine_worker.py  
-run_agent.py  
-daily_runner.py  
-app_streamlit.py  
-README.md  
-
----
-
-# ⚙️ Installation
-
-```bash
-git clone https://github.com/BoneManTGRM/Autonomous-research-agent
-cd Autonomous-research-agent
-pip install -r requirements.txt
