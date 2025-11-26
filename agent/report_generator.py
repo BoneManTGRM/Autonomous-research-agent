@@ -11,6 +11,13 @@ Outputs:
     probability, equilibrium and volatility) so the agent and human
     operator can see how quickly the system is learning and how safe
     the autonomy regime is.
+
+Learning speed diagnostics:
+    In addition to Option C signals, this module estimates cycles per
+    hour, RYE per hour, and a qualitative learning speed grade that
+    combines stability, recovery momentum, and efficiency. This helps
+    operators compare different training runs for how fast and how
+    safely they learn.
 """
 
 from __future__ import annotations
@@ -353,6 +360,64 @@ def _meta_segment_stats(
     return segments
 
 
+def _learning_speed_grade(
+    cycles_per_hour: Optional[float],
+    rye_per_hour: Optional[float],
+    stab: Optional[float],
+    momentum: Optional[float],
+) -> Tuple[str, str]:
+    """Qualitative learning speed grade for 10x tuning.
+
+    Uses cycles per hour, RYE per hour, stability index, and recovery
+    momentum to give a short label and explanation that can guide
+    training decisions.
+    """
+    cph = float(cycles_per_hour) if isinstance(cycles_per_hour, (int, float)) else 0.0
+    rph = float(rye_per_hour) if isinstance(rye_per_hour, (int, float)) else 0.0
+    st = float(stab) if isinstance(stab, (int, float)) else None
+    mo = float(momentum) if isinstance(momentum, (int, float)) else None
+
+    if cph <= 0.0 or rph <= 0.0:
+        return (
+            "insufficient data",
+            "Too few cycles or unknown runtime length to estimate learning speed.",
+        )
+
+    # Rough speed bands; these are deliberately simple and conservative.
+    if cph >= 60 and rph >= 2.5:
+        base_label = "very fast learning"
+    elif cph >= 30 and rph >= 1.0:
+        base_label = "fast learning"
+    elif cph >= 15 and rph >= 0.4:
+        base_label = "moderate learning"
+    else:
+        base_label = "slow learning"
+
+    # Stability and momentum adjustments
+    if st is not None:
+        if st >= 0.65 and (mo is None or mo >= 0.0):
+            return (
+                f"{base_label}, stable",
+                "Learning speed is high with a stable repair pattern and nonnegative recovery momentum.",
+            )
+        if st <= 0.35 and (mo is not None and mo < 0.0):
+            return (
+                f"{base_label}, unstable",
+                "Learning speed is limited by volatility and negative recovery momentum. Consider lowering swarm size or tightening verification.",
+            )
+
+    if mo is not None and mo > 0.1 and rph >= 0.4:
+        return (
+            f"{base_label}, accelerating",
+            "Recovery momentum is positive and RYE per hour is improving, suggesting an accelerating learning regime.",
+        )
+
+    return (
+        base_label,
+        "Learning speed is within expected bounds for this configuration. Use RYE trends and stability index for finer tuning.",
+    )
+
+
 # ---------------------------------------------------------
 # FULL REPORT (Advanced)
 # ---------------------------------------------------------
@@ -459,6 +524,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     low_p = diagnostics.get("low_percentile")
     mid_p = diagnostics.get("mid_percentile")
     high_p = diagnostics.get("high_percentile")
+    osc_std = diagnostics.get("oscillation_std")
 
     runtime = _extract_session_runtime(timestamps)
 
@@ -477,6 +543,20 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
 
     # Option C meta segment stats (if run_metadata is present)
     meta_segments = _meta_segment_stats(cycles)
+
+    # Learning speed metrics
+    cycles_per_hour: Optional[float] = None
+    rye_per_hour: Optional[float] = None
+    if hours_run is not None and hours_run > 0.0:
+        cycles_per_hour = float(n_cycles) / float(hours_run)
+        rye_per_hour = avg_rye * cycles_per_hour
+
+    speed_grade_label, speed_grade_text = _learning_speed_grade(
+        cycles_per_hour,
+        rye_per_hour,
+        stab,
+        momentum,
+    )
 
     # Build report
     lines: List[str] = []
@@ -529,6 +609,8 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
             ws_stop_rye = worker_state.get("stop_rye")
             ws_max_minutes = worker_state.get("max_minutes")
             ws_updated = worker_state.get("updated_at")
+            ws_learning_mode = worker_state.get("learning_mode")
+            ws_swarm_size = worker_state.get("swarm_size")
 
             if ws_status:
                 lines.append(f"- Status: **{ws_status}**")
@@ -549,6 +631,10 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
                     lines.append(f"- Max run minutes: **{float(ws_max_minutes):.1f}**")
                 except Exception:
                     lines.append(f"- Max run minutes: **{ws_max_minutes}**")
+            if ws_learning_mode:
+                lines.append(f"- Learning mode: `{ws_learning_mode}`")
+            if isinstance(ws_swarm_size, (int, float)):
+                lines.append(f"- Swarm agents active: **{int(ws_swarm_size)}**")
             if ws_updated:
                 lines.append(f"- Worker state updated at: `{ws_updated}`")
             lines.append("")
@@ -597,6 +683,11 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     lines.append(f"- Avg ΔR: **{avg_delta:.3f}**")
     lines.append(f"- Avg Energy: **{avg_energy:.3f}**")
 
+    if cycles_per_hour is not None:
+        lines.append(f"- Cycles per hour (approx): **{cycles_per_hour:.2f}**")
+    if rye_per_hour is not None:
+        lines.append(f"- RYE per hour (approx): **{rye_per_hour:.3f}**")
+
     if roll is not None:
         lines.append(f"- Rolling RYE (last 10): **{roll:.3f}**")
     if robust_roll is not None:
@@ -618,6 +709,9 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     if momentum is not None:
         lines.append(f"- Recovery momentum: **{momentum:.3f}** (higher means late stage acceleration)")
 
+    if osc_std is not None:
+        lines.append(f"- RYE oscillation standard deviation: **{osc_std:.3f}**")
+
     if low_p is not None and mid_p is not None and high_p is not None:
         lines.append(
             f"- RYE distribution: low ~**{low_p:.3f}**, median ~**{mid_p:.3f}**, high ~**{high_p:.3f}**"
@@ -637,6 +731,8 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     equilibrium = option_c_sig.get("equilibrium") or {}
     volatility = option_c_sig.get("volatility") or {}
     harmonic = option_c_sig.get("tgrm_harmonic_index")
+    learning_meta = option_c_sig.get("learning_meta") or {}
+    spread_meta = option_c_sig.get("spread_of_learning") or {}
 
     tier_label = run_tier.get("tier")
     tier_reason = run_tier.get("reason")
@@ -677,6 +773,30 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     if hours_run is not None:
         lines.append(f"- Hours run so far (approx): **{hours_run:.2f} h**")
 
+    # Learning meta signals from Option C, if present
+    lm_speed = learning_meta.get("learning_speed_label")
+    lm_comment = learning_meta.get("learning_speed_comment")
+    lm_curriculum = learning_meta.get("curriculum_stage")
+    lm_profile = learning_meta.get("profile")
+    if lm_speed:
+        lines.append(f"- Option C learning speed label: **{lm_speed}**")
+    if lm_curriculum:
+        lines.append(f"- Curriculum stage: **{lm_curriculum}**")
+    if lm_profile:
+        lines.append(f"- Learning profile: **{lm_profile}**")
+    if lm_comment:
+        lines.append(f"  - {lm_comment}")
+
+    sol_mode = spread_meta.get("mode")
+    sol_parents = spread_meta.get("parents_used")
+    if sol_mode:
+        lines.append(f"- Spread of learning mode: **{sol_mode}**")
+    if isinstance(sol_parents, int):
+        lines.append(f"- Parent goals used for cross copying: **{sol_parents}**")
+
+    # Local learning speed grade
+    lines.append(f"- Learning speed grade: **{speed_grade_label}**")
+    lines.append(f"  - {speed_grade_text}")
     lines.append("")
 
     # Domain level view
@@ -724,7 +844,6 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
             rp = seg.get("runtime_profile") or ""
             cnt = int(seg.get("count", 0))
             avg_seg = seg.get("avg_rye")
-            min_seg = seg.get("min_rye")
             max_seg = seg.get("max_rye")
             avg_str = f"{avg_seg:.3f}" if isinstance(avg_seg, (int, float)) else "n/a"
             best_str = f"{max_seg:.3f}" if isinstance(max_seg, (int, float)) else "n/a"
@@ -743,6 +862,10 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
             lines.append(f"- Streaming avg RYE: **{float(gi['avg_rye']):.3f}**")
         if isinstance(gi.get("rye_count"), int):
             lines.append(f"- RYE samples tracked: **{gi['rye_count']}**")
+        if gi.get("equilibrium_label"):
+            lines.append(f"- Equilibrium label: `{gi['equilibrium_label']}`")
+        if gi.get("curriculum_stage"):
+            lines.append(f"- Curriculum stage: `{gi['curriculum_stage']}`")
         lines.append("")
 
     # Hypotheses
@@ -819,10 +942,11 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     lines.append(
         "This session reflects a sequence of TGRM cycles (Test → Detect → Repair → Verify). "
         "RYE quantifies how much verified improvement (ΔR) occurred per unit energy (E). "
-        "The stability index, momentum, trend, and Option C safety envelope together indicate "
+        "The stability index, momentum, trend, oscillation level, and Option C safety envelope together indicate "
         "whether the system is moving toward a stable high repair yield equilibrium or oscillating "
-        "in a more exploratory regime. Run tier and breakthrough likelihood give a fast, "
-        "human friendly summary of where this experiment sits in the Reparodynamics landscape."
+        "in a more exploratory regime. Run tier, learning speed grade, and breakthrough likelihood give a fast, "
+        "human friendly summary of where this experiment sits in the Reparodynamics landscape and how aggressively "
+        "it is learning."
     )
 
     return "\n".join(lines)
