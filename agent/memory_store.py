@@ -403,6 +403,7 @@ class MemoryStore:
             - goal level avg_rye, min_rye, max_rye, rye_count
             - best and last RYE per goal
             - last equilibrium label and basic breakthrough info
+            - streaming last_rye_delta for speed of learning
         """
         gi = self._data.setdefault("goal_index", {})
         entry = gi.get(goal) or {}
@@ -475,6 +476,7 @@ class MemoryStore:
                 entry["max_rye"] = v
 
             # Track best RYE and cycle index for fast learning profile
+            prev_last_rye = entry.get("last_rye")
             best_rye = entry.get("best_rye")
             if not isinstance(best_rye, (int, float)) or v > float(best_rye):
                 entry["best_rye"] = v
@@ -482,6 +484,11 @@ class MemoryStore:
                     entry["best_cycle_index"] = int(cycle_index)
 
             entry["last_rye"] = v
+            if isinstance(prev_last_rye, (int, float)):
+                try:
+                    entry["last_rye_delta"] = v - float(prev_last_rye)
+                except Exception:
+                    entry["last_rye_delta"] = None
             if cycle_index is not None:
                 entry["last_cycle_index"] = int(cycle_index)
 
@@ -2193,3 +2200,140 @@ class MemoryStore:
 
         rows_sorted = sorted(rows, key=lambda r: (r["avg_rye"], r["rye_count"]), reverse=True)
         return rows_sorted[:limit]
+
+    # ------------------------------------------------------------------
+    # Fast learning snapshot for meta controllers
+    # ------------------------------------------------------------------
+    def get_fast_learning_snapshot(
+        self,
+        goal: Optional[str] = None,
+        role: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return a compact, ultra fast learning snapshot.
+
+        This is designed for:
+            - ultra mode controllers that need a single read per step
+            - swarm role schedulers
+            - dashboards that only need directional signals
+
+        If goal is None, the goal with highest avg_rye is selected
+        (if any goals exist).
+        """
+        gi = self._data.get("goal_index") or {}
+        if not isinstance(gi, dict) or not gi:
+            return {
+                "goal": None,
+                "role": role,
+                "avg_rye": None,
+                "last_rye": None,
+                "last_rye_delta": None,
+                "best_rye": None,
+                "rye_count": 0,
+                "cycle_count": 0,
+                "note_count": 0,
+                "last_equilibrium_label": None,
+                "last_breakthrough_score": None,
+                "best_breakthrough_score": None,
+                "learning_burst_active": False,
+                "learning_burst_cycles_remaining": None,
+                "trend": None,
+            }
+
+        chosen_goal = goal
+        if chosen_goal is None:
+            # Pick best goal by avg_rye then rye_count
+            best_row = None
+            for g, entry in gi.items():
+                if not isinstance(entry, dict):
+                    continue
+                avg_val = entry.get("avg_rye")
+                count_val = entry.get("rye_count")
+                if not isinstance(avg_val, (int, float)) or not isinstance(count_val, int):
+                    continue
+                row = {
+                    "goal": g,
+                    "avg_rye": float(avg_val),
+                    "rye_count": int(count_val),
+                }
+                if best_row is None:
+                    best_row = row
+                else:
+                    if (row["avg_rye"], row["rye_count"]) > (best_row["avg_rye"], best_row["rye_count"]):
+                        best_row = row
+            if best_row is not None:
+                chosen_goal = best_row["goal"]
+
+        entry = gi.get(chosen_goal or "") or {}
+        if not isinstance(entry, dict):
+            entry = {}
+
+        avg_rye = entry.get("avg_rye")
+        last_rye = entry.get("last_rye")
+        last_rye_delta = entry.get("last_rye_delta")
+        best_rye = entry.get("best_rye")
+        rye_count = entry.get("rye_count") if isinstance(entry.get("rye_count"), int) else 0
+        cycle_count = entry.get("cycle_count") if isinstance(entry.get("cycle_count"), int) else 0
+        note_count = entry.get("note_count") if isinstance(entry.get("note_count"), int) else 0
+
+        last_equilibrium_label = entry.get("last_equilibrium_label")
+        last_breakthrough_score = entry.get("last_breakthrough_score")
+        best_breakthrough_score = entry.get("best_breakthrough_score")
+
+        # Role level overrides if requested
+        role_block = None
+        if role is not None:
+            roles_dict = entry.get("roles") or {}
+            if isinstance(roles_dict, dict):
+                rb = roles_dict.get(role)
+                if isinstance(rb, dict):
+                    role_block = rb
+
+        if role_block:
+            if isinstance(role_block.get("avg_rye"), (int, float)):
+                avg_rye = float(role_block["avg_rye"])
+            if isinstance(role_block.get("rye_count"), int):
+                rye_count = int(role_block["rye_count"])
+            if isinstance(role_block.get("cycle_count"), int):
+                cycle_count = int(role_block["cycle_count"])
+            if isinstance(role_block.get("note_count"), int):
+                note_count = int(role_block["note_count"])
+
+        # Learning burst state
+        lb = self._data.get("learning_burst") or {}
+        if not isinstance(lb, dict):
+            lb = {}
+        lb_active = bool(lb.get("active"))
+        lb_cycles_remaining = lb.get("cycles_remaining")
+
+        # Simple directional trend from last_rye_delta
+        trend: Optional[str] = None
+        if isinstance(last_rye_delta, (int, float)):
+            if last_rye_delta > 0.01:
+                trend = "improving"
+            elif last_rye_delta < -0.01:
+                trend = "declining"
+            else:
+                trend = "flat"
+
+        snapshot: Dict[str, Any] = {
+            "goal": chosen_goal,
+            "role": role,
+            "avg_rye": float(avg_rye) if isinstance(avg_rye, (int, float)) else None,
+            "last_rye": float(last_rye) if isinstance(last_rye, (int, float)) else None,
+            "last_rye_delta": float(last_rye_delta) if isinstance(last_rye_delta, (int, float)) else None,
+            "best_rye": float(best_rye) if isinstance(best_rye, (int, float)) else None,
+            "rye_count": rye_count,
+            "cycle_count": cycle_count,
+            "note_count": note_count,
+            "last_equilibrium_label": last_equilibrium_label,
+            "last_breakthrough_score": float(last_breakthrough_score)
+            if isinstance(last_breakthrough_score, (int, float))
+            else None,
+            "best_breakthrough_score": float(best_breakthrough_score)
+            if isinstance(best_breakthrough_score, (int, float))
+            else None,
+            "learning_burst_active": lb_active,
+            "learning_burst_cycles_remaining": lb_cycles_remaining if isinstance(lb_cycles_remaining, int) else None,
+            "trend": trend,
+        }
+        return snapshot
