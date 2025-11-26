@@ -67,7 +67,16 @@ from agent.rye_metrics import (
     stability_index,
     recovery_momentum,
     build_run_diagnostics,
+    rye_volatility_signature,
+    detect_rye_equilibrium,
+    tgrm_harmonic_index,
+    estimate_breakthrough_probability,
+    breakthrough_likelihood_90d,
+    autonomy_safety_envelope,
+    early_failure_warning_score,
+    classify_run_tier,
 )
+from agent_report_builder import build_agent_report  # full Option C report with learning speed
 
 # Optional discovery and verification helpers (imported lazily if present)
 try:  # type: ignore[import]
@@ -447,6 +456,25 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
             lines.append(f"- {f}")
 
     return "\n".join(lines)
+
+
+# Helper used by learning speed panels and Option C report
+def compute_run_hours(history: List[Dict[str, Any]]) -> Optional[float]:
+    """Approximate total hours between first and last cycle timestamps."""
+    timestamps: List[datetime] = []
+    for e in history:
+        ts = e.get("timestamp")
+        if isinstance(ts, str):
+            try:
+                timestamps.append(datetime.fromisoformat(ts))
+            except Exception:
+                continue
+    if len(timestamps) < 2:
+        return None
+    start = min(timestamps)
+    end = max(timestamps)
+    delta = end - start
+    return max(delta.total_seconds() / 3600.0, 0.0)
 
 
 # -------------------------------------------------------------------
@@ -1544,6 +1572,53 @@ def main() -> None:
             with adv_cols[4]:
                 st.metric("Recovery momentum", f"{momentum_val:.3f}" if momentum_val is not None else "n/a")
 
+            # Learning speed and breakthrough profile
+            st.markdown("### Learning speed and breakthrough profile")
+
+            hours_run = compute_run_hours(history)
+            bp_short = estimate_breakthrough_probability(diagnostics, domain=None, horizon_hours=hours_run)
+            bp90 = breakthrough_likelihood_90d(diagnostics, domain=None, hours_run_so_far=hours_run)
+            env = autonomy_safety_envelope(diagnostics)
+            fail = early_failure_warning_score(diagnostics)
+
+            bp_prob = None
+            if isinstance(bp_short, dict):
+                bp_prob = bp_short.get("probability")
+
+            bp90_prob = None
+            if isinstance(bp90, dict):
+                bp90_prob = bp90.get("probability")
+
+            tier_info = classify_run_tier(diagnostics, breakthrough_prob=bp_prob)
+            tier_label = None
+            if isinstance(tier_info, dict):
+                tier_label = tier_info.get("tier") or tier_info.get("label")
+
+            ls_cols = st.columns(4)
+            with ls_cols[0]:
+                st.metric(
+                    "Approx hours run",
+                    f"{hours_run:.2f}" if isinstance(hours_run, (int, float)) else "n/a",
+                )
+            with ls_cols[1]:
+                if isinstance(bp_prob, (int, float)):
+                    st.metric("Breakthrough chance (near term)", f"{bp_prob * 100:.1f}%")
+                else:
+                    st.metric("Breakthrough chance (near term)", "n/a")
+            with ls_cols[2]:
+                if isinstance(bp90_prob, (int, float)):
+                    st.metric("Breakthrough likelihood 90d", f"{bp90_prob * 100:.1f}%")
+                else:
+                    st.metric("Breakthrough likelihood 90d", "n/a")
+            with ls_cols[3]:
+                st.metric("Run tier", tier_label or "n/a")
+
+            with st.expander("Autonomy safety and failure envelope"):
+                st.write("Autonomy safety envelope:")
+                st.json(env)
+                st.write("Early failure warning score:")
+                st.json(fail)
+
             with st.expander("Raw history JSON"):
                 st.code(json.dumps(history, indent=2), language="json")
 
@@ -1958,6 +2033,9 @@ def main() -> None:
         "You can rerun these after long autonomous sessions."
     )
 
+    history_for_reports = memory.get_cycle_history()
+    hours_run_for_reports = compute_run_hours(history_for_reports) if history_for_reports else None
+
     col_rep1, col_rep2, col_rep3 = st.columns(3)
 
     with col_rep1:
@@ -1984,6 +2062,24 @@ def main() -> None:
                 st.info(str(e))
             except Exception:
                 st.info("PDF generation failed unexpectedly. Check server logs for details.")
+
+        if st.button("Full Option C learning speed report", key="option_c_report_btn"):
+            option_md = build_agent_report(
+                memory_store=memory,
+                goal=None,
+                domain=None,
+                hours_run_so_far=hours_run_for_reports,
+                swarm_stats=None,
+                intelligence_profile=None,
+                biomarker_snapshot=None,
+            )
+            st.markdown(option_md)
+            st.download_button(
+                "Download Option C report (Markdown)",
+                data=option_md,
+                file_name="autonomous_option_c_report.md",
+                mime="text/markdown",
+            )
 
     with col_rep2:
         if st.button("Outcome focused summary"):
