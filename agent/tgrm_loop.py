@@ -74,6 +74,14 @@ When config["ultra_speed"] is true the loop:
     - exposes a compact `short_view` block for fast UI and logging
     - adds `meta_signals` for the meta controller to read RYE and
       contradiction rates without parsing full logs.
+
+Longevity two stage mode
+------------------------
+When run_cycle is called with stage="idea" or stage="verify" and optional
+hallmark/subgoal, the loop:
+    - tags cycles with hallmark and stage for later reporting
+    - can push high value hypotheses into a ReplayBuffer for curriculum
+      style learning via _log_replay_candidate
 """
 
 from __future__ import annotations
@@ -491,6 +499,11 @@ class TGRMLoop:
         pdf_bytes: Optional[bytes] = None,
         biomarker_snapshot: Optional[Dict[str, Any]] = None,
         domain: Optional[str] = None,
+        stage: str = "idea",
+        hallmark: Optional[str] = None,
+        subgoal: Optional[str] = None,
+        replay_buffer: Optional[Any] = None,
+        curriculum_state: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Run one TGRM cycle for a given research goal.
 
@@ -520,6 +533,20 @@ class TGRMLoop:
             domain:
                 Optional domain tag such as "general", "longevity", or "math".
                 Preserved in the log for future domain specific behavior.
+            stage:
+                Optional TGRM stage hint for longevity style two stage runs:
+                "idea" or "verify". Defaults to "idea".
+            hallmark:
+                Optional hallmark label for longevity runs, such as
+                "mitochondria" or "senescence".
+            subgoal:
+                Optional sub target such as "mito_membrane_potential".
+            replay_buffer:
+                Optional ReplayBuffer like object where high value hypotheses
+                and patterns can be stored for curriculum learning.
+            curriculum_state:
+                Optional dict with curriculum hints such as phase name,
+                progress fraction, or active pathway focus.
 
         Returns:
             Dict with:
@@ -532,6 +559,10 @@ class TGRMLoop:
         """
         src_ctrl = self._normalise_source_controls(source_controls)
         domain_tag = domain or "general"
+
+        stage_tag = (stage or "idea").lower()
+        if stage_tag not in {"idea", "verify"}:
+            stage_tag = "idea"
 
         # Per cycle tool usage tracker (for energy E and diagnostics)
         tool_usage: ToolUsage = self._usage_factory()
@@ -561,7 +592,12 @@ class TGRMLoop:
             maintenance_mode = True
 
         # Strict pipeline phase log for Ultra mode and debugging
-        phases: Dict[str, Any] = {}
+        phases: Dict[str, Any] = {
+            "stage": stage_tag,
+            "hallmark": hallmark,
+            "subgoal": subgoal,
+            "curriculum_state": curriculum_state or {},
+        }
 
         # TEST phase
         prior_notes = self.memory_store.get_notes(goal)
@@ -669,6 +705,11 @@ class TGRMLoop:
                 "confidence": conf,
                 "tags": [domain_tag, "auto_generated"],
             }
+            if hallmark:
+                hyp_record["tags"].append(f"hallmark:{hallmark}")
+            if subgoal:
+                hyp_record["tags"].append(f"subgoal:{subgoal}")
+
             hypotheses.append(hyp_record)
 
             candidate_hypotheses.append(
@@ -751,6 +792,9 @@ class TGRMLoop:
             "goal": goal,
             "role": role,
             "domain": domain_tag,
+            "stage": stage_tag,
+            "hallmark": hallmark,
+            "subgoal": subgoal,
             "ultra_speed": self.ultra_speed,
             "maintenance_mode": maintenance_mode,
             "issues_before": issues,
@@ -775,15 +819,21 @@ class TGRMLoop:
             "todo_items": issue_code_counts_after.get("todo_item", 0),
             "contradictions": issue_code_counts_after.get("contradiction", 0),
             "sources_used": stats.get("sources_used", 0),
+            "stage": stage_tag,
+            "hallmark": hallmark,
+            "subgoal": subgoal,
         }
 
         # Machine facing log
-        cycle_summary = {
+        cycle_summary: Dict[str, Any] = {
             "cycle": cycle_index,
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "goal": goal,
             "role": role,
             "domain": domain_tag,
+            "stage": stage_tag,
+            "hallmark": hallmark,
+            "subgoal": subgoal,
             "tgrm_level": self.tgrm_level,
             "ultra_speed": self.ultra_speed,
             # Issues before and after
@@ -838,6 +888,17 @@ class TGRMLoop:
             "meta_signals": meta_signals,
         }
 
+        # Replay buffer logging and metadata tagging for longevity aware loops
+        replay_item_ids = self._log_replay_candidate(cycle_summary, replay_buffer)
+        self._tag_cycle_metadata(
+            cycle_summary,
+            hallmark=hallmark,
+            subgoal=subgoal,
+            stage=stage_tag,
+            curriculum_state=curriculum_state,
+            replay_item_ids=replay_item_ids,
+        )
+
         # Log cycle into memory
         self.memory_store.log_cycle(cycle_summary)
 
@@ -846,6 +907,9 @@ class TGRMLoop:
             "cycle": cycle_index,
             "role": role,
             "domain": domain_tag,
+            "stage": stage_tag,
+            "hallmark": hallmark,
+            "subgoal": subgoal,
             "goal": goal,
             "issues_before": issue_descriptions,
             "issues_after": issues_after,
@@ -872,6 +936,8 @@ class TGRMLoop:
             "short_view": short_view,
             "meta_signals": meta_signals,
             "phases": phases,
+            "curriculum_state": curriculum_state,
+            "replay_item_ids": replay_item_ids,
         }
 
         # Expose stats and citations at the top level so CoreAgent and the UI
@@ -1919,6 +1985,116 @@ class TGRMLoop:
 
         note_text = "\n".join(note_lines)
         return note_text, citations, stats
+
+    # ------------------------------------------------------------------
+    # Longevity replay helpers
+    # ------------------------------------------------------------------
+    def _tag_cycle_metadata(
+        self,
+        cycle_log: Dict[str, Any],
+        hallmark: Optional[str],
+        subgoal: Optional[str],
+        stage: Optional[str],
+        curriculum_state: Optional[Dict[str, Any]] = None,
+        replay_item_ids: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Attach hallmark, stage, curriculum hints, and replay ids to the log."""
+        if stage:
+            cycle_log["stage"] = stage
+        if hallmark:
+            cycle_log["hallmark"] = hallmark
+        if subgoal:
+            cycle_log["subgoal"] = subgoal
+
+        if curriculum_state:
+            cycle_log["curriculum_state"] = dict(curriculum_state)
+            phase = curriculum_state.get("phase") or curriculum_state.get("name")
+            if phase:
+                cycle_log.setdefault("tags", [])
+                if f"curriculum:{phase}" not in cycle_log["tags"]:
+                    cycle_log["tags"].append(f"curriculum:{phase}")
+
+        if replay_item_ids:
+            cycle_log["replay_item_ids"] = list(replay_item_ids)
+
+        return cycle_log
+
+    def _log_replay_candidate(
+        self,
+        cycle_log: Dict[str, Any],
+        replay_buffer: Optional[Any],
+    ) -> List[str]:
+        """Push top hypotheses and patterns from this cycle into a replay buffer.
+
+        The replay_buffer can be:
+            - an object with .add_item(item: dict) -> Any
+            - a callable that accepts a single item dict
+
+        Returns:
+            List of item ids that were created for this cycle.
+        """
+        item_ids: List[str] = []
+        if replay_buffer is None:
+            return item_ids
+
+        hypotheses = cycle_log.get("hypotheses") or []
+        citations = cycle_log.get("citations") or []
+        biomarker_pattern = cycle_log.get("biomarker_snapshot")
+        rye_score = cycle_log.get("RYE")
+        energy_cost = cycle_log.get("energy_E")
+        hallmark = cycle_log.get("hallmark")
+        stage = cycle_log.get("stage")
+        run_id = cycle_log.get("run_id")
+        timestamp = cycle_log.get("timestamp")
+        cycle_idx = cycle_log.get("cycle")
+
+        # Select up to a few best hypotheses by confidence if available
+        def hyp_score(h: Dict[str, Any]) -> float:
+            val = h.get("confidence")
+            try:
+                return float(val) if val is not None else 0.0
+            except Exception:
+                return 0.0
+
+        sorted_hypotheses = sorted(hypotheses, key=hyp_score, reverse=True)
+        top_hypotheses = sorted_hypotheses[:5]
+
+        for idx, h in enumerate(top_hypotheses):
+            text = h.get("text") or h.get("description") or h.get("title") or ""
+            if not text:
+                continue
+
+            item_id = f"replay_{cycle_idx}_{idx}"
+            item: Dict[str, Any] = {
+                "item_id": item_id,
+                "hallmark": hallmark,
+                "stage": stage,
+                "mechanism_chain": text,
+                "biomarker_pattern": biomarker_pattern,
+                "hypothesis_text": text,
+                "rye_score": rye_score,
+                "energy_cost": energy_cost,
+                "decision": "pending",
+                "reason": "auto_logged_from_cycle",
+                "source_citations": citations,
+                "tags": h.get("tags", []),
+                "created_at": timestamp,
+                "run_id": run_id,
+                "cycle_index": cycle_idx,
+            }
+
+            try:
+                if hasattr(replay_buffer, "add_item"):
+                    replay_buffer.add_item(item)  # type: ignore[attr-defined]
+                elif callable(replay_buffer):
+                    replay_buffer(item)
+                # Only append if we did not raise
+                item_ids.append(item_id)
+            except Exception:
+                # Replay logging must never break the main loop
+                continue
+
+        return item_ids
 
     # ------------------------------------------------------------------
     # Candidate intervention extractor
