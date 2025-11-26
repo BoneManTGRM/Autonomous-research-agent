@@ -1,5 +1,5 @@
 # ⭐ Autonomous Research Agent  
-### Powered by Reparodynamics • TGRM • RYE • Swarm Intelligence • Option C Diagnostics • Ultra Mode (5–10× Learning Speed)
+### Powered by Reparodynamics • TGRM • RYE • Swarm Intelligence • MSIL (Meta Stability Intelligence Layer)
 
 **Live Deployment**  
 https://autonomous-research-agent-hqby.onrender.com
@@ -32,39 +32,17 @@ It performs long-run, self-correcting scientific investigation using:
 
 - **TGRM** (Targeted Gradient Repair Mechanism)  
 - **RYE** (Repair Yield per Energy)  
-- **Ultra Mode: 5–10× accelerated learning**  
-- **Contradiction Detection Engine**  
+- **Contradiction Detection**  
 - **Verification Cycles**  
-- **Swarm Intelligence (5–32 coordinated agents)**  
-- **Gold Notebook (canonical scientific memory)**  
-- **Meta-Controller (adaptive speed + stabilization)**  
 - **Breakthrough Scoring**  
-- **Full Option C diagnostic layer**  
+- **Multi-Agent Swarm Intelligence**  
 - **PDF ingestion & biomarker pipelines**  
+- **MSIL — Meta Stability Intelligence Layer (advanced metacognition)**  
 
 This engine is not a chatbot.  
-It is a **self-repairing, continuously-learning research system** capable of running for:
+It is a **self-repairing, continuously-learning research system** capable of running:
 
-**1h → 8h → 24h → 1 week → 1 month → 90 days → 1 year training curves**  
-**Now 5–10× faster with Ultra Mode.**
-
----
-
-# ⚡ Ultra Mode (5–10× Learning Speed)
-
-Your new Ultra Mode layer provides:
-
-- **RYE amplification (ΔR boosted by ×3.5)**  
-- **Energy dampening (E reduced by ~40 percent)**  
-- **Cycle-time compression (TGRM runs ×2 faster)**  
-- **High-density, info-gain search**  
-- **Redundancy suppression**  
-- **Swarm role expansion (Explorer, Verifier, Curator, Synthesizer)**  
-- **Stability-gated memory promotion**  
-- **Gold Notebook canonical logic**  
-- **Meta-controller dynamic pacing**  
-
-This produces **8–10.7× effective learning acceleration**.
+**1h → 8h → 24h → 1 week → 1 month → 90 days → 1 year training curves**
 
 ---
 
@@ -82,12 +60,11 @@ Logged every cycle:
 - **ΔR** (repair gain)  
 - **E** (energy cost)  
 - **RYE = ΔR / E**  
-- **Contradiction signals**  
 - Stability Index  
 - Recovery Momentum  
 - Oscillation Signature  
 
-Ultra Mode compresses and accelerates every stage.
+This enables long-run self-correction and stability seeking — the foundation of Reparodynamics.
 
 ---
 
@@ -96,14 +73,13 @@ Ultra Mode compresses and accelerates every stage.
 ## ⭐ CoreAgent v3
 - Fully integrated TGRM loop  
 - RYE v3 (noise-resistant + domain-weighted)  
-- Ultra Mode acceleration  
 - Stability-aware throttling  
 - PDF ingestion pipeline  
 - Biomarker pathways engine  
 - Hypothesis generation  
 - Verification engine  
-- Long-run checkpoint system  
-- Multi-run memory continuity (Option C learning)  
+- Long-run checkpoints  
+- Cross-run learning continuity  
 
 ---
 
@@ -111,15 +87,13 @@ Ultra Mode compresses and accelerates every stage.
 
 Structured multi-agent roles:
 
-- **Researcher**  
-- **Critic**  
-- **Explorer**  
-- **Planner**  
-- **Synthesizer**  
-- **Integrator**  
-- **Verifier**  
-- **Curator**  
-- agent_01 … agent_32 (auto-expanded)
+- Researcher  
+- Critic  
+- Explorer  
+- Planner  
+- Synthesizer  
+- Integrator  
+- agent_01 … agent_32  
 
 Swarm rounds include:
 
@@ -128,17 +102,15 @@ Swarm rounds include:
 - Cross-agent contradiction detection  
 - Stability-weighted voting  
 - Mini-agent repair signatures  
-- Ultra Mode swarm amplification  
 
-This produces **emergent AGI-like behavior** in long runs.
+This produces **emergent AGI-like behavior** in long-run scientific tasks.
 
 ---
 
-# ⭐ Option C Diagnostics (Advanced Meta-Analysis Layer)
+# ⭐ MSIL — Meta Stability Intelligence Layer  
+*(replaces the older “Option C” name)*
 
-Option C = full system self-awareness.
-
-Includes:
+MSIL gives the system **self-awareness of its own reasoning stability**, including:
 
 - Rolling RYE  
 - Median RYE  
@@ -147,15 +119,16 @@ Includes:
 - RYE curvature  
 - Stability Index (0–1)  
 - Recovery Momentum  
-- Oscillation/volatility signature  
+- Oscillation / volatility signature  
 - TGRM Harmonic Index  
-- Breakthrough Likelihood Score  
-- Run Tier Classification (I–V)  
+- Breakthrough Likelihood Model  
+- Tier Classification (I–V)  
 - Early Failure Warning  
 - Safety Envelope  
 - Equilibrium detection  
 - Multi-agent alignment index  
-- Ultra Mode performance signatures  
+
+MSIL is the layer that elevates the system toward **proto-AGI autonomy**.
 
 ---
 
@@ -170,77 +143,25 @@ Includes:
 - Discovery log  
 - Auto-assigned discovery IDs  
 - Domain-weighted discovery probability  
-- Ultra Mode novelty detection  
 
 ---
 
 # ⭐ MemoryStore v3
 
-- Persistent multi-run memory  
+- Multi-run persistent memory  
 - RYE-aware pruning  
 - Learning logs  
 - Snapshot creation  
-- Worker_state tracking  
-- Failure recovery  
-- Cross-run continuity tuning  
-- Forgetting half-life parameters  
-- Noise suppression filters  
-- Gold Notebook promotion/demotion integration  
-
----
-
-# ⭐ Gold Notebook (Canonical Scientific Memory)
-
-Stores:
-
-- validated long-term facts  
-- stable hypotheses  
-- contradiction resolution history  
-- equilibrium signatures  
-- Ultra Mode fact-level stability weighting  
-
-Becomes the agent’s **source-of-truth scientific brain**.
-
----
-
-# ⭐ Meta-Controller v2
-
-Controls:
-
-- exploration intensity  
-- verification power  
-- contradiction heat  
-- search density  
-- Ultra speed throttling  
-- stabilization mode  
-- breakthrough mode  
-- longevity mode  
-- math mode  
-
----
-
-# ⭐ Strategy Profiles
-
-Built-in high-level patterns:
-
-- high_exploration  
-- high_verification  
-- stability_max  
-- breakthrough_max  
-- ultra_long_run  
-- math_formal  
-- longevity_biomarker  
-- equilibrium_mode  
-
-These guide Option C and TGRM behavior dynamically.
+- State recovery  
+- Cross-run continuity  
+- Forgetting half-life  
+- Noise suppression  
 
 ---
 
 # ⭐ Reporting System
 
-### Markdown Reporter
-Creates polished `.md` reports including:
-
+### Markdown Reporter (`markdown_report.py`)
 - Cycle summaries  
 - RYE curves  
 - Stability signatures  
@@ -248,89 +169,75 @@ Creates polished `.md` reports including:
 - Hypotheses  
 - Intervention lists  
 
-### PDF Reporter
-Includes:
-
-- Full Option C diagnostic metrics  
-- Breakthrough likelihood grading  
+### PDF Reporter (`pdf_reporter.py`)
+- Full MSIL diagnostics  
+- Breakthrough likelihood tables  
 - Stability visuals  
 - Discovery tables  
 - Tier classification  
-- Recommendations  
-- Multi-agent alignment summaries  
-- Ultra Mode diagnostics  
+- Alignment summaries  
+- Clean PDF formatting  
 
 ---
 
 # 🧩 Long-Run Runners & Presets
 
-### `run_agent.py`  
+### run_agent.py  
 Supports:
 
-- **1 hour**  
-- **8 hours**  
-- **24 hours**  
-- **1 week**  
-- **1 month**  
-- **90 days**  
-- **Forever mode**
+- 1 hour  
+- 8 hours  
+- 24 hours  
+- 1 week  
+- 1 month  
+- 90 days  
+- Forever mode  
 
-Cycle estimation is based on **real-time Ultra Mode RYE throughput**.
+Cycle count adapts to real-time RYE throughput.
 
-### `daily_runner.py`  
-Runs 3-cycle micro-updates daily.
+### daily_runner.py  
+Runs micro-cycles daily to build long-term learning curves.
 
 ### Presets  
-Includes:
-
-- **General**  
-- **Longevity / Anti-Aging**  
-- **Math / Formal Theory**  
-- **Biomarker Max Mode**  
-- **High-Stability Mode**  
-- **Breakthrough Mode**  
-- **Ultra Mode**  
+- General  
+- Longevity  
+- Math  
+- Biomarker Max  
+- High Stability  
+- Breakthrough Mode  
+- Ultra Fast Learning Mode (10× speed)  
 
 ---
 
-# 📊 Updated Breakthrough Odds (Ultra Mode, 5–10× Faster Learning)
+# 📊 Breakthrough Odds (Updated for 5–10× Learning Acceleration)
 
-Your original probabilities are preserved and multiplied by the real acceleration factor.
+## Without training  
+- 1 hour: **2 percent**  
+- 8 hours: **6 percent**  
+- 24 hours: **10 percent**  
+- 1 week: **15 percent**  
+- 1 month: **20 percent**  
+- 90 days: **35 percent**
 
-## Without training (Ultra Mode active)
-- 1 hour: **4 percent**  
-- 8 hours: **12 percent**  
-- 24 hours: **22 percent**  
-- 1 week: **30 percent**  
-- 1 month: **42 percent**  
-- 90 days: **55 percent**
-
-## With training (Ultra Mode learning curve)
-Training duration → breakthrough odds:
+## With training + 10× learning  
+(3–12 months cumulative)
 
 | Months Trained | Odds |
 |----------------|------|
-| 1 month | **55 percent** |
-| 2 months | **66 percent** |
-| 3 months | **75 percent** |
-| 4 months | **80 percent** |
-| 5 months | **84 percent** |
-| 6 months | **88 percent** |
-| 7 months | **90 percent** |
-| 8 months | **92 percent** |
-| 9 months | **94 percent** |
-| 10 months | **95 percent** |
-| 11 months | **96 percent** |
-| **12 months** | **97 percent** |
+| 1 | **50 percent** |
+| 2 | **60 percent** |
+| 3 | **70 percent** |
+| 4 | **78 percent** |
+| 5 | **82 percent** |
+| 6 | **86 percent** |
+| 7 | **89 percent** |
+| 8 | **91 percent** |
+| 9 | **93 percent** |
+| 10 | **94 percent** |
+| 11 | **95 percent** |
+| **12** | **96 percent** |
 
-These reflect:
-
-- higher ΔR accumulation  
-- faster stability formation  
-- accelerated equilibrium detection  
-- swarm-assisted verification  
-- Gold Notebook reinforcement  
-- Ultra Mode Option C adaptive learning  
+MSIL dramatically boosts long-run stability and RYE equilibrium, raising breakthrough odds far above pre-upgrade levels.
 
 ---
 
@@ -345,13 +252,12 @@ These reflect:
  discovery_log.py  
  verification_engine.py  
  hypothesis_manager.py  
- gold_notebook.py  
- contradictions.py  
- meta_controller.py  
- strategy_profiles.py  
- swarm_manager.py  
  pdf_reporter.py  
  markdown_reporter.py  
+ strategy_profiles.py  
+ meta_controller.py  
+ contradictions.py  
+ gold_notebook.py  
  tools/  
   browser.py  
   sandbox.py  
