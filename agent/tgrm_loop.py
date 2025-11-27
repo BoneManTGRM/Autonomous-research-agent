@@ -45,7 +45,7 @@ The loop uses the `domain` tag ("general", "longevity", "math", ...)
 to surface higher level issues such as:
     - missing_biomarkers (longevity)
     - missing_mechanisms (longevity)
-    - missing_formalism (math: definitions / theorems / proofs)
+    - missing_formalism (math: definitions or theorems or proofs)
     - missing_connections (math: links to existing theory)
 
 These appear as additional issue codes and pass through the same
@@ -78,7 +78,7 @@ When config["ultra_speed"] is true the loop:
 Longevity two stage mode
 ------------------------
 When run_cycle is called with stage="idea" or stage="verify" and optional
-hallmark/subgoal, the loop:
+hallmark or subgoal, the loop:
     - tags cycles with hallmark and stage for later reporting
     - can push high value hypotheses into a ReplayBuffer for curriculum
       style learning via _log_replay_candidate
@@ -90,17 +90,65 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from .rye_metrics import compute_delta_r, compute_energy, compute_rye
-from .tools_web import WebResearchTool
-from .tools_papers import PaperTool
-from .tools_files import FileTool
-from .tools_pubmed import PubMedTool
-from .tools_semantic_scholar import SemanticScholarTool
-from .hypothesis_engine import generate_hypotheses
+
+# Optional imports for external tools and hypothesis engine.
+# Each has a safe fallback so the loop still runs if the modules
+# or dependencies are missing.
+
+# Web research
+try:
+    from .tools_web import WebResearchTool  # type: ignore[import]
+except Exception:  # pragma: no cover
+    WebResearchTool = None  # type: ignore[assignment]
+
+
+# Paper and PDF tools
+try:
+    from .tools_papers import PaperTool  # type: ignore[import]
+except Exception:  # pragma: no cover
+    PaperTool = None  # type: ignore[assignment]
+
+
+# File tools (currently lightly used but optional)
+try:
+    from .tools_files import FileTool  # type: ignore[import]
+except Exception:  # pragma: no cover
+    FileTool = None  # type: ignore[assignment]
+
+
+# PubMed and Semantic Scholar
+try:
+    from .tools_pubmed import PubMedTool  # type: ignore[import]
+except Exception:  # pragma: no cover
+    PubMedTool = None  # type: ignore[assignment]
+
+try:
+    from .tools_semantic_scholar import SemanticScholarTool  # type: ignore[import]
+except Exception:  # pragma: no cover
+    SemanticScholarTool = None  # type: ignore[assignment]
+
+
+# Hypothesis engine
+try:
+    from .hypothesis_engine import generate_hypotheses  # type: ignore[import]
+except Exception:  # pragma: no cover
+    def generate_hypotheses(
+        goal: str,
+        notes: List[Dict[str, Any]],
+        citations: List[Dict[str, Any]],
+        max_hypotheses: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Fallback hypothesis generator when hypothesis_engine is unavailable.
+
+        This returns an empty list so the rest of the loop can still run.
+        """
+        return []
+
 
 # Optional Toolbelt / ToolUsage import to mirror CoreAgent behavior.
 try:
     from .tools import Toolbelt, ToolUsage  # type: ignore[attr-defined]
-except Exception:
+except Exception:  # pragma: no cover
     Toolbelt = None  # type: ignore[assignment]
 
     class ToolUsage:  # type: ignore[no-redef]
@@ -112,6 +160,54 @@ except Exception:
             self.sql_queries: int = 0
             self.data_loads: int = 0
             self.approx_tokens: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Null or fallback tool implementations
+# ---------------------------------------------------------------------------
+
+
+class _NullWebTool:
+    """Fallback web research tool when tools_web or dependencies are missing."""
+
+    def search(self, query: str, **kwargs: Any) -> List[Dict[str, Any]]:
+        return []
+
+    def summarize_results(self, results: List[Dict[str, Any]]) -> str:
+        return "Web search disabled or unavailable for this run."
+
+    def to_citations(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        return []
+
+
+class _NullPaperTool:
+    """Fallback paper tool when tools_papers is missing."""
+
+    def ingest_bytes(self, pdf_bytes: bytes) -> str:
+        return ""
+
+    def summarise(self, text: str) -> str:
+        return "PDF ingestion disabled or unavailable for this run."
+
+
+class _NullFileTool:
+    """Fallback file tool when tools_files is missing."""
+    def __init__(self) -> None:
+        pass
+
+
+class _NullPubMedTool:
+    """Fallback PubMed tool when tools_pubmed is missing."""
+
+    def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        return []
+
+
+class _NullSemanticScholarTool:
+    """Fallback Semantic Scholar tool when tools_semantic_scholar is missing."""
+
+    def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        return []
 
 
 class TGRMLoop:
@@ -166,14 +262,46 @@ class TGRMLoop:
 
             self._usage_factory = _default_usage_factory
 
-        # Core tools
-        self.web_tool = WebResearchTool()
-        self.paper_tool = PaperTool()
-        self.file_tool = FileTool()
+        # Core tools with safe fallbacks
+        try:
+            if WebResearchTool is not None:
+                self.web_tool = WebResearchTool()  # type: ignore[call-arg]
+            else:
+                self.web_tool = _NullWebTool()
+        except Exception:
+            self.web_tool = _NullWebTool()
 
-        # Scientific tools
-        self.pubmed_tool = PubMedTool()
-        self.semantic_tool = SemanticScholarTool()
+        try:
+            if PaperTool is not None:
+                self.paper_tool = PaperTool()  # type: ignore[call-arg]
+            else:
+                self.paper_tool = _NullPaperTool()
+        except Exception:
+            self.paper_tool = _NullPaperTool()
+
+        try:
+            if FileTool is not None:
+                self.file_tool = FileTool()  # type: ignore[call-arg]
+            else:
+                self.file_tool = _NullFileTool()
+        except Exception:
+            self.file_tool = _NullFileTool()
+
+        try:
+            if PubMedTool is not None:
+                self.pubmed_tool = PubMedTool()  # type: ignore[call-arg]
+            else:
+                self.pubmed_tool = _NullPubMedTool()
+        except Exception:
+            self.pubmed_tool = _NullPubMedTool()
+
+        try:
+            if SemanticScholarTool is not None:
+                self.semantic_tool = SemanticScholarTool()  # type: ignore[call-arg]
+            else:
+                self.semantic_tool = _NullSemanticScholarTool()
+        except Exception:
+            self.semantic_tool = _NullSemanticScholarTool()
 
         # Long run optimization: track which questions have already been
         # researched so we do not re query the same text many times during
@@ -183,16 +311,16 @@ class TGRMLoop:
         # TGRM level: 1 (basic), 2 (targeted), 3 (domain plus swarm aware).
         # If not set in config, default to level 3 to unlock full power.
         try:
-            self.tgrm_level: int = int(self.config.get("tgrm_level", 3))
+            self.tgrm_level = int(self.config.get("tgrm_level", 3))
         except Exception:
             self.tgrm_level = 3
 
         # Sliding window size for short term RYE gradient estimates
-        self.rye_window_size: int = int(self.config.get("rye_window_size", 20))
+        self.rye_window_size = int(self.config.get("rye_window_size", 20))
 
         # Ultra speed mode and strict pipeline flag (used by meta controller and UI)
-        self.ultra_speed: bool = bool(self.config.get("ultra_speed", False))
-        self.strict_pipeline: bool = bool(self.config.get("strict_pipeline", True))
+        self.ultra_speed = bool(self.config.get("ultra_speed", False))
+        self.strict_pipeline = bool(self.config.get("strict_pipeline", True))
 
     # ------------------------------------------------------------------
     # Small helper for token estimation (for energy accounting)
@@ -1170,7 +1298,10 @@ class TGRMLoop:
         # Helper to register citations into MemoryStore
         def _log_citations(cites: List[Dict[str, Any]]) -> None:
             for c in cites:
-                self.memory_store.add_citation(goal, c)
+                try:
+                    self.memory_store.add_citation(goal, c)
+                except Exception:
+                    pass
 
         for issue, desc in zip(issues_to_handle, descriptions_to_handle):
             if issue == "no_notes":
@@ -1183,7 +1314,10 @@ class TGRMLoop:
                     maintenance_mode=maintenance_mode,
                     tool_usage=tool_usage,
                 )
-                self.memory_store.add_note(goal, note_text, role=role)
+                try:
+                    self.memory_store.add_note(goal, note_text, role=role)
+                except Exception:
+                    pass
                 repair_actions.append(
                     {
                         "issue": issue,
@@ -1215,7 +1349,10 @@ class TGRMLoop:
                     tool_usage=tool_usage,
                 )
 
-                self.memory_store.add_note(goal, note_text, role=role)
+                try:
+                    self.memory_store.add_note(goal, note_text, role=role)
+                except Exception:
+                    pass
                 repair_actions.append(
                     {
                         "issue": issue,
@@ -1240,7 +1377,10 @@ class TGRMLoop:
                     f"[{role}] Reminder: contradiction flagged in notes. "
                     "Future cycles should prioritise resolving this with additional sources."
                 )
-                self.memory_store.add_note(goal, note, role=role)
+                try:
+                    self.memory_store.add_note(goal, note, role=role)
+                except Exception:
+                    pass
                 repair_actions.append(
                     {
                         "issue": issue,
@@ -1260,7 +1400,10 @@ class TGRMLoop:
                     domain=domain,
                     tool_usage=tool_usage,
                 )
-                self.memory_store.add_note(goal, note_text, role=role)
+                try:
+                    self.memory_store.add_note(goal, note_text, role=role)
+                except Exception:
+                    pass
                 repair_actions.append(
                     {
                         "issue": issue,
@@ -1285,7 +1428,10 @@ class TGRMLoop:
                     domain=domain,
                     tool_usage=tool_usage,
                 )
-                self.memory_store.add_note(goal, note_text, role=role)
+                try:
+                    self.memory_store.add_note(goal, note_text, role=role)
+                except Exception:
+                    pass
                 repair_actions.append(
                     {
                         "issue": issue,
@@ -1310,7 +1456,10 @@ class TGRMLoop:
                     domain=domain,
                     tool_usage=tool_usage,
                 )
-                self.memory_store.add_note(goal, note_text, role=role)
+                try:
+                    self.memory_store.add_note(goal, note_text, role=role)
+                except Exception:
+                    pass
                 repair_actions.append(
                     {
                         "issue": issue,
@@ -1330,7 +1479,10 @@ class TGRMLoop:
                     f"[{role}] Encountered issue '{issue}' with description: {desc}. "
                     "This issue type is not yet fully handled; marking as TODO for future cycles."
                 )
-                self.memory_store.add_note(goal, note, role=role)
+                try:
+                    self.memory_store.add_note(goal, note, role=role)
+                except Exception:
+                    pass
                 repair_actions.append(
                     {
                         "issue": issue,
@@ -1478,7 +1630,7 @@ class TGRMLoop:
             if tool_usage is not None:
                 tool_usage.approx_tokens += self._estimate_tokens(web_summary)
 
-            note_lines.append("Web summary (Tavily):")
+            note_lines.append("Web summary (Tavily or equivalent):")
             note_lines.append(web_summary)
             note_lines.append("")
             note_lines.append("Web sources:")
@@ -1650,7 +1802,7 @@ class TGRMLoop:
         note_lines.append(f"[{role}] Targeted research on open items ({issue}) for goal:")
         note_lines.append(goal)
         note_lines.append("")
-        note_lines.append("Questions / TODOs considered:")
+        note_lines.append("Questions or TODOs considered:")
         for q in questions:
             note_lines.append(f"- {q}")
         note_lines.append("")
@@ -1686,7 +1838,7 @@ class TGRMLoop:
                 if tool_usage is not None:
                     tool_usage.approx_tokens += self._estimate_tokens(web_summary)
 
-                note_lines.append("Web summary (Tavily):")
+                note_lines.append("Web summary (Tavily or equivalent):")
                 note_lines.append(web_summary)
                 note_lines.append("Web sources:")
                 for c in web_cites:
