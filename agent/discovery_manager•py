@@ -1,0 +1,634 @@
+# agent/discovery_manager.py
+
+"""Discovery management and breakthrough analytics for the Autonomous Research Agent.
+
+This module defines a DiscoveryManager that sits beside:
+
+    - TGRM loop and RYE metrics
+    - Presets and discovery_engine configuration
+    - Stability kernel and advanced diagnostics
+    - Optional citation utilities
+    - Optional MSIL style meta intelligence
+
+Goals:
+
+    - Collect candidate discoveries from cycle history
+    - Score and tier discoveries using RYE, novelty, support, and citations
+    - Integrate domain specific discovery_engine config from presets
+    - Expose compact summaries for reports and the Streamlit UI
+    - Provide soft breakthrough tier probabilities that align with
+      Reparodynamics and RYE signals
+
+DiscoveryManager never changes core run settings, time budgets, or engine behavior.
+It only reads from MemoryStore history and configuration, then returns structured
+analytics that the UI, report generator, or MetaAgent can consume.
+
+It is safe to ignore if you only need the basic CoreAgent.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
+import uuid
+import statistics
+import math
+
+from .memory_store import MemoryStore
+from .presets import get_preset
+from .rye_metrics import build_run_diagnostics
+
+# Optional citation utilities
+try:
+    from . import citation_utils  # type: ignore[import]
+except Exception:  # pragma: no cover
+    citation_utils = None  # type: ignore[assignment]
+
+
+# -------------------------------------------------------------------
+# Data models
+# -------------------------------------------------------------------
+
+
+@dataclass
+class DiscoveryCandidate:
+    """Single candidate discovery extracted from cycle history."""
+
+    discovery_id: str
+    run_id: Optional[str]
+    cycle_index: int
+    preset_name: str
+    domain: str
+    kind: str  # mechanism, intervention, treatment, biomarker_shift, pattern, theorem, etc
+    title: str
+    description: str
+
+    # Metrics
+    novelty_score: Optional[float] = None
+    support_score: Optional[float] = None
+    confidence: Optional[float] = None
+    role_agreement: Optional[int] = None
+
+    rye_before: Optional[float] = None
+    rye_after: Optional[float] = None
+    delta_rye: Optional[float] = None
+    energy_cost: Optional[float] = None
+    rye_efficiency: Optional[float] = None
+
+    # Evidence
+    citations: List[Dict[str, Any]] = field(default_factory=list)
+    citation_count: int = 0
+    citation_quality_hint: Optional[str] = None
+
+    biomarker_evidence: Dict[str, Any] = field(default_factory=dict)
+    biomarker_shift_count: int = 0
+
+    # Tiering
+    tier_hint: Optional[str] = None  # "tier1", "tier2", "tier3"
+    tier_score: Optional[float] = None
+
+    # Raw metadata from the engine
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DiscoverySummary:
+    """Aggregated view of discoveries for a single run."""
+
+    run_id: Optional[str]
+    preset_name: str
+    domain: str
+
+    total_candidates: int
+    by_kind: Dict[str, int]
+    by_tier: Dict[str, int]
+
+    top_candidates: List[DiscoveryCandidate] = field(default_factory=list)
+    tier1_candidates: List[DiscoveryCandidate] = field(default_factory=list)
+    tier2_candidates: List[DiscoveryCandidate] = field(default_factory=list)
+    tier3_candidates: List[DiscoveryCandidate] = field(default_factory=list)
+
+    diagnostics_snapshot: Dict[str, Any] = field(default_factory=dict)
+    tier_thresholds: Dict[str, Any] = field(default_factory=dict)
+
+    created_utc: str = field(
+        default_factory=lambda: datetime.utcnow().isoformat()
+    )
+
+
+# -------------------------------------------------------------------
+# Helper utilities
+# -------------------------------------------------------------------
+
+
+def _safe_mean(values: List[float]) -> Optional[float]:
+    vals = [v for v in values if isinstance(v, (int, float))]
+    if not vals:
+        return None
+    try:
+        return float(statistics.mean(vals))
+    except Exception:
+        return None
+
+
+def _safe_float(value: Any) -> Optional[float]:
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except Exception:
+        return None
+
+
+def _clamp01(value: float) -> float:
+    return float(max(0.0, min(1.0, value)))
+
+
+def _extract_citations(raw: Any) -> List[Dict[str, Any]]:
+    """Normalize citation structures from arbitrary engine outputs."""
+    if raw is None:
+        return []
+    if isinstance(raw, list):
+        cleaned: List[Dict[str, Any]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                cleaned.append(item)
+            elif isinstance(item, str):
+                cleaned.append({"raw": item})
+        return cleaned
+    if isinstance(raw, dict):
+        return [raw]
+    return [{"raw": str(raw)}]
+
+
+def _citation_quality_hint(citations: List[Dict[str, Any]]) -> Optional[str]:
+    """Very lightweight heuristic about citation quality."""
+    if not citations:
+        return None
+    journal_like = 0
+    preprint_like = 0
+    url_only = 0
+
+    for c in citations:
+        src = (c.get("source") or c.get("journal") or c.get("publisher") or "").lower()
+        url = (c.get("url") or c.get("link") or "").lower()
+        if "medrxiv" in src or "biorxiv" in src:
+            preprint_like += 1
+        elif any(key in src for key in ["nature", "cell", "science", "lancet", "nejm"]):
+            journal_like += 1
+        elif url:
+            url_only += 1
+
+    if journal_like > 0 and preprint_like == 0 and url_only == 0:
+        return "high"
+    if journal_like > 0 or preprint_like > 0:
+        return "medium"
+    if url_only > 0:
+        return "low"
+    return None
+
+
+def _extract_biomarker_evidence(meta: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
+    """Pull biomarker evidence from candidate metadata if present."""
+    if not isinstance(meta, dict):
+        return {}, 0
+    biomarker = meta.get("biomarker_evidence") or meta.get("biomarkers") or {}
+    if not isinstance(biomarker, dict):
+        return {}, 0
+    shifts = biomarker.get("shifts") or []
+    count = 0
+    if isinstance(shifts, list):
+        count = len(shifts)
+    return biomarker, count
+
+
+# -------------------------------------------------------------------
+# DiscoveryManager
+# -------------------------------------------------------------------
+
+
+class DiscoveryManager:
+    """Discovery extraction and breakthrough analytics manager.
+
+    DiscoveryManager assumes that the engine places candidate discoveries
+    into one or more of the following fields in each cycle log entry:
+
+        - "discovery_events": List[dict]
+        - "candidate_discoveries": List[dict]
+        - "discoveries": List[dict]
+
+    Each candidate is expected to be a dict that may contain:
+
+        - "kind" or "type"
+        - "title"
+        - "description"
+        - "novelty_score"
+        - "support_score"
+        - "confidence"
+        - "roles" or "role_agreement"
+        - "citations" or "sources"
+        - "metadata" or "meta"
+
+    The manager is robust to missing fields and uses soft defaults.
+    """
+
+    def __init__(
+        self,
+        memory_store: MemoryStore,
+        preset_name: str = "general",
+        config: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        self.memory = memory_store
+        self.config = config or {}
+        self.preset_name = preset_name
+        self.preset = get_preset(preset_name)
+        self.domain = self.preset.get("domain", "general")
+
+        # Default discovery config from preset
+        de_cfg = self.preset.get("discovery_engine", {}) or {}
+        self.discovery_config: Dict[str, Any] = de_cfg
+
+        self.classification_kinds: List[str] = list(
+            de_cfg.get("classification", []) or []
+        )
+
+    # ------------------------------------------------------------------
+    # Public main methods
+    # ------------------------------------------------------------------
+
+    def extract_candidates(
+        self,
+        history: Optional[List[Dict[str, Any]]] = None,
+        run_id: Optional[str] = None,
+    ) -> List[DiscoveryCandidate]:
+        """Extract raw candidate discoveries from cycle history."""
+        if history is None:
+            history = self.memory.get_cycle_history()
+
+        candidates: List[DiscoveryCandidate] = []
+
+        for entry in history:
+            cycle_index = int(entry.get("cycle_index") or 0)
+            rye_before = _safe_float(entry.get("rye_before"))
+            rye_after = _safe_float(entry.get("rye_after") or entry.get("rye_value"))
+            delta_rye = None
+            if rye_after is not None and rye_before is not None:
+                delta_rye = rye_after - rye_before
+            energy_cost = _safe_float(entry.get("energy_cost"))
+            rye_eff = None
+            if delta_rye is not None and energy_cost and energy_cost > 0:
+                rye_eff = delta_rye / energy_cost
+
+            # Possible fields that hold discovery records
+            raw_lists: List[Any] = []
+            for key in ("discovery_events", "candidate_discoveries", "discoveries"):
+                val = entry.get(key)
+                if val:
+                    raw_lists.append(val)
+
+            for raw_list in raw_lists:
+                if not isinstance(raw_list, list):
+                    continue
+                for raw in raw_list:
+                    if not isinstance(raw, dict):
+                        continue
+                    candidate = self._build_candidate_from_raw(
+                        raw=raw,
+                        run_id=run_id,
+                        cycle_index=cycle_index,
+                        rye_before=rye_before,
+                        rye_after=rye_after,
+                        delta_rye=delta_rye,
+                        energy_cost=energy_cost,
+                        rye_efficiency=rye_eff,
+                    )
+                    candidates.append(candidate)
+
+        return candidates
+
+    def score_and_classify(
+        self,
+        candidates: List[DiscoveryCandidate],
+    ) -> List[DiscoveryCandidate]:
+        """Attach RYE aware scores and tier hints to each candidate."""
+        tier_hints = self._extract_tier_thresholds()
+        scored: List[DiscoveryCandidate] = []
+        for cand in candidates:
+            self._score_candidate(cand, tier_hints)
+            scored.append(cand)
+        return scored
+
+    def summarize_run(
+        self,
+        history: Optional[List[Dict[str, Any]]] = None,
+        run_id: Optional[str] = None,
+    ) -> DiscoverySummary:
+        """Produce a DiscoverySummary for a single run."""
+        if history is None:
+            history = self.memory.get_cycle_history()
+
+        candidates = self.extract_candidates(history=history, run_id=run_id)
+        candidates = self.score_and_classify(candidates)
+
+        by_kind: Dict[str, int] = {}
+        by_tier: Dict[str, int] = {
+            "unclassified": 0,
+            "tier1": 0,
+            "tier2": 0,
+            "tier3": 0,
+        }
+
+        for c in candidates:
+            kind = c.kind or "unknown"
+            by_kind[kind] = by_kind.get(kind, 0) + 1
+            tier = c.tier_hint or "unclassified"
+            by_tier[tier] = by_tier.get(tier, 0) + 1
+
+        # Basic diagnostics snapshot for context
+        try:
+            diagnostics = build_run_diagnostics(history=history, domain=self.domain, window=10)
+        except Exception:
+            diagnostics = {}
+
+        tier_thresholds = self._extract_tier_thresholds()
+
+        # Select top candidates by tier_score
+        sorted_candidates = sorted(
+            candidates,
+            key=lambda c: c.tier_score if isinstance(c.tier_score, (int, float)) else 0.0,
+            reverse=True,
+        )
+        top_candidates = sorted_candidates[:20]
+
+        tier1_candidates = [c for c in sorted_candidates if c.tier_hint == "tier1"]
+        tier2_candidates = [c for c in sorted_candidates if c.tier_hint == "tier2"]
+        tier3_candidates = [c for c in sorted_candidates if c.tier_hint == "tier3"]
+
+        summary = DiscoverySummary(
+            run_id=run_id,
+            preset_name=self.preset_name,
+            domain=self.domain,
+            total_candidates=len(candidates),
+            by_kind=by_kind,
+            by_tier=by_tier,
+            top_candidates=top_candidates,
+            tier1_candidates=tier1_candidates[:20],
+            tier2_candidates=tier2_candidates[:20],
+            tier3_candidates=tier3_candidates[:20],
+            diagnostics_snapshot=diagnostics,
+            tier_thresholds=tier_thresholds,
+        )
+
+        # Optionally persist if MemoryStore supports it
+        self._store_summary_if_supported(summary)
+        return summary
+
+    def export_for_report(self, summary: DiscoverySummary) -> Dict[str, Any]:
+        """Export a compact dict for report generators and the UI."""
+        def compact_candidate(c: DiscoveryCandidate) -> Dict[str, Any]:
+            return {
+                "discovery_id": c.discovery_id,
+                "cycle_index": c.cycle_index,
+                "kind": c.kind,
+                "title": c.title,
+                "description": c.description,
+                "novelty_score": c.novelty_score,
+                "support_score": c.support_score,
+                "confidence": c.confidence,
+                "role_agreement": c.role_agreement,
+                "delta_rye": c.delta_rye,
+                "rye_efficiency": c.rye_efficiency,
+                "citation_count": c.citation_count,
+                "citation_quality_hint": c.citation_quality_hint,
+                "biomarker_shift_count": c.biomarker_shift_count,
+                "tier_hint": c.tier_hint,
+                "tier_score": c.tier_score,
+            }
+
+        return {
+            "run_id": summary.run_id,
+            "preset_name": summary.preset_name,
+            "domain": summary.domain,
+            "total_candidates": summary.total_candidates,
+            "by_kind": summary.by_kind,
+            "by_tier": summary.by_tier,
+            "diagnostics_snapshot": summary.diagnostics_snapshot,
+            "tier_thresholds": summary.tier_thresholds,
+            "top_candidates": [compact_candidate(c) for c in summary.top_candidates],
+            "tier1_candidates": [compact_candidate(c) for c in summary.tier1_candidates],
+            "tier2_candidates": [compact_candidate(c) for c in summary.tier2_candidates],
+            "tier3_candidates": [compact_candidate(c) for c in summary.tier3_candidates],
+        }
+
+    # ------------------------------------------------------------------
+    # Internal builders and scorers
+    # ------------------------------------------------------------------
+
+    def _build_candidate_from_raw(
+        self,
+        raw: Dict[str, Any],
+        run_id: Optional[str],
+        cycle_index: int,
+        rye_before: Optional[float],
+        rye_after: Optional[float],
+        delta_rye: Optional[float],
+        energy_cost: Optional[float],
+        rye_efficiency: Optional[float],
+    ) -> DiscoveryCandidate:
+        """Normalize a raw discovery record into a DiscoveryCandidate."""
+        kind = str(raw.get("kind") or raw.get("type") or "unknown").strip()
+        title = str(raw.get("title") or raw.get("name") or "Unnamed discovery").strip()
+        description = str(raw.get("description") or raw.get("summary") or "").strip()
+
+        novelty_score = _safe_float(raw.get("novelty_score"))
+        support_score = _safe_float(raw.get("support_score"))
+        confidence = _safe_float(raw.get("confidence"))
+
+        # Roles or role agreement
+        roles = raw.get("roles")
+        if isinstance(roles, list):
+            role_agreement = len(roles)
+        else:
+            role_agreement = raw.get("role_agreement")
+            if isinstance(role_agreement, str):
+                try:
+                    role_agreement = int(role_agreement)
+                except Exception:
+                    role_agreement = None
+
+        # Citations
+        citations_raw = raw.get("citations") or raw.get("sources")
+        citations_list = _extract_citations(citations_raw)
+        citation_count = len(citations_list)
+        citation_hint = _citation_quality_hint(citations_list)
+
+        # Biomarker evidence
+        metadata = raw.get("metadata") or raw.get("meta") or {}
+        biomarker_ev, biomarker_shift_count = _extract_biomarker_evidence(metadata)
+
+        return DiscoveryCandidate(
+            discovery_id=str(raw.get("id") or uuid.uuid4()),
+            run_id=run_id,
+            cycle_index=cycle_index,
+            preset_name=self.preset_name,
+            domain=self.domain,
+            kind=kind,
+            title=title,
+            description=description,
+            novelty_score=novelty_score,
+            support_score=support_score,
+            confidence=confidence,
+            role_agreement=role_agreement if isinstance(role_agreement, int) else None,
+            rye_before=rye_before,
+            rye_after=rye_after,
+            delta_rye=delta_rye,
+            energy_cost=energy_cost,
+            rye_efficiency=rye_efficiency,
+            citations=citations_list,
+            citation_count=citation_count,
+            citation_quality_hint=citation_hint,
+            biomarker_evidence=biomarker_ev,
+            biomarker_shift_count=biomarker_shift_count,
+            metadata=metadata if isinstance(metadata, dict) else {},
+        )
+
+    def _score_candidate(
+        self,
+        cand: DiscoveryCandidate,
+        tier_hints: Dict[str, Any],
+    ) -> None:
+        """Attach RYE aware tier score and tier hint to a candidate.
+
+        Uses transparent heuristics:
+
+            - novelty_score
+            - support_score
+            - confidence
+            - role_agreement
+            - delta_rye and rye_efficiency
+            - evidence strictness from preset discovery_engine
+        """
+        cfg = self.discovery_config or {}
+        base_novelty_min = cfg.get("threshold_novelty")
+        base_support_min = cfg.get("threshold_support")
+
+        novelty = _safe_float(cand.novelty_score) or 0.0
+        support = _safe_float(cand.support_score) or 0.0
+        confidence = _safe_float(cand.confidence) or 0.0
+        delta_rye = _safe_float(cand.delta_rye) or 0.0
+        rye_eff = _safe_float(cand.rye_efficiency) or 0.0
+        role_agreement = float(cand.role_agreement or 0)
+        citation_count = float(cand.citation_count or 0)
+        biomarker_shifts = float(cand.biomarker_shift_count or 0)
+
+        # Normalize components
+        novelty_component = _clamp01(novelty / max(base_novelty_min or 0.1, 0.05))
+        support_component = _clamp01(support / max(base_support_min or 0.1, 0.05))
+        confidence_component = _clamp01(confidence)
+        delta_component = _clamp01(delta_rye / 0.10) if delta_rye > 0 else 0.0
+        efficiency_component = _clamp01(rye_eff / 0.05) if rye_eff > 0 else 0.0
+        role_component = _clamp01(role_agreement / float(cfg.get("minimum_role_agreement", 3) or 3))
+        citation_component = _clamp01(math.log1p(citation_count) / math.log1p(50.0))
+        biomarker_component = _clamp01(biomarker_shifts / 5.0)
+
+        # Weights tuned for biomedical and math modes
+        weights = {
+            "novelty": 0.25,
+            "support": 0.20,
+            "confidence": 0.15,
+            "delta": 0.15,
+            "efficiency": 0.10,
+            "roles": 0.05,
+            "citations": 0.05,
+            "biomarkers": 0.05,
+        }
+        weight_sum = sum(weights.values()) or 1.0
+
+        score = (
+            novelty_component * weights["novelty"]
+            + support_component * weights["support"]
+            + confidence_component * weights["confidence"]
+            + delta_component * weights["delta"]
+            + efficiency_component * weights["efficiency"]
+            + role_component * weights["roles"]
+            + citation_component * weights["citations"]
+            + biomarker_component * weights["biomarkers"]
+        ) / weight_sum
+
+        cand.tier_score = _clamp01(score)
+        cand.tier_hint = self._assign_tier(score, cand, tier_hints)
+
+    def _assign_tier(
+        self,
+        score: float,
+        cand: DiscoveryCandidate,
+        tier_hints: Dict[str, Any],
+    ) -> str:
+        """Map a continuous score into tiers using preset thresholds."""
+        t1 = tier_hints.get("tier1_thresholds", {}) if tier_hints else {}
+        t2 = tier_hints.get("tier2_thresholds", {}) if tier_hints else {}
+        t3 = tier_hints.get("tier3_thresholds", {}) if tier_hints else {}
+
+        # Use min_avg_rye and min_peak_rye as soft boundaries if present.
+        def avg_rye_boundary(th: Dict[str, Any]) -> float:
+            val = th.get("min_avg_rye")
+            if isinstance(val, (int, float)):
+                return float(val)
+            return 0.06
+
+        def peak_rye_boundary(th: Dict[str, Any]) -> float:
+            val = th.get("min_peak_rye")
+            if isinstance(val, (int, float)):
+                return float(val)
+            return 0.12
+
+        # Qualitative boundaries based on score
+        if score >= 0.80:
+            return "tier3"
+        if score >= 0.55:
+            return "tier2"
+        if score >= 0.35:
+            return "tier1"
+
+        # For longevity, allow biomarker heavy candidates to be upgraded a tier
+        domain = self.domain
+        if domain == "longevity" and cand.biomarker_shift_count >= 3:
+            if score >= 0.30:
+                return "tier1"
+
+        # For math, allow highly novel structures to be tier2 with lower support
+        if domain == "math" and (cand.kind in ["theorem", "framework", "mathematical_structure"]):
+            if (cand.novelty_score or 0.0) >= 0.6 and score >= 0.40:
+                return "tier2"
+
+        return "unclassified"
+
+    def _extract_tier_thresholds(self) -> Dict[str, Any]:
+        """Combine preset level tier thresholds from discovery and pdf configs."""
+        de_cfg = self.discovery_config or {}
+        pdf_cfg = self.preset.get("pdf_report", {}) or {}
+        overrides = pdf_cfg.get("breakthrough_overrides", {}) or {}
+        base_defaults = pdf_cfg.get("base_defaults", {}) or {}
+        base_hints = base_defaults.get("breakthrough_hints", {}) or {}
+
+        merged: Dict[str, Any] = {}
+        for src in (base_hints, de_cfg, overrides):
+            for k, v in src.items():
+                if k not in merged:
+                    merged[k] = v
+                else:
+                    # Simple override rule: later sources overwrite earlier ones
+                    merged[k] = v
+        return merged
+
+    def _store_summary_if_supported(self, summary: DiscoverySummary) -> None:
+        """Store summary in MemoryStore if it exposes a suitable method."""
+        try:
+            if hasattr(self.memory, "save_discovery_summary"):
+                self.memory.save_discovery_summary(summary)  # type: ignore[attr-defined]
+            elif hasattr(self.memory, "store_discovery_summary"):
+                self.memory.store_discovery_summary(summary)  # type: ignore[attr-defined]
+        except Exception:
+            # Persistence is best effort only
+            return
