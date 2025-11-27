@@ -19,6 +19,7 @@ Key components:
 - hypothesis_engine: simple structured hypothesis generation
 - biomarker_analyzer: basic rule based biomarker scoring for longevity mode
 - continuous_runner: helper for running continuous sessions from scripts
+- report_builder: Option C report generator (RYE, stability, diagnostics)
 """
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "hypothesis_engine",
     "biomarker_analyzer",
     "continuous_runner",
+    "report_builder",  # <-- added so imports resolve cleanly
 ]
