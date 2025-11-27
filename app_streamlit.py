@@ -19,6 +19,8 @@ Features:
 - Memory pruning controls (if supported by MemoryStore)
 - Verification panel for cures, treatments, and stability checks
 - Multi agent insight graph for roles, hypotheses, and discoveries
+- Report generation from full cycle history
+- Optional PDF report export (if reportlab is installed)
 
 Reparodynamics:
     The UI is a front panel on a reparodynamic system:
@@ -41,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -710,6 +713,14 @@ def equilibrium_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Optional[fl
     }
 
 
+def _safe_gv_id(prefix: str, raw: str) -> str:
+    """Sanitize Graphviz node id to avoid spaces and punctuation issues."""
+    clean = re.sub(r"[^a-zA-Z0-9_]", "_", raw)
+    if not clean:
+        clean = "node"
+    return f"{prefix}{clean}"
+
+
 def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[str, Any]]) -> str:
     """Build a Graphviz DOT string linking goals, roles, hypotheses, and discoveries."""
     nodes: List[str] = []
@@ -720,17 +731,23 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
 
     # Domains
     domains = sorted({str(e.get("domain", "general")) for e in history})
+    domain_ids: Dict[str, str] = {}
     for d in domains:
         safe_d = d.replace('"', "'")
-        nodes.append(f'domain_{safe_d} [label="Domain: {safe_d}", shape=box]')
-        edges.append(f"run -> domain_{safe_d}")
+        node_id = _safe_gv_id("domain_", d)
+        domain_ids[d] = node_id
+        nodes.append(f'{node_id} [label="Domain: {safe_d}", shape=box]')
+        edges.append(f"run -> {node_id}")
 
     # Roles
     roles = sorted({str(e.get("role", "agent")) for e in history})
+    role_ids: Dict[str, str] = {}
     for r in roles:
         safe_r = r.replace('"', "'")
-        nodes.append(f'role_{safe_r} [label="Role: {safe_r}", shape=ellipse]')
-        edges.append(f"run -> role_{safe_r}")
+        node_id = _safe_gv_id("role_", r)
+        role_ids[r] = node_id
+        nodes.append(f'{node_id} [label="Role: {safe_r}", shape=ellipse]')
+        edges.append(f"run -> {node_id}")
 
     # Hypotheses, take top 8 by confidence if available
     hyps = extract_hypotheses_from_history(history)
@@ -750,11 +767,18 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
 
     for idx, h in enumerate(top_hyps):
         label = h["text"][:60].replace('"', "'")
-        nodes.append(f'hyp_{idx} [label="H: {label}", shape=note]')
-        d = str(h.get("domain", "general")).replace('"', "'")
-        r = str(h.get("role", "agent")).replace('"', "'")
-        edges.append(f"domain_{d} -> hyp_{idx}")
-        edges.append(f"role_{r} -> hyp_{idx}")
+        hyp_id = f"hyp_{idx}"
+        nodes.append(f'{hyp_id} [label="H: {label}", shape=note]')
+        d = str(h.get("domain", "general"))
+        r = str(h.get("role", "agent"))
+        d_id = domain_ids.get(d, _safe_gv_id("domain_", d))
+        r_id = role_ids.get(r, _safe_gv_id("role_", r))
+        if d_id not in domain_ids.values():
+            nodes.append(f'{d_id} [label="Domain: {d.replace(\'"\', "\'")}", shape=box]')
+        if r_id not in role_ids.values():
+            nodes.append(f'{r_id} [label="Role: {r.replace(\'"\', "\'")}", shape=ellipse]')
+        edges.append(f"{d_id} -> {hyp_id}")
+        edges.append(f"{r_id} -> {hyp_id}")
 
     # Discoveries, top 8 by rye_gain if present
     top_disc: List[Dict[str, Any]] = []
@@ -773,8 +797,9 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
     for idx, d in enumerate(top_disc):
         label = str(d.get("title") or d.get("summary") or d.get("id") or f"Discovery {idx + 1}")
         label = label[:60].replace('"', "'")
-        nodes.append(f'disc_{idx} [label="D: {label}", shape=diamond]')
-        edges.append(f"run -> disc_{idx}")
+        disc_id = f"disc_{idx}"
+        nodes.append(f'{disc_id} [label="D: {label}", shape=diamond]')
+        edges.append(f"run -> {disc_id}")
 
     dot_lines = ["digraph G {", 'rankdir=LR;', 'node [fontname="Helvetica"];']
     dot_lines.extend(nodes)
