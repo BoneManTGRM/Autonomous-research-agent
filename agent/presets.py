@@ -1,5 +1,3 @@
-# agent/presets.py
-
 """Domain presets for the Autonomous Research Agent.
 
 Presets act as domain specific profiles that define:
@@ -29,13 +27,18 @@ from __future__ import annotations
 from typing import Dict, Any, List, Optional
 
 # Simple version tag so the app and UI can display which preset set is loaded.
-PRESETS_VERSION: str = "2025-11-26-10x-speed"
+PRESETS_VERSION: str = "2025-11-27-10x-speed-rt"
 
 # ---------------------------------------------------------------------
 # Global Runtime Profiles (applies for all presets)
 # These are interpreted by CoreAgent and engine_worker.
 # Each profile now also carries learning speed hints that can be used
 # by the learning_burst layer and MemoryStore learning profiles.
+#
+# New field: wallclock_minutes
+#   Exact intended duration in minutes so timed runs map to real time:
+#   1 hour, 8 hours, 24 hours, 1 week, 1 month, 90 days.
+#   The forever profile omits a fixed wallclock_minutes value.
 # ---------------------------------------------------------------------
 RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
     "1_hour": {
@@ -48,6 +51,8 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "none",
         "target_rye_range": [0.02, 0.15],
+        # Exact real time target in minutes
+        "wallclock_minutes": 60.0,
         # Faster learning hints
         "learning_speed_factor": 2.0,
         "burst_profile_hint": "light",
@@ -63,6 +68,8 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "transient_or_plateau",
         "target_rye_range": [0.04, 0.18],
+        # Exact real time target in minutes
+        "wallclock_minutes": 8.0 * 60.0,
         "learning_speed_factor": 4.0,
         "burst_profile_hint": "light",
         "spread_of_learning_strength": 0.6,
@@ -77,6 +84,8 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "plateau",
         "target_rye_range": [0.06, 0.20],
+        # Exact real time target in minutes
+        "wallclock_minutes": 24.0 * 60.0,
         "learning_speed_factor": 6.0,
         "burst_profile_hint": "balanced",
         "spread_of_learning_strength": 0.8,
@@ -94,6 +103,8 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "plateau_or_high",
         "target_rye_range": [0.08, 0.22],
+        # Exact real time target in minutes
+        "wallclock_minutes": 7.0 * 24.0 * 60.0,
         "learning_speed_factor": 8.0,
         "burst_profile_hint": "balanced",
         "spread_of_learning_strength": 1.0,
@@ -111,6 +122,8 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "plateau_or_high",
         "target_rye_range": [0.09, 0.24],
+        # Exact real time target in minutes
+        "wallclock_minutes": 30.0 * 24.0 * 60.0,
         "learning_speed_factor": 9.0,
         "burst_profile_hint": "aggressive",
         "spread_of_learning_strength": 1.2,
@@ -129,6 +142,8 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "high_or_plateau",
         "target_rye_range": [0.10, 0.28],
+        # Exact real time target in minutes
+        "wallclock_minutes": 90.0 * 24.0 * 60.0,
         "learning_speed_factor": 10.0,
         "burst_profile_hint": "aggressive",
         "spread_of_learning_strength": 1.5,
@@ -143,6 +158,7 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "use_advanced_rye": True,
         "expected_equilibrium": "mixed",
         "target_rye_range": [0.04, 0.24],
+        # No fixed wallclock_minutes for forever
         "learning_speed_factor": 5.0,
         "burst_profile_hint": "balanced",
         "spread_of_learning_strength": 1.0,
