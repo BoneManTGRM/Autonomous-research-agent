@@ -269,6 +269,12 @@ try:
 except Exception:
     TradingEngine = None  # type: ignore
 
+# Optional SwarmOrchestrator engine
+try:
+    from .swarm_orchestrator import SwarmOrchestrator  # type: ignore[attr-defined]
+except Exception:
+    SwarmOrchestrator = None  # type: ignore
+
 # Discovery stack imports
 from .discovery_log import DiscoveryLogger, get_global_logger
 from .hypothesis_manager import HypothesisManager
@@ -328,6 +334,29 @@ class CoreAgent:
         else:
             # TGRMLoop will receive a plain dict of tool callables
             self.tools = self.tool_registry
+
+        # ------------------------------------------------------------------
+        # Swarm Orchestrator (hierarchical swarm engine on top of CoreAgent)
+        # ------------------------------------------------------------------
+        self.swarm_orchestrator: Optional[Any] = None
+        if SwarmOrchestrator is not None:
+            try:
+                self.swarm_orchestrator = SwarmOrchestrator(
+                    agent_fn=self._run_swarm_agent_payload,
+                    max_workers=int(self.config.get("swarm_max_workers", 32)),
+                    max_swarm_size=int(self.config.get("swarm_max_size", 64)),
+                    default_mode=str(self.config.get("swarm_default_mode", "burst")),
+                    default_domain=str(self.config.get("default_domain", "general")),
+                    enable_cross_domain_bridge=bool(self.config.get("swarm_cross_domain_bridge", True)),
+                    enable_diagnostics=bool(self.config.get("swarm_diagnostics_enabled", True)),
+                    enable_msil=bool(self.config.get("swarm_msil_enabled", True)),
+                    enable_stability_kernel=bool(self.config.get("swarm_stability_enabled", True)),
+                    enable_discovery_manager=bool(self.config.get("swarm_discovery_enabled", True)),
+                    enable_protocol_synthesizer=bool(self.config.get("swarm_protocols_enabled", True)),
+                    record_history=bool(self.config.get("swarm_history_enabled", True)),
+                )
+            except Exception:
+                self.swarm_orchestrator = None
 
         # ------------------------------------------------------------------
         # MSIL controller and modes (v1 vs v2, single vs dual track)
@@ -1121,6 +1150,214 @@ class CoreAgent:
             return self.get_agent_roles()
         except Exception:
             return self.get_agent_roles()
+
+    # ------------------------------------------------------------------
+    # Swarm Orchestrator helpers
+    # ------------------------------------------------------------------
+    def get_swarm_orchestrator_status(self) -> Dict[str, Any]:
+        """Return status for the SwarmOrchestrator engine."""
+        if self.swarm_orchestrator is None:
+            return {
+                "enabled": False,
+                "reason": "not_initialized",
+            }
+        try:
+            return {
+                "enabled": True,
+                "max_workers": self.swarm_orchestrator.max_workers,
+                "max_swarm_size": self.swarm_orchestrator.max_swarm_size,
+                "default_mode": self.swarm_orchestrator.default_mode,
+                "default_domain": self.swarm_orchestrator.default_domain,
+                "roles": [r.name for r in getattr(self.swarm_orchestrator, "roles", [])],
+                "history_length": len(getattr(self.swarm_orchestrator, "history", [])),
+            }
+        except Exception:
+            return {
+                "enabled": True,
+            }
+
+    def _run_swarm_agent_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        """Adapter so SwarmOrchestrator can call back into CoreAgent.
+
+        Each swarm agent runs a compact continuous burst using the normal
+        CoreAgent run_continuous path, then returns a summary and basic
+        diagnostics for the orchestrator.
+        """
+        try:
+            goal = str(payload.get("goal", "")).strip()
+            role = str(payload.get("role", "agent"))
+            domain = str(payload.get("domain", "general"))
+
+            max_cycles = int(payload.get("max_cycles", 8))
+
+            max_minutes_raw = payload.get("max_minutes")
+            max_minutes = float(max_minutes_raw) if isinstance(max_minutes_raw, (int, float)) else None
+
+            experiment_mode = payload.get("experiment_mode")
+            source_controls = payload.get("source_controls")
+            pdf_bytes = payload.get("pdf_bytes")
+            biomarker_snapshot = payload.get("biomarker_snapshot")
+            runtime_profile = payload.get("runtime_profile")
+
+            stop_rye_raw = payload.get("stop_rye")
+            stop_rye = float(stop_rye_raw) if isinstance(stop_rye_raw, (int, float)) else None
+
+            summaries = self.run_continuous(
+                goal=goal,
+                max_cycles=max_cycles,
+                stop_rye=stop_rye,
+                role=role,
+                source_controls=source_controls,
+                pdf_bytes=pdf_bytes,
+                biomarker_snapshot=biomarker_snapshot,
+                domain=domain,
+                max_minutes=max_minutes,
+                forever=False,
+                resume_from_checkpoint=False,
+                runtime_profile=runtime_profile,
+                run_id=payload.get("run_id"),
+                experiment_mode=experiment_mode,
+            )
+
+            summary = summaries[-1] if summaries else {}
+
+            diagnostics: Dict[str, Any] = {}
+            rye_diag = summary.get("rye_diagnostics") or summary.get("rye")
+            if isinstance(rye_diag, dict):
+                diagnostics["rye"] = rye_diag
+
+            result: Dict[str, Any] = {
+                "agent_index": payload.get("agent_index"),
+                "agent_id": payload.get("agent_id"),
+                "role": role,
+                "domain": domain,
+                "status": "ok",
+                "summary": summary,
+                "diagnostics": diagnostics,
+            }
+
+            trace = summary.get("rye_trace") or summary.get("RYE_trace")
+            if trace is not None:
+                result["rye_trace"] = trace
+
+            energy = summary.get("Energy") or summary.get("energy") or summary.get("cost_energy")
+            if isinstance(energy, (int, float)):
+                result["energy"] = float(energy)
+
+            tokens = summary.get("total_tokens") or summary.get("tokens_used")
+            if isinstance(tokens, (int, float)):
+                result["tokens_used"] = float(tokens)
+
+            if "citations" in summary:
+                result["citations"] = summary["citations"]
+
+            return result
+
+        except Exception as exc:
+            return {
+                "agent_index": payload.get("agent_index"),
+                "agent_id": payload.get("agent_id"),
+                "role": payload.get("role", "agent"),
+                "domain": payload.get("domain", "general"),
+                "status": "error",
+                "error": str(exc),
+            }
+
+    def run_orchestrated_swarm(
+        self,
+        goal: str,
+        *,
+        base_preset: Dict[str, Any],
+        swarm_size: int = 4,
+        max_cycles: int = 6,
+        mode: Optional[str] = None,
+        domain: Optional[str] = None,
+        curriculum_id: Optional[str] = None,
+        profile_name: Optional[str] = None,
+        seed: Optional[int] = None,
+        global_context: Optional[Dict[str, Any]] = None,
+        per_agent_overrides: Optional[Sequence[Dict[str, Any]]] = None,
+        timeout_s: Optional[float] = None,
+        return_agent_payloads: bool = False,
+        extra_tags: Optional[Dict[str, Any]] = None,
+        **agent_extra: Any,
+    ) -> Dict[str, Any]:
+        """Run a single orchestrated swarm round on top of CoreAgent."""
+        if self.swarm_orchestrator is None:
+            return {
+                "enabled": False,
+                "reason": "swarm_orchestrator_not_available",
+            }
+
+        swarm_summary = self.swarm_orchestrator.run_swarm(
+            goal=goal,
+            base_preset=base_preset,
+            swarm_size=swarm_size,
+            max_cycles=max_cycles,
+            mode=mode,
+            agent_fn=None,
+            run_id=agent_extra.pop("run_id", None),
+            domain=domain or "general",
+            curriculum_id=curriculum_id,
+            profile_name=profile_name,
+            seed=seed,
+            global_context=global_context,
+            per_agent_overrides=per_agent_overrides,
+            timeout_s=timeout_s,
+            return_agent_payloads=return_agent_payloads,
+            extra_tags=extra_tags,
+            **agent_extra,
+        )
+        return swarm_summary
+
+    def run_orchestrated_swarm_training_burst(
+        self,
+        goal: str,
+        *,
+        base_preset: Dict[str, Any],
+        rounds: int = 3,
+        swarm_size: int = 4,
+        max_cycles: int = 6,
+        mode: Optional[str] = None,
+        domain: Optional[str] = None,
+        runtime_profile: Optional[str] = None,
+        curriculum_id: Optional[str] = None,
+        profile_name: Optional[str] = None,
+        seed: Optional[int] = None,
+        global_context: Optional[Dict[str, Any]] = None,
+        timeout_s: Optional[float] = None,
+        extra_tags: Optional[Dict[str, Any]] = None,
+        **agent_extra: Any,
+    ) -> List[Dict[str, Any]]:
+        """Run several orchestrated swarms in a row as a training burst."""
+        results: List[Dict[str, Any]] = []
+        if self.swarm_orchestrator is None:
+            return results
+
+        domain_effective = domain or "general"
+        preset_with_runtime = dict(base_preset)
+        if runtime_profile is not None:
+            preset_with_runtime["runtime_profile"] = runtime_profile
+
+        for _ in range(max(1, int(rounds))):
+            summary = self.run_orchestrated_swarm(
+                goal=goal,
+                base_preset=preset_with_runtime,
+                swarm_size=swarm_size,
+                max_cycles=max_cycles,
+                mode=mode,
+                domain=domain_effective,
+                curriculum_id=curriculum_id,
+                profile_name=profile_name,
+                seed=seed,
+                global_context=global_context,
+                timeout_s=timeout_s,
+                return_agent_payloads=False,
+                extra_tags=extra_tags,
+                **agent_extra,
+            )
+            results.append(summary)
+        return results
 
     def spawn_child_agent(self, extra_config: Optional[Dict[str, Any]] = None) -> "CoreAgent":
         """Create a new CoreAgent that shares the same MemoryStore."""
