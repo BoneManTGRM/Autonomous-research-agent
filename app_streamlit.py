@@ -12,8 +12,6 @@ Features:
 - RYE, delta_R, and Energy charts
 - Real Tavily search support detection
 - Source citation viewer
-- Report generation from full cycle history
-- Optional PDF report export (if reportlab is installed)
 - Tools status panel for web browser and sandbox tools
 - Discovery log viewer and autonomous discovery panel
 - Snapshot timeline with equilibrium and stability view
@@ -582,6 +580,37 @@ def extract_hypotheses_from_history(history: List[Dict[str, Any]]) -> List[Dict[
     return results
 
 
+def extract_citations_from_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten citations across all cycles into a list with cycle info for the citation viewer."""
+    results: List[Dict[str, Any]] = []
+    for entry in history:
+        cycle_idx = entry.get("cycle")
+        role = entry.get("role", "agent")
+        domain = entry.get("domain", "general")
+        ts = entry.get("timestamp")
+        cites = entry.get("citations") or []
+        for c in cites:
+            if not isinstance(c, dict):
+                continue
+            source = c.get("source") or c.get("provider") or ""
+            title = c.get("title") or ""
+            url = c.get("url") or c.get("link") or ""
+            snippet = c.get("snippet") or c.get("summary") or ""
+            results.append(
+                {
+                    "cycle": cycle_idx,
+                    "role": role,
+                    "domain": domain,
+                    "timestamp": ts,
+                    "source": source,
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet,
+                }
+            )
+    return results
+
+
 def load_verification_log() -> List[Dict[str, Any]]:
     """Try to load verification log entries from standard locations."""
     candidates = [
@@ -1109,7 +1138,8 @@ def main() -> None:
                             biomarker_snapshot=None,
                             domain=domain_tag,
                         )
-                        results.append(out["summary"])
+                            summary = out["summary"]
+                        results.append(summary)
             else:
                 # Classic single or researcher plus critic manual mode
                 if not multi_agent:
@@ -1499,9 +1529,10 @@ def main() -> None:
         st.write("No cycles yet.")
     else:
         # Top level tabs
-        tab_history, tab_discovery, tab_snapshots, tab_hypo, tab_memory, tab_verify, tab_graph = st.tabs(
+        tab_history, tab_citations, tab_discovery, tab_snapshots, tab_hypo, tab_memory, tab_verify, tab_graph = st.tabs(
             [
                 "Cycle history",
+                "Citations",
                 "Discovery log",
                 "Snapshots and equilibrium",
                 "Hypothesis manager",
@@ -1702,6 +1733,84 @@ def main() -> None:
 
             with st.expander("Raw diagnostics JSON"):
                 st.code(json.dumps(diagnostics, indent=2), language="json")
+
+        # ----------------- Citations tab -----------------
+        with tab_citations:
+            st.markdown("### Source citation viewer")
+
+            citations = extract_citations_from_history(history)
+            if not citations:
+                st.info("No citations recorded yet in cycle history.")
+            else:
+                total_cites = len(citations)
+                unique_sources = sorted({c["source"] for c in citations if c.get("source")})
+                domains_c = sorted({c["domain"] for c in citations})
+                roles_c = sorted({c["role"] for c in citations})
+
+                col_c1, col_c2, col_c3 = st.columns(3)
+                with col_c1:
+                    st.metric("Total citation hits", total_cites)
+                with col_c2:
+                    st.metric("Unique sources", len(unique_sources))
+                with col_c3:
+                    st.metric("Domains with citations", len(domains_c))
+
+                domain_filter = st.multiselect(
+                    "Filter by domain",
+                    options=domains_c,
+                    default=domains_c,
+                )
+                role_filter = st.multiselect(
+                    "Filter by role",
+                    options=roles_c,
+                    default=roles_c,
+                )
+                source_filter = st.multiselect(
+                    "Filter by source",
+                    options=unique_sources,
+                    default=unique_sources,
+                )
+
+                filtered_cites: List[Dict[str, Any]] = []
+                for c in citations:
+                    d = c["domain"]
+                    r = c["role"]
+                    s = c["source"]
+                    if domain_filter and d not in domain_filter:
+                        continue
+                    if role_filter and r not in role_filter:
+                        continue
+                    if source_filter and s not in source_filter:
+                        continue
+                    filtered_cites.append(c)
+
+                st.write(f"Showing {len(filtered_cites)} citations after filters.")
+
+                view_rows_c: List[Dict[str, Any]] = []
+                for c in filtered_cites:
+                    title = c["title"] or ""
+                    snippet = c["snippet"] or ""
+                    if len(title) > 80:
+                        title = title[:80] + "..."
+                    if len(snippet) > 120:
+                        snippet = snippet[:120] + "..."
+                    view_rows_c.append(
+                        {
+                            "cycle": c["cycle"],
+                            "role": c["role"],
+                            "domain": c["domain"],
+                            "source": c["source"],
+                            "title": title,
+                            "snippet": snippet,
+                            "url": c["url"],
+                            "timestamp": c["timestamp"],
+                        }
+                    )
+
+                st.dataframe(view_rows_c, use_container_width=True)
+
+                with st.expander("Raw citations JSON"):
+                    st.code(json.dumps(citations, indent=2), language="json")
 
         # ----------------- Discovery log tab -----------------
         with tab_discovery:
