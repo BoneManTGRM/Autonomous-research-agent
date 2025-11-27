@@ -100,7 +100,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-from .rye_metrics import compute_delta_r, compute_energy, compute_rye
+from .rye_metrics import compute_delta_r, compute_rye
 
 # Optional stability kernel integration
 try:
@@ -181,6 +181,52 @@ except Exception:  # pragma: no cover
             self.sql_queries: int = 0
             self.data_loads: int = 0
             self.approx_tokens: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Local energy accounting helper
+# ---------------------------------------------------------------------------
+
+
+def compute_energy(
+    actions_taken: List[Dict[str, Any]],
+    web_calls: int = 0,
+    pubmed_calls: int = 0,
+    semantic_calls: int = 0,
+    pdf_ingestions: int = 0,
+    tokens_estimate: int = 0,
+    swarm_size: Optional[int] = None,
+    swarm_layer: Optional[str] = None,
+) -> float:
+    """Compute an energy cost E for a cycle compatible with older setups.
+
+    Energy is a weighted combination of:
+        - number of repair actions
+        - external calls (web, PubMed, Semantic Scholar, PDF ingestion)
+        - approximate tokens processed
+        - optional swarm scaling (size and layer)
+    """
+    base_actions = max(1, len(actions_taken))
+    external_calls = web_calls + pubmed_calls + semantic_calls + pdf_ingestions
+    token_cost = tokens_estimate / 1000.0
+
+    energy = (
+        0.5 * base_actions
+        + 0.75 * external_calls
+        + 0.2 * token_cost
+    )
+
+    if swarm_size:
+        energy *= 1.0 + min(2.0, max(0.0, (swarm_size - 1) / 32.0))
+
+    if swarm_layer:
+        layer = str(swarm_layer).lower()
+        if layer in {"meta", "guardian"}:
+            energy *= 1.15
+        elif layer in {"exploration", "deep"}:
+            energy *= 1.1
+
+    return max(0.1, float(energy))
 
 
 # ---------------------------------------------------------------------------
@@ -951,7 +997,6 @@ class TGRMLoop:
             semantic_calls=stats.get("semantic_calls", 0),
             pdf_ingestions=stats.get("pdf_ingestions", 0),
             tokens_estimate=tool_usage.approx_tokens,
-            # Optional swarm aware hints (ignored by older compute_energy)
             swarm_size=(swarm_profile or {}).get("swarm_size"),
             swarm_layer=(swarm_profile or {}).get("layer"),
         )
