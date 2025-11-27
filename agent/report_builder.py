@@ -8,7 +8,7 @@ This combines:
 - Swarm role summaries
 - Intelligence profile summary
 - Biomarker snapshots (if enabled)
-- PDF ready structured fields
+- PDF-ready structured fields
 - Markdown builder for Streamlit + headless use
 
 This replaces nothing.
@@ -19,10 +19,10 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# Import from the agent package since this file lives at repo root
-from agent.rye_metrics import (
+from .rye_metrics import (
     build_run_diagnostics,
     rye_volatility_signature,
     detect_rye_equilibrium,
@@ -35,13 +35,12 @@ from agent.rye_metrics import (
     build_option_c_signature,
 )
 
-from agent.memory_store import MemoryStore
+from .memory_store import MemoryStore
 
 
 # -------------------------------------------------------------
 # Helpers
 # -------------------------------------------------------------
-
 
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -62,7 +61,6 @@ def _md_section(title: str, body: str) -> str:
 # MAIN REPORT BUILDER
 # -------------------------------------------------------------
 
-
 def build_agent_report(
     *,
     memory_store: MemoryStore,
@@ -74,9 +72,8 @@ def build_agent_report(
     biomarker_snapshot: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
-    Generates a full Option C scientific report.
+    Generates a full Option C scientific report:
 
-    Sections:
     - Cycle history summary
     - RYE diagnostics bundle
     - Stability and trend analysis
@@ -86,10 +83,9 @@ def build_agent_report(
     - Tool stats (from MemoryStore)
     - Swarm mode summary
     - Intelligence profile summary
-    - Biomarkers (anti aging mode)
+    - Biomarkers (anti-aging mode)
     """
 
-    # Pull history and tool stats from memory
     history = memory_store.get_cycle_history()
     tool_stats = memory_store.get_tool_stats()
 
@@ -99,14 +95,10 @@ def build_agent_report(
     eq = detect_rye_equilibrium(history)
     harm = tgrm_harmonic_index(history)
     bp = estimate_breakthrough_probability(diag, domain=domain, horizon_hours=None)
-    bp90 = breakthrough_likelihood_90d(
-        diag,
-        domain=domain,
-        hours_run_so_far=hours_run_so_far,
-    )
+    bp90 = breakthrough_likelihood_90d(diag, domain=domain, hours_run_so_far=hours_run_so_far)
     env = autonomy_safety_envelope(diag)
     fail = early_failure_warning_score(diag)
-    tier = classify_run_tier(diag, breakthrough_prob=bp.get("probability"))
+    tier = classify_run_tier(diag, breakthrough_prob=bp["probability"])
 
     option_c_signature = build_option_c_signature(
         history,
@@ -132,25 +124,24 @@ def build_agent_report(
 
     # Header
     lines.append("# Autonomous Research Agent - Full Option C Report")
-    lines.append(f"**Timestamp:** {_iso_now()}")
+    lines.append(f"**Timestamp:** { _iso_now() }")
     if goal:
         lines.append(f"**Goal:** {goal}")
     if domain:
         lines.append(f"**Domain:** `{domain}`")
     lines.append("")
+
     lines.append("---\n")
 
     # 1. Cycle Overview
     lines.append(
         _md_section(
             "Cycle Overview",
-            _json(
-                {
-                    "total_cycles": len(history),
-                    "domain": domain,
-                    "hours_run_so_far": hours_run_so_far,
-                }
-            ),
+            _json({
+                "total_cycles": len(history),
+                "domain": domain,
+                "hours_run_so_far": hours_run_so_far,
+            })
         )
     )
 
@@ -158,9 +149,7 @@ def build_agent_report(
     lines.append(_md_section("RYE Diagnostics", _json(diag)))
 
     # 3. Learning Speed Summary (10x signals)
-    lines.append(
-        _md_section("Learning Speed Summary", _json(learning_speed_summary))
-    )
+    lines.append(_md_section("Learning Speed Summary", _json(learning_speed_summary)))
 
     # 4. Volatility
     lines.append(_md_section("Volatility Signature", _json(vol)))
@@ -169,35 +158,25 @@ def build_agent_report(
     lines.append(_md_section("Equilibrium Detection", _json(eq)))
 
     # 6. TGRM Harmonic Index
-    lines.append(
-        _md_section("TGRM Harmonic Index", _json({"harmonic_index": harm}))
-    )
+    lines.append(_md_section("TGRM Harmonic Index", _json({"harmonic_index": harm})))
 
-    # 7. Breakthrough Probability (short term)
-    lines.append(
-        _md_section("Breakthrough Probability (Short Term)", _json(bp))
-    )
+    # 7. Breakthrough Probability (near term)
+    lines.append(_md_section("Breakthrough Probability (Short-Term)", _json(bp)))
 
-    # 8. 90 Day Breakthrough Likelihood
-    lines.append(
-        _md_section("90 Day Breakthrough Likelihood", _json(bp90))
-    )
+    # 8. 90-Day Breakthrough Likelihood
+    lines.append(_md_section("90-Day Breakthrough Likelihood", _json(bp90)))
 
     # 9. Autonomy Stability Envelope
     lines.append(_md_section("Autonomy Stability Envelope", _json(env)))
 
-    # 10. Critical Failure Early Warning
-    lines.append(
-        _md_section("Critical Failure Early Warning", _json(fail))
-    )
+    # 10. Critical-Failure Early Warning
+    lines.append(_md_section("Critical-Failure Early Warning", _json(fail)))
 
     # 11. Run Tier Classification
     lines.append(_md_section("Run Tier Classification", _json(tier)))
 
     # 12. Option C Composite Signature
-    lines.append(
-        _md_section("Option C Composite Signature", _json(option_c_signature))
-    )
+    lines.append(_md_section("Option C Composite Signature", _json(option_c_signature)))
 
     # 13. Tool Diagnostics
     lines.append(_md_section("Tool Diagnostics", _json(tool_stats)))
@@ -206,26 +185,16 @@ def build_agent_report(
     lines.append(_md_section("Swarm Stats", _json(swarm_stats or {})))
 
     # 15. Intelligence Profile
-    lines.append(
-        _md_section("Intelligence Profile", _json(intelligence_profile or {}))
-    )
+    lines.append(_md_section("Intelligence Profile", _json(intelligence_profile or {})))
 
     # 16. Biomarker Snapshot (Longevity Mode)
-    lines.append(
-        _md_section("Biomarker Snapshot", _json(biomarker_snapshot or {}))
-    )
+    lines.append(_md_section("Biomarker Snapshot", _json(biomarker_snapshot or {})))
 
     # 17. Raw Cycle History (condensed)
     lines.append(
         _md_section(
             "Cycle History (condensed)",
-            (
-                f"Cycles: {len(history)}\n\n"
-                "Only the last 20 entries shown:\n\n"
-                "```json\n"
-                f"{_json(history[-20:])}\n"
-                "```"
-            ),
+            f"Cycles: {len(history)}\n\nOnly the last 20 entries shown:\n\n```json\n{_json(history[-20:])}\n```"
         )
     )
 
