@@ -18,6 +18,30 @@ Learning speed diagnostics:
     combines stability, recovery momentum, and efficiency. This helps
     operators compare different training runs for how fast and how
     safely they learn.
+
+Discovery and equilibrium view:
+    This module also aggregates breakthrough signals and equilibrium
+    snapshots from individual cycles when available. It produces a
+    simple tier histogram for discovery intensity and a compact view
+    of equilibrium labels and scores across the run.
+
+Citation coverage:
+    The report estimates how many cycles carried citations, how many
+    unique sources and papers were used, and how dense the supporting
+    evidence is for the run as a whole.
+
+MSIL and meta intelligence:
+    When available, this module reads MSIL snapshots and meta controller
+    states from the memory store. It exposes msil_score, skill dimensions,
+    domain profiles, discovery density, and curriculum hints as an
+    additional layer above raw RYE metrics.
+
+Optional fields:
+    Wherever possible this module will:
+    - fall back between flattened and summary nested cycle structures
+    - pick up optional bundles like learning_meta, safety_meta,
+      spread_of_learning, and any extra diagnostics values
+    - render generic key value views for unknown optional dictionaries
 """
 
 from __future__ import annotations
@@ -136,10 +160,14 @@ def _domain_and_role_stats(
     role_stats: Dict[str, Dict[str, Any]] = {}
 
     for c in cycles:
-        rye = c.get("RYE")
-        if not isinstance(rye, (int, float)):
+        # Support both flattened and nested summary structures
+        rye_val = c.get("RYE")
+        if rye_val is None and isinstance(c.get("summary"), dict):
+            rye_val = c["summary"].get("RYE")
+
+        if not isinstance(rye_val, (int, float)):
             continue
-        rye_f = float(rye)
+        rye_f = float(rye_val)
 
         domain = str(c.get("domain", "general") or "general")
         role = str(c.get("role", "agent") or "agent")
@@ -222,10 +250,9 @@ def _primary_domain_from_stats(domain_stats: Dict[str, Dict[str, Any]]) -> Optio
 
 
 def _markdown_to_plain_lines(text: str, width: int = 90) -> List[str]:
-    """Very simple markdown-to-plain converter for PDF text.
+    """Very simple markdown to plain converter for PDF text.
 
-    - Strips leading markdown markers (#, *, -, etc.)
-    - Wraps lines to a maximum character width for better PDF layout.
+    Strips leading markdown markers and wraps to fixed width.
     """
     lines: List[str] = []
     for raw in text.splitlines():
@@ -233,7 +260,7 @@ def _markdown_to_plain_lines(text: str, width: int = 90) -> List[str]:
         # strip some simple markdown markers
         for prefix in ("#", "* ", "- ", "• ", "> "):
             if s.startswith(prefix):
-                s = s[len(prefix) :].lstrip()
+                s = s[len(prefix):].lstrip()
                 break
         if not s:
             lines.append("")  # preserve blank lines
@@ -246,9 +273,7 @@ def _markdown_to_plain_lines(text: str, width: int = 90) -> List[str]:
 def _write_pdf(text: str, output_path: str, title: Optional[str] = None) -> str:
     """Write plain text content into a simple PDF file.
 
-    Requires reportlab. If reportlab is not installed, raises a RuntimeError
-    with a clear message so the caller can handle it or tell the user to
-    install the dependency.
+    Requires reportlab. If reportlab is not installed, raises a RuntimeError.
     """
     if canvas is None or letter is None:
         raise RuntimeError(
@@ -272,7 +297,6 @@ def _write_pdf(text: str, output_path: str, title: Optional[str] = None) -> str:
     text_obj.setFont("Helvetica", 10)
 
     for line in _markdown_to_plain_lines(text, width=100):
-        # New page if we reach bottom
         if text_obj.getY() <= bottom_margin:
             c.drawText(text_obj)
             c.showPage()
@@ -290,25 +314,7 @@ def _write_pdf(text: str, output_path: str, title: Optional[str] = None) -> str:
 def _meta_segment_stats(
     cycles: List[Dict[str, Any]]
 ) -> Dict[int, Dict[str, Any]]:
-    """Aggregate Option C meta controller segments from per cycle run_metadata.
-
-    Expects cycles to optionally contain a run_metadata dict with keys such as:
-        segment_index, phase, mode, runtime_profile, elapsed_minutes, RYE
-
-    Returns:
-        {
-            segment_index: {
-                "phase": str or None,
-                "mode": str or None,
-                "runtime_profile": str or None,
-                "count": int,
-                "avg_rye": float or None,
-                "min_rye": float or None,
-                "max_rye": float or None,
-            },
-            ...
-        }
-    """
+    """Aggregate Option C meta controller segments from per cycle run_metadata."""
     segments: Dict[int, Dict[str, Any]] = {}
 
     for c in cycles:
@@ -321,6 +327,9 @@ def _meta_segment_stats(
             continue
 
         rye_val = c.get("RYE")
+        if rye_val is None and isinstance(c.get("summary"), dict):
+            rye_val = c["summary"].get("RYE")
+
         rye_f: Optional[float] = None
         if isinstance(rye_val, (int, float)):
             rye_f = float(rye_val)
@@ -348,7 +357,6 @@ def _meta_segment_stats(
             if cur_max is None or rye_f > cur_max:
                 seg["max_rye"] = rye_f
 
-    # Convert sums to averages and prune internals
     for idx, seg in list(segments.items()):
         cnt = int(seg.get("count", 0)) or 0
         if cnt <= 0:
@@ -360,18 +368,158 @@ def _meta_segment_stats(
     return segments
 
 
+def _map_breakthrough_score_to_tier(score: float) -> str:
+    """Map a breakthrough_score in [0, 1] to an internal discovery tier label."""
+    if score < 0.3:
+        return "none"
+    if score < 0.55:
+        return "tier_3_hint"
+    if score < 0.8:
+        return "tier_2_candidate"
+    return "tier_1_candidate"
+
+
+def _breakthrough_and_equilibrium_stats(
+    cycles: List[Dict[str, Any]]
+) -> Dict[str, Any]:
+    """Aggregate breakthrough and equilibrium signals over all cycles."""
+    total_cycles = len(cycles)
+    breakthrough_count = 0
+    best_breakthrough_score: Optional[float] = None
+    best_breakthrough_cycle: Optional[Dict[str, Any]] = None
+
+    tier_counts: Dict[str, int] = {
+        "none": 0,
+        "tier_3_hint": 0,
+        "tier_2_candidate": 0,
+        "tier_1_candidate": 0,
+    }
+
+    eq_label_counts: Dict[str, int] = {}
+    eq_scores: List[float] = []
+    osc_scores: List[float] = []
+
+    for c in cycles:
+        summary = c.get("summary")
+        if not isinstance(summary, dict):
+            summary = {}
+
+        breakthrough = summary.get("breakthrough") or c.get("breakthrough") or {}
+        if isinstance(breakthrough, dict):
+            bs = breakthrough.get("breakthrough_score")
+            flag = breakthrough.get("is_breakthrough")
+            tier = breakthrough.get("tier") or breakthrough.get("discovery_tier")
+
+            if isinstance(bs, (int, float)):
+                bs_float = float(bs)
+                if best_breakthrough_score is None or bs_float > best_breakthrough_score:
+                    best_breakthrough_score = bs_float
+                    best_breakthrough_cycle = c
+                if not tier:
+                    tier = _map_breakthrough_score_to_tier(bs_float)
+                if tier:
+                    tier = str(tier)
+                    if tier not in tier_counts:
+                        tier_counts[tier] = 0
+                    tier_counts[tier] += 1
+                breakthrough_count += 1
+            elif isinstance(flag, bool) and flag:
+                breakthrough_count += 1
+                if not tier:
+                    tier = "tier_3_hint"
+                if tier not in tier_counts:
+                    tier_counts[tier] = 0
+                tier_counts[tier] += 1
+
+        equilibrium = summary.get("equilibrium") or c.get("equilibrium") or {}
+        if isinstance(equilibrium, dict):
+            label = equilibrium.get("equilibrium_label") or equilibrium.get("label")
+            eq_score = equilibrium.get("equilibrium_score")
+            osc_score = equilibrium.get("oscillation_score")
+
+            if isinstance(label, str) and label:
+                eq_label_counts[label] = eq_label_counts.get(label, 0) + 1
+            if isinstance(eq_score, (int, float)):
+                eq_scores.append(float(eq_score))
+            if isinstance(osc_score, (int, float)):
+                osc_scores.append(float(osc_score))
+
+    avg_eq_score = float(sum(eq_scores) / len(eq_scores)) if eq_scores else None
+    avg_osc_score = float(sum(osc_scores) / len(osc_scores)) if osc_scores else None
+
+    tier_order = ["none", "tier_3_hint", "tier_2_candidate", "tier_1_candidate"]
+    rank = {name: idx for idx, name in enumerate(tier_order)}
+    overall_tier = "none"
+    for t, cnt in tier_counts.items():
+        if cnt <= 0:
+            continue
+        if rank.get(t, 0) > rank.get(overall_tier, 0):
+            overall_tier = t
+
+    return {
+        "total_cycles": total_cycles,
+        "breakthrough_cycles": breakthrough_count,
+        "tier_counts": tier_counts,
+        "overall_tier": overall_tier,
+        "best_breakthrough_score": best_breakthrough_score,
+        "best_breakthrough_cycle": best_breakthrough_cycle,
+        "equilibrium_label_counts": eq_label_counts,
+        "avg_equilibrium_score": avg_eq_score,
+        "avg_oscillation_score": avg_osc_score,
+    }
+
+
+def _citation_stats(
+    cycles: List[Dict[str, Any]],
+    all_citations: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Estimate citation coverage and unique sources over the run."""
+    total_cycles = len(cycles)
+    cycles_with_cites = 0
+
+    for c in cycles:
+        cits = c.get("citations") or []
+        if isinstance(cits, list) and cits:
+            cycles_with_cites += 1
+        else:
+            summary = c.get("summary")
+            if isinstance(summary, dict):
+                sc = summary.get("citations") or []
+                if isinstance(sc, list) and sc:
+                    cycles_with_cites += 1
+
+    total_cites = len(all_citations)
+    unique_sources = set()
+    unique_papers = set()
+
+    for ct in all_citations:
+        src = str(ct.get("source", "unknown") or "unknown")
+        title = str(ct.get("title", "Untitled") or "Untitled")
+        url = str(ct.get("url", "") or "")
+        unique_sources.add(src)
+        unique_papers.add((title, url))
+
+    coverage = float(cycles_with_cites) / float(total_cycles) if total_cycles > 0 else 0.0
+    avg_per_cycle = float(total_cites) / float(total_cycles) if total_cycles > 0 else 0.0
+
+    return {
+        "total_cycles": total_cycles,
+        "cycles_with_citations": cycles_with_cites,
+        "coverage_fraction": coverage,
+        "total_citations": total_cites,
+        "avg_citations_per_cycle": avg_per_cycle,
+        "unique_source_count": len(unique_sources),
+        "unique_paper_count": len(unique_papers),
+    }
+
+
 def _learning_speed_grade(
     cycles_per_hour: Optional[float],
     rye_per_hour: Optional[float],
     stab: Optional[float],
     momentum: Optional[float],
 ) -> Tuple[str, str]:
-    """Qualitative learning speed grade for 10x tuning.
-
-    Uses cycles per hour, RYE per hour, stability index, and recovery
-    momentum to give a short label and explanation that can guide
-    training decisions.
-    """
+    """Qualitative learning speed grade for 10x tuning."""
     cph = float(cycles_per_hour) if isinstance(cycles_per_hour, (int, float)) else 0.0
     rph = float(rye_per_hour) if isinstance(rye_per_hour, (int, float)) else 0.0
     st = float(stab) if isinstance(stab, (int, float)) else None
@@ -383,7 +531,6 @@ def _learning_speed_grade(
             "Too few cycles or unknown runtime length to estimate learning speed.",
         )
 
-    # Rough speed bands; these are deliberately simple and conservative.
     if cph >= 60 and rph >= 2.5:
         base_label = "very fast learning"
     elif cph >= 30 and rph >= 1.0:
@@ -393,9 +540,9 @@ def _learning_speed_grade(
     else:
         base_label = "slow learning"
 
-    # Stability and momentum adjustments
     if st is not None:
-        if st >= 0.65 and (mo is None or mo >= 0.0):
+        improving = mo is None or mo >= 0.0
+        if st >= 0.65 and improving:
             return (
                 f"{base_label}, stable",
                 "Learning speed is high with a stable repair pattern and nonnegative recovery momentum.",
@@ -418,8 +565,40 @@ def _learning_speed_grade(
     )
 
 
+def _render_generic_optional_dict(
+    d: Dict[str, Any],
+    lines: List[str],
+    prefix: str = "- ",
+    max_items: int = 12,
+) -> None:
+    """Render a generic optional dict in key colon value form.
+
+    Only prints simple scalar values and short lists or dicts, and
+    truncates the list for readability.
+    """
+    if not isinstance(d, dict):
+        return
+    count = 0
+    for key, val in d.items():
+        if count >= max_items:
+            lines.append(f"{prefix}... {len(d) - max_items} more keys not shown")
+            break
+        if isinstance(val, (int, float, str, bool)) or val is None:
+            lines.append(f"{prefix}{key}: {val}")
+            count += 1
+        elif isinstance(val, (list, dict)):
+            try:
+                short = str(val)
+                if len(short) > 120:
+                    short = short[:117] + "..."
+                lines.append(f"{prefix}{key}: {short}")
+                count += 1
+            except Exception:
+                continue
+
+
 # ---------------------------------------------------------
-# FULL REPORT (Advanced)
+# FULL REPORT
 # ---------------------------------------------------------
 def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     """Generate full Reparodynamics markdown report with advanced metrics."""
@@ -440,6 +619,8 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     run_state: Optional[Dict[str, Any]] = None
     worker_state: Optional[Dict[str, Any]] = None
     watchdog_info: Optional[Dict[str, Any]] = None
+    msil_snapshot: Optional[Dict[str, Any]] = None
+    meta_state: Optional[Dict[str, Any]] = None
 
     try:
         if hasattr(memory_store, "load_run_state"):
@@ -459,6 +640,23 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     except Exception:
         watchdog_info = None
 
+    # MSIL snapshot if available
+    try:
+        if hasattr(memory_store, "get_msil_snapshot"):
+            try:
+                msil_snapshot = memory_store.get_msil_snapshot(goal=goal)
+            except TypeError:
+                msil_snapshot = memory_store.get_msil_snapshot()
+    except Exception:
+        msil_snapshot = None
+
+    # Meta controller state if available
+    try:
+        if hasattr(memory_store, "get_meta_state"):
+            meta_state = memory_store.get_meta_state()
+    except Exception:
+        meta_state = None
+
     # Metric stores
     rye_values: List[float] = []
     delta_values: List[float] = []
@@ -470,9 +668,22 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     all_citations: List[Dict[str, Any]] = []
 
     for c in cycles:
-        rye_values.append(_safe_float(c.get("RYE"), 0.0))
-        delta_values.append(_safe_float(c.get("delta_R"), 0.0))
-        energy_values.append(_safe_float(c.get("energy_E"), 0.0))
+        rye_val = c.get("RYE")
+        delta_val = c.get("delta_R")
+        energy_val = c.get("energy_E")
+
+        summary = c.get("summary")
+        if isinstance(summary, dict):
+            if rye_val is None:
+                rye_val = summary.get("RYE")
+            if delta_val is None:
+                delta_val = summary.get("delta_R")
+            if energy_val is None:
+                energy_val = summary.get("energy_E")
+
+        rye_values.append(_safe_float(rye_val, 0.0))
+        delta_values.append(_safe_float(delta_val, 0.0))
+        energy_values.append(_safe_float(energy_val, 0.0))
 
         domains.add(c.get("domain", "general"))
         goals_seen.add(c.get("goal", ""))
@@ -481,9 +692,12 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
         if isinstance(ts, str) and ts:
             timestamps.append(ts)
 
-        # Hypotheses and citations attached to cycles
         hyps = c.get("hypotheses") or []
         cits = c.get("citations") or []
+
+        if isinstance(summary, dict):
+            hyps = hyps or summary.get("hypotheses") or []
+            cits = cits or summary.get("citations") or []
 
         for h in hyps:
             if isinstance(h, dict):
@@ -500,11 +714,11 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     avg_delta = sum(delta_values) / len(delta_values) if delta_values else 0.0
     avg_energy = sum(energy_values) / len(energy_values) if energy_values else 0.0
 
-    # Domain and role stats (for primary domain and swarm view)
+    # Domain and role stats
     domain_stats, role_stats = _domain_and_role_stats(cycles)
     primary_domain = _primary_domain_from_stats(domain_stats)
 
-    # Diagnostics bundle (10x Option C signature)
+    # Diagnostics bundle from Option C
     hours_run = _compute_session_hours(timestamps)
     option_c_sig = build_option_c_signature(
         cycles,
@@ -528,7 +742,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
 
     runtime = _extract_session_runtime(timestamps)
 
-    # Optional goal index and discoveries from memory store
+    # Optional goal index and discoveries
     goal_index_entry: Optional[Dict[str, Any]] = None
     try:
         goal_index_entry = memory_store.get_goal_index(goal) if hasattr(memory_store, "get_goal_index") else None
@@ -541,8 +755,14 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     except Exception:
         discoveries = []
 
-    # Option C meta segment stats (if run_metadata is present)
+    # Option C meta segment stats
     meta_segments = _meta_segment_stats(cycles)
+
+    # Breakthrough and equilibrium stats across cycles
+    be_stats = _breakthrough_and_equilibrium_stats(cycles)
+
+    # Citation coverage stats
+    cite_stats = _citation_stats(cycles, all_citations)
 
     # Learning speed metrics
     cycles_per_hour: Optional[float] = None
@@ -557,6 +777,41 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
         stab,
         momentum,
     )
+
+    # Option C top level bundles
+    run_tier = option_c_sig.get("run_tier") or {}
+    env = option_c_sig.get("autonomy_safety_envelope") or {}
+    early_fail = option_c_sig.get("early_failure_warning") or {}
+    bp = option_c_sig.get("breakthrough_probability") or {}
+    bp90 = option_c_sig.get("breakthrough_likelihood_90d") or {}
+    equilibrium = option_c_sig.get("equilibrium") or {}
+    volatility = option_c_sig.get("volatility") or {}
+    harmonic = option_c_sig.get("tgrm_harmonic_index")
+    learning_meta = option_c_sig.get("learning_meta") or {}
+    spread_meta = option_c_sig.get("spread_of_learning") or {}
+    safety_meta = option_c_sig.get("safety_meta") or {}
+    curriculum_meta = option_c_sig.get("curriculum_meta") or {}
+    msil_meta = option_c_sig.get("msil_meta") or {}
+
+    # Compute list of extra diagnostic keys not already rendered
+    known_diag_keys = {
+        "rolling_rye",
+        "robust_rolling_rye",
+        "trend_simple",
+        "rye_median",
+        "stability_index",
+        "recovery_momentum",
+        "trend_slope",
+        "low_percentile",
+        "mid_percentile",
+        "high_percentile",
+        "oscillation_std",
+    }
+    extra_diag = {
+        k: v
+        for k, v in diagnostics.items()
+        if k not in known_diag_keys and isinstance(v, (int, float))
+    }
 
     # Build report
     lines: List[str] = []
@@ -653,6 +908,56 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
                 lines.append(f"- Time since last heartbeat: **{minutes_since:.2f} minutes**")
             lines.append("")
 
+    # MSIL snapshot section
+    if isinstance(msil_snapshot, dict) and msil_snapshot:
+        lines.append("## MSIL snapshot\n")
+        msil_score = msil_snapshot.get("msil_score")
+        if isinstance(msil_score, (int, float)):
+            lines.append(f"- MSIL score: **{float(msil_score):.3f}** (0 to 1 meta stability and intelligence level)")
+        skill_dims = msil_snapshot.get("skill_dimensions") or {}
+        if isinstance(skill_dims, dict) and skill_dims:
+            lines.append("- Skill dimensions:")
+            for name, val in skill_dims.items():
+                if isinstance(val, (int, float)):
+                    lines.append(f"  - {name}: **{float(val):.3f}**")
+                else:
+                    lines.append(f"  - {name}: {val}")
+        dom_prof = msil_snapshot.get("domain_profiles") or {}
+        if isinstance(dom_prof, dict) and dom_prof:
+            lines.append("- Domain profiles:")
+            _render_generic_optional_dict(dom_prof, lines, prefix="  - ", max_items=8)
+        msil_break = msil_snapshot.get("breakthrough_density")
+        if isinstance(msil_break, (int, float)):
+            lines.append(f"- Breakthrough density estimate: **{float(msil_break):.3f}**")
+        msil_text = msil_snapshot.get("comment")
+        if isinstance(msil_text, str) and msil_text.strip():
+            lines.append(f"- MSIL comment: {msil_text}")
+        lines.append("")
+
+    # Meta controller state section
+    if isinstance(meta_state, dict) and meta_state:
+        lines.append("## Meta controller state\n")
+        meta_mode = meta_state.get("mode")
+        if meta_mode:
+            lines.append(f"- Meta mode: `{meta_mode}`")
+        active_profile = meta_state.get("active_profile")
+        if active_profile:
+            lines.append(f"- Active training profile: `{active_profile}`")
+        target_goal = meta_state.get("target_goal")
+        if target_goal:
+            lines.append(f"- Target meta goal: `{target_goal}`")
+        meta_note = meta_state.get("note")
+        if isinstance(meta_note, str) and meta_note.strip():
+            lines.append(f"- Meta note: {meta_note}")
+        extra_meta = {
+            k: v
+            for k, v in meta_state.items()
+            if k not in {"mode", "active_profile", "target_goal", "note"}
+        }
+        if extra_meta:
+            _render_generic_optional_dict(extra_meta, lines, prefix="- ", max_items=10)
+        lines.append("")
+
     # Goals
     if goal:
         lines.append(f"**Filtered goal:** {goal}\n")
@@ -704,7 +1009,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
         lines.append(f"- Regression slope of RYE over cycles: **{slope:.5f}**")
 
     if stab is not None:
-        lines.append(f"- Stability index: **{stab:.3f}** (1.0 is highly stable, 0.0 is chaotic)")
+        lines.append(f"- Stability index: **{stab:.3f}** (1.0 highly stable, 0.0 chaotic)")
 
     if momentum is not None:
         lines.append(f"- Recovery momentum: **{momentum:.3f}** (higher means late stage acceleration)")
@@ -717,22 +1022,70 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
             f"- RYE distribution: low ~**{low_p:.3f}**, median ~**{mid_p:.3f}**, high ~**{high_p:.3f}**"
         )
 
+    if extra_diag:
+        lines.append("- Extra diagnostics:")
+        for k, v in list(extra_diag.items())[:10]:
+            lines.append(f"  - {k}: **{float(v):.4f}**")
+
     phase_label = _classify_phase(slope, trend, stab)
     lines.append(f"- Phase classification: **{phase_label}**")
     lines.append("")
 
-    # Option C / 10x learning snapshot
+    # Discovery and equilibrium view
+    lines.append("## Discovery and equilibrium signals\n")
+    lines.append(
+        f"- Cycles with breakthrough signatures: **{be_stats['breakthrough_cycles']}** "
+        f"of **{be_stats['total_cycles']}**"
+    )
+    tier_counts = be_stats["tier_counts"]
+    lines.append(
+        f"- Discovery tier counts: "
+        f"tier 1 candidates **{tier_counts.get('tier_1_candidate', 0)}**, "
+        f"tier 2 candidates **{tier_counts.get('tier_2_candidate', 0)}**, "
+        f"tier 3 hints **{tier_counts.get('tier_3_hint', 0)}**"
+    )
+    lines.append(f"- Overall discovery tier for this run: **{be_stats['overall_tier']}**")
+
+    if isinstance(be_stats.get("best_breakthrough_score"), (int, float)):
+        lines.append(
+            f"- Best breakthrough score observed: **{be_stats['best_breakthrough_score']:.3f}**"
+        )
+
+    eq_counts = be_stats["equilibrium_label_counts"]
+    if eq_counts:
+        lines.append("- Equilibrium labels seen across cycles:")
+        for lbl, cnt in sorted(eq_counts.items(), key=lambda kv: kv[0]):
+            lines.append(f"  - `{lbl}`: **{cnt}** cycles")
+
+    if isinstance(be_stats.get("avg_equilibrium_score"), (int, float)):
+        lines.append(
+            f"- Avg equilibrium score: **{be_stats['avg_equilibrium_score']:.3f}**"
+        )
+    if isinstance(be_stats.get("avg_oscillation_score"), (int, float)):
+        lines.append(
+            f"- Avg oscillation score: **{be_stats['avg_oscillation_score']:.3f}**"
+        )
+    lines.append("")
+
+    # Citation coverage view
+    lines.append("## Citation coverage\n")
+    lines.append(
+        f"- Cycles with citations: **{cite_stats['cycles_with_citations']}** of "
+        f"**{cite_stats['total_cycles']}** "
+        f"({cite_stats['coverage_fraction'] * 100.0:.1f}% coverage)"
+    )
+    lines.append(
+        f"- Total citations recorded: **{cite_stats['total_citations']}** "
+        f"(avg **{cite_stats['avg_citations_per_cycle']:.2f}** per cycle)"
+    )
+    lines.append(
+        f"- Unique sources: **{cite_stats['unique_source_count']}**, "
+        f"unique papers or URLs: **{cite_stats['unique_paper_count']}**"
+    )
+    lines.append("")
+
+    # Option C self diagnosis
     lines.append("## Option C self diagnosis (10x learning signals)\n")
-    run_tier = option_c_sig.get("run_tier") or {}
-    env = option_c_sig.get("autonomy_safety_envelope") or {}
-    early_fail = option_c_sig.get("early_failure_warning") or {}
-    bp = option_c_sig.get("breakthrough_probability") or {}
-    bp90 = option_c_sig.get("breakthrough_likelihood_90d") or {}
-    equilibrium = option_c_sig.get("equilibrium") or {}
-    volatility = option_c_sig.get("volatility") or {}
-    harmonic = option_c_sig.get("tgrm_harmonic_index")
-    learning_meta = option_c_sig.get("learning_meta") or {}
-    spread_meta = option_c_sig.get("spread_of_learning") or {}
 
     tier_label = run_tier.get("tier")
     tier_reason = run_tier.get("reason")
@@ -747,7 +1100,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
 
     early_score = early_fail.get("score")
     if isinstance(early_score, (int, float)):
-        lines.append(f"- Early failure warning score: **{early_score:.3f}** (higher means more risk)")
+        lines.append(f"- Early failure warning score: **{early_score:.3f}** (higher more risk)")
 
     bp_val = bp.get("probability")
     if isinstance(bp_val, (int, float)):
@@ -773,7 +1126,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     if hours_run is not None:
         lines.append(f"- Hours run so far (approx): **{hours_run:.2f} h**")
 
-    # Learning meta signals from Option C, if present
+    # Learning meta
     lm_speed = learning_meta.get("learning_speed_label")
     lm_comment = learning_meta.get("learning_speed_comment")
     lm_curriculum = learning_meta.get("curriculum_stage")
@@ -793,6 +1146,24 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
         lines.append(f"- Spread of learning mode: **{sol_mode}**")
     if isinstance(sol_parents, int):
         lines.append(f"- Parent goals used for cross copying: **{sol_parents}**")
+
+    # Safety meta
+    hard_violations = safety_meta.get("hard_violations")
+    soft_warnings = safety_meta.get("soft_warnings")
+    if isinstance(hard_violations, int) and hard_violations > 0:
+        lines.append(f"- Hard safety violations recorded: **{hard_violations}**")
+    if isinstance(soft_warnings, int) and soft_warnings > 0:
+        lines.append(f"- Soft safety warnings recorded: **{soft_warnings}**")
+
+    # Curriculum meta
+    if isinstance(curriculum_meta, dict) and curriculum_meta:
+        lines.append("- Curriculum meta overview:")
+        _render_generic_optional_dict(curriculum_meta, lines, prefix="  - ", max_items=8)
+
+    # MSIL meta from Option C
+    if isinstance(msil_meta, dict) and msil_meta:
+        lines.append("- MSIL meta overview:")
+        _render_generic_optional_dict(msil_meta, lines, prefix="  - ", max_items=8)
 
     # Local learning speed grade
     lines.append(f"- Learning speed grade: **{speed_grade_label}**")
@@ -931,10 +1302,12 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
             kind = d.get("kind", "")
             label = d.get("label", "")
             score = d.get("score", None)
+            tier = d.get("tier") or d.get("discovery_tier")
+            tier_str = f", tier {tier}" if tier else ""
             if isinstance(score, (int, float)):
-                lines.append(f"- [{ts}] [{kind}] ({score:.2f}) {label}")
+                lines.append(f"- [{ts}] [{kind}{tier_str}] ({score:.2f}) {label}")
             else:
-                lines.append(f"- [{ts}] [{kind}] {label}")
+                lines.append(f"- [{ts}] [{kind}{tier_str}] {label}")
         lines.append("")
 
     # Interpretation
@@ -942,11 +1315,12 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     lines.append(
         "This session reflects a sequence of TGRM cycles (Test → Detect → Repair → Verify). "
         "RYE quantifies how much verified improvement (ΔR) occurred per unit energy (E). "
-        "The stability index, momentum, trend, oscillation level, and Option C safety envelope together indicate "
-        "whether the system is moving toward a stable high repair yield equilibrium or oscillating "
-        "in a more exploratory regime. Run tier, learning speed grade, and breakthrough likelihood give a fast, "
-        "human friendly summary of where this experiment sits in the Reparodynamics landscape and how aggressively "
-        "it is learning."
+        "The stability index, momentum, trend, oscillation level, Option C safety envelope, "
+        "and MSIL snapshot together indicate whether the system is moving toward a stable high "
+        "repair yield equilibrium or oscillating in a more exploratory regime. Run tier, learning "
+        "speed grade, discovery tiers, breakthrough likelihood, and citation coverage give a fast, "
+        "human friendly summary of where this experiment sits in the Reparodynamics landscape and "
+        "how aggressively it is learning without leaving its safety envelope."
     )
 
     return "\n".join(lines)
@@ -983,7 +1357,10 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> s
         if ts:
             timestamps.append(ts)
 
+        summary = c.get("summary")
         cits = c.get("citations") or []
+        if isinstance(summary, dict):
+            cits = cits or summary.get("citations") or []
         for ct in cits:
             if isinstance(ct, dict):
                 all_citations.append(ct)
@@ -1017,7 +1394,10 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> s
     ]
 
     for c in cycles:
+        summary = c.get("summary")
         hyps = c.get("hypotheses") or []
+        if isinstance(summary, dict):
+            hyps = hyps or summary.get("hypotheses") or []
         for h in hyps:
             text = h["text"] if isinstance(h, dict) else str(h)
             if any(k.lower() in text.lower() for k in KEYWORDS):
@@ -1038,7 +1418,6 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> s
     if not structured:
         lines.append("No structured discoveries recorded.\n")
     else:
-        # Sort by score then timestamp
         def _disc_key(d: Dict[str, Any]) -> Tuple[float, str]:
             score = d.get("score")
             s_val = float(score) if isinstance(score, (int, float)) else 0.0
@@ -1051,8 +1430,10 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> s
             label = d.get("label", "")
             score = d.get("score")
             ts_local = d.get("timestamp", "")
+            tier = d.get("tier") or d.get("discovery_tier")
+            tier_str = f", tier {tier}" if tier else ""
             score_str = f" (score {score:.2f})" if isinstance(score, (int, float)) else ""
-            lines.append(f"{i}. [{kind}] {label}{score_str}")
+            lines.append(f"{i}. [{kind}{tier_str}] {label}{score_str}")
             if ts_local:
                 lines.append(f"   - recorded at `{ts_local}`")
         if len(sorted_disc) > 50:
@@ -1110,14 +1491,7 @@ def generate_report_pdf(
     goal: Optional[str] = None,
     output_path: str = "autonomous_agent_report.pdf",
 ) -> str:
-    """Generate the full report and write it to a PDF file.
-
-    Returns:
-        The output_path for convenience.
-
-    Raises:
-        RuntimeError if reportlab is not installed.
-    """
+    """Generate the full report and write it to a PDF file."""
     md = generate_report(memory_store, goal=goal)
     title = "Autonomous Research Agent Report"
     if goal:
@@ -1130,14 +1504,7 @@ def generate_findings_report_pdf(
     goal: Optional[str] = None,
     output_path: str = "autonomous_agent_findings_report.pdf",
 ) -> str:
-    """Generate the targeted findings report and write it to a PDF file.
-
-    Returns:
-        The output_path for convenience.
-
-    Raises:
-        RuntimeError if reportlab is not installed.
-    """
+    """Generate the targeted findings report and write it to a PDF file."""
     md = generate_findings_report(memory_store, goal=goal)
     title = "Autonomous Agent Findings Report"
     if goal:
