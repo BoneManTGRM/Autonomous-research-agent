@@ -23,7 +23,7 @@ This upgraded module introduces:
 Backwards compatibility:
     Existing callers that only pass the original arguments still work:
     - compute_delta_r(...) can be called without novelty_score or coherence_gain.
-    - compute_energy(...) can be called without swarm_size or swarm_layering.
+    - compute_energy(...) can be called without swarm_size or swarm_layer.
     - build_cycle_rye_summary(...) can be called without learning_speed_factor.
 """
 
@@ -166,19 +166,22 @@ def compute_energy(
     semantic_calls: int = 0,
     pdf_ingestions: int = 0,
     tokens_estimate: Optional[int] = None,
-    swarm_size: int = 1,
-    swarm_layering: int = 1,
+    swarm_size: Optional[int] = None,
+    swarm_layer: Optional[int] = None,
+    **kwargs: Any,
 ) -> float:
     """
-    Compute energy cost with swarm layer normalization.
+    Compute energy cost with swarm normalization.
 
     New fields:
-    - swarm_size     -> number of active agents
-    - swarm_layering -> depth (roles x agents x branches)
+    - swarm_size   -> number of active agents
+    - swarm_layer  -> depth or layer index for multi layer swarms
 
     Existing calls that do not pass these fields still behave as before.
+    Unknown keyword arguments are ignored for forward compatibility.
     """
 
+    # Base cost from actions and core calls
     base_cost = float(len(actions_taken)) if actions_taken else 1.0
 
     cost_web = max(web_calls, 0) * 1.5
@@ -193,8 +196,8 @@ def compute_energy(
         total += float(tokens_estimate) / 1000.0
 
     # Swarm penalty (prevents cheating via infinite agent spawning)
-    swarm_size_eff = max(swarm_size, 1)
-    swarm_layer_eff = max(swarm_layering, 1)
+    swarm_size_eff = swarm_size if isinstance(swarm_size, int) and swarm_size > 0 else 1
+    swarm_layer_eff = swarm_layer if isinstance(swarm_layer, int) and swarm_layer > 0 else 1
     swarm_penalty = 1.0 + ((swarm_size_eff - 1) * 0.05) + ((swarm_layer_eff - 1) * 0.1)
     total *= swarm_penalty
 
