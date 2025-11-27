@@ -74,7 +74,7 @@ from agent.rye_metrics import (
     early_failure_warning_score,
     classify_run_tier,
 )
-from agent_report_builder import build_agent_report  # full Option C report with learning speed
+from agent.report_builder import build_agent_report  # full Option C report with learning speed
 
 # Optional discovery and verification helpers (imported lazily if present)
 try:  # type: ignore[import]
