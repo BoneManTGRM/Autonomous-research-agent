@@ -774,9 +774,11 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
         d_id = domain_ids.get(d, _safe_gv_id("domain_", d))
         r_id = role_ids.get(r, _safe_gv_id("role_", r))
         if d_id not in domain_ids.values():
-            nodes.append(f'{d_id} [label="Domain: {d.replace(\'"\', "\'")}", shape=box]')
+            safe_d2 = d.replace('"', "'")
+            nodes.append(f'{d_id} [label="Domain: {safe_d2}", shape=box]')
         if r_id not in role_ids.values():
-            nodes.append(f'{r_id} [label="Role: {r.replace(\'"\', "\'")}", shape=ellipse]')
+            safe_r2 = r.replace('"', "'")
+            nodes.append(f'{r_id} [label="Role: {safe_r2}", shape=ellipse]')
         edges.append(f"{d_id} -> {hyp_id}")
         edges.append(f"{r_id} -> {hyp_id}")
 
