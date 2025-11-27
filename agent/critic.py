@@ -114,6 +114,9 @@ class AgentCriticController:
             {
               "goal": ...,
               "domain": ...,
+              "hallmark": ...,
+              "subgoal": ...,
+              "run_id": ...,
               "idea_stage": {...},
               "verify_stage": {...},
               "episode_summary": {...}
@@ -121,6 +124,7 @@ class AgentCriticController:
         """
         cfg = self.config
         domain = cfg.domain
+        run_id = cfg.run_id
 
         hallmark_name = hallmark or self._select_hallmark(context=context)
         two_stage = cfg.two_stage
@@ -168,7 +172,7 @@ class AgentCriticController:
             "domain": domain,
             "hallmark": hallmark_name,
             "subgoal": subgoal,
-            "run_id": cfg.run_id,
+            "run_id": run_id,
             "idea_stage": idea_result,
             "verify_stage": verify_result,
             "episode_summary": episode_summary,
@@ -234,6 +238,12 @@ class AgentCriticController:
         best_cycle: Optional[Dict[str, Any]] = None
         best_rye: Optional[float] = None
 
+        discovery_tiers: List[str] = []
+        breakthrough_scores: List[float] = []
+        equilibrium_labels: List[str] = []
+        equilibrium_scores: List[float] = []
+        oscillation_scores: List[float] = []
+
         for offset in range(max_cycles):
             cycle_index = start_cycle_index + offset
 
@@ -262,6 +272,25 @@ class AgentCriticController:
                     best_rye = rye_float
                     best_cycle = cycle_output
 
+            breakthrough = summary.get("breakthrough") or {}
+            bs = breakthrough.get("breakthrough_score")
+            if isinstance(bs, (int, float)):
+                bs_float = float(bs)
+                breakthrough_scores.append(bs_float)
+                discovery_tiers.append(self._map_breakthrough_to_tier(bs_float))
+
+            eq = summary.get("equilibrium") or {}
+            eq_label = eq.get("equilibrium_label")
+            eq_score = eq.get("equilibrium_score")
+            osc_score = eq.get("oscillation_score")
+
+            if isinstance(eq_label, str):
+                equilibrium_labels.append(eq_label)
+            if isinstance(eq_score, (int, float)):
+                equilibrium_scores.append(float(eq_score))
+            if isinstance(osc_score, (int, float)):
+                oscillation_scores.append(float(osc_score))
+
             # Optional replay item logging
             self._log_replay_from_cycle(
                 stage_label=stage_label,
@@ -273,6 +302,14 @@ class AgentCriticController:
             )
 
         avg_rye = float(sum(rye_values) / len(rye_values)) if rye_values else None
+        best_breakthrough_score = max(breakthrough_scores) if breakthrough_scores else None
+
+        discovery_summary = self._summarise_discovery_for_stage(discovery_tiers)
+        equilibrium_summary = self._summarise_equilibrium_for_stage(
+            equilibrium_labels,
+            equilibrium_scores,
+            oscillation_scores,
+        )
 
         return {
             "stage": stage_label,
@@ -281,6 +318,9 @@ class AgentCriticController:
             "avg_rye": avg_rye,
             "best_rye": best_rye,
             "best_cycle": best_cycle,
+            "discovery_summary": discovery_summary,
+            "best_breakthrough_score": best_breakthrough_score,
+            "equilibrium_summary": equilibrium_summary,
         }
 
     def _run_single_cycle(
@@ -358,6 +398,60 @@ class AgentCriticController:
 
         return True
 
+    def _map_breakthrough_to_tier(self, score: float) -> str:
+        """Map a breakthrough_score in [0, 1] to an internal discovery tier label."""
+        if score < 0.3:
+            return "none"
+        if score < 0.55:
+            return "tier_3_hint"
+        if score < 0.8:
+            return "tier_2_candidate"
+        return "tier_1_candidate"
+
+    def _summarise_discovery_for_stage(self, tiers: List[str]) -> Dict[str, Any]:
+        """Simple histogram of discovery tiers for a stage."""
+        summary: Dict[str, Any] = {
+            "total_cycles": len(tiers),
+            "none": 0,
+            "tier_3_hint": 0,
+            "tier_2_candidate": 0,
+            "tier_1_candidate": 0,
+            "max_tier": "none",
+        }
+        order = ["none", "tier_3_hint", "tier_2_candidate", "tier_1_candidate"]
+        rank: Dict[str, int] = {name: idx for idx, name in enumerate(order)}
+
+        best = "none"
+        for t in tiers:
+            if t not in summary:
+                continue
+            summary[t] += 1
+            if rank.get(t, 0) > rank.get(best, 0):
+                best = t
+
+        summary["max_tier"] = best
+        return summary
+
+    def _summarise_equilibrium_for_stage(
+        self,
+        labels: List[str],
+        eq_scores: List[float],
+        osc_scores: List[float],
+    ) -> Dict[str, Any]:
+        """Aggregate equilibrium signals from cycles for this stage."""
+        label_counts: Dict[str, int] = {}
+        for lbl in labels:
+            label_counts[lbl] = label_counts.get(lbl, 0) + 1
+
+        avg_eq = float(sum(eq_scores) / len(eq_scores)) if eq_scores else None
+        avg_osc = float(sum(osc_scores) / len(osc_scores)) if osc_scores else None
+
+        return {
+            "label_counts": label_counts,
+            "avg_equilibrium_score": avg_eq,
+            "avg_oscillation_score": avg_osc,
+        }
+
     def _log_replay_from_cycle(
         self,
         stage_label: str,
@@ -400,6 +494,11 @@ class AgentCriticController:
                 or first.get("title")
             )
 
+        equilibrium = summary.get("equilibrium")
+        breakthrough = summary.get("breakthrough")
+        short_view = summary.get("short_view")
+        meta_signals = summary.get("meta_signals")
+
         item: Dict[str, Any] = {
             "item_id": f"{goal[:32]}::{cycle_index}::{stage_label}",
             "stage": stage_label,
@@ -418,8 +517,10 @@ class AgentCriticController:
             "run_id": self.config.run_id,
             "cycle_index": cycle_index,
             "created_at": created_at,
-            "equilibrium": summary.get("equilibrium"),
-            "breakthrough": summary.get("breakthrough"),
+            "equilibrium": equilibrium,
+            "breakthrough": breakthrough,
+            "short_view": short_view,
+            "meta_signals": meta_signals,
         }
 
         try:
@@ -446,6 +547,9 @@ class AgentCriticController:
         verify_avg = verify_result.get("avg_rye") if verify_result else None
         verify_best = verify_result.get("best_rye") if verify_result else None
 
+        idea_disc = idea_result.get("discovery_summary") or {}
+        verify_disc = verify_result.get("discovery_summary") if verify_result else None
+
         # Final hypothesis set is taken from the best available cycle,
         # preferring critic cycles if they exist.
         final_cycle = None
@@ -458,6 +562,12 @@ class AgentCriticController:
         final_hypotheses = final_summary.get("hypotheses") or []
         final_breakthrough = final_summary.get("breakthrough") or {}
 
+        episode_tier = None
+        if verify_disc and isinstance(verify_disc, dict):
+            episode_tier = verify_disc.get("max_tier")
+        if not episode_tier and isinstance(idea_disc, dict):
+            episode_tier = idea_disc.get("max_tier")
+
         return {
             "goal": goal,
             "domain": domain,
@@ -466,6 +576,9 @@ class AgentCriticController:
             "idea_best_rye": idea_best,
             "verify_avg_rye": verify_avg,
             "verify_best_rye": verify_best,
+            "idea_discovery_summary": idea_disc,
+            "verify_discovery_summary": verify_disc,
             "final_hypotheses": final_hypotheses,
             "final_breakthrough": final_breakthrough,
+            "episode_discovery_tier": episode_tier,
         }
