@@ -37,10 +37,18 @@ import statistics
 # ---------------------------------------------------------------------------
 
 def _safe_float(value: Any) -> Optional[float]:
-    """Convert to float if numeric, otherwise return None."""
-    if isinstance(value, (int, float)):
+    """
+    Convert to float whenever possible.
+
+    Accepts ints, floats, and numeric strings. Returns None when conversion
+    fails. This makes the module more robust to mixed-type histories.
+    """
+    try:
+        if value is None:
+            return None
         return float(value)
-    return None
+    except Exception:
+        return None
 
 
 def normalize_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -69,6 +77,41 @@ def normalize_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         e["RYE"] = v
         norm.append(e)
     return norm
+
+
+def _extract_rye_series(values_or_history: List[Any]) -> List[float]:
+    """
+    Flexible extractor used by many metrics.
+
+    Accepts either:
+        - a list of history dicts with "RYE" fields
+        - a list of raw numeric values
+        - a mixed list of both
+
+    Returns a clean list[float] of RYE values in the original order.
+
+    This is what makes the module compatible with both:
+        - history style callers (TGRM, CoreAgent, Streamlit UI)
+        - vector style callers (msil.py, IQ probes, etc)
+    """
+    if not isinstance(values_or_history, list) or not values_or_history:
+        return []
+
+    # If first element is a dict, treat as standard history
+    if isinstance(values_or_history[0], dict):
+        norm = normalize_history(values_or_history)
+        return [float(e["RYE"]) for e in norm]
+
+    # Otherwise, treat as raw numeric or mixed
+    out: List[float] = []
+    for item in values_or_history:
+        if isinstance(item, dict):
+            v = _safe_float(item.get("RYE"))
+        else:
+            v = _safe_float(item)
+        if v is not None:
+            out.append(v)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -181,21 +224,25 @@ def compute_rye(delta_r: float, energy_e: float) -> float:
 # ---------------------------------------------------------------------------
 
 def rolling_rye(history: List[Dict[str, Any]], window: int = 10) -> Optional[float]:
-    """Compute a simple rolling average of RYE over the last N cycles."""
+    """
+    Compute a simple rolling average of RYE over the last N cycles.
+
+    Compatible with either:
+        - full history entries (dicts with "RYE")
+        - bare RYE series (list[float])
+    """
     if not history or window <= 0:
         return None
 
-    norm = normalize_history(history)
-    if not norm:
-        return None
-
-    recent = norm[-window:]
-    vals = [float(entry["RYE"]) for entry in recent]
-
+    vals = _extract_rye_series(history)
     if not vals:
         return None
 
-    return sum(vals) / len(vals)
+    recent = vals[-window:]
+    if not recent:
+        return None
+
+    return sum(recent) / len(recent)
 
 
 # ---------------------------------------------------------------------------
@@ -208,21 +255,21 @@ def robust_rolling_rye(history: List[Dict[str, Any]], window: int = 10) -> Optio
 
     This is more robust to occasional spikes or outliers, and useful
     for noisy long runs with irregular repair bursts.
+
+    Accepts history style or bare RYE lists.
     """
     if not history or window <= 0:
         return None
 
-    norm = normalize_history(history)
-    if not norm:
-        return None
-
-    recent = norm[-window:]
-    vals = [float(entry["RYE"]) for entry in recent]
-
+    vals = _extract_rye_series(history)
     if not vals:
         return None
 
-    return statistics.median(vals)
+    recent = vals[-window:]
+    if len(recent) == 0:
+        return None
+
+    return statistics.median(recent)
 
 
 # ---------------------------------------------------------------------------
@@ -231,11 +278,7 @@ def robust_rolling_rye(history: List[Dict[str, Any]], window: int = 10) -> Optio
 
 def median_rye(history: List[Dict[str, Any]]) -> Optional[float]:
     """Median RYE across all cycles, robust to outliers."""
-    norm = normalize_history(history)
-    if not norm:
-        return None
-
-    vals = [float(e["RYE"]) for e in norm]
+    vals = _extract_rye_series(history)
     if not vals:
         return None
     return statistics.median(vals)
@@ -252,25 +295,23 @@ def efficiency_trend(history: List[Dict[str, Any]]) -> Optional[float]:
     Positive  -> improving efficiency
     Negative  -> declining efficiency
     Near zero -> flat or noisy
+
+    Accepts history style or bare RYE lists.
     """
-    norm = normalize_history(history)
-    n = len(norm)
+    vals = _extract_rye_series(history)
+    n = len(vals)
     if n < 4:
         return None
 
     mid = n // 2
-    old = norm[:mid]
-    recent = norm[mid:]
+    old = vals[:mid]
+    recent = vals[mid:]
 
-    def _avg(h: List[Dict[str, Any]]) -> Optional[float]:
-        vals = [float(e["RYE"]) for e in h]
-        return sum(vals) / len(vals) if vals else None
-
-    avg_old = _avg(old)
-    avg_recent = _avg(recent)
-
-    if avg_old is None or avg_recent is None:
+    if not old or not recent:
         return None
+
+    avg_old = sum(old) / len(old)
+    avg_recent = sum(recent) / len(recent)
 
     return avg_recent - avg_old
 
@@ -283,28 +324,21 @@ def regression_rye_slope(history: List[Dict[str, Any]]) -> Optional[float]:
     """
     Linear regression slope of RYE over cycles.
 
+    Accepts either a full history or a bare list of RYE floats.
+
     Returns:
         slope (float) or None if not enough data.
     """
-    norm = normalize_history(history)
-    if len(norm) < 4:
-        return None
-
-    xs: List[float] = []
-    ys: List[float] = []
-
-    for i, entry in enumerate(norm):
-        xs.append(float(i))
-        ys.append(float(entry["RYE"]))
-
-    n = len(xs)
+    vals = _extract_rye_series(history)
+    n = len(vals)
     if n < 2:
         return None
 
+    xs: List[float] = [float(i) for i in range(n)]
     mean_x = sum(xs) / n
-    mean_y = sum(ys) / n
+    mean_y = sum(vals) / n
 
-    num = sum((xs[i] - mean_x) * (ys[i] - mean_y) for i in range(n))
+    num = sum((xs[i] - mean_x) * (vals[i] - mean_y) for i in range(n))
     den = sum((xs[i] - mean_x) ** 2 for i in range(n))
 
     if den == 0:
@@ -323,12 +357,13 @@ def stability_index(history: List[Dict[str, Any]]) -> Optional[float]:
 
     1.0 = perfectly stable improvements
     0.0 = chaotic swings
+
+    Compatible with both full history and bare RYE lists.
     """
-    norm = normalize_history(history)
-    if len(norm) < 4:
+    vals = _extract_rye_series(history)
+    if len(vals) < 4:
         return None
 
-    vals = [float(e["RYE"]) for e in norm]
     mean = sum(vals) / len(vals)
     var = statistics.pvariance(vals)
 
@@ -350,6 +385,8 @@ def recovery_momentum(history: List[Dict[str, Any]]) -> Optional[float]:
 
     Good for long missions (weeks to 90 day runs) where you want to know
     if the system is picking up momentum or stalling.
+
+    Works with either full history or bare RYE lists.
     """
     slope = regression_rye_slope(history)
     if slope is None:
@@ -410,12 +447,10 @@ def rye_percentiles(
         low  -> pessimistic floor
         mid  -> central tendency (usually close to median_rye)
         high -> optimistic ceiling
-    """
-    norm = normalize_history(history)
-    if len(norm) == 0:
-        return None, None, None
 
-    vals = sorted(float(e["RYE"]) for e in norm)
+    Compatible with both history dicts and bare RYE lists.
+    """
+    vals = sorted(_extract_rye_series(history))
     n = len(vals)
     if n == 0:
         return None, None, None
@@ -748,8 +783,8 @@ def compute_tool_rye(
             "error_events": 0,
             "sum_delta_r": 0.0,
             "sum_energy": 0.0,
-            "ratios": [],             # per event delta_r / energy_e
-            "ratios_learning": [],    # per event learning adjusted ratios
+            "ratios": [],
+            "ratios_learning": [],
             "last_timestamp": None,
         }
 
@@ -872,9 +907,11 @@ def rye_volatility_signature(
     volatility_score:
         ~1.0 -> very stable
         ~0.0 -> highly volatile
+
+    Accepts either full history or bare RYE lists.
     """
-    norm = normalize_history(history)
-    if len(norm) == 0 or window <= 1:
+    vals = _extract_rye_series(history)
+    if len(vals) == 0 or window <= 1:
         return {
             "std": None,
             "range": None,
@@ -882,9 +919,8 @@ def rye_volatility_signature(
             "volatility_score": None,
         }
 
-    recent = norm[-window:]
-    vals = [float(e["RYE"]) for e in recent]
-    if len(vals) < 2:
+    recent = vals[-window:]
+    if len(recent) < 2:
         return {
             "std": None,
             "range": None,
@@ -892,10 +928,10 @@ def rye_volatility_signature(
             "volatility_score": None,
         }
 
-    mean = sum(vals) / len(vals)
-    std = statistics.pstdev(vals)
-    vmin = min(vals)
-    vmax = max(vals)
+    mean = sum(recent) / len(recent)
+    std = statistics.pstdev(recent)
+    vmin = min(recent)
+    vmax = max(recent)
     r = vmax - vmin
 
     if mean == 0:
@@ -932,26 +968,29 @@ def detect_rye_equilibrium(
         - enough recent points
         - regression slope magnitude below slope_tolerance
         - volatility is not excessive
+
+    Accepts either full history or bare RYE lists.
     """
-    norm = normalize_history(history)
-    if len(norm) < window:
+    vals = _extract_rye_series(history)
+    n = len(vals)
+    if n < window:
         return {
             "in_equilibrium": False,
             "reason": "not_enough_data",
-            "window_size": len(norm),
+            "window_size": n,
             "local_slope": None,
             "local_volatility_score": None,
         }
 
-    recent = norm[-window:]
-    slope = regression_rye_slope(recent)
-    vol_sig = rye_volatility_signature(recent, window=window)
+    recent_vals = vals[-window:]
+    slope = regression_rye_slope(recent_vals)
+    vol_sig = rye_volatility_signature(recent_vals, window=window)
 
     if slope is None:
         return {
             "in_equilibrium": False,
             "reason": "no_slope",
-            "window_size": len(recent),
+            "window_size": len(recent_vals),
             "local_slope": None,
             "local_volatility_score": vol_sig.get("volatility_score"),
         }
@@ -967,7 +1006,7 @@ def detect_rye_equilibrium(
     return {
         "in_equilibrium": in_eq,
         "reason": reason,
-        "window_size": len(recent),
+        "window_size": len(recent_vals),
         "local_slope": slope,
         "local_volatility_score": vol_score,
     }
@@ -987,6 +1026,8 @@ def tgrm_harmonic_index(
 
     Returns:
         float in [0, 1] or None
+
+    Works with either full history or bare RYE lists.
     """
     stab = stability_index(history)
     rec = recovery_momentum(history)
@@ -1076,7 +1117,7 @@ def estimate_breakthrough_probability(
     }
 
 
-# Autonomy–Stability Safety Envelope
+# Autonomy Stability Safety Envelope
 
 def autonomy_safety_envelope(
     diagnostics: Dict[str, Any],
@@ -1147,9 +1188,9 @@ def classify_run_tier(
     """
     Classify a run into tiers:
 
-        Tier 0: unstable / chaotic
+        Tier 0: unstable or chaotic
         Tier 1: normal working agent (positive average RYE)
-        Tier 2: self-repairing, long-run stable
+        Tier 2: self repairing, long run stable
         Tier 3: "Major Breakthrough Zone" candidate
     """
     count = diagnostics.get("count") or 0
@@ -1196,7 +1237,7 @@ def classify_run_tier(
     }
 
 
-# Critical-Failure Early Warning Score
+# Critical Failure Early Warning Score
 
 def early_failure_warning_score(
     diagnostics: Dict[str, Any],
@@ -1254,7 +1295,7 @@ def early_failure_warning_score(
     }
 
 
-# 90-Day Breakthrough Likelihood Score
+# 90 Day Breakthrough Likelihood Score
 
 def breakthrough_likelihood_90d(
     diagnostics: Dict[str, Any],
@@ -1264,7 +1305,7 @@ def breakthrough_likelihood_90d(
 ) -> Dict[str, Any]:
     """
     Convenience wrapper: estimate breakthrough likelihood specifically for
-    a 90-day horizon, optionally conditioned on how long the system has
+    a 90 day horizon, optionally conditioned on how long the system has
     already been running.
     """
     horizon_hours = 90 * 24
@@ -1301,7 +1342,7 @@ def build_option_c_signature(
     window: int = 10,
 ) -> Dict[str, Any]:
     """
-    High-level Option C self-diagnosis snapshot.
+    High level Option C self diagnosis snapshot.
 
     Combines:
         - run diagnostics (including learning adjusted sub block if present)
@@ -1309,7 +1350,7 @@ def build_option_c_signature(
         - equilibrium detection
         - TGRM harmonic index
         - breakthrough probability
-        - 90-day breakthrough likelihood
+        - 90 day breakthrough likelihood
         - autonomy safety envelope
         - early failure warning
         - run tier classification
@@ -1334,4 +1375,190 @@ def build_option_c_signature(
         "autonomy_safety_envelope": env,
         "early_failure_warning": fail,
         "run_tier": tier_info,
+    }
+
+
+# ======================================================================
+#                    OPTIONAL UTILITIES FOR MSIL AND OFFLINE ANALYTICS
+# ======================================================================
+
+def compact_history(
+    history: List[Dict[str, Any]],
+    *,
+    max_points: int = 500,
+) -> List[Dict[str, Any]]:
+    """
+    Optional helper: downsample a long history to at most max_points entries.
+
+    Keeps the first and last entries and samples the middle region
+    approximately uniformly. This is useful for:
+        - exporting long runs
+        - building light msil snapshots
+        - plotting without huge payloads
+    """
+    if not isinstance(history, list) or len(history) <= max_points:
+        return list(history or [])
+
+    n = len(history)
+    if max_points <= 2:
+        return [history[0], history[-1]]
+
+    # Always keep first and last
+    result: List[Dict[str, Any]] = [history[0]]
+    inner = history[1:-1]
+    inner_points = max_points - 2
+    step = max(len(inner) / float(inner_points), 1.0)
+
+    idx = 0.0
+    while int(idx) < len(inner) and len(result) < max_points - 1:
+        result.append(inner[int(idx)])
+        idx += step
+
+    result.append(history[-1])
+    return result
+
+
+def history_window(
+    history: List[Dict[str, Any]],
+    *,
+    start_index: Optional[int] = None,
+    end_index: Optional[int] = None,
+    last_n: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Optional helper: slice a history by indices or take the last N entries.
+
+    This is WYSIWYG and does not touch RYE values. It is designed to be used
+    before calling build_option_c_signature or build_run_diagnostics in
+    msil style probes.
+    """
+    if not isinstance(history, list):
+        return []
+
+    n = len(history)
+    if n == 0:
+        return []
+
+    if last_n is not None and last_n > 0:
+        return history[max(0, n - last_n) :]
+
+    si = 0 if start_index is None else max(start_index, 0)
+    ei = n if end_index is None else min(end_index, n)
+    if si >= ei:
+        return []
+    return history[si:ei]
+
+
+def domain_slice(
+    history: List[Dict[str, Any]],
+    *,
+    domain: str,
+) -> List[Dict[str, Any]]:
+    """
+    Optional helper: filter history to entries for a single domain.
+
+    This expects history entries with a "domain" key. If the key is missing
+    the entry is skipped.
+    """
+    if not isinstance(history, list) or not domain:
+        return []
+
+    target = domain.lower()
+    out: List[Dict[str, Any]] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        d = entry.get("domain")
+        if isinstance(d, str) and d.lower() == target:
+            out.append(entry)
+    return out
+
+
+def summarize_rye_series(
+    values_or_history: List[Any],
+) -> Dict[str, Optional[float]]:
+    """
+    Optional helper: quick summary for bare RYE series or full history.
+
+    Returns a compact summary:
+        {
+          "count": int,
+          "avg": float or None,
+          "median": float or None,
+          "min": float or None,
+          "max": float or None,
+        }
+    """
+    vals = _extract_rye_series(values_or_history)
+    n = len(vals)
+    if n == 0:
+        return {
+            "count": 0,
+            "avg": None,
+            "median": None,
+            "min": None,
+            "max": None,
+        }
+
+    avg = sum(vals) / n
+    med = statistics.median(vals)
+    vmin = min(vals)
+    vmax = max(vals)
+
+    return {
+        "count": n,
+        "avg": avg,
+        "median": med,
+        "min": vmin,
+        "max": vmax,
+    }
+
+
+def build_msil_ready_snapshot(
+    history: List[Dict[str, Any]],
+    *,
+    domain: Optional[str] = None,
+    label: Optional[str] = None,
+    hours_run_so_far: Optional[float] = None,
+    window: int = 10,
+    max_points: int = 500,
+) -> Dict[str, Any]:
+    """
+    Optional high level helper for msil.py and IQ style probes.
+
+    This gives a compact, export friendly snapshot with:
+        - a compacted history segment
+        - option C signature
+        - a minimal front panel summary
+
+    It does not change any core logic, it just composes existing primitives.
+    """
+    compact = compact_history(history, max_points=max_points)
+    option_c = build_option_c_signature(
+        compact,
+        domain=domain,
+        hours_run_so_far=hours_run_so_far,
+        window=window,
+    )
+    diag = option_c["diagnostics"]
+    tier_info = option_c["run_tier"]
+
+    summary = {
+        "label": label,
+        "domain": domain or diag.get("domain"),
+        "tier": tier_info.get("tier"),
+        "rye_avg": diag.get("rye_avg"),
+        "rye_median": diag.get("rye_median"),
+        "rye_last": diag.get("rye_last"),
+        "stability_index": diag.get("stability_index"),
+        "trend_slope": diag.get("trend_slope"),
+        "breakthrough_probability": option_c["breakthrough_probability"].get("probability"),
+        "breakthrough_likelihood_90d": option_c["breakthrough_likelihood_90d"].get("probability"),
+        "early_failure_score": option_c["early_failure_warning"].get("score"),
+    }
+
+    return {
+        "summary": summary,
+        "option_c_signature": option_c,
+        "history_compact": compact,
     }
