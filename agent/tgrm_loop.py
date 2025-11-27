@@ -82,6 +82,17 @@ hallmark or subgoal, the loop:
     - tags cycles with hallmark and stage for later reporting
     - can push high value hypotheses into a ReplayBuffer for curriculum
       style learning via _log_replay_candidate
+
+Stability kernel and discovery manager
+--------------------------------------
+If available, the loop can optionally:
+    - stream per cycle metrics into a StabilityKernel for long run
+      stability_index, recovery_momentum, and noise estimates
+    - stream per cycle signals into a DiscoveryManager for tiered
+      discovery classification (tier_0 to tier_3)
+
+Both integrations are soft optional and never break runs if modules
+are missing or misconfigured.
 """
 
 from __future__ import annotations
@@ -90,6 +101,18 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
 from .rye_metrics import compute_delta_r, compute_energy, compute_rye
+
+# Optional stability kernel integration
+try:
+    from .stability_kernel import StabilityKernel  # type: ignore[import]
+except Exception:  # pragma: no cover
+    StabilityKernel = None  # type: ignore[assignment]
+
+# Optional discovery manager integration
+try:
+    from .discovery_manager import DiscoveryManager  # type: ignore[import]
+except Exception:  # pragma: no cover
+    DiscoveryManager = None  # type: ignore[assignment]
 
 # Optional imports for external tools and hypothesis engine.
 # Each has a safe fallback so the loop still runs if the modules
@@ -101,20 +124,17 @@ try:
 except Exception:  # pragma: no cover
     WebResearchTool = None  # type: ignore[assignment]
 
-
 # Paper and PDF tools
 try:
     from .tools_papers import PaperTool  # type: ignore[import]
 except Exception:  # pragma: no cover
     PaperTool = None  # type: ignore[assignment]
 
-
 # File tools (currently lightly used but optional)
 try:
     from .tools_files import FileTool  # type: ignore[import]
 except Exception:  # pragma: no cover
     FileTool = None  # type: ignore[assignment]
-
 
 # PubMed and Semantic Scholar
 try:
@@ -127,11 +147,11 @@ try:
 except Exception:  # pragma: no cover
     SemanticScholarTool = None  # type: ignore[assignment]
 
-
 # Hypothesis engine
 try:
     from .hypothesis_engine import generate_hypotheses  # type: ignore[import]
 except Exception:  # pragma: no cover
+
     def generate_hypotheses(
         goal: str,
         notes: List[Dict[str, Any]],
@@ -153,6 +173,7 @@ except Exception:  # pragma: no cover
 
     class ToolUsage:  # type: ignore[no-redef]
         """Minimal fallback usage tracker if tools.ToolUsage is unavailable."""
+
         def __init__(self) -> None:
             self.web_calls: int = 0
             self.browser_actions: int = 0
@@ -192,6 +213,7 @@ class _NullPaperTool:
 
 class _NullFileTool:
     """Fallback file tool when tools_files is missing."""
+
     def __init__(self) -> None:
         pass
 
@@ -256,7 +278,7 @@ class TGRMLoop:
             # Toolbelt style API
             self._usage_factory = self.tools.new_usage_tracker  # type: ignore[assignment]
         else:
-            # Local fallback
+
             def _default_usage_factory() -> ToolUsage:
                 return ToolUsage()
 
@@ -302,6 +324,22 @@ class TGRMLoop:
                 self.semantic_tool = _NullSemanticScholarTool()
         except Exception:
             self.semantic_tool = _NullSemanticScholarTool()
+
+        # Optional stability kernel and discovery manager
+        self.stability_kernel = None
+        self.discovery_manager = None
+
+        if StabilityKernel is not None and self.config.get("enable_stability_kernel", True):
+            try:
+                self.stability_kernel = StabilityKernel()
+            except Exception:
+                self.stability_kernel = None
+
+        if DiscoveryManager is not None and self.config.get("enable_discovery_manager", True):
+            try:
+                self.discovery_manager = DiscoveryManager()
+            except Exception:
+                self.discovery_manager = None
 
         # Long run optimization: track which questions have already been
         # researched so we do not re query the same text many times during
@@ -431,7 +469,9 @@ class TGRMLoop:
         if current_rye is None:
             return result
 
-        history = self._get_recent_history_for_goal(goal, limit=max(self.rye_window_size, 10))
+        history = self._get_recent_history_for_goal(
+            goal, limit=max(self.rye_window_size, 10)
+        )
         rye_values: List[float] = []
         for row in history:
             val = row.get("RYE") or row.get("rye") or row.get("rye_value")
@@ -563,7 +603,9 @@ class TGRMLoop:
         total_after = sum(issue_code_counts_after.values()) or 0
 
         if total_before > 0:
-            reduction = max(0.0, float(total_before - total_after)) / float(total_before)
+            reduction = max(0.0, float(total_before - total_after)) / float(
+                total_before
+            )
         else:
             reduction = 0.0
 
@@ -632,6 +674,9 @@ class TGRMLoop:
         subgoal: Optional[str] = None,
         replay_buffer: Optional[Any] = None,
         curriculum_state: Optional[Dict[str, Any]] = None,
+        run_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        swarm_profile: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Run one TGRM cycle for a given research goal.
 
@@ -675,7 +720,13 @@ class TGRMLoop:
             curriculum_state:
                 Optional dict with curriculum hints such as phase name,
                 progress fraction, or active pathway focus.
-
+            run_id:
+                Optional id of the long running experiment or swarm run.
+            agent_id:
+                Optional id of the agent within a swarm.
+            swarm_profile:
+                Optional dict describing swarm context such as size, layer,
+                and role weights. Safe to omit.
         Returns:
             Dict with:
                 {
@@ -700,7 +751,9 @@ class TGRMLoop:
         total_cycles_for_goal: int = 0
         try:
             if hasattr(self.memory_store, "get_rye_stats"):
-                avg, _min_rye, _max_rye, count = self.memory_store.get_rye_stats(goal=goal)  # type: ignore[attr-defined]
+                avg, _min_rye, _max_rye, count = self.memory_store.get_rye_stats(
+                    goal=goal
+                )  # type: ignore[attr-defined]
                 avg_rye = avg
                 total_cycles_for_goal = count
         except Exception:
@@ -732,7 +785,9 @@ class TGRMLoop:
         status_report = self._test(goal, prior_notes)
         phases["test_before"] = {
             "known_notes_count": status_report.get("known_notes_count", 0),
-            "approx_citation_markers": status_report.get("approx_citation_markers"),
+            "approx_citation_markers": status_report.get(
+                "approx_citation_markers"
+            ),
         }
 
         # DETECT phase
@@ -753,7 +808,9 @@ class TGRMLoop:
             "missing_formalism",
             "missing_connections",
         ]
-        domain_issue_flags_before = {code: (code in issues) for code in domain_issue_codes}
+        domain_issue_flags_before = {
+            code: (code in issues) for code in domain_issue_codes
+        }
 
         has_questions_before = "question_mark" in issues
         has_todos_before = "todo_item" in issues
@@ -788,7 +845,9 @@ class TGRMLoop:
         issues_after, _ = self._detect(new_status_report, domain=domain_tag)
 
         phases["test_after"] = {
-            "known_notes_count": new_status_report.get("known_notes_count", len(new_notes)),
+            "known_notes_count": new_status_report.get(
+                "known_notes_count", len(new_notes)
+            ),
         }
         phases["detect_after"] = {
             "issue_codes": issues_after,
@@ -798,14 +857,18 @@ class TGRMLoop:
         for code in issues_after:
             issue_code_counts_after[code] = issue_code_counts_after.get(code, 0) + 1
 
-        domain_issue_flags_after = {code: (code in issues_after) for code in domain_issue_codes}
+        domain_issue_flags_after = {
+            code: (code in issues_after) for code in domain_issue_codes
+        }
         has_questions_after = "question_mark" in issues_after
         has_todos_after = "todo_item" in issues_after
         has_contradictions_after = "contradiction" in issues_after
 
         # Hypothesis generation (now structured for discovery and learning)
         max_h = 3 if self.tgrm_level == 1 else 5
-        raw_hypotheses = generate_hypotheses(goal, new_notes, citations, max_hypotheses=max_h)
+        raw_hypotheses = generate_hypotheses(
+            goal, new_notes, citations, max_hypotheses=max_h
+        )
 
         hypotheses: List[Dict[str, Any]] = []
         candidate_hypotheses: List[Dict[str, Any]] = []
@@ -888,6 +951,9 @@ class TGRMLoop:
             semantic_calls=stats.get("semantic_calls", 0),
             pdf_ingestions=stats.get("pdf_ingestions", 0),
             tokens_estimate=tool_usage.approx_tokens,
+            # Optional swarm aware hints (ignored by older compute_energy)
+            swarm_size=(swarm_profile or {}).get("swarm_size"),
+            swarm_layer=(swarm_profile or {}).get("layer"),
         )
         rye_value = compute_rye(delta_r, energy_e)
 
@@ -914,6 +980,46 @@ class TGRMLoop:
             citations=citations,
         )
 
+        # Optional stability kernel snapshot
+        stability_snapshot: Optional[Dict[str, Any]] = None
+        if self.stability_kernel is not None:
+            try:
+                stability_snapshot = self.stability_kernel.update_from_cycle(
+                    rye=rye_value,
+                    delta_r=delta_r,
+                    energy_e=energy_e,
+                    equilibrium_info=equilibrium_info,
+                    meta={
+                        "goal": goal,
+                        "domain": domain_tag,
+                        "cycle_index": cycle_index,
+                        "role": role,
+                        "run_id": run_id,
+                        "agent_id": agent_id,
+                    },
+                )
+            except Exception:
+                stability_snapshot = None
+
+        # Optional discovery manager snapshot
+        discovery_snapshot: Optional[Dict[str, Any]] = None
+        if self.discovery_manager is not None:
+            try:
+                discovery_snapshot = self.discovery_manager.update_from_cycle(
+                    goal=goal,
+                    domain=domain_tag,
+                    rye=rye_value,
+                    delta_r=delta_r,
+                    energy_e=energy_e,
+                    breakthrough=breakthrough_info,
+                    hypotheses=hypotheses,
+                    citations=citations,
+                    cycle_index=cycle_index,
+                    run_id=run_id,
+                )
+            except Exception:
+                discovery_snapshot = None
+
         # Short structured view - tuned for Ultra mode and UI
         short_view = {
             "cycle": cycle_index,
@@ -923,6 +1029,8 @@ class TGRMLoop:
             "stage": stage_tag,
             "hallmark": hallmark,
             "subgoal": subgoal,
+            "run_id": run_id,
+            "agent_id": agent_id,
             "ultra_speed": self.ultra_speed,
             "maintenance_mode": maintenance_mode,
             "issues_before": issues,
@@ -933,6 +1041,11 @@ class TGRMLoop:
             "RYE": rye_value,
             "equilibrium_label": equilibrium_info.get("equilibrium_label"),
             "breakthrough_score": breakthrough_info.get("breakthrough_score"),
+            "stability_index": (stability_snapshot or {}).get("stability_index"),
+            "recovery_momentum": (stability_snapshot or {}).get(
+                "recovery_momentum"
+            ),
+            "discovery_tier": (discovery_snapshot or {}).get("tier"),
         }
 
         # Meta controller friendly signals
@@ -950,6 +1063,10 @@ class TGRMLoop:
             "stage": stage_tag,
             "hallmark": hallmark,
             "subgoal": subgoal,
+            "run_id": run_id,
+            "agent_id": agent_id,
+            "stability": stability_snapshot,
+            "discovery": discovery_snapshot,
         }
 
         # Machine facing log
@@ -962,6 +1079,8 @@ class TGRMLoop:
             "stage": stage_tag,
             "hallmark": hallmark,
             "subgoal": subgoal,
+            "run_id": run_id,
+            "agent_id": agent_id,
             "tgrm_level": self.tgrm_level,
             "ultra_speed": self.ultra_speed,
             # Issues before and after
@@ -995,6 +1114,9 @@ class TGRMLoop:
             # RYE gradient and equilibrium and breakthrough
             "equilibrium": equilibrium_info,
             "breakthrough": breakthrough_info,
+            # Stability kernel and discovery manager snapshots
+            "stability": stability_snapshot,
+            "discovery": discovery_snapshot,
             # Tool usage details for this cycle
             "tool_usage": {
                 "web_calls": tool_usage.web_calls,
@@ -1014,6 +1136,8 @@ class TGRMLoop:
             "phases": phases,
             "short_view": short_view,
             "meta_signals": meta_signals,
+            # Swarm profile metadata (if any)
+            "swarm_profile": swarm_profile or {},
         }
 
         # Replay buffer logging and metadata tagging for longevity aware loops
@@ -1038,6 +1162,8 @@ class TGRMLoop:
             "stage": stage_tag,
             "hallmark": hallmark,
             "subgoal": subgoal,
+            "run_id": run_id,
+            "agent_id": agent_id,
             "goal": goal,
             "issues_before": issue_descriptions,
             "issues_after": issues_after,
@@ -1053,6 +1179,8 @@ class TGRMLoop:
             "delta_R_components": delta_r_components,
             "equilibrium": equilibrium_info,
             "breakthrough": breakthrough_info,
+            "stability": stability_snapshot,
+            "discovery": discovery_snapshot,
             "notes_added": notes_added,
             "citations": citations,
             "hypotheses": hypotheses,
@@ -1066,6 +1194,7 @@ class TGRMLoop:
             "phases": phases,
             "curriculum_state": curriculum_state,
             "replay_item_ids": replay_item_ids,
+            "swarm_profile": swarm_profile or {},
         }
 
         # Expose stats and citations at the top level so CoreAgent and the UI
@@ -1145,10 +1274,14 @@ class TGRMLoop:
                     descriptions.append("Unanswered question detected in notes.")
                 if "TODO" in content or "todo" in content:
                     issues.append("todo_item")
-                    descriptions.append("TODO item detected in notes; missing information.")
+                    descriptions.append(
+                        "TODO item detected in notes; missing information."
+                    )
                 if "CONTRADICTION" in content:
                     issues.append("contradiction")
-                    descriptions.append("Marked contradiction in notes; needs resolution.")
+                    descriptions.append(
+                        "Marked contradiction in notes; needs resolution."
+                    )
 
         # Level 2: citation level diagnostics
         if self.tgrm_level >= 2 and notes:
@@ -1181,7 +1314,15 @@ class TGRMLoop:
 
         if all(
             kw.lower() not in text.lower()
-            for kw in ["biomarker", "blood", "lab value", "marker", "hdl", "ldl", "triglyceride"]
+            for kw in [
+                "biomarker",
+                "blood",
+                "lab value",
+                "marker",
+                "hdl",
+                "ldl",
+                "triglyceride",
+            ]
         ):
             issues.append("missing_biomarkers")
             descriptions.append(
@@ -1505,7 +1646,9 @@ class TGRMLoop:
     # ------------------------------------------------------------------
     # Helper methods
     # ------------------------------------------------------------------
-    def _normalise_source_controls(self, source_controls: Optional[Dict[str, bool]]) -> Dict[str, bool]:
+    def _normalise_source_controls(
+        self, source_controls: Optional[Dict[str, bool]]
+    ) -> Dict[str, bool]:
         """Provide default source controls if none are given."""
         defaults = {
             "web": True,
@@ -1548,10 +1691,18 @@ class TGRMLoop:
             level = base_level - 1
 
         if purpose in {"initial", "gap_repair", "strengthen"}:
-            if not maintenance_mode and base_level == 3 and role_lower in {"researcher", "explorer"}:
+            if (
+                not maintenance_mode
+                and base_level == 3
+                and role_lower in {"researcher", "explorer"}
+            ):
                 level = 3
         elif purpose == "targeted":
-            if not maintenance_mode and base_level >= 2 and role_lower in {"researcher", "explorer"}:
+            if (
+                not maintenance_mode
+                and base_level >= 2
+                and role_lower in {"researcher", "explorer"}
+            ):
                 level = min(3, base_level)
             elif role_lower in {"critic", "planner", "synthesizer", "integrator"}:
                 level = max(1, min(base_level, 2))
@@ -1653,7 +1804,9 @@ class TGRMLoop:
                         getattr(browser_result, "text_snippet", "") or ""
                     )
 
-                note_lines.append(f"Browser deep dive snippet from: {browser_result.url}")
+                note_lines.append(
+                    f"Browser deep dive snippet from: {browser_result.url}"
+                )
                 if getattr(browser_result, "error", None):
                     note_lines.append(f"(Browser error: {browser_result.error})")
                 else:
@@ -1738,7 +1891,9 @@ class TGRMLoop:
                 if issue_type == "question_mark" and "?" in line_strip:
                     if len(line_strip) > 10:
                         candidates.append(line_strip)
-                elif issue_type == "todo_item" and ("TODO" in line_strip or "todo" in line_strip):
+                elif issue_type == "todo_item" and (
+                    "TODO" in line_strip or "todo" in line_strip
+                ):
                     if len(line_strip) > 10:
                         candidates.append(line_strip)
 
@@ -1788,7 +1943,9 @@ class TGRMLoop:
             questions = [f"{goal} - focus on: {issue_description}"]
         elif len(questions) == 0:
             note_lines: List[str] = []
-            note_lines.append(f"[{role}] Maintenance pass on open items ({issue}) for goal:")
+            note_lines.append(
+                f"[{role}] Maintenance pass on open items ({issue}) for goal:"
+            )
             note_lines.append(goal)
             note_lines.append("")
             note_lines.append(
@@ -1799,7 +1956,9 @@ class TGRMLoop:
             return note_text, citations, stats
 
         note_lines: List[str] = []
-        note_lines.append(f"[{role}] Targeted research on open items ({issue}) for goal:")
+        note_lines.append(
+            f"[{role}] Targeted research on open items ({issue}) for goal:"
+        )
         note_lines.append(goal)
         note_lines.append("")
         note_lines.append("Questions or TODOs considered:")
@@ -1858,7 +2017,9 @@ class TGRMLoop:
                 citations.extend(pubmed_cites)
 
                 if tool_usage is not None:
-                    titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
+                    titles = " ".join(
+                        r.get("title", "") or "" for r in pubmed_results
+                    )
                     tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                 note_lines.append("PubMed sources:")
@@ -1879,7 +2040,9 @@ class TGRMLoop:
                 citations.extend(sem_cites)
 
                 if tool_usage is not None:
-                    titles = " ".join(r.get("title", "") or "" for r in sem_results)
+                    titles = " ".join(
+                        r.get("title", "") or "" for r in sem_results
+                    )
                     tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                 note_lines.append("Semantic Scholar sources:")
@@ -2046,11 +2209,13 @@ class TGRMLoop:
         elif dom == "math":
             if issue == "missing_formalism":
                 query = (
-                    f"formal definition theorem stability framework similar to reparodynamics and RYE"
+                    "formal definition theorem stability framework similar to "
+                    "reparodynamics and RYE"
                 )
             elif issue == "missing_connections":
                 query = (
-                    f"connections between stability theory Lyapunov control Markov processes and repair dynamics"
+                    "connections between stability theory Lyapunov control "
+                    "Markov processes and repair dynamics"
                 )
             else:
                 query = f"{goal} mathematical stability formalization"
@@ -2212,7 +2377,12 @@ class TGRMLoop:
         top_hypotheses = sorted_hypotheses[:5]
 
         for idx, h in enumerate(top_hypotheses):
-            text = h.get("text") or h.get("description") or h.get("title") or ""
+            text = (
+                h.get("text")
+                or h.get("description")
+                or h.get("title")
+                or ""
+            )
             if not text:
                 continue
 
