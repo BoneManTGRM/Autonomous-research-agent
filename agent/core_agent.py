@@ -20,6 +20,89 @@ RYE (Repair Yield per Energy):
     by effort). CoreAgent orchestrates cycles, multi-agent runs, and
     continuous modes while the TGRM loop integrates tool usage into E.
 
+MSIL v2 hooks (dual-track inference):
+    CoreAgent supports a configurable `msil_mode` and `msil_track_mode`
+    that can be passed into upgraded TGRM loops:
+        - msil_mode: "v1" or "v2"
+        - msil_track_mode: "single" or "dual"
+    If an MSIL controller is available, CoreAgent will attach it as
+    `self.msil_controller` and expose advisory helpers.
+
+TGRM v3 hooks (multi-goal self-repair):
+    CoreAgent exposes `run_multi_goal_cycle` and
+    `run_multi_goal_training_burst` which call
+    `TGRMLoop.run_multi_goal_cycle(...)` when available, and otherwise
+    fall back to running goals one by one. This sets the stage for
+    true multi-hypothesis repair in the loop.
+
+Stability Kernel:
+    If a StabilityKernel implementation is available, CoreAgent
+    attaches it as `self.stability_kernel` and feeds each cycle summary
+    into it. When the kernel recommends a halt, redirection, or slowdown,
+    CoreAgent will stop continuous runs with a "stability_guard" reason.
+
+Autonomous literature crawler:
+    If a LiteratureCrawler is available, CoreAgent exposes
+    `run_literature_crawl(...)` that can crawl PubMed, preprints, and
+    other literature sources, log findings into MemoryStore, and feed
+    DiscoveryLogger and HypothesisManager.
+
+Hierarchical swarm architecture:
+    CoreAgent still uses a flat list of roles, but if a SwarmProfileManager
+    is available, it can interpret profile names ("lab_style", "validator_heavy")
+    and translate them into structured role sets through
+    `apply_swarm_profile(...)`. run_swarm_continuous can be called with
+    an explicit profile and roles.
+
+RYE v4 style signal decomposition:
+    CoreAgent exposes helpers that can call richer rye_metrics functions
+    such as Option C signatures and any future v4 metrics, then attach
+    these to training_profile and learning plans. The underlying math
+    lives in rye_metrics.
+
+Protocol Synthesizer:
+    If a ProtocolSynthesizer is available, CoreAgent attaches it and
+    exposes `synthesize_protocols_from_validated(...)` which turns
+    validated hypotheses and RYE diagnostics into candidate protocols
+    and supplement stacks.
+
+Meta-Agent for self tuning:
+    If a MetaAgent is available, CoreAgent attaches it as
+    `self.meta_agent` and exposes `run_meta_tuning(...)` that produces
+    advisory suggestions for prompts, roles, swarm shape, and thresholds
+    based on learning_plan and meta_state.
+
+Memory partition v2:
+    CoreAgent can enable memory tiers:
+        - Gold Memory
+        - Silver Memory
+        - Bronze Memory
+        - Dustbin Memory
+    When `memory_tiers_enabled` is True and MemoryStore supports
+    `configure_tiers(...)`, CoreAgent configures tier labels and exposes
+    `get_memory_partition_status()` for quick tier counts.
+
+True long-horizon run modes:
+    On top of `run_continuous` and `run_swarm_continuous`, CoreAgent
+    exposes:
+        - run_long_horizon_single(...)
+        - run_long_horizon_swarm(...)
+    which are convenient wrappers for 24 hour to multi day runs with
+    stability guarding and RYE diagnostics plugged in.
+
+Breakthrough Hunter mode:
+    CoreAgent supports `breakthrough_hunter_enabled` in config. When on,
+    default experiment_mode is "breakthrough" for continuous and swarm
+    runs, and RYE thresholds or discovery instrumentation can be tuned
+    more aggressively for Tier 3 discovery probability.
+
+Integrated trading mode:
+    If a TradingEngine is available, CoreAgent attaches it and exposes:
+        - run_trading_session(...)
+        - run_trading_swarm(...)
+    which are domain "trading" runs coupled with any trading specific
+    logic in the TradingEngine while still using TGRM and RYE.
+
 Multi-agent extension:
     CoreAgent can orchestrate multiple logical agent roles
     (researcher, critic, planner, synthesizer, explorer, plus up to
@@ -29,7 +112,7 @@ Multi-agent extension:
         - long continuous runs where each "round" consists of many roles.
 
     The maximum number of logical agents is capped at 32 for safety,
-    and can be configured via config["max_agents"] (1-32).
+    and can be configured via config["max_agents"] (1 to 32).
 
 Toolbelt and tool registry:
     CoreAgent owns a tools layer that can be:
@@ -57,22 +140,23 @@ Domain presets and experiment modes:
     CoreAgent also uses domain presets (via presets.get_preset) to:
         - pick sensible default runtime profiles per domain
         - suggest RYE stop thresholds
-        - keep behavior aligned with longevity / math / general modes
+        - keep behavior aligned with longevity, math, general, or trading modes
 
     The experiment_mode (for example discovery, stability_test,
-    protocol_builder) can be passed in and tagged on runs so that the
-    meta controller and report generator can distinguish different runs.
+    protocol_builder, breakthrough, trading) can be passed in and
+    tagged on runs so that the meta controller and report generator
+    can distinguish different runs.
 
 Discovery extensions:
     CoreAgent can optionally cooperate with:
         - DiscoveryLogger for RYE spikes, hypotheses, and contradictions
-        - HypothesisManager for a pending / validated / rejected pipeline
+        - HypothesisManager for a pending, validated, rejected pipeline
         - SnapshotGenerator for weekly experiment summaries
         - MemoryPruner for long run memory health
         - VerificationEngine for deeper checks of promising hypotheses
         - DiscoveryEngine (if available) for tiered discovery scoring
 
-    These helpers sit on top of your existing TGRM loop and do not
+    These helpers sit on top of the existing TGRM loop and do not
     change its core behavior. They only consume the summary dicts and
     write logs or hypothesis records.
 
@@ -149,6 +233,42 @@ try:
 except Exception:
     DiscoveryEngine = None  # type: ignore
 
+# Optional advanced controllers and kernels
+try:
+    from .msil_controller import MSILController  # type: ignore[attr-defined]
+except Exception:
+    MSILController = None  # type: ignore
+
+try:
+    from .stability_kernel import StabilityKernel  # type: ignore[attr-defined]
+except Exception:
+    StabilityKernel = None  # type: ignore
+
+try:
+    from .literature_crawler import LiteratureCrawler  # type: ignore[attr-defined]
+except Exception:
+    LiteratureCrawler = None  # type: ignore
+
+try:
+    from .protocol_synthesizer import ProtocolSynthesizer  # type: ignore[attr-defined]
+except Exception:
+    ProtocolSynthesizer = None  # type: ignore
+
+try:
+    from .meta_agent import MetaAgent  # type: ignore[attr-defined]
+except Exception:
+    MetaAgent = None  # type: ignore
+
+try:
+    from .swarm_profiles import SwarmProfileManager  # type: ignore[attr-defined]
+except Exception:
+    SwarmProfileManager = None  # type: ignore
+
+try:
+    from .trading_engine import TradingEngine  # type: ignore[attr-defined]
+except Exception:
+    TradingEngine = None  # type: ignore
+
 # Discovery stack imports
 from .discovery_log import DiscoveryLogger, get_global_logger
 from .hypothesis_manager import HypothesisManager
@@ -161,14 +281,14 @@ class CoreAgent:
     """High-level controller for the autonomous research agent.
 
     This class wires UI or CLI controls (multi-agent, continuous mode,
-    source preferences, PDF uploads, swarm roles) into the lower-level
-    TGRMLoop which performs the actual reparodynamic TGRM cycles and
-    RYE computation.
+    source preferences, PDF uploads, swarm roles, advanced upgrades)
+    into the lower-level TGRMLoop which performs the actual reparodynamic
+    TGRM cycles and RYE computation.
 
     It also owns a tools layer that TGRMLoop can use for:
         - headless browser actions
         - code execution sandbox
-        - data pipelines (CSV / Excel / SQLite)
+        - data pipelines (CSV, Excel, SQLite)
         - registry based tools via TOOL_REGISTRY
 
     Speed modes:
@@ -176,6 +296,17 @@ class CoreAgent:
         - accelerated: advisory auto tuning is more active
         - ultra: advisory auto tuning plus extra meta statistics
                  intended for upgraded TGRM and swarm modules
+
+    Advanced hooks:
+        - msil_mode and msil_track_mode for MSIL v2
+        - stability_kernel for long horizon stability
+        - literature_crawler for autonomous reading
+        - protocol_synthesizer for stack and protocol building
+        - meta_agent for self tuning
+        - swarm_profile_manager for hierarchical swarms
+        - trading_engine for trading runs
+        - memory tiers for Gold, Silver, Bronze, Dustbin
+        - breakthrough_hunter_enabled for discovery focused runs
     """
 
     def __init__(self, memory_store: MemoryStore, config: Optional[Dict[str, Any]] = None) -> None:
@@ -198,25 +329,38 @@ class CoreAgent:
             # TGRMLoop will receive a plain dict of tool callables
             self.tools = self.tool_registry
 
+        # ------------------------------------------------------------------
+        # MSIL controller and modes (v1 vs v2, single vs dual track)
+        # ------------------------------------------------------------------
+        self.msil_mode: str = str(self.config.get("msil_mode", "v1")).lower()
+        if self.msil_mode not in {"v1", "v2"}:
+            self.msil_mode = "v1"
+
+        self.msil_track_mode: str = str(self.config.get("msil_track_mode", "single")).lower()
+        if self.msil_track_mode not in {"single", "dual"}:
+            self.msil_track_mode = "single"
+
+        if MSILController is not None:
+            try:
+                self.msil_controller = MSILController(config=self.config)
+            except Exception:
+                self.msil_controller = None
+        else:
+            self.msil_controller = None
+
         # Underlying TGRM loop that actually performs Test, Detect, Repair, Verify.
         # Prefer the newer signature that accepts tools=..., but keep a
-        # backwards-compatible fallback for older TGRMLoop implementations.
+        # backwards compatible fallback for older TGRMLoop implementations.
         try:
-            self.tgrm_loop = TGRMLoop(self.memory_store, self.config, tools=self.tools)  # type: ignore[call-arg]
+            self.tgrm_loop = TGRMLoop(
+                self.memory_store,
+                self.config,
+                tools=self.tools,  # type: ignore[call-arg]
+            )
         except TypeError:
             self.tgrm_loop = TGRMLoop(self.memory_store, self.config)
 
         # Source controls can be set by the UI at runtime.
-        # Example:
-        #   {
-        #       "web": True,
-        #       "pubmed": True,
-        #       "semantic": False,
-        #       "pdf": True,
-        #       "biomarkers": False,
-        #       "sandbox": False,
-        #       "data_connectors": False,
-        #   }
         self.source_controls: Dict[str, bool] = {}
 
         # Optional attached PDF bytes (from an uploaded file in the UI)
@@ -232,16 +376,12 @@ class CoreAgent:
         # ------------------------------------------------------------------
         # Multi-agent configuration (up to 32 logical agents)
         # ------------------------------------------------------------------
-        # Hard safety cap for number of logical agents this CoreAgent
-        # will coordinate in any single round.
         self.max_agents: int = int(self.config.get("max_agents", 32))
         if self.max_agents < 1:
             self.max_agents = 1
         if self.max_agents > 32:
             self.max_agents = 32
 
-        # Logical base roles. Additional generic roles are generated
-        # as agent_01, agent_02, up to self.max_agents.
         base_roles: List[str] = [
             "researcher",
             "critic",
@@ -250,16 +390,12 @@ class CoreAgent:
             "explorer",
         ]
 
-        # Generate a full role list up to max_agents
         generated_roles: List[str] = list(base_roles)
-        # Fill remaining slots with generic agent_NN labels
         counter = 1
         while len(generated_roles) < self.max_agents:
             generated_roles.append(f"agent_{counter:02d}")
             counter += 1
 
-        # If config provides an explicit list of roles, use it but
-        # enforce the max_agents cap.
         config_roles = self.config.get("agent_roles")
         if isinstance(config_roles, (list, tuple)):
             roles: List[str] = [str(r) for r in config_roles if r]
@@ -268,26 +404,19 @@ class CoreAgent:
         else:
             roles = generated_roles
 
-        # Enforce safety cap
         self.agent_roles: List[str] = roles[: self.max_agents]
 
         # ------------------------------------------------------------------
         # Discovery stack (sits on top of existing logic)
         # ------------------------------------------------------------------
-        # Track last RYE to detect spikes.
         self._last_rye: Optional[float] = None
 
-        # Shared discovery logger and hypothesis pipeline.
-        # run_id will be set per run where needed.
         self.discovery_logger: DiscoveryLogger = get_global_logger()
         self.hypothesis_manager: HypothesisManager = HypothesisManager(run_id=None)
 
-        # Long run helpers for 90 day experiments.
         self.memory_pruner: MemoryPruner = MemoryPruner(self.memory_store, run_id=None)
         self.snapshot_generator: SnapshotGenerator = SnapshotGenerator(run_id=None)
 
-        # Verification engine for deeper checks on promising hypotheses.
-        # The actual check functions can be wired from engine_worker.
         self.verification_engine: VerificationEngine = VerificationEngine(
             hypothesis_manager=self.hypothesis_manager,
             discovery_logger=self.discovery_logger,
@@ -297,8 +426,6 @@ class CoreAgent:
             run_id=None,
         )
 
-        # Optional discovery engine for tiered scoring and more advanced
-        # "what counts as a major discovery" logic.
         self.discovery_engine: Optional[Any] = None
         if DiscoveryEngine is not None:
             try:
@@ -311,6 +438,74 @@ class CoreAgent:
                 )
             except Exception:
                 self.discovery_engine = None
+
+        # ------------------------------------------------------------------
+        # Stability Kernel, Literature Crawler, Protocol Synthesizer,
+        # Meta Agent, Swarm Profiles, Trading Engine
+        # ------------------------------------------------------------------
+        if StabilityKernel is not None:
+            try:
+                self.stability_kernel = StabilityKernel(config=self.config)
+            except Exception:
+                self.stability_kernel = None
+        else:
+            self.stability_kernel = None
+
+        if LiteratureCrawler is not None:
+            try:
+                self.literature_crawler = LiteratureCrawler(
+                    memory_store=self.memory_store,
+                    discovery_logger=self.discovery_logger,
+                    config=self.config,
+                )
+            except Exception:
+                self.literature_crawler = None
+        else:
+            self.literature_crawler = None
+
+        if ProtocolSynthesizer is not None:
+            try:
+                self.protocol_synthesizer = ProtocolSynthesizer(
+                    memory_store=self.memory_store,
+                    hypothesis_manager=self.hypothesis_manager,
+                    verification_engine=self.verification_engine,
+                    config=self.config,
+                )
+            except Exception:
+                self.protocol_synthesizer = None
+        else:
+            self.protocol_synthesizer = None
+
+        if MetaAgent is not None:
+            try:
+                self.meta_agent = MetaAgent(
+                    memory_store=self.memory_store,
+                    config=self.config,
+                )
+            except Exception:
+                self.meta_agent = None
+        else:
+            self.meta_agent = None
+
+        if SwarmProfileManager is not None:
+            try:
+                self.swarm_profile_manager = SwarmProfileManager(config=self.config)
+            except Exception:
+                self.swarm_profile_manager = None
+        else:
+            self.swarm_profile_manager = None
+
+        if TradingEngine is not None:
+            try:
+                self.trading_engine = TradingEngine(
+                    memory_store=self.memory_store,
+                    discovery_logger=self.discovery_logger,
+                    config=self.config,
+                )
+            except Exception:
+                self.trading_engine = None
+        else:
+            self.trading_engine = None
 
         # ------------------------------------------------------------------
         # Intelligence profile support
@@ -331,50 +526,37 @@ class CoreAgent:
         # ------------------------------------------------------------------
         # Learned profile from memory history
         # ------------------------------------------------------------------
-        # This holds the last learned suggestions from learn_from_memory:
-        #   {
-        #     "has_history": bool,
-        #     "recommended_runtime_profile": Optional[str],
-        #     "recommended_stop_rye": Optional[float],
-        #     "diagnostics": Optional[dict],
-        #   }
         self.learned_from_memory: Dict[str, Any] = {}
 
         # ------------------------------------------------------------------
-        # Agent-level training / learning configuration
+        # Agent-level training configuration
         # ------------------------------------------------------------------
-        # Learning is at the agent level (TGRM + RYE + memory), not model weights.
         self.learning_enabled: bool = bool(self.config.get("learning_enabled", True))
-        # Minimum cycle history before we trust learned suggestions.
         self.min_training_history: int = int(self.config.get("min_training_history", 50))
         if self.min_training_history < 0:
             self.min_training_history = 0
 
-        # Last training burst summary (short diagnostic or optimization runs).
         self.training_profile: Dict[str, Any] = {}
-        # Last high-level learning plan produced by optimize_learning_pipeline().
         self.learning_plan: Dict[str, Any] = {}
 
         # ------------------------------------------------------------------
         # Citation tracking configuration
         # ------------------------------------------------------------------
-        # If enabled, CoreAgent will propagate any citations returned by TGRMLoop
-        # into summaries, state, and run metadata so the UI and report
-        # generator can show clear source provenance.
         self.citations_enabled: bool = bool(self.config.get("citations_enabled", True))
 
         # ------------------------------------------------------------------
-        # Speed and meta controller configuration
+        # Speed, Breakthrough Hunter, RYE mode
         # ------------------------------------------------------------------
-        # Speed mode is advisory and backward compatible.
-        # Other modules can read this to tune how aggressive they are.
         self.speed_mode: str = str(self.config.get("speed_mode", "standard")).lower()
         if self.speed_mode not in {"standard", "accelerated", "ultra"}:
             self.speed_mode = "standard"
 
-        # Meta state keeps lightweight, run level stats for future
-        # Ultra controllers. This does not change behavior by itself,
-        # but gives TGRM and UI a place to read speed related context.
+        self.breakthrough_hunter_enabled: bool = bool(self.config.get("breakthrough_hunter_enabled", False))
+
+        self.rye_mode: str = str(self.config.get("rye_mode", "v3")).lower()
+        if self.rye_mode not in {"v2", "v3", "v4"}:
+            self.rye_mode = "v3"
+
         self._meta_state: Dict[str, Any] = {
             "speed_mode": self.speed_mode,
             "last_update_ts": time.time(),
@@ -387,6 +569,21 @@ class CoreAgent:
                 "recent_round_contradictions": [],
             },
         }
+
+        # ------------------------------------------------------------------
+        # Memory tiers (Gold, Silver, Bronze, Dustbin)
+        # ------------------------------------------------------------------
+        self.memory_tiers_enabled: bool = bool(self.config.get("memory_tiers_enabled", False))
+        self.memory_tiers: List[str] = ["gold", "silver", "bronze", "dustbin"]
+        if self.memory_tiers_enabled:
+            try:
+                if hasattr(self.memory_store, "configure_tiers"):
+                    self.memory_store.configure_tiers(self.memory_tiers)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+
+        # Last meta tuning suggestions
+        self.last_meta_tuning: Dict[str, Any] = {}
 
         self._apply_intelligence_profile()
 
@@ -433,11 +630,7 @@ class CoreAgent:
     # Source controls helpers
     # ------------------------------------------------------------------
     def set_source_controls(self, controls: Dict[str, bool]) -> None:
-        """Replace the default source controls with a validated copy.
-
-        Keys should be strings and values should be bools.
-        This does not affect any existing saved state, only future runs.
-        """
+        """Replace the default source controls with a validated copy."""
         if not isinstance(controls, dict):
             return
         cleaned: Dict[str, bool] = {}
@@ -479,11 +672,7 @@ class CoreAgent:
         self._meta_state["last_update_ts"] = time.time()
 
     def _meta_note_single_cycle(self, rye_value: Optional[float], contradictions: Optional[int]) -> None:
-        """Internal helper for tracking recent single agent RYE and contradictions.
-
-        This does not change behavior. It simply stores short windows
-        of stats that can be used by upgraded TGRM loops or UI panels.
-        """
+        """Track recent single agent RYE and contradictions for meta tuning."""
         try:
             stats = self._meta_state.get("single_run_stats") or {}
             recent_rye = stats.get("recent_rye") or []
@@ -507,7 +696,7 @@ class CoreAgent:
             return
 
     def _meta_note_swarm_round(self, avg_round_rye: Optional[float], avg_round_contradictions: Optional[float]) -> None:
-        """Internal helper for tracking swarm round RYE and contradictions."""
+        """Track swarm round RYE and contradictions."""
         try:
             stats = self._meta_state.get("swarm_run_stats") or {}
             recent_rye = stats.get("recent_round_rye") or []
@@ -534,20 +723,7 @@ class CoreAgent:
     # Learning from memory history
     # ------------------------------------------------------------------
     def learn_from_memory(self, domain: Optional[str] = None) -> Dict[str, Any]:
-        """Analyze past cycles and derive learned runtime hints.
-
-        This method is conservative and purely advisory:
-            - It never raises.
-            - It does not mutate external state except self.learned_from_memory.
-            - It can be called by the UI, workers, or continuous modes.
-
-        Returns:
-            Dict with keys:
-                - "has_history": bool
-                - "recommended_runtime_profile": Optional[str]
-                - "recommended_stop_rye": Optional[float]
-                - "diagnostics": Optional[dict]
-        """
+        """Analyze past cycles and derive learned runtime hints."""
         learned: Dict[str, Any] = {
             "has_history": False,
             "recommended_runtime_profile": None,
@@ -580,7 +756,6 @@ class CoreAgent:
 
         learned["diagnostics"] = diagnostics
 
-        # Simple heuristic for runtime profile and stop_rye based on diagnostics
         recommended_profile: Optional[str] = None
         recommended_stop_rye: Optional[float] = None
 
@@ -590,24 +765,17 @@ class CoreAgent:
             slope = diagnostics.get("trend_slope")
             mid = diagnostics.get("mid_percentile")
 
-            # Choose profile based on average efficiency and stability
             if isinstance(avg, (int, float)) and isinstance(stab, (int, float)):
                 if avg >= 0.5 and stab >= 0.6:
-                    # High efficiency and stable: safe to attempt a long run
                     recommended_profile = "24_hours"
                 elif avg >= 0.2 and stab >= 0.3:
-                    # Moderate efficiency: medium run
                     recommended_profile = "8_hours"
                 else:
-                    # Noisy or weak efficiency: short diagnostic run
                     recommended_profile = "1_hour"
 
-            # Use the mid percentile as a soft baseline for stop_rye
             if isinstance(mid, (int, float)):
-                # Keep threshold conservative to avoid premature termination
                 recommended_stop_rye = float(mid) * 0.5
 
-            # If trend is clearly negative, bias toward shorter profile
             if isinstance(slope, (int, float)) and slope < 0 and recommended_profile == "24_hours":
                 recommended_profile = "8_hours"
 
@@ -646,7 +814,6 @@ class CoreAgent:
             with self.checkpoint_path.open("w", encoding="utf-8") as f:
                 json.dump(state, f, ensure_ascii=False, indent=2)
         except Exception:
-            # Checkpoint failures must not crash the agent
             return
 
     def _clear_checkpoint(self) -> None:
@@ -667,11 +834,7 @@ class CoreAgent:
         run_metadata: Dict[str, Any],
         summaries: List[Dict[str, Any]],
     ) -> None:
-        """Send a compact run manifest into MemoryStore if supported.
-
-        This is intentionally conservative and will silently do nothing
-        if MemoryStore does not provide log_run_manifest yet.
-        """
+        """Send a compact run manifest into MemoryStore if supported."""
         manifest: Dict[str, Any] = {
             "run_id": run_id,
             "mode": mode,
@@ -679,16 +842,13 @@ class CoreAgent:
             "domain": domain,
             "experiment_mode": experiment_mode,
             "run_metadata": dict(run_metadata),
-            # Caller may trim summaries before passing here if needed.
             "summaries": summaries,
         }
         try:
             if hasattr(self.memory_store, "log_run_manifest"):
-                # Preferred future signature: log_run_manifest(run_id, manifest)
                 try:
                     self.memory_store.log_run_manifest(run_id, manifest)  # type: ignore[attr-defined]
                 except TypeError:
-                    # Fallback: some variants might only accept manifest
                     try:
                         self.memory_store.log_run_manifest(manifest)  # type: ignore[attr-defined]
                     except Exception:
@@ -709,18 +869,7 @@ class CoreAgent:
         run_id: Optional[str],
         experiment_mode: Optional[str],
     ) -> None:
-        """Inspect a cycle summary and log discovery related signals.
-
-        This method never raises. It reads from summary and writes into
-        the discovery logger and hypothesis manager, without changing
-        the TGRM core behavior.
-
-        Current behavior:
-            - optional DiscoveryEngine tiered processing
-            - detect RYE spikes and log them
-            - register candidate hypotheses surfaced by the loop
-        """
-        # First, allow DiscoveryEngine to see the full picture
+        """Inspect a cycle summary and log discovery related signals."""
         if self.discovery_engine is not None:
             try:
                 context = {
@@ -730,13 +879,11 @@ class CoreAgent:
                     "run_id": run_id,
                     "experiment_mode": experiment_mode,
                 }
-                # process_cycle signature is intentionally loose; any mismatch is caught.
                 self.discovery_engine.process_cycle(summary, context=context)  # type: ignore[attr-defined]
             except Exception:
                 pass
 
         try:
-            # Attach run_id into helpers if present
             if run_id is not None:
                 self.discovery_logger.run_id = run_id
                 self.hypothesis_manager.run_id = run_id
@@ -792,10 +939,9 @@ class CoreAgent:
 
                 self._last_rye = rye_float
         except Exception:
-            # Discovery hooks must never interfere with the main loop
             pass
 
-        # 2) Hypothesis registration from summary["candidate_hypotheses"]
+        # 2) Hypothesis registration
         try:
             raw_hyp_list = (
                 summary.get("candidate_hypotheses")
@@ -848,12 +994,8 @@ class CoreAgent:
         except Exception:
             return
 
-    # Public discovery status helper
     def get_discovery_status(self) -> Dict[str, Any]:
-        """Return a compact view of discovery and hypothesis state.
-
-        Safe to call from the UI. Never raises.
-        """
+        """Return a compact view of discovery and hypothesis state."""
         status: Dict[str, Any] = {
             "last_rye": self._last_rye,
             "pending_hypotheses": None,
@@ -881,6 +1023,70 @@ class CoreAgent:
         return status
 
     # ------------------------------------------------------------------
+    # Stability Kernel and memory tiers status
+    # ------------------------------------------------------------------
+    def get_stability_status(self) -> Dict[str, Any]:
+        """Return stability kernel status if available."""
+        if self.stability_kernel is None:
+            return {"enabled": False}
+        try:
+            status = self.stability_kernel.get_status()
+            if not isinstance(status, dict):
+                status = {}
+        except Exception:
+            status = {}
+        status["enabled"] = True
+        return status
+
+    def _apply_stability_kernel(
+        self,
+        summary: Dict[str, Any],
+        *,
+        mode: str,
+        goal: str,
+        domain: str,
+        run_id: str,
+        experiment_mode: Optional[str],
+        elapsed_minutes: float,
+    ) -> Optional[Dict[str, Any]]:
+        """Feed summary into StabilityKernel and handle any guard signals."""
+        if self.stability_kernel is None:
+            return None
+        try:
+            context = {
+                "mode": mode,
+                "goal": goal,
+                "domain": domain,
+                "run_id": run_id,
+                "experiment_mode": experiment_mode,
+                "elapsed_minutes": elapsed_minutes,
+                "speed_mode": self.speed_mode,
+            }
+            self.stability_kernel.observe_cycle(summary, context=context)
+            action = self.stability_kernel.recommend_action()
+            if isinstance(action, dict):
+                return action
+        except Exception:
+            return None
+        return None
+
+    def get_memory_partition_status(self) -> Dict[str, Any]:
+        """Return tier level memory statistics if available."""
+        status: Dict[str, Any] = {
+            "tiers_enabled": self.memory_tiers_enabled,
+            "tiers": list(self.memory_tiers),
+            "counts": {},
+        }
+        try:
+            if hasattr(self.memory_store, "tier_counts"):
+                counts = self.memory_store.tier_counts()  # type: ignore[attr-defined]
+                if isinstance(counts, dict):
+                    status["counts"] = counts
+        except Exception:
+            pass
+        return status
+
+    # ------------------------------------------------------------------
     # Multi-agent utilities
     # ------------------------------------------------------------------
     def get_agent_roles(self) -> List[str]:
@@ -902,16 +1108,22 @@ class CoreAgent:
             pass
         return status
 
+    def apply_swarm_profile(self, profile_name: str) -> List[str]:
+        """Apply a swarm profile to agent roles if a manager is available."""
+        if self.swarm_profile_manager is None:
+            return self.get_agent_roles()
+        try:
+            roles = self.swarm_profile_manager.resolve_roles(profile_name)
+            if isinstance(roles, (list, tuple)):
+                resolved = [str(r) for r in roles][: self.max_agents]
+                if resolved:
+                    self.agent_roles = resolved
+            return self.get_agent_roles()
+        except Exception:
+            return self.get_agent_roles()
+
     def spawn_child_agent(self, extra_config: Optional[Dict[str, Any]] = None) -> "CoreAgent":
-        """Create a new CoreAgent that shares the same MemoryStore.
-
-        This is a light-weight way for agents to create agents.
-        Child agents share the same memory substrate but can have their
-        own configuration (for example different prompts, domains, and so on).
-
-        The child will inherit max_agents (capped at 32) unless overridden
-        in extra_config["max_agents"].
-        """
+        """Create a new CoreAgent that shares the same MemoryStore."""
         cfg = dict(self.config)
         if extra_config:
             cfg.update(extra_config)
@@ -921,17 +1133,7 @@ class CoreAgent:
     # Persistence helpers for background workers
     # ------------------------------------------------------------------
     def load_state_from_storage(self) -> Dict[str, Any]:
-        """Load the latest engine run state from persistent storage.
-
-        Priority:
-            1. MemoryStore.load_run_state() if available.
-            2. JSON checkpoint file (used as a fallback).
-
-        Returns:
-            A dict representing the last known engine state.
-            Returns {} if nothing valid is found.
-        """
-        # Prefer MemoryStore-based state if implemented
+        """Load the latest engine run state from persistent storage."""
         try:
             if hasattr(self.memory_store, "load_run_state"):
                 state = self.memory_store.load_run_state()  # type: ignore[attr-defined]
@@ -945,28 +1147,19 @@ class CoreAgent:
         return state
 
     def save_state_to_storage(self, state: Dict[str, Any]) -> None:
-        """Save engine run state to persistent storage.
-
-        Priority:
-            1. MemoryStore.save_run_state() if available.
-            2. JSON checkpoint file (fallback).
-        """
+        """Save engine run state to persistent storage."""
         if not isinstance(state, dict):
             return
 
-        # Defensive copy so callers can hold their own reference
         payload: Dict[str, Any] = dict(state)
 
-        # Try MemoryStore first
         try:
             if hasattr(self.memory_store, "save_run_state"):
                 self.memory_store.save_run_state(payload)  # type: ignore[attr-defined]
                 return
         except Exception:
-            # If MemoryStore persistence fails, fall back to checkpoint file.
             pass
 
-        # Fallback: store minimal state in the checkpoint file
         try:
             checkpoint_state: Dict[str, Any] = {
                 "version": 1,
@@ -1001,42 +1194,7 @@ class CoreAgent:
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Run exactly one TGRM cycle and return updated state plus summary.
-
-        This is the primary entry point for engine_worker.py:
-
-            1. Load state from storage (or start with None).
-            2. Call run_one_cycle_and_return_state(...)
-            3. Persist the returned state using save_state_to_storage()
-            4. Sleep a bit and repeat.
-
-        Args:
-            state:
-                Existing engine state dict, or None to initialize from scratch.
-            goal:
-                Optional override of the research goal. If not provided, reads from state["goal"].
-            role:
-                Logical role label for this cycle ("agent", "researcher", "critic", etc.).
-            domain:
-                Optional domain tag ("general", "longevity", "math", ...). Overrides state["domain"] if provided.
-            source_controls:
-                Optional per cycle source configuration.
-            pdf_bytes:
-                Optional PDF payload for this cycle.
-            biomarker_snapshot:
-                Optional biomarker payload for future longevity aware logic.
-            run_id:
-                Optional run identifier for this sequence of cycles. If not provided
-                and no run_id exists in state, one will be generated.
-            experiment_mode:
-                Optional experiment mode label (for example "discovery").
-
-        Returns:
-            Dict with keys:
-                - "state": updated engine state dict
-                - "summary": human-facing cycle summary dict
-        """
-        # Start from existing state or initialize a new one
+        """Run exactly one TGRM cycle and return updated state plus summary."""
         if state is None:
             history = self.memory_store.get_cycle_history()
             next_index = len(history)
@@ -1058,10 +1216,8 @@ class CoreAgent:
             if source_controls is not None:
                 state["source_controls"] = dict(source_controls)
         else:
-            # Make a shallow copy so we do not mutate caller's dict in place
             state = dict(state)
 
-        # Resolve run_id and experiment_mode from parameters or state
         effective_run_id: str = run_id or state.get("run_id") or self._generate_run_id()
         state["run_id"] = effective_run_id
 
@@ -1069,7 +1225,6 @@ class CoreAgent:
             experiment_mode = state.get("experiment_mode")
         state["experiment_mode"] = experiment_mode
 
-        # Resolve goal / role / domain from parameters or state
         effective_goal: str = (goal or state.get("goal") or "").strip()
         state["goal"] = effective_goal
 
@@ -1079,8 +1234,6 @@ class CoreAgent:
         effective_domain: str = domain or state.get("domain", "general")
         state["domain"] = effective_domain
 
-        # Resolve source controls:
-        # parameter > state["source_controls"] > self.source_controls
         if source_controls is not None:
             effective_sources: Dict[str, bool] = dict(source_controls)
             state["source_controls"] = dict(source_controls)
@@ -1091,7 +1244,6 @@ class CoreAgent:
             else:
                 effective_sources = dict(self.source_controls)
 
-        # Determine cycle index
         try:
             ci = int(state.get("cycle_index", 0))
             if ci < 0:
@@ -1101,13 +1253,11 @@ class CoreAgent:
             ci = len(history)
         state["cycle_index"] = ci
 
-        # Choose PDF bytes: if not passed in, we fall back to attached PDF
         if pdf_bytes is None:
             effective_pdf_bytes = self._attached_pdf_bytes
         else:
             effective_pdf_bytes = pdf_bytes
 
-        # Run a single cycle (TGRM plus tools plus RYE)
         result = self.run_cycle(
             goal=effective_goal,
             cycle_index=ci,
@@ -1121,7 +1271,6 @@ class CoreAgent:
         )
         summary = result.get("summary", {})
 
-        # Update engine state with result metadata
         state["last_update_ts"] = time.time()
         state["cycles_completed"] = int(state.get("cycles_completed", 0)) + 1
         state["cycle_index"] = ci + 1
@@ -1131,13 +1280,11 @@ class CoreAgent:
         if isinstance(rye_val, (int, float)):
             state["last_rye"] = float(rye_val)
 
-        # Mirror last citations into state if present
         if self.citations_enabled and isinstance(summary, dict):
             citations = summary.get("citations")
             if isinstance(citations, list):
                 state["last_citations"] = citations
 
-        # Meta note for single cycle (used by ultra controllers and UI)
         if isinstance(summary, dict):
             contradictions = None
             contr_val = summary.get("contradictions")
@@ -1148,7 +1295,6 @@ class CoreAgent:
                 contradictions=contradictions,
             )
 
-        # Mark as still in progress; the worker or UI can toggle this off if needed
         state["in_progress"] = True
 
         return {
@@ -1160,17 +1306,12 @@ class CoreAgent:
     # Public API used by Streamlit and CLI
     # ------------------------------------------------------------------
     def attach_pdf(self, uploaded_file: Any) -> None:
-        """Attach a PDF (uploaded via Streamlit) for later cycles.
-
-        The TGRM loop can then ingest this PDF as part of its REPAIR
-        actions. If uploaded_file is None, this does nothing.
-        """
+        """Attach a PDF (uploaded via Streamlit) for later cycles."""
         if uploaded_file is None:
             return
         try:
             self._attached_pdf_bytes = uploaded_file.read()
         except Exception:
-            # Fail silently; core logic should still run without PDF
             self._attached_pdf_bytes = None
 
     def run_cycle(
@@ -1185,51 +1326,18 @@ class CoreAgent:
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Run a single cycle of research using the TGRM loop.
-
-        Args:
-            goal:
-                Research goal for this cycle.
-            cycle_index:
-                Global cycle index (used for logging and history).
-            role:
-                Logical role for this cycle such as "agent", "researcher",
-                or "critic". This is recorded in the logs and
-                allows multi-agent setups.
-            source_controls:
-                Optional override for which sources to use in this cycle.
-                If None, falls back to self.source_controls.
-            pdf_bytes:
-                Optional PDF bytes for this cycle. If None, falls back
-                to any previously attached PDF stored in self._attached_pdf_bytes.
-            biomarker_snapshot:
-                Placeholder for a future biomarker or lab value payload.
-            domain:
-                Optional domain tag such as "general", "longevity", or "math"
-                to label this cycle in the logs.
-            run_id:
-                Optional run identifier for the enclosing run.
-            experiment_mode:
-                Optional experiment mode label (for example "discovery").
-
-        Returns:
-            Dict[str, Any]: Dictionary containing the human-facing
-            summary and the raw log of the cycle.
-        """
-        # Merge source_controls: explicit argument overrides stored default
+        """Run a single cycle of research using the TGRM loop."""
         effective_source_controls: Dict[str, bool] = {}
         if self.source_controls:
             effective_source_controls.update(self.source_controls)
         if source_controls:
             effective_source_controls.update(source_controls)
 
-        # Choose PDF bytes: per-call bytes override attached PDF
         effective_pdf_bytes: Optional[bytes] = (
             pdf_bytes if pdf_bytes is not None else self._attached_pdf_bytes
         )
 
-        # Forward into the TGRM loop.
-        # Use a TypeError safe wrapper for compatibility with older signatures.
+        # Preferred advanced signature with MSIL and RYE mode hooks
         try:
             result = self.tgrm_loop.run_cycle(
                 goal=goal,
@@ -1239,18 +1347,30 @@ class CoreAgent:
                 pdf_bytes=effective_pdf_bytes,
                 biomarker_snapshot=biomarker_snapshot,
                 domain=domain,
+                msil_mode=self.msil_mode,          # type: ignore[arg-type]
+                msil_track_mode=self.msil_track_mode,  # type: ignore[arg-type]
+                rye_mode=self.rye_mode,            # type: ignore[arg-type]
             )
         except TypeError:
-            # Backward compatibility: older TGRMLoop.run_cycle
-            # that only accepts (goal, cycle_index) or (goal, cycle_index, role).
+            # Backward compatibility
             try:
-                result = self.tgrm_loop.run_cycle(goal, cycle_index, role)
+                result = self.tgrm_loop.run_cycle(
+                    goal=goal,
+                    cycle_index=cycle_index,
+                    role=role,
+                    source_controls=effective_source_controls,
+                    pdf_bytes=effective_pdf_bytes,
+                    biomarker_snapshot=biomarker_snapshot,
+                    domain=domain,
+                )
             except TypeError:
-                result = self.tgrm_loop.run_cycle(goal, cycle_index)
+                try:
+                    result = self.tgrm_loop.run_cycle(goal, cycle_index, role)
+                except TypeError:
+                    result = self.tgrm_loop.run_cycle(goal, cycle_index)
 
         summary = result.get("summary", {})
 
-        # Tag summary with run level context if present
         if isinstance(summary, dict):
             if run_id is not None:
                 summary.setdefault("run_id", run_id)
@@ -1261,19 +1381,15 @@ class CoreAgent:
             summary.setdefault("role", role)
             summary.setdefault("cycle_index", cycle_index)
 
-            # If the TGRM loop returned tool_stats at the result level, mirror
-            # them into the summary so the UI and report generator can see them.
             tool_stats = result.get("tool_stats")
             if tool_stats is not None and "tool_stats" not in summary:
                 summary["tool_stats"] = tool_stats
 
-            # If citations are returned by TGRMLoop, mirror them into the summary
             if self.citations_enabled:
                 citations = result.get("citations")
                 if isinstance(citations, list):
                     summary.setdefault("citations", citations)
 
-            # Discovery aware post processing (new hook, does not change core behavior)
             self._handle_post_cycle_discovery(
                 summary,
                 cycle_index=cycle_index,
@@ -1284,6 +1400,90 @@ class CoreAgent:
             )
 
         return result
+
+    # ------------------------------------------------------------------
+    # Multi-goal hooks for TGRM v3
+    # ------------------------------------------------------------------
+    def run_multi_goal_cycle(
+        self,
+        goals: Sequence[str],
+        cycle_index: int,
+        role: str = "agent",
+        source_controls: Optional[Dict[str, bool]] = None,
+        pdf_bytes: Optional[bytes] = None,
+        biomarker_snapshot: Optional[Dict[str, Any]] = None,
+        domain: Optional[str] = None,
+        run_id: Optional[str] = None,
+        experiment_mode: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Run a multi-goal cycle if TGRMLoop supports it, otherwise degrade."""
+        goals_list = [g for g in goals if str(g).strip()]
+        if not goals_list:
+            return self.run_cycle(
+                goal="",
+                cycle_index=cycle_index,
+                role=role,
+                source_controls=source_controls,
+                pdf_bytes=pdf_bytes,
+                biomarker_snapshot=biomarker_snapshot,
+                domain=domain,
+                run_id=run_id,
+                experiment_mode=experiment_mode,
+            )
+
+        # Advanced path: TGRMLoop.run_multi_goal_cycle
+        if hasattr(self.tgrm_loop, "run_multi_goal_cycle"):
+            try:
+                result = self.tgrm_loop.run_multi_goal_cycle(  # type: ignore[attr-defined]
+                    goals=goals_list,
+                    cycle_index=cycle_index,
+                    role=role,
+                    source_controls=source_controls or self.source_controls,
+                    pdf_bytes=pdf_bytes if pdf_bytes is not None else self._attached_pdf_bytes,
+                    biomarker_snapshot=biomarker_snapshot,
+                    domain=domain,
+                    msil_mode=self.msil_mode,
+                    msil_track_mode=self.msil_track_mode,
+                    rye_mode=self.rye_mode,
+                )
+                summary = result.get("summary", {})
+                if isinstance(summary, dict):
+                    if run_id is not None:
+                        summary.setdefault("run_id", run_id)
+                    if experiment_mode is not None:
+                        summary.setdefault("experiment_mode", experiment_mode)
+                    if domain is not None:
+                        summary.setdefault("domain", domain)
+                    summary.setdefault("role", role)
+                    summary.setdefault("cycle_index", cycle_index)
+                    self._handle_post_cycle_discovery(
+                        summary,
+                        cycle_index=cycle_index,
+                        role=role,
+                        domain=domain,
+                        run_id=run_id,
+                        experiment_mode=experiment_mode,
+                    )
+                return result
+            except Exception:
+                pass
+
+        # Fallback: run first goal as main and attach others as context string
+        combined_goal = goals_list[0]
+        if len(goals_list) > 1:
+            extra_goals = "; ".join(goals_list[1:])
+            combined_goal = f"{goals_list[0]} (plus linked hypotheses: {extra_goals})"
+        return self.run_cycle(
+            goal=combined_goal,
+            cycle_index=cycle_index,
+            role=role,
+            source_controls=source_controls,
+            pdf_bytes=pdf_bytes,
+            biomarker_snapshot=biomarker_snapshot,
+            domain=domain,
+            run_id=run_id,
+            experiment_mode=experiment_mode,
+        )
 
     # ------------------------------------------------------------------
     # Single-agent continuous mode
@@ -1306,79 +1506,23 @@ class CoreAgent:
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run multiple TGRM cycles in a row (continuous mode) for a single role.
-
-        This is the long running reparodynamic mode where the agent
-        repeatedly applies Test, Detect, Repair, Verify to gradually
-        improve its internal state under a fixed goal.
-
-        Args:
-            goal:
-                Research goal to pursue over many cycles.
-            max_cycles:
-                Hard cap on the number of cycles to prevent infinite runs
-                in hosted environments (used when forever is False).
-            stop_rye:
-                Optional RYE threshold. If set, the loop stops
-                early once average RYE over recent cycles
-                falls below this value.
-            role:
-                Logical role for the continuous runner, usually "agent".
-            source_controls:
-                Optional source configuration applied to every cycle.
-            pdf_bytes:
-                Optional PDF bytes shared across cycles.
-            biomarker_snapshot:
-                Optional biomarker or lab value payload shared for
-                future biomarker aware logic.
-            domain:
-                Optional domain tag forwarded into each cycle.
-            max_minutes:
-                Optional wall clock time budget in minutes. If provided,
-                the loop stops once this time has elapsed (up to per cycle
-                granularity).
-            forever:
-                If True, ignore max_cycles and keep running until
-                stopped by max_minutes, stop_rye, or the environment.
-            resume_from_checkpoint:
-                If True, try to detect a previous interrupted continuous run from
-                the checkpoint file and adjust the remaining time budget.
-            watchdog_interval_minutes:
-                How often to update the checkpoint heartbeat at minimum.
-            runtime_profile:
-                Optional name of a runtime profile from presets.RUNTIME_PROFILES.
-            run_id:
-                Optional identifier for this continuous run. If not provided,
-                one will be generated.
-            experiment_mode:
-                Optional experiment mode label (for example "discovery").
-
-        Returns:
-            List[Dict[str, Any]]: List of human-facing summaries for
-            each completed cycle. Each summary includes run_metadata
-            indicating how long the run lasted and why it stopped.
-        """
+        """Run multiple TGRM cycles in a row (continuous mode) for a single role."""
         summaries: List[Dict[str, Any]] = []
         recent_rye: List[float] = []
 
-        # Ensure a run_id exists for this continuous run
         effective_run_id = run_id or self._generate_run_id()
 
-        # Enforce a global failsafe on max_cycles
         max_cycles_failsafe = int(CONTINUOUS_MODE_DEFAULTS.get("max_cycles_failsafe", 10_000_000))
         if max_cycles > max_cycles_failsafe:
             max_cycles = max_cycles_failsafe
 
-        # Domain aware preset defaults
         effective_domain = domain or "general"
         preset_cfg = get_preset(effective_domain)
 
-        # Watchdog interval default from global config if caller did not override
         default_watchdog = float(CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes))
         if watchdog_interval_minutes == 5.0:
             watchdog_interval_minutes = default_watchdog
 
-        # Optional memory driven auto tuning before we choose runtime profile
         if runtime_profile is None and self.config.get("auto_learn_from_memory", True):
             try:
                 learned = self.learn_from_memory(domain=effective_domain)
@@ -1390,21 +1534,16 @@ class CoreAgent:
                     if isinstance(lr, (int, float)):
                         stop_rye = float(lr)
             except Exception:
-                # Learning must never break the run
                 pass
 
-        # If speed_mode is accelerated or ultra and runtime_profile is still None,
-        # prefer longer profiles for high stability domains.
         if runtime_profile is None and self.speed_mode in {"accelerated", "ultra"}:
             default_profile = preset_cfg.get("default_runtime_profile")
             if isinstance(default_profile, str):
                 runtime_profile = default_profile
 
-        # Default runtime profile from domain preset if not provided
         if runtime_profile is None:
             runtime_profile = preset_cfg.get("default_runtime_profile")
 
-        # Apply runtime profile hints if requested
         profile_cfg: Optional[Dict[str, Any]] = None
         if runtime_profile:
             profile_cfg = RUNTIME_PROFILES.get(runtime_profile)
@@ -1413,7 +1552,6 @@ class CoreAgent:
             est_cycles = profile_cfg.get("estimated_cycles")
             profile_stop_rye = profile_cfg.get("rye_stop_threshold")
 
-            # Map profile name to a default time budget if not set
             if max_minutes is None:
                 if runtime_profile == "1_hour":
                     max_minutes = 60.0
@@ -1422,30 +1560,24 @@ class CoreAgent:
                 elif runtime_profile == "24_hours":
                     max_minutes = 24 * 60.0
                 elif runtime_profile == "90_days":
-                    # 90 days in minutes, if ever used in single mode
                     max_minutes = 90 * 24 * 60.0
                 elif runtime_profile == "forever":
                     forever = True
 
-            # Use profile estimated cycles when max_cycles is still at a small default
             if isinstance(est_cycles, (int, float)) and max_cycles <= 100:
                 try:
                     max_cycles = max(1, int(est_cycles))
                 except Exception:
                     pass
 
-            # Automatically set stop_rye if not provided
             if stop_rye is None and isinstance(profile_stop_rye, (int, float)):
                 stop_rye = float(profile_stop_rye)
 
-        # If still no explicit stop_rye and preset defines a default
         if stop_rye is None:
             preset_stop = preset_cfg.get("default_rye_stop_threshold")
             if isinstance(preset_stop, (int, float)):
                 stop_rye = float(preset_stop)
 
-        # Detect and adapt hour presets from older app versions if
-        # max_minutes is still None.
         if max_minutes is None:
             if max_cycles == 120:
                 max_minutes = 60.0
@@ -1460,7 +1592,6 @@ class CoreAgent:
                 forever = True
                 max_cycles = max_cycles_failsafe
 
-        # Try to resume from a previous interrupted continuous run
         checkpoint = None
         if resume_from_checkpoint and self.auto_resume_enabled:
             checkpoint = self._load_checkpoint()
@@ -1473,11 +1604,9 @@ class CoreAgent:
                 ):
                     remaining = checkpoint.get("remaining_minutes")
                     if isinstance(remaining, (int, float)) and remaining > 0:
-                        # Treat remaining minutes as the new budget if tighter
                         if max_minutes is None or max_minutes > float(remaining):
                             max_minutes = float(remaining)
 
-        # Start counting cycles from the existing history length
         history = self.memory_store.get_cycle_history()
         start_index = len(history)
 
@@ -1487,22 +1616,22 @@ class CoreAgent:
         i = 0
         stop_reason: str = "completed"
 
-        # Heartbeat label for single agent runs
         heartbeat_label = CONTINUOUS_MODE_DEFAULTS.get("heartbeat_labels", {}).get("single", "continuous_single")
 
+        # Default experiment mode for Breakthrough Hunter
+        if experiment_mode is None and self.breakthrough_hunter_enabled:
+            experiment_mode = "breakthrough"
+
         while True:
-            # Cycle-based stopping (unless in explicit forever mode)
             if not forever and i >= max_cycles:
                 stop_reason = "cycle_cap"
                 break
 
-            # Time based stopping
             elapsed_min = (time.monotonic() - start_time) / 60.0
             if max_minutes is not None and elapsed_min >= max_minutes:
                 stop_reason = "time_limit"
                 break
 
-            # Watchdog heartbeat and checkpoint before starting the cycle
             now = time.monotonic()
             since_last_heartbeat = (now - last_watchdog_update) / 60.0
             if since_last_heartbeat >= min(watchdog_interval_minutes, max(1.0, watchdog_interval_minutes)):
@@ -1533,7 +1662,6 @@ class CoreAgent:
                     "speed_mode": self.speed_mode,
                 }
                 self._save_checkpoint(checkpoint_state)
-                # Use MemoryStore watchdog as an additional heartbeat
                 try:
                     self.memory_store.heartbeat(label=heartbeat_label)
                 except Exception:
@@ -1558,11 +1686,24 @@ class CoreAgent:
             rye_val = summary.get("RYE")
             if isinstance(rye_val, (int, float)):
                 recent_rye.append(float(rye_val))
-                # Keep a sliding window of the last N cycles
                 if len(recent_rye) > 10:
                     recent_rye.pop(0)
 
-            # Optional stopping condition based on RYE efficiency
+            # Stability Kernel guard
+            action = self._apply_stability_kernel(
+                summary,
+                mode="single",
+                goal=goal,
+                domain=effective_domain,
+                run_id=effective_run_id,
+                experiment_mode=experiment_mode,
+                elapsed_minutes=elapsed_min,
+            )
+            if isinstance(action, dict):
+                if action.get("halt"):
+                    stop_reason = "stability_guard"
+                    break
+
             if stop_rye is not None and recent_rye:
                 avg_rye = sum(recent_rye) / len(recent_rye)
                 if avg_rye < stop_rye:
@@ -1571,10 +1712,8 @@ class CoreAgent:
 
             i += 1
 
-        # Continuous run finished cleanly
         self._clear_checkpoint()
 
-        # Attach run-level metadata (including how long it actually ran)
         total_elapsed_min = (time.monotonic() - start_time) / 60.0
         run_metadata: Dict[str, Any] = {
             "mode": "single",
@@ -1593,7 +1732,6 @@ class CoreAgent:
             "speed_mode": self.speed_mode,
         }
 
-        # Optional run health score or diagnostics if rye_metrics provides them
         if _rye_metrics_mod is not None:
             try:
                 if hasattr(_rye_metrics_mod, "run_health_score"):
@@ -1602,7 +1740,6 @@ class CoreAgent:
             except Exception:
                 pass
 
-        # Total citations across this continuous run
         if self.citations_enabled:
             total_citations = 0
             for s in summaries:
@@ -1612,7 +1749,6 @@ class CoreAgent:
                         total_citations += len(c)
             run_metadata["total_citations"] = total_citations
 
-        # Attach the last learned_from_memory snapshot for observability
         if self.learned_from_memory:
             run_metadata["learned_from_memory"] = dict(self.learned_from_memory)
 
@@ -1620,7 +1756,6 @@ class CoreAgent:
             if isinstance(s, dict):
                 s["run_metadata"] = dict(run_metadata)
 
-        # Log a compact manifest into MemoryStore if the new API exists
         self._log_run_manifest(
             run_id=effective_run_id,
             mode="single",
@@ -1654,76 +1789,20 @@ class CoreAgent:
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run continuous multi-agent swarm rounds.
-
-        Each round runs one TGRM cycle per logical agent role (up to 32),
-        sharing a single MemoryStore. This is the hybrid swarm mode:
-
-            - Each role has a different function such as researcher, critic, planner.
-            - All roles write to the same MemoryStore and RYE history.
-            - The system measures average RYE across the swarm per round.
-
-        Args:
-            goal:
-                Research goal for the entire swarm.
-            max_rounds:
-                Hard cap on number of swarm rounds (each round may include
-                up to 32 logical agents).
-            stop_rye:
-                Optional threshold on average swarm RYE. If the rolling
-                average over recent rounds drops below this, the run stops.
-            roles:
-                Optional explicit list of roles. If None, uses self.agent_roles.
-                Capped at self.max_agents (default 32).
-            source_controls:
-                Source configuration shared by all roles.
-            pdf_bytes:
-                Optional PDF bytes shared across all agents and rounds.
-            biomarker_snapshot:
-                Optional biomarker payload for future longevity aware logic.
-            domain:
-                Optional domain tag such as "general", "longevity", or "math".
-            max_minutes:
-                Optional wall clock time budget in minutes for the whole swarm run.
-            forever:
-                If True, ignore max_rounds and keep running until stopped
-                by max_minutes, stop_rye, or environment limits.
-            resume_from_checkpoint:
-                If True, try to resume a previous swarm run (mode="swarm")
-                that was interrupted.
-            watchdog_interval_minutes:
-                Minimum frequency of checkpoint and watchdog heartbeats.
-            runtime_profile:
-                Optional runtime profile name from presets.RUNTIME_PROFILES.
-            run_id:
-                Optional identifier for this swarm run. If not provided,
-                one will be generated.
-            experiment_mode:
-                Optional experiment mode label for this swarm run.
-
-        Returns:
-            Flat list of summaries produced by all roles across all rounds.
-            Each summary includes run_metadata with swarm run duration
-            and stop_reason.
-        """
+        """Run continuous multi-agent swarm rounds."""
         all_summaries: List[Dict[str, Any]] = []
         recent_round_rye: List[float] = []
 
-        # Ensure a run_id exists for this swarm run
         effective_run_id = run_id or self._generate_run_id()
-
-        # Domain aware preset defaults
         effective_domain = domain or "general"
         preset_cfg = get_preset(effective_domain)
 
-        # Determine swarm role set
         if roles is None:
             roles_seq: Sequence[str] = self.agent_roles
         else:
             roles_seq = roles
         roles_list: List[str] = [str(r) for r in roles_seq][: self.max_agents]
 
-        # Apply swarm related overrides from intelligence profile if present
         if self._swarm_cfg:
             try:
                 if "max_rounds" in self._swarm_cfg and max_rounds == 50:
@@ -1737,12 +1816,10 @@ class CoreAgent:
             except Exception:
                 pass
 
-        # Watchdog interval default from global config if caller did not override
         default_watchdog = float(CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes))
         if watchdog_interval_minutes == 5.0:
             watchdog_interval_minutes = default_watchdog
 
-        # Optional memory driven auto tuning before runtime profile selection
         if runtime_profile is None and self.config.get("auto_learn_from_memory", True):
             try:
                 learned = self.learn_from_memory(domain=effective_domain)
@@ -1756,18 +1833,14 @@ class CoreAgent:
             except Exception:
                 pass
 
-        # If speed_mode is accelerated or ultra and runtime_profile is still None,
-        # prefer the domain default profile from presets.
         if runtime_profile is None and self.speed_mode in {"accelerated", "ultra"}:
             default_profile = preset_cfg.get("default_runtime_profile")
             if isinstance(default_profile, str):
                 runtime_profile = default_profile
 
-        # Default runtime profile from domain preset if not provided
         if runtime_profile is None:
             runtime_profile = preset_cfg.get("default_runtime_profile")
 
-        # Apply runtime profile hints if requested
         profile_cfg: Optional[Dict[str, Any]] = None
         if runtime_profile:
             profile_cfg = RUNTIME_PROFILES.get(runtime_profile)
@@ -1776,8 +1849,6 @@ class CoreAgent:
             est_cycles = profile_cfg.get("estimated_cycles")
             profile_stop_rye = profile_cfg.get("rye_stop_threshold")
 
-            # For swarm: treat estimated_cycles as approximate total
-            # agent cycles. Convert to rounds by dividing by number of roles.
             if isinstance(est_cycles, (int, float)) and max_rounds <= 50:
                 try:
                     per_round = max(1, len(roles_list) or 1)
@@ -1801,13 +1872,11 @@ class CoreAgent:
             if stop_rye is None and isinstance(profile_stop_rye, (int, float)):
                 stop_rye = float(profile_stop_rye)
 
-        # If still no explicit stop_rye and preset defines a default
         if stop_rye is None:
             preset_stop = preset_cfg.get("default_rye_stop_threshold")
             if isinstance(preset_stop, (int, float)):
                 stop_rye = float(preset_stop)
 
-        # Try to resume from a previous swarm run
         checkpoint = None
         if resume_from_checkpoint and self.auto_resume_enabled:
             checkpoint = self._load_checkpoint()
@@ -1822,7 +1891,6 @@ class CoreAgent:
                         if max_minutes is None or max_minutes > float(remaining):
                             max_minutes = float(remaining)
 
-        # Start cycle indexing after existing history
         history = self.memory_store.get_cycle_history()
         start_index = len(history)
 
@@ -1832,22 +1900,21 @@ class CoreAgent:
         round_idx = 0
         stop_reason: str = "completed"
 
-        # Heartbeat label for swarm runs
         heartbeat_label = CONTINUOUS_MODE_DEFAULTS.get("heartbeat_labels", {}).get("swarm", "continuous_swarm")
 
+        if experiment_mode is None and self.breakthrough_hunter_enabled:
+            experiment_mode = "breakthrough"
+
         while True:
-            # Round based stopping (unless in explicit forever mode)
             if not forever and round_idx >= max_rounds:
                 stop_reason = "round_cap"
                 break
 
-            # Time based stopping
             elapsed_min = (time.monotonic() - start_time) / 60.0
             if max_minutes is not None and elapsed_min >= max_minutes:
                 stop_reason = "time_limit"
                 break
 
-            # Watchdog and checkpoint
             now = time.monotonic()
             since_last_heartbeat = (now - last_watchdog_update) / 60.0
             if since_last_heartbeat >= min(watchdog_interval_minutes, max(1.0, watchdog_interval_minutes)):
@@ -1884,7 +1951,6 @@ class CoreAgent:
                     pass
                 last_watchdog_update = now
 
-            # Compute base cycle index for this round (each role gets a unique cycle index)
             base_ci = start_index + round_idx * max(1, len(roles_list))
 
             round_summaries = self.run_multi_agent_round(
@@ -1901,7 +1967,6 @@ class CoreAgent:
 
             all_summaries.extend(round_summaries)
 
-            # Compute average RYE across roles for this round
             round_ryes: List[float] = []
             round_contras: List[float] = []
             for s in round_summaries:
@@ -1923,8 +1988,22 @@ class CoreAgent:
             if round_contras:
                 avg_round_contra = sum(round_contras) / len(round_contras)
 
-            # Note swarm stats in meta state for ultra controllers and UI
             self._meta_note_swarm_round(avg_round_rye, avg_round_contra)
+
+            # Stability Kernel guard
+            if round_summaries:
+                action = self._apply_stability_kernel(
+                    round_summaries[-1],
+                    mode="swarm",
+                    goal=goal,
+                    domain=effective_domain,
+                    run_id=effective_run_id,
+                    experiment_mode=experiment_mode,
+                    elapsed_minutes=elapsed_min,
+                )
+                if isinstance(action, dict) and action.get("halt"):
+                    stop_reason = "stability_guard"
+                    break
 
             if stop_rye is not None and recent_round_rye:
                 avg_recent = sum(recent_round_rye) / len(recent_round_rye)
@@ -1934,10 +2013,8 @@ class CoreAgent:
 
             round_idx += 1
 
-        # Swarm run finished cleanly
         self._clear_checkpoint()
 
-        # Attach run-level metadata (including how long it actually ran)
         total_elapsed_min = (time.monotonic() - start_time) / 60.0
         run_metadata: Dict[str, Any] = {
             "mode": "swarm",
@@ -1956,7 +2033,6 @@ class CoreAgent:
             "speed_mode": self.speed_mode,
         }
 
-        # Optional run health score or diagnostics if rye_metrics provides them
         if _rye_metrics_mod is not None:
             try:
                 if hasattr(_rye_metrics_mod, "run_health_score"):
@@ -1965,7 +2041,6 @@ class CoreAgent:
             except Exception:
                 pass
 
-        # Total citations across the swarm run
         if self.citations_enabled:
             total_citations = 0
             for s in all_summaries:
@@ -1975,7 +2050,6 @@ class CoreAgent:
                         total_citations += len(c)
             run_metadata["total_citations"] = total_citations
 
-        # Attach the last learned_from_memory snapshot for observability
         if self.learned_from_memory:
             run_metadata["learned_from_memory"] = dict(self.learned_from_memory)
 
@@ -1983,7 +2057,6 @@ class CoreAgent:
             if isinstance(s, dict):
                 s["run_metadata"] = dict(run_metadata)
 
-        # Log a compact manifest into MemoryStore if the new API exists
         self._log_run_manifest(
             run_id=effective_run_id,
             mode="swarm",
@@ -2011,35 +2084,7 @@ class CoreAgent:
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run one multi-agent round: one cycle per role, sharing MemoryStore.
-
-        This is used by swarm continuous mode, but can also be called
-        directly if a caller wants to orchestrate a single swarm round.
-
-        Args:
-            goal:
-                High-level research goal shared by all roles.
-            base_cycle_index:
-                Global cycle index for the first role in this round.
-                Subsequent roles use base_cycle_index + i.
-            roles:
-                Sequence of role names (for example ["researcher", "critic", ...]).
-            source_controls:
-                Shared source configuration for all roles.
-            pdf_bytes:
-                Optional PDF bytes available to each role.
-            biomarker_snapshot:
-                Optional biomarker snapshot shared across roles.
-            domain:
-                Optional domain tag such as "general", "longevity", or "math".
-            run_id:
-                Optional identifier for the enclosing swarm run.
-            experiment_mode:
-                Optional experiment mode label for this round.
-
-        Returns:
-            List of summary dicts, one per role.
-        """
+        """Run one multi-agent round: one cycle per role, sharing MemoryStore."""
         summaries: List[Dict[str, Any]] = []
         effective_domain = domain or "general"
         effective_run_id = run_id or self._generate_run_id()
@@ -2070,14 +2115,8 @@ class CoreAgent:
         min_keep: int = 1000,
         max_drop_fraction: float = 0.3,
     ) -> Dict[str, Any]:
-        """Run a memory pruning pass using MemoryPruner.
-
-        This expects the backing MemoryStore to expose a list_entries /
-        delete_entries interface either directly or through an adapter.
-        If pruning fails, it returns a small summary without raising.
-        """
+        """Run a memory pruning pass using MemoryPruner."""
         try:
-            # Use profile based overrides if present
             rye_w = 0.5
             rec_w = 0.3
             acc_w = 0.2
@@ -2117,14 +2156,7 @@ class CoreAgent:
         self,
         week_number: int,
     ) -> Optional[Path]:
-        """Generate a weekly snapshot report using SnapshotGenerator.
-
-        Uses:
-            - cycle history from MemoryStore
-            - rye_metrics if available
-            - hypothesis manager summary
-            - memory statistics if provided by MemoryStore
-        """
+        """Generate a weekly snapshot report using SnapshotGenerator."""
         try:
             history = self.memory_store.get_cycle_history()
             cycle_stats = {
@@ -2171,11 +2203,7 @@ class CoreAgent:
         self,
         limit: Optional[int] = None,
     ) -> List[Any]:
-        """Run verification passes on pending hypotheses.
-
-        This calls the VerificationEngine with the current configuration.
-        It is safe to call on a schedule from engine_worker.
-        """
+        """Run verification passes on pending hypotheses."""
         try:
             effective_limit = limit
             if effective_limit is None and self.intelligence_profile:
@@ -2191,19 +2219,10 @@ class CoreAgent:
             return []
 
     # ------------------------------------------------------------------
-    # Agent-level training / learning helpers
+    # Agent-level training and learning helpers
     # ------------------------------------------------------------------
     def get_learning_status(self) -> Dict[str, Any]:
-        """Return a compact view of the agent-level learning state.
-
-        This is useful for the UI or external controllers that want to
-        show:
-
-            - whether learning is enabled
-            - how much history exists
-            - what the last learned suggestions were
-            - what the last training burst looked like
-        """
+        """Return a compact view of the agent-level learning state."""
         status: Dict[str, Any] = {
             "learning_enabled": self.learning_enabled,
             "min_training_history": self.min_training_history,
@@ -2219,7 +2238,6 @@ class CoreAgent:
         except Exception:
             status["total_cycles"] = None
 
-        # Attach recent meta stats for Ultra viewers
         try:
             status["meta_state"] = {
                 "speed_mode": self._meta_state.get("speed_mode"),
@@ -2239,12 +2257,7 @@ class CoreAgent:
         runtime_profile: Optional[str] = None,
         experiment_mode: Optional[str] = None,
     ) -> None:
-        """Internal helper: derive a training profile snapshot after a burst.
-
-        This consumes the end state (history plus summaries) and creates
-        a compact record in self.training_profile. It does not change
-        core behavior or external state.
-        """
+        """Derive a training profile snapshot after a burst."""
         profile: Dict[str, Any] = {
             "last_training_at": time.time(),
             "domain": domain or "general",
@@ -2253,7 +2266,6 @@ class CoreAgent:
             "cycles_in_burst": len(summaries),
         }
 
-        # Simple rollup over this burst
         rye_vals: List[float] = []
         for s in summaries:
             rv = s.get("RYE")
@@ -2263,7 +2275,6 @@ class CoreAgent:
             profile["burst_rye_avg"] = sum(rye_vals) / len(rye_vals)
             profile["burst_rye_last"] = rye_vals[-1]
 
-        # Use full history plus rye_metrics to attach richer diagnostics if available
         history: List[Dict[str, Any]] = []
         try:
             history = self.memory_store.get_cycle_history()
@@ -2316,36 +2327,17 @@ class CoreAgent:
         biomarker_snapshot: Optional[Dict[str, Any]] = None,
         experiment_mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run a short, focused training burst.
-
-        This is where agent-level learning happens in practice:
-        - It writes new structured knowledge into MemoryStore.
-        - It exercises TGRM and tools on a focused goal.
-        - It updates self.training_profile and leaves self.learned_from_memory
-          available for later calls.
-
-        It does not change model weights. It only improves the agent's
-        internal state and history.
-
-        Typical use:
-            - 1 hour general diagnostic run
-            - 1 hour longevity refinement
-            - short math-theorem exploration burst
-        """
+        """Run a short, focused training burst."""
         if not self.learning_enabled:
-            # Return empty but do not block the caller
             return []
 
         effective_domain = domain or "general"
-        # Default training runtime profile
         if runtime_profile is None:
             runtime_profile = str(self.config.get("training_runtime_profile", "1_hour"))
             if runtime_profile not in RUNTIME_PROFILES:
                 runtime_profile = "1_hour"
 
-        # Default bounds for a burst: conservative, safe, cheap
         if max_cycles is None:
-            # Use profile estimate if present, otherwise a small number
             est_cfg = RUNTIME_PROFILES.get(runtime_profile, {})
             est = est_cfg.get("estimated_cycles")
             if isinstance(est, (int, float)):
@@ -2359,7 +2351,6 @@ class CoreAgent:
             elif runtime_profile == "8_hours":
                 max_minutes = 4 * 60.0
             else:
-                # Generic small burst
                 max_minutes = 60.0
 
         if experiment_mode is None:
@@ -2382,7 +2373,6 @@ class CoreAgent:
             experiment_mode=experiment_mode,
         )
 
-        # After the burst, update training profile from full history plus this burst
         self._update_training_profile_from_summaries(
             summaries,
             domain=effective_domain,
@@ -2392,22 +2382,98 @@ class CoreAgent:
 
         return summaries
 
+    def run_multi_goal_training_burst(
+        self,
+        goals: Sequence[str],
+        *,
+        domain: Optional[str] = None,
+        role: str = "agent",
+        runtime_profile: Optional[str] = None,
+        max_cycles: Optional[int] = None,
+        max_minutes: Optional[float] = None,
+        stop_rye: Optional[float] = None,
+        source_controls: Optional[Dict[str, bool]] = None,
+        pdf_bytes: Optional[bytes] = None,
+        biomarker_snapshot: Optional[Dict[str, Any]] = None,
+        experiment_mode: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Training burst that uses multi-goal cycles when available."""
+        if hasattr(self.tgrm_loop, "run_multi_goal_cycle"):
+            # Use multi-goal cycles by orchestrating cycles manually
+            if not self.learning_enabled:
+                return []
+            effective_domain = domain or "general"
+            if runtime_profile is None:
+                runtime_profile = "1_hour"
+            if max_cycles is None:
+                max_cycles = 30
+            if max_minutes is None:
+                max_minutes = 60.0
+            if experiment_mode is None:
+                experiment_mode = "training_multi_goal"
+
+            summaries: List[Dict[str, Any]] = []
+            start_time = time.monotonic()
+            history = self.memory_store.get_cycle_history()
+            base_index = len(history)
+
+            for i in range(max_cycles):
+                elapsed_min = (time.monotonic() - start_time) / 60.0
+                if elapsed_min >= max_minutes:
+                    break
+                ci = base_index + i
+                result = self.run_multi_goal_cycle(
+                    goals=goals,
+                    cycle_index=ci,
+                    role=role,
+                    source_controls=source_controls,
+                    pdf_bytes=pdf_bytes,
+                    biomarker_snapshot=biomarker_snapshot,
+                    domain=effective_domain,
+                    run_id=None,
+                    experiment_mode=experiment_mode,
+                )
+                summary = result.get("summary", {})
+                summaries.append(summary)
+
+                rye_val = summary.get("RYE")
+                if stop_rye is not None and isinstance(rye_val, (int, float)) and rye_val < stop_rye:
+                    break
+
+            self._update_training_profile_from_summaries(
+                summaries,
+                domain=effective_domain,
+                runtime_profile=runtime_profile,
+                experiment_mode=experiment_mode,
+            )
+            return summaries
+
+        # Fallback to single goal training burst using the first goal
+        first_goal = ""
+        for g in goals:
+            gs = str(g).strip()
+            if gs:
+                first_goal = gs
+                break
+        return self.run_training_burst(
+            goal=first_goal,
+            domain=domain,
+            role=role,
+            runtime_profile=runtime_profile,
+            max_cycles=max_cycles,
+            max_minutes=max_minutes,
+            stop_rye=stop_rye,
+            source_controls=source_controls,
+            pdf_bytes=pdf_bytes,
+            biomarker_snapshot=biomarker_snapshot,
+            experiment_mode=experiment_mode,
+        )
+
     def optimize_learning_pipeline(
         self,
         domain: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Derive a high-level learning plan from existing history.
-
-        This is the "optimize my learning pipeline" entry point.
-
-        It:
-            - calls learn_from_memory(domain)
-            - optionally calls rye_metrics Option C for richer diagnostics
-            - proposes simple, concrete next actions (as text) without
-              mutating core behavior.
-
-        It is safe to call from the UI or a controller.
-        """
+        """Derive a high-level learning plan from existing history."""
         plan: Dict[str, Any] = {
             "domain": domain or "general",
             "learning_enabled": self.learning_enabled,
@@ -2424,11 +2490,9 @@ class CoreAgent:
             self.learning_plan = plan
             return plan
 
-        # Step 1: pull learned hints from history
         learned = self.learn_from_memory(domain=domain)
         plan["learned_from_memory"] = dict(learned)
 
-        # Step 2: Option C signature if available (full run self-diagnosis)
         option_c = None
         if _rye_metrics_mod is not None and hasattr(_rye_metrics_mod, "build_option_c_signature"):
             try:
@@ -2443,7 +2507,6 @@ class CoreAgent:
                 option_c = None
         plan["option_c_signature"] = option_c
 
-        # Step 3: propose next actions (text only, no hard changes)
         actions: List[str] = []
 
         has_history = bool(learned.get("has_history"))
@@ -2452,8 +2515,8 @@ class CoreAgent:
 
         if not has_history:
             actions.append(
-                "Run at least one short training burst (for example 1-hour general or longevity) "
-                "to build initial cycle history before auto-tuning."
+                "Run at least one short training burst (for example 1 hour general or longevity) "
+                "to build initial cycle history before auto tuning."
             )
         else:
             if isinstance(rec_profile, str):
@@ -2472,22 +2535,162 @@ class CoreAgent:
                 if tier:
                     actions.append(f"Current run tier according to Option C: {tier}.")
                 if env_state:
-                    actions.append(f"Autonomy-stability safety envelope is classified as: {env_state}.")
+                    actions.append(f"Autonomy stability safety envelope is classified as: {env_state}.")
             except Exception:
                 pass
 
-        # Generic training hygiene suggestions (agent-level learning)
         actions.append(
-            "Use run_training_burst(...) with focused goals (for example one clear longevity question) "
-            "to teach the agent on compact, high-signal problems."
+            "Use run_training_burst(...) with focused goals to teach the agent on compact, high signal problems."
         )
         actions.append(
-            "Periodically call prune_memory(...) to keep MemoryStore healthy and avoid dilution of high-value traces."
+            "Periodically call prune_memory(...) to keep MemoryStore healthy and avoid dilution of high value traces."
         )
         actions.append(
-            "After major bursts, regenerate snapshots with generate_snapshot(...) so you can track skill buildup over weeks."
+            "After major bursts, regenerate snapshots with generate_snapshot(...) to track skill buildup over weeks."
         )
 
         plan["actions"] = actions
         self.learning_plan = plan
         return plan
+
+    # ------------------------------------------------------------------
+    # Meta Agent tuning helpers
+    # ------------------------------------------------------------------
+    def run_meta_tuning(self) -> Dict[str, Any]:
+        """Use MetaAgent to propose self tuning updates if available."""
+        result: Dict[str, Any] = {
+            "enabled": False,
+            "suggestions": None,
+            "error": None,
+        }
+        if self.meta_agent is None:
+            return result
+        try:
+            suggest = getattr(self.meta_agent, "suggest_tuning", None)
+            if callable(suggest):
+                suggestions = suggest(
+                    learning_plan=self.learning_plan,
+                    training_profile=self.training_profile,
+                    meta_state=self._meta_state,
+                    config=self.config,
+                )
+                result["enabled"] = True
+                result["suggestions"] = suggestions
+                self.last_meta_tuning = suggestions if isinstance(suggestions, dict) else {}
+                return result
+        except Exception as exc:
+            result["error"] = str(exc)
+        return result
+
+    # ------------------------------------------------------------------
+    # Long horizon and trading helpers
+    # ------------------------------------------------------------------
+    def run_long_horizon_single(
+        self,
+        goal: str,
+        days: float = 3.0,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
+        """Convenience wrapper for a long horizon single agent run."""
+        max_minutes = days * 24.0 * 60.0
+        return self.run_continuous(
+            goal=goal,
+            max_cycles=int(1_000_000),
+            max_minutes=max_minutes,
+            forever=False,
+            resume_from_checkpoint=True,
+            runtime_profile="24_hours",
+            **kwargs,
+        )
+
+    def run_long_horizon_swarm(
+        self,
+        goal: str,
+        days: float = 3.0,
+        **kwargs: Any,
+    ) -> List[Dict[str, Any]]:
+        """Convenience wrapper for a long horizon swarm run."""
+        max_minutes = days * 24.0 * 60.0
+        return self.run_swarm_continuous(
+            goal=goal,
+            max_rounds=int(1_000_000),
+            max_minutes=max_minutes,
+            forever=False,
+            resume_from_checkpoint=True,
+            runtime_profile="24_hours",
+            **kwargs,
+        )
+
+    def run_trading_session(
+        self,
+        goal: str,
+        *,
+        max_minutes: float = 60.0,
+        max_cycles: int = 200,
+        experiment_mode: Optional[str] = "trading",
+    ) -> List[Dict[str, Any]]:
+        """Run a trading focused single agent session."""
+        return self.run_continuous(
+            goal=goal,
+            max_cycles=max_cycles,
+            domain="trading",
+            max_minutes=max_minutes,
+            experiment_mode=experiment_mode,
+        )
+
+    def run_trading_swarm(
+        self,
+        goal: str,
+        *,
+        max_minutes: float = 60.0,
+        max_rounds: int = 20,
+        experiment_mode: Optional[str] = "trading",
+    ) -> List[Dict[str, Any]]:
+        """Run a trading focused swarm session."""
+        return self.run_swarm_continuous(
+            goal=goal,
+            max_rounds=max_rounds,
+            domain="trading",
+            max_minutes=max_minutes,
+            experiment_mode=experiment_mode,
+        )
+
+    # ------------------------------------------------------------------
+    # Autonomous literature crawler helpers
+    # ------------------------------------------------------------------
+    def run_literature_crawl(
+        self,
+        query: str,
+        max_items: int = 50,
+        domains: Optional[Sequence[str]] = None,
+        run_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Run an autonomous literature crawl if a crawler is attached."""
+        if self.literature_crawler is None:
+            return {
+                "enabled": False,
+                "items": [],
+                "reason": "crawler_not_available",
+            }
+        try:
+            crawl_fn = getattr(self.literature_crawler, "crawl_and_ingest", None)
+            if callable(crawl_fn):
+                result = crawl_fn(
+                    query=query,
+                    max_items=max_items,
+                    domains=domains,
+                    run_id=run_id or self._generate_run_id(),
+                )
+                if isinstance(result, dict):
+                    result.setdefault("enabled", True)
+                    return result
+        except Exception as exc:
+            return {
+                "enabled": True,
+                "items": [],
+                "error": str(exc),
+            }
+        return {
+            "enabled": True,
+            "items": [],
+        }
