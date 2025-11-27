@@ -3,7 +3,7 @@
 Features:
 - Continuous Mode with duration presets (1h, 8h, 24h, 1 week, 1 month, 90 days, Forever)
 - Researcher + Critic multi agent mode
-- Swarm mode with up to dozens of specialized mini agents
+- Swarm mode with up to dozens of mini agents
 - Domain presets (General, Longevity, Math)
 - PubMed / Semantic Scholar ingestion controls
 - Biomarker analysis toggle (for anti aging teams)
@@ -721,6 +721,16 @@ def _safe_gv_id(prefix: str, raw: str) -> str:
     return f"{prefix}{clean}"
 
 
+def _clean_label_text(text: str, max_len: int = 60) -> str:
+    """Clean label text for Graphviz: strip quotes, newlines, and compress spaces."""
+    text = str(text)
+    text = text.replace('"', "'").replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_len:
+        text = text[:max_len] + "..."
+    return text
+
+
 def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[str, Any]]) -> str:
     """Build a Graphviz DOT string linking goals, roles, hypotheses, and discoveries."""
     nodes: List[str] = []
@@ -733,20 +743,20 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
     domains = sorted({str(e.get("domain", "general")) for e in history})
     domain_ids: Dict[str, str] = {}
     for d in domains:
-        safe_d = d.replace('"', "'")
+        safe_d_label = _clean_label_text(f"Domain: {d}")
         node_id = _safe_gv_id("domain_", d)
         domain_ids[d] = node_id
-        nodes.append(f'{node_id} [label="Domain: {safe_d}", shape=box]')
+        nodes.append(f'{node_id} [label="{safe_d_label}", shape=box]')
         edges.append(f"run -> {node_id}")
 
     # Roles
     roles = sorted({str(e.get("role", "agent")) for e in history})
     role_ids: Dict[str, str] = {}
     for r in roles:
-        safe_r = r.replace('"', "'")
+        safe_r_label = _clean_label_text(f"Role: {r}")
         node_id = _safe_gv_id("role_", r)
         role_ids[r] = node_id
-        nodes.append(f'{node_id} [label="Role: {safe_r}", shape=ellipse]')
+        nodes.append(f'{node_id} [label="{safe_r_label}", shape=ellipse]')
         edges.append(f"run -> {node_id}")
 
     # Hypotheses, take top 8 by confidence if available
@@ -766,19 +776,19 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
         top_hyps = []
 
     for idx, h in enumerate(top_hyps):
-        label = h["text"][:60].replace('"', "'")
+        label_text = _clean_label_text(h["text"])
         hyp_id = f"hyp_{idx}"
-        nodes.append(f'{hyp_id} [label="H: {label}", shape=note]')
+        nodes.append(f'{hyp_id} [label="H: {label_text}", shape=note]')
         d = str(h.get("domain", "general"))
         r = str(h.get("role", "agent"))
         d_id = domain_ids.get(d, _safe_gv_id("domain_", d))
         r_id = role_ids.get(r, _safe_gv_id("role_", r))
         if d_id not in domain_ids.values():
-            safe_d2 = d.replace('"', "'")
-            nodes.append(f'{d_id} [label="Domain: {safe_d2}", shape=box]')
+            safe_d2_label = _clean_label_text(f"Domain: {d}")
+            nodes.append(f'{d_id} [label="{safe_d2_label}", shape=box]')
         if r_id not in role_ids.values():
-            safe_r2 = r.replace('"', "'")
-            nodes.append(f'{r_id} [label="Role: {safe_r2}", shape=ellipse]')
+            safe_r2_label = _clean_label_text(f"Role: {r}")
+            nodes.append(f'{r_id} [label="{safe_r2_label}", shape=ellipse]')
         edges.append(f"{d_id} -> {hyp_id}")
         edges.append(f"{r_id} -> {hyp_id}")
 
@@ -797,13 +807,13 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
         top_disc = [d for _, d in scored_disc[:8]]
 
     for idx, d in enumerate(top_disc):
-        label = str(d.get("title") or d.get("summary") or d.get("id") or f"Discovery {idx + 1}")
-        label = label[:60].replace('"', "'")
+        label_src = d.get("title") or d.get("summary") or d.get("id") or f"Discovery {idx + 1}"
+        label_text = _clean_label_text(label_src)
         disc_id = f"disc_{idx}"
-        nodes.append(f'{disc_id} [label="D: {label}", shape=diamond]')
+        nodes.append(f'{disc_id} [label="D: {label_text}", shape=diamond]')
         edges.append(f"run -> {disc_id}")
 
-    dot_lines = ["digraph G {", 'rankdir=LR;', 'node [fontname="Helvetica"];']
+    dot_lines = ["digraph G {", "rankdir=LR;", 'node [fontname="Helvetica"];']
     dot_lines.extend(nodes)
     dot_lines.extend(edges)
     dot_lines.append("}")
