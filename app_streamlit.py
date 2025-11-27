@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
@@ -49,59 +50,121 @@ from datetime import datetime
 import streamlit as st
 import yaml
 
-from agent.core_agent import CoreAgent
-from agent.memory_store import MemoryStore
-from agent.presets import PRESETS, get_preset, RUNTIME_PROFILES  # domain presets and runtime profiles
-from agent.report_generator import (
-    generate_report,
-    generate_findings_report,
-    generate_report_pdf,
-    generate_findings_report_pdf,
-)  # report builders and PDF exporters
-from agent.rye_metrics import (
-    rolling_rye,
-    efficiency_trend,
-    regression_rye_slope,
-    stability_index,
-    recovery_momentum,
-    build_run_diagnostics,
-    rye_volatility_signature,
-    detect_rye_equilibrium,
-    tgrm_harmonic_index,
-    estimate_breakthrough_probability,
-    breakthrough_likelihood_90d,
-    autonomy_safety_envelope,
-    early_failure_warning_score,
-    classify_run_tier,
-)
-from agent.report_builder import build_agent_report  # full Option C report with learning speed
+# Ensure repository root is on sys.path so imports work on Render and local
+ROOT_DIR = Path(__file__).resolve().parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
 
-# Optional discovery and verification helpers (imported lazily if present)
-try:  # type: ignore[import]
-    from agent import discovery_log as _discovery_module  # pragma: no cover
-except Exception:  # pragma: no cover
-    _discovery_module = None  # type: ignore[assignment]
-
-try:  # type: ignore[import]
-    from agent import verification_engine as _verification_module  # pragma: no cover
-except Exception:  # pragma: no cover
-    _verification_module = None  # type: ignore[assignment]
-
-try:  # type: ignore[import]
-    from agent import hypothesis_manager as _hypo_module  # pragma: no cover
-except Exception:  # pragma: no cover
-    _hypo_module = None  # type: ignore[assignment]
-
-try:  # type: ignore[import]
-    from agent import memory_pruner as _pruner_module  # pragma: no cover
-except Exception:  # pragma: no cover
-    _pruner_module = None  # type: ignore[assignment]
-
-# Optional tools registry (for web browser and sandbox status)
+# Prefer package style imports, fall back to flat layout if needed
 try:
-    from agent.tools import TOOL_REGISTRY  # type: ignore[import]
-except Exception:  # pragma: no cover
-    TOOL_REGISTRY = {}  # type: ignore[assignment]
+    from agent.core_agent import CoreAgent
+    from agent.memory_store import MemoryStore
+    from agent.presets import PRESETS, get_preset, RUNTIME_PROFILES  # domain presets and runtime profiles
+    from agent.report_generator import (
+        generate_report,
+        generate_findings_report,
+        generate_report_pdf,
+        generate_findings_report_pdf,
+    )  # report builders and PDF exporters
+    from agent.rye_metrics import (
+        rolling_rye,
+        efficiency_trend,
+        regression_rye_slope,
+        stability_index,
+        recovery_momentum,
+        build_run_diagnostics,
+        rye_volatility_signature,
+        detect_rye_equilibrium,
+        tgrm_harmonic_index,
+        estimate_breakthrough_probability,
+        breakthrough_likelihood_90d,
+        autonomy_safety_envelope,
+        early_failure_warning_score,
+        classify_run_tier,
+    )
+    from agent.report_builder import build_agent_report  # full Option C report with learning speed
+
+    # Optional discovery and verification helpers (imported lazily if present)
+    try:  # type: ignore[import]
+        from agent import discovery_log as _discovery_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _discovery_module = None  # type: ignore[assignment]
+
+    try:  # type: ignore[import]
+        from agent import verification_engine as _verification_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _verification_module = None  # type: ignore[assignment]
+
+    try:  # type: ignore[import]
+        from agent import hypothesis_manager as _hypo_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _hypo_module = None  # type: ignore[assignment]
+
+    try:  # type: ignore[import]
+        from agent import memory_pruner as _pruner_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _pruner_module = None  # type: ignore[assignment]
+
+    # Optional tools registry (for web browser and sandbox status)
+    try:
+        from agent.tools import TOOL_REGISTRY  # type: ignore[import]
+    except Exception:  # pragma: no cover
+        TOOL_REGISTRY = {}  # type: ignore[assignment]
+
+except ImportError:
+    # Flat layout fallback: all modules live next to this file
+    from core_agent import CoreAgent
+    from memory_store import MemoryStore
+    from presets import PRESETS, get_preset, RUNTIME_PROFILES  # type: ignore[no-redef]
+    from report_generator import (
+        generate_report,
+        generate_findings_report,
+        generate_report_pdf,
+        generate_findings_report_pdf,
+    )  # type: ignore[no-redef]
+    from rye_metrics import (  # type: ignore[no-redef]
+        rolling_rye,
+        efficiency_trend,
+        regression_rye_slope,
+        stability_index,
+        recovery_momentum,
+        build_run_diagnostics,
+        rye_volatility_signature,
+        detect_rye_equilibrium,
+        tgrm_harmonic_index,
+        estimate_breakthrough_probability,
+        breakthrough_likelihood_90d,
+        autonomy_safety_envelope,
+        early_failure_warning_score,
+        classify_run_tier,
+    )
+    from report_builder import build_agent_report  # type: ignore[no-redef]
+
+    try:  # type: ignore[import]
+        import discovery_log as _discovery_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _discovery_module = None  # type: ignore[assignment]
+
+    try:  # type: ignore[import]
+        import verification_engine as _verification_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _verification_module = None  # type: ignore[assignment]
+
+    try:  # type: ignore[import]
+        import hypothesis_manager as _hypo_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _hypo_module = None  # type: ignore[assignment]
+
+    try:  # type: ignore[import]
+        import memory_pruner as _pruner_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _pruner_module = None  # type: ignore[assignment]
+
+    try:
+        from tools import TOOL_REGISTRY  # type: ignore[import]
+    except Exception:  # pragma: no cover
+        TOOL_REGISTRY = {}  # type: ignore[assignment]
+
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
