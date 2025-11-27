@@ -1138,7 +1138,7 @@ def main() -> None:
                             biomarker_snapshot=None,
                             domain=domain_tag,
                         )
-                            summary = out["summary"]
+                        summary = out["summary"]
                         results.append(summary)
             else:
                 # Classic single or researcher plus critic manual mode
