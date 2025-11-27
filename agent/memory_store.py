@@ -18,6 +18,8 @@ This module provides a JSON-based persistent storage layer. It stores:
 - option_c_diagnostics (deep AGI-style diagnostics for frontier runs)
 - swarm_contracts (specialization contracts for swarm roles)
 - learning_burst (burst learning state for the TGRM loop)
+- benchmarks (ARC, math, longevity test batteries, etc.)
+- source_index (lightweight index for linking entities to citation ids)
 
 The memory store acts as a lightweight knowledge base for the agent and is
 referenced each cycle to retrieve prior context and to persist new findings.
@@ -30,12 +32,13 @@ Reparodynamics interpretation:
 
     The run_state, worker_state, watchdog, goal_index, events, discoveries,
     run_manifests, tool_events, milestones, hypothesis_evolution,
-    option_c_diagnostics, swarm_contracts, and learning_burst sections act
-    as a meta layer: they record how the system itself is running so that
-    the agent can restart and continue repair with minimal extra energy
-    and give swarm level analytics (per role and per goal), plus a running
-    log of key cure and treatment candidates, tool behavior, and learning
-    curve shaping.
+    option_c_diagnostics, swarm_contracts, learning_burst, benchmarks,
+    and source_index sections act as a meta layer: they record how the
+    system itself is running so that the agent can restart and continue
+    repair with minimal extra energy and give swarm level analytics
+    (per role and per goal), plus a running log of key cure and treatment
+    candidates, tool behavior, benchmark performance, and learning curve
+    shaping.
 """
 
 from __future__ import annotations
@@ -61,7 +64,7 @@ except Exception:  # pragma: no cover
 # ----------------------------------------------------------------------
 # Schema and global caps
 # ----------------------------------------------------------------------
-MEMORY_SCHEMA_VERSION = 3
+MEMORY_SCHEMA_VERSION = 4
 
 # Hard but generous caps for 24-90 day or long runs
 # These mirror the events and discoveries bounding you already had.
@@ -76,6 +79,7 @@ MAX_DISCOVERIES = 2_000
 MAX_TOOL_EVENTS = 20_000
 MAX_RUN_MANIFESTS = 2_000
 MAX_MILESTONES = 5_000
+MAX_BENCHMARKS = 50_000
 
 
 def _utc_now_iso() -> str:
@@ -105,6 +109,8 @@ class MemoryStore:
         - "hypothesis_evolution": evolution of ideas over time
         - "option_c_diagnostics": deep diagnostics for Option C frontier runs
         - "swarm_contracts":     specialization contracts for swarm roles
+        - "benchmarks":          benchmark/task results such as ARC, math suites
+        - "source_index":        optional index for mapping entities to citations
 
     In memory (non persistent) vector memory may also be attached to
     support semantic search and time decayed retrieval if the optional
@@ -117,7 +123,7 @@ class MemoryStore:
         - worker_state and events for live status and debugging
         - bounded growth of logs (notes, cycles, hypotheses, citations,
           events, tool_events, hypothesis_evolution, option_c_diagnostics,
-          swarm_contracts)
+          swarm_contracts, benchmarks)
         - per run manifests and milestones for report generation
 
     Advanced learning layer:
@@ -127,6 +133,7 @@ class MemoryStore:
         - learning_burst supports temporary high intensity learning modes
         - hypothesis_evolution tracks how ideas refine or merge
         - option_c_diagnostics and swarm_contracts support frontier AGI runs
+        - benchmarks give a persistent trace of test performance (ARC, math, etc.)
     """
 
     def __init__(self, memory_file: str) -> None:
@@ -161,6 +168,8 @@ class MemoryStore:
             "hypothesis_evolution": [],
             "option_c_diagnostics": [],
             "swarm_contracts": [],
+            "benchmarks": [],
+            "source_index": {},
             "schema_version": MEMORY_SCHEMA_VERSION,
         }
         self._load()
@@ -199,6 +208,8 @@ class MemoryStore:
             "hypothesis_evolution": [],
             "option_c_diagnostics": [],
             "swarm_contracts": [],
+            "benchmarks": [],
+            "source_index": {},
         }
         for key, default in defaults.items():
             if key not in self._data:
@@ -217,10 +228,19 @@ class MemoryStore:
                     "hypothesis_evolution",
                     "option_c_diagnostics",
                     "swarm_contracts",
+                    "benchmarks",
                 ):
                     if not isinstance(self._data.get(key), list):
                         self._data[key] = []
-                elif key in ("run_manifests", "run_state", "worker_state", "watchdog", "goal_index", "learning_burst"):
+                elif key in (
+                    "run_manifests",
+                    "run_state",
+                    "worker_state",
+                    "watchdog",
+                    "goal_index",
+                    "learning_burst",
+                    "source_index",
+                ):
                     if not isinstance(self._data.get(key), dict):
                         self._data[key] = {}
         # Ensure schema version is present
@@ -235,6 +255,10 @@ class MemoryStore:
         lb.setdefault("cycles_remaining", None)
         lb.setdefault("burst_index", None)
         self._data["learning_burst"] = lb
+
+        # Ensure source_index is a dict
+        if not isinstance(self._data.get("source_index"), dict):
+            self._data["source_index"] = {}
 
     def _load(self) -> None:
         """Load memory from disk if the file exists."""
@@ -267,6 +291,8 @@ class MemoryStore:
                     "hypothesis_evolution": [],
                     "option_c_diagnostics": [],
                     "swarm_contracts": [],
+                    "benchmarks": [],
+                    "source_index": {},
                     "schema_version": MEMORY_SCHEMA_VERSION,
                 }
 
@@ -374,6 +400,8 @@ class MemoryStore:
             "hypothesis_evolution": [],
             "option_c_diagnostics": [],
             "swarm_contracts": [],
+            "benchmarks": [],
+            "source_index": {},
             "schema_version": MEMORY_SCHEMA_VERSION,
         }
         self._save()
@@ -517,9 +545,12 @@ class MemoryStore:
         role: str = "agent",
         importance: float = 1.0,
         domain: Optional[str] = None,
+        run_id: Optional[str] = None,
+        cycle_index: Optional[int] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Add a note associated with a research goal."""
-        note = {
+        note: Dict[str, Any] = {
             "timestamp": _utc_now_iso(),
             "goal": goal,
             "content": content,
@@ -529,6 +560,12 @@ class MemoryStore:
         }
         if domain is not None:
             note["domain"] = domain
+        if run_id is not None:
+            note["run_id"] = run_id
+        if cycle_index is not None:
+            note["cycle_index"] = int(cycle_index)
+        if extra:
+            note["extra"] = dict(extra)
 
         self._data.setdefault("notes", []).append(note)
 
@@ -550,7 +587,7 @@ class MemoryStore:
         # Also store in vector memory if available, for semantic retrieval
         if self.vector_memory is not None and content:
             try:
-                meta = {
+                meta: Dict[str, Any] = {
                     "goal": goal,
                     "tags": tags or [],
                     "role": role,
@@ -558,6 +595,10 @@ class MemoryStore:
                 }
                 if domain is not None:
                     meta["domain"] = domain
+                if run_id is not None:
+                    meta["run_id"] = run_id
+                if cycle_index is not None:
+                    meta["cycle_index"] = int(cycle_index)
                 self.vector_memory.add_item(text=content, metadata=meta)
             except Exception:
                 pass
@@ -617,15 +658,28 @@ class MemoryStore:
         *,
         score: Optional[float] = None,
         tags: Optional[List[str]] = None,
+        domain: Optional[str] = None,
+        role: Optional[str] = None,
+        run_id: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Store a generated hypothesis for a given goal."""
-        hyp = {
+        hyp: Dict[str, Any] = {
             "timestamp": _utc_now_iso(),
             "goal": goal,
             "text": text,
             "score": float(score) if score is not None else None,
             "tags": tags or [],
         }
+        if domain is not None:
+            hyp["domain"] = domain
+        if role is not None:
+            hyp["role"] = role
+        if run_id is not None:
+            hyp["run_id"] = run_id
+        if extra:
+            hyp["extra"] = dict(extra)
+
         self._data.setdefault("hypotheses", []).append(hyp)
 
         # Bound hypothesis list growth
@@ -637,12 +691,18 @@ class MemoryStore:
         # Hypotheses are also valuable semantic memory
         if self.vector_memory is not None and text:
             try:
-                meta = {
+                meta: Dict[str, Any] = {
                     "goal": goal,
                     "type": "hypothesis",
                     "score": hyp["score"],
                     "tags": hyp["tags"],
                 }
+                if domain is not None:
+                    meta["domain"] = domain
+                if role is not None:
+                    meta["role"] = role
+                if run_id is not None:
+                    meta["run_id"] = run_id
                 self.vector_memory.add_item(text=text, metadata=meta)
             except Exception:
                 pass
@@ -680,13 +740,37 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # Citations
     # ------------------------------------------------------------------
-    def add_citation(self, goal: str, citation: Dict[str, Any]) -> None:
+    def add_citation(
+        self,
+        goal: str,
+        citation: Dict[str, Any],
+        *,
+        run_id: Optional[str] = None,
+        role: Optional[str] = None,
+        domain: Optional[str] = None,
+        cycle_index: Optional[int] = None,
+        tool_name: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Add a structured citation object."""
-        entry = {
+        entry: Dict[str, Any] = {
             "timestamp": _utc_now_iso(),
             "goal": goal,
             "citation": citation,
         }
+        if run_id is not None:
+            entry["run_id"] = run_id
+        if role is not None:
+            entry["role"] = role
+        if domain is not None:
+            entry["domain"] = domain
+        if cycle_index is not None:
+            entry["cycle_index"] = int(cycle_index)
+        if tool_name is not None:
+            entry["tool_name"] = tool_name
+        if extra:
+            entry["extra"] = dict(extra)
+
         self._data.setdefault("citations", []).append(entry)
 
         # Bound citation growth
@@ -695,6 +779,7 @@ class MemoryStore:
 
         self._save()
 
+        # Optional vector memory storage
         if self.vector_memory is not None:
             try:
                 text_parts = [
@@ -703,12 +788,22 @@ class MemoryStore:
                     str(citation.get("url", "")),
                 ]
                 text = " ".join([p for p in text_parts if p])
-                meta = {
+                meta: Dict[str, Any] = {
                     "goal": goal,
                     "type": "citation",
                     "source": citation.get("source", "web"),
                     "url": citation.get("url", ""),
                 }
+                if run_id is not None:
+                    meta["run_id"] = run_id
+                if role is not None:
+                    meta["role"] = role
+                if domain is not None:
+                    meta["domain"] = domain
+                if cycle_index is not None:
+                    meta["cycle_index"] = int(cycle_index)
+                if tool_name is not None:
+                    meta["tool_name"] = tool_name
                 if text:
                     self.vector_memory.add_item(text=text, metadata=meta)
             except Exception:
@@ -724,13 +819,28 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # Biomarkers (placeholder for anti aging or lab data)
     # ------------------------------------------------------------------
-    def add_biomarker_snapshot(self, goal: str, data: Dict[str, Any]) -> None:
+    def add_biomarker_snapshot(
+        self,
+        goal: str,
+        data: Dict[str, Any],
+        *,
+        run_id: Optional[str] = None,
+        domain: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Store a biomarker snapshot (anti aging or health metrics)."""
-        entry = {
+        entry: Dict[str, Any] = {
             "timestamp": _utc_now_iso(),
             "goal": goal,
             "data": data,
         }
+        if run_id is not None:
+            entry["run_id"] = run_id
+        if domain is not None:
+            entry["domain"] = domain
+        if extra:
+            entry["extra"] = dict(extra)
+
         self._data.setdefault("biomarkers", []).append(entry)
 
         if len(self._data["biomarkers"]) > MAX_BIOMARKERS:
@@ -1132,7 +1242,7 @@ class MemoryStore:
             kind = "worker_status", "partial_cycle", "ui_action"
             level = "info", "warning", "error"
         """
-        ev = {
+        ev: Dict[str, Any] = {
             "timestamp": _utc_now_iso(),
             "kind": kind,
             "level": level,
@@ -1200,6 +1310,12 @@ class MemoryStore:
         tags: Optional[List[str]] = None,
         citations: Optional[List[Dict[str, Any]]] = None,
         domain: Optional[str] = None,
+        run_id: Optional[str] = None,
+        equilibrium_label: Optional[str] = None,
+        breakthrough_score: Optional[float] = None,
+        verification_status: Optional[str] = None,
+        priority_rank: Optional[int] = None,
+        extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Record a key discovery, such as a treatment or mechanism candidate.
 
@@ -1209,7 +1325,7 @@ class MemoryStore:
             - "mechanism"
             - "biomarker"
         """
-        entry = {
+        entry: Dict[str, Any] = {
             "timestamp": _utc_now_iso(),
             "goal": goal,
             "kind": kind,
@@ -1221,6 +1337,18 @@ class MemoryStore:
         }
         if domain is not None:
             entry["domain"] = domain
+        if run_id is not None:
+            entry["run_id"] = run_id
+        if equilibrium_label is not None:
+            entry["equilibrium_label"] = equilibrium_label
+        if isinstance(breakthrough_score, (int, float)):
+            entry["breakthrough_score"] = float(breakthrough_score)
+        if verification_status is not None:
+            entry["verification_status"] = verification_status
+        if priority_rank is not None:
+            entry["priority_rank"] = int(priority_rank)
+        if extra:
+            entry["extra"] = dict(extra)
 
         self._data.setdefault("discoveries", []).append(entry)
 
@@ -1236,7 +1364,7 @@ class MemoryStore:
                 text_parts = [label, evidence_summary]
                 text = " ".join([p for p in text_parts if p])
                 if text:
-                    meta = {
+                    meta: Dict[str, Any] = {
                         "goal": goal,
                         "type": "discovery",
                         "kind": kind,
@@ -1245,6 +1373,8 @@ class MemoryStore:
                     }
                     if domain is not None:
                         meta["domain"] = domain
+                    if run_id is not None:
+                        meta["run_id"] = run_id
                     self.vector_memory.add_item(text=text, metadata=meta)
             except Exception:
                 pass
@@ -1284,6 +1414,13 @@ class MemoryStore:
             reverse=True,
         )
         return entries_sorted[:limit]
+
+    def get_discoveries_for_run(self, run_id: str) -> List[Dict[str, Any]]:
+        """Return discoveries associated with a specific run_id."""
+        entries = self._data.get("discoveries", [])
+        if not isinstance(entries, list):
+            return []
+        return [e for e in entries if isinstance(e, dict) and e.get("run_id") == run_id]
 
     # ------------------------------------------------------------------
     # Run manifests for long runs
@@ -2009,6 +2146,25 @@ class MemoryStore:
                 else:
                     title += f"- [{ts}] [{kind}] {label}\n"
 
+        # Benchmarks section (ARC etc.)
+        bm = self.get_benchmark_results(goal=goal)
+        title += f"\nBenchmark results logged: {len(bm)}\n"
+        if bm:
+            title += "\nRecent benchmark samples:\n"
+            for b in bm[:5]:
+                ts = b.get("timestamp", "")
+                name = b.get("benchmark", "")
+                task_id = b.get("task_id", "")
+                score = b.get("score", None)
+                passed = b.get("passed", None)
+                if isinstance(score, (int, float)):
+                    base = f"- [{ts}] {name} task={task_id} score={score:.3f}"
+                else:
+                    base = f"- [{ts}] {name} task={task_id}"
+                if isinstance(passed, bool):
+                    base += f" passed={passed}"
+                title += base + "\n"
+
         title += "\nEnd of report.\n"
         return title
 
@@ -2337,3 +2493,122 @@ class MemoryStore:
             "trend": trend,
         }
         return snapshot
+
+    # ------------------------------------------------------------------
+    # Benchmarks (ARC, math suites, etc.)
+    # ------------------------------------------------------------------
+    def log_benchmark_result(
+        self,
+        *,
+        benchmark: str,
+        task_id: Optional[str] = None,
+        score: Optional[float] = None,
+        max_score: Optional[float] = None,
+        passed: Optional[bool] = None,
+        run_id: Optional[str] = None,
+        goal: Optional[str] = None,
+        domain: Optional[str] = None,
+        role: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Log a single benchmark result (ARC task, math suite, etc.)."""
+        entry: Dict[str, Any] = {
+            "timestamp": _utc_now_iso(),
+            "benchmark": benchmark,
+            "task_id": task_id,
+            "score": float(score) if isinstance(score, (int, float)) else None,
+            "max_score": float(max_score) if isinstance(max_score, (int, float)) else None,
+            "passed": bool(passed) if isinstance(passed, bool) else None,
+            "run_id": run_id,
+            "goal": goal,
+            "domain": domain,
+            "role": role,
+        }
+        if extra:
+            entry["extra"] = dict(extra)
+
+        arr = self._data.setdefault("benchmarks", [])
+        arr.append(entry)
+        if len(arr) > MAX_BENCHMARKS:
+            self._data["benchmarks"] = arr[-MAX_BENCHMARKS:]
+
+        self._save()
+
+    def get_benchmark_results(
+        self,
+        benchmark: Optional[str] = None,
+        run_id: Optional[str] = None,
+        goal: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve benchmark results filtered by benchmark, run, goal."""
+        arr = self._data.get("benchmarks", [])
+        if not isinstance(arr, list):
+            return []
+
+        results: List[Dict[str, Any]] = []
+        for e in reversed(arr):
+            if not isinstance(e, dict):
+                continue
+            if benchmark is not None and e.get("benchmark") != benchmark:
+                continue
+            if run_id is not None and e.get("run_id") != run_id:
+                continue
+            if goal is not None and e.get("goal") != goal:
+                continue
+            results.append(e)
+            if len(results) >= limit:
+                break
+        return results
+
+    def get_benchmark_summary(
+        self,
+        benchmark: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Return a compact summary of benchmark performance."""
+        arr = self._data.get("benchmarks", [])
+        if not isinstance(arr, list) or not arr:
+            return {
+                "benchmark": benchmark,
+                "count": 0,
+                "avg_score": None,
+                "best_score": None,
+                "pass_rate": None,
+            }
+
+        scores: List[float] = []
+        passes = 0
+        total = 0
+        for e in arr:
+            if not isinstance(e, dict):
+                continue
+            if benchmark is not None and e.get("benchmark") != benchmark:
+                continue
+            total += 1
+            sc = e.get("score")
+            if isinstance(sc, (int, float)):
+                scores.append(float(sc))
+            p = e.get("passed")
+            if isinstance(p, bool) and p:
+                passes += 1
+
+        if total == 0:
+            return {
+                "benchmark": benchmark,
+                "count": 0,
+                "avg_score": None,
+                "best_score": None,
+                "pass_rate": None,
+            }
+
+        avg_score = sum(scores) / len(scores) if scores else None
+        best_score = max(scores) if scores else None
+        pass_rate = passes / float(total) if total > 0 else None
+
+        return {
+            "benchmark": benchmark,
+            "count": total,
+            "avg_score": avg_score,
+            "best_score": best_score,
+            "pass_rate": pass_rate,
+        }
