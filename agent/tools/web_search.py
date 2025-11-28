@@ -19,7 +19,6 @@ import hashlib
 import json
 import os
 import time
-import inspect
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -141,7 +140,7 @@ def _compute_learning_context(
 
 
 # ---------------------------------------------------------------------
-# Logging plus caching
+# Logging + caching
 # ---------------------------------------------------------------------
 LOG_PATH = Path("logs/web_search_log.json")
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -173,15 +172,28 @@ def _log_event(event: Dict[str, Any]) -> None:
 # Tavily wrapper
 # ---------------------------------------------------------------------
 def _get_tavily_client() -> Tuple[Optional[Any], Optional[str]]:
-    api_key = os.getenv("TAVILY_API_KEY")
-    if not api_key:
-        return None, "No Tavily API key set."
+    """Return a TavilyClient instance or an error string.
 
+    Handles both new and old SDK styles:
+    - TavilyClient(api_key="...") where the key is passed explicitly
+    - TavilyClient() where the key is read from TAVILY_API_KEY env
+    """
     if TavilyClient is None:
         return None, "tavily-python not installed."
 
+    api_key = os.getenv("TAVILY_API_KEY")
+    if not api_key:
+        return None, "No TAVILY_API_KEY found in environment."
+
     try:
-        return TavilyClient(api_key=api_key), None
+        # First try the explicit api_key signature
+        try:
+            client = TavilyClient(api_key=api_key)
+        except TypeError:
+            # Newer SDK reads from env only
+            os.environ["TAVILY_API_KEY"] = api_key
+            client = TavilyClient()
+        return client, None
     except Exception as e:
         return None, f"Tavily init failed: {e}"
 
@@ -310,8 +322,8 @@ def _apply_learning_speed(
     The idea:
         - Base Tavily cost approximates raw energy spent.
         - Faster learning means more yield per unit energy.
-        - We keep info_gain as is (what the web returned) and treat
-          search_energy as an effective cost divided by learning_speed_factor.
+        - We keep info_gain as is and treat search_energy as an
+          effective cost divided by learning_speed_factor.
 
     This is compatible with RYE:
         RYE_search = info_gain / search_energy
@@ -410,37 +422,34 @@ def web_search_tool(
 
     start = time.time()
 
-    # Build kwargs only for parameters this version of TavilyClient.search supports.
     try:
-        sig = inspect.signature(client.search)
-        allowed = sig.parameters.keys()
-    except Exception:
-        allowed = {"query", "max_results", "topic", "search_depth",
-                   "include_answer", "include_raw_content", "include_images"}
-
-    candidate_kwargs = {
-        "query": q,
-        "max_results": max_results,
-        "topic": topic,
-        "search_depth": search_depth,
-        "time_range": time_range,
-        "auto_parameters": auto_parameters,
-        "include_answer": include_answer,
-        "include_raw_content": include_raw_content,
-        "include_images": include_images,
-    }
-    call_kwargs = {
-        name: value
-        for name, value in candidate_kwargs.items()
-        if name in allowed and value is not None
-    }
-
-    try:
-        raw = client.search(**call_kwargs)
+        # Preferred full parameter call
+        try:
+            raw = client.search(
+                query=q,
+                max_results=max_results,
+                topic=topic,
+                search_depth=search_depth,
+                time_range=time_range,
+                auto_parameters=auto_parameters,
+                include_answer=include_answer,
+                include_raw_content=include_raw_content,
+                include_images=include_images,
+            )
+        except TypeError:
+            # Fallback for older or minimized SDKs
+            raw = client.search(query=q, max_results=max_results)
     except Exception as e:
         summary_base = _stub_summary(q, str(e))
         _cache_set(cache_key, summary_base)
         summary = _apply_learning_speed(_clone_summary(summary_base), eff_factor, eff_burst)
+        _log_event(
+            {
+                "event": "web_search_error",
+                "query": q,
+                "error": str(e),
+            }
+        )
         return asdict(summary)
 
     elapsed = time.time() - start
