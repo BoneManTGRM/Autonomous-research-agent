@@ -46,7 +46,6 @@ import json
 import os
 import re
 import sys
-import time
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime
@@ -823,7 +822,7 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
         if d_id not in domain_ids.values():
             safe_d2_label = _clean_label_text(f"Domain: {d}")
             nodes.append(f'{d_id} [label="{safe_d2_label}", shape=box]')
-        if r_id not in role_ids.values():
+        if r_id not in domain_ids.values():
             safe_r2_label = _clean_label_text(f"Role: {r}")
             nodes.append(f'{r_id} [label="{safe_r2_label}", shape=ellipse]')
         edges.append(f"{d_id} -> {hyp_id}")
@@ -1926,20 +1925,23 @@ def main() -> None:
                 with col_c3:
                     st.metric("Domains with citations", len(domains_c))
 
-                domain_filter = st.multiselect(
+                citations_domain_filter = st.multiselect(
                     "Filter by domain",
                     options=domains_c,
                     default=domains_c,
+                    key="citations_domain_filter",
                 )
-                role_filter = st.multiselect(
+                citations_role_filter = st.multiselect(
                     "Filter by role",
                     options=roles_c,
                     default=roles_c,
+                    key="citations_role_filter",
                 )
-                source_filter = st.multiselect(
+                citations_source_filter = st.multiselect(
                     "Filter by source",
                     options=unique_sources,
                     default=unique_sources,
+                    key="citations_source_filter",
                 )
 
                 filtered_cites: List[Dict[str, Any]] = []
@@ -1947,11 +1949,11 @@ def main() -> None:
                     d = c["domain"]
                     r = c["role"]
                     s = c["source"]
-                    if domain_filter and d not in domain_filter:
+                    if citations_domain_filter and d not in citations_domain_filter:
                         continue
-                    if role_filter and r not in role_filter:
+                    if citations_role_filter and r not in citations_role_filter:
                         continue
-                    if source_filter and s not in source_filter:
+                    if citations_source_filter and s not in citations_source_filter:
                         continue
                     filtered_cites.append(c)
 
@@ -2023,10 +2025,11 @@ def main() -> None:
                 domains_available = sorted(
                     {str(d.get("domain", "general")) for d in discoveries}
                 )
-                domain_filter = st.multiselect(
+                discovery_domain_filter = st.multiselect(
                     "Filter by domain",
                     options=domains_available,
                     default=domains_available,
+                    key="discovery_domain_filter",
                 )
                 min_gain = st.number_input(
                     "Minimum RYE gain to show",
@@ -2039,7 +2042,7 @@ def main() -> None:
                 filtered = []
                 for d in discoveries:
                     dom = str(d.get("domain", "general"))
-                    if domain_filter and dom not in domain_filter:
+                    if discovery_domain_filter and dom not in discovery_domain_filter:
                         continue
                     gain = d.get("rye_gain") or d.get("delta_rye") or 0.0
                     try:
@@ -2166,8 +2169,18 @@ def main() -> None:
                 # Filters
                 domains = sorted({str(h["domain"]) for h in all_hyps})
                 roles = sorted({str(h["role"]) for h in all_hyps})
-                domain_filter = st.multiselect("Filter by domain", options=domains, default=domains)
-                role_filter = st.multiselect("Filter by role", options=roles, default=roles)
+                hypo_domain_filter = st.multiselect(
+                    "Filter by domain",
+                    options=domains,
+                    default=domains,
+                    key="hypo_domain_filter",
+                )
+                hypo_role_filter = st.multiselect(
+                    "Filter by role",
+                    options=roles,
+                    default=roles,
+                    key="hypo_role_filter",
+                )
 
                 min_conf = st.number_input(
                     "Minimum confidence",
@@ -2181,9 +2194,9 @@ def main() -> None:
                 for h in all_hyps:
                     d = str(h["domain"])
                     r = str(h["role"])
-                    if domain_filter and d not in domain_filter:
+                    if hypo_domain_filter and d not in hypo_domain_filter:
                         continue
-                    if role_filter and r not in role_filter:
+                    if hypo_role_filter and r not in hypo_role_filter:
                         continue
                     conf = h.get("confidence")
                     if isinstance(conf, (int, float)) and conf < min_conf:
