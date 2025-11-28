@@ -114,11 +114,25 @@ def _env_list(name: str) -> Optional[List[str]]:
 
 
 def detect_tools() -> Dict[str, bool]:
-    """Detect presence of web browser and sandbox tools from TOOL_REGISTRY."""
+    """
+    Detect presence of web browser and sandbox tools from TOOL_REGISTRY.
+
+    Web detection includes:
+    - Generic browser style tools: web_search, browser, web, internet
+    - Tavily based tools: tavily_search
+    - Option C web wrapper: extreme_web_search (if you registered it with that name)
+    """
     if not isinstance(TOOL_REGISTRY, dict):
         return {"web": False, "sandbox": False}
 
-    web_keys = {"web_search", "browser", "web", "internet"}
+    web_keys = {
+        "web_search",
+        "browser",
+        "web",
+        "internet",
+        "tavily_search",       # standard Tavily tool name
+        "extreme_web_search",  # your Option C wrapper, if present
+    }
     sandbox_keys = {"sandbox", "code_sandbox", "python_sandbox", "exec_sandbox"}
 
     has_web = any(k in TOOL_REGISTRY for k in web_keys)
