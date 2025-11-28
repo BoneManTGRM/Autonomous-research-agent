@@ -30,6 +30,10 @@ from typing import Any, Dict, List, Optional, Tuple
 # If you set TAVILY_API_KEY in Render or locally, that will take precedence.
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY") or "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"
 
+# Tavily has a hard 400 character query limit.
+# Use a safety margin so the swarm never triggers the error.
+MAX_TAVILY_QUERY_CHARS = 360
+
 # ---------------------------------------------------------------------
 # Try to import the Tavily client
 # ---------------------------------------------------------------------
@@ -401,7 +405,16 @@ def web_search_tool(
     burst_profile_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Perform a Tavily web search with extreme mode and learning aware intelligence."""
-    q = (query or "").strip()
+    raw_q = (query or "").strip()
+
+    # Clamp to Tavily max length with safety margin.
+    truncated = False
+    if len(raw_q) > MAX_TAVILY_QUERY_CHARS:
+        q = raw_q[:MAX_TAVILY_QUERY_CHARS]
+        truncated = True
+    else:
+        q = raw_q
+
     learning_ctx = _compute_learning_context(
         topic=topic,
         override_factor=learning_speed_factor,
@@ -420,6 +433,16 @@ def web_search_tool(
 
     max_results = max(1, min(max_results, 12))
     cache_key = (q, max_results, topic, search_depth)
+
+    if truncated:
+        _log_event(
+            {
+                "event": "query_truncated",
+                "original_len": len(raw_q),
+                "clamped_len": len(q),
+                "sample": raw_q[:200],
+            }
+        )
 
     cached = _cache_get(cache_key)
     if cached is not None:
