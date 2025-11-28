@@ -2,7 +2,7 @@
 
 This module centralizes all logic for:
 - Normalizing raw citation objects from tools or memory.
-- Extracting citations from cycles and tool_events.
+- Extracting citations from cycles, tool_events, and memory stores.
 - Merging, deduplicating, and trimming citation lists.
 - Building human readable bibliographies for reports.
 
@@ -28,6 +28,12 @@ Typical usage patterns:
     from .citation_utils import build_bibliography_markdown
 
     bib_md = build_bibliography_markdown(all_citations, max_items=50)
+
+3. From MemoryStore centric reporting:
+
+    from .citation_utils import extract_citations_from_memory_store
+
+    cites = extract_citations_from_memory_store(memory_store, goal="longevity")
 
 All public functions are safe to call with None or unexpected types.
 """
@@ -81,7 +87,7 @@ def _normalize_author_list(value: Any) -> Optional[str]:
         - List of dicts with "name" or "full_name".
         - Comma separated string.
 
-    Returns "Last, F.; Last2, F2." style short string if possible.
+    Returns a compact author string, truncated if extremely long.
     """
     if value is None:
         return None
@@ -91,7 +97,6 @@ def _normalize_author_list(value: Any) -> Optional[str]:
         text = value.strip()
         if not text:
             return None
-        # Limit length to avoid huge blobs
         if len(text) > 300:
             text = text[:297] + "..."
         return text
@@ -116,7 +121,6 @@ def _normalize_author_list(value: Any) -> Optional[str]:
     if not names:
         return None
 
-    # Compact formatting, truncate if too long
     joined = "; ".join(names)
     if len(joined) > 300:
         joined = joined[:297] + "..."
@@ -157,7 +161,6 @@ def _normalize_doi(meta: Dict[str, Any]) -> Optional[str]:
         s = _safe_str(cand)
         if not s:
             continue
-        # Heuristic detection of DOI pattern
         if "10." in s:
             return s
     return None
@@ -199,7 +202,6 @@ def _normalize_title(meta: Dict[str, Any]) -> Optional[str]:
     for cand in candidates:
         s = _safe_str(cand)
         if s:
-            # Small trim for extreme length
             if len(s) > 400:
                 s = s[:397] + "..."
             return s
@@ -275,11 +277,11 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
             "url": str | None,
             "doi": str | None,
             "authors": str | None,
-            "venue": str | None,   # journal, conference, or site name
+            "venue": str | None,
             "year": str | None,
             "snippet": str | None,
             "score": float | None,
-            "raw": dict            # original dict (as best effort)
+            "raw": dict            # original dict (best effort)
         }
     """
     if not isinstance(raw, dict):
@@ -290,7 +292,6 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
     for nested_key in ("metadata", "raw", "extra", "info", "paper"):
         nested = meta.get(nested_key)
         if isinstance(nested, dict):
-            # Do not overwrite existing keys
             for k, v in nested.items():
                 meta.setdefault(k, v)
 
@@ -308,9 +309,8 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
     snippet = _normalize_snippet(meta)
     score = _normalize_score(meta)
 
-    # If we still have nothing meaningful, drop it
+    # If we still have nothing meaningful, drop it unless there is at least URL or DOI
     if not any([title, url, doi, snippet]):
-        # Keep minimal objects for traceability if they actually had a URL
         if url or doi:
             return {
                 "source": source,
@@ -356,7 +356,7 @@ def normalize_citation_list(
 
 
 # ---------------------------------------------------------------------------
-# Extraction from cycles and tool events
+# Extraction from cycles, tool events, and memory store
 # ---------------------------------------------------------------------------
 
 
@@ -367,7 +367,7 @@ def extract_citations_from_tool_events(
     """Extract citations from generic tool_events.
 
     This is intentionally forgiving and tries a few patterns that are common in
-    autonomous agents:
+    autonomous agents, for example:
 
         event = {
             "tool": "tavily_search",
@@ -386,6 +386,13 @@ def extract_citations_from_tool_events(
             }
         }
 
+        event = {
+            "tool": "file_reader",
+            "payload": {
+                "documents": [...]
+            }
+        }
+
     The function walks common containers and normalizes each candidate.
     """
     if not tool_events:
@@ -400,26 +407,41 @@ def extract_citations_from_tool_events(
         tool_name = _safe_str(ev.get("tool") or ev.get("name") or ev.get("kind"))
         # Guess a default source from tool name
         if tool_name:
-            if "pubmed" in tool_name.lower():
+            lname = tool_name.lower()
+            if "pubmed" in lname:
                 local_source = "pubmed"
-            elif "semantic" in tool_name.lower():
+            elif "semantic" in lname:
                 local_source = "semantic_scholar"
-            elif "tavily" in tool_name.lower():
+            elif "tavily" in lname:
                 local_source = "tavily"
-            elif "file" in tool_name.lower() or "pdf" in tool_name.lower():
+            elif "file" in lname or "pdf" in lname:
                 local_source = "file"
             else:
                 local_source = default_source
         else:
             local_source = default_source
 
-        # Inspect common containers
+        # First, if event already has a "citations" field, trust that
+        if isinstance(ev.get("citations"), (list, tuple)):
+            collected.extend(
+                normalize_citation_list(ev.get("citations"), default_source=local_source)
+            )
+
         candidate_containers: List[Any] = []
-        for key in ("results", "papers", "items", "data", "documents", "hits"):
+
+        # Direct containers
+        for key in ("results", "papers", "items", "data", "documents", "hits", "output", "response"):
             if key in ev:
                 candidate_containers.append(ev[key])
 
-        # In some tools the result list is directly in "data" or similar
+        # Some tools tuck everything inside "payload"
+        payload = ev.get("payload")
+        if isinstance(payload, dict):
+            for key in ("results", "papers", "items", "data", "documents", "hits", "output", "response"):
+                if key in payload:
+                    candidate_containers.append(payload[key])
+
+        # In some tools the result list is directly in "data" as nested lists
         for container in candidate_containers:
             if isinstance(container, dict):
                 # Maybe deeper nested list
@@ -477,6 +499,70 @@ def extract_citations_from_cycles(
     return all_cites
 
 
+def extract_citations_from_memory_store(
+    memory_store: Any,
+    *,
+    goal: Optional[str] = None,
+    run_id: Optional[str] = None,
+    limit: int = 1000,
+    default_source: str = "web",
+) -> List[Dict[str, Any]]:
+    """High level helper to pull citations directly from a MemoryStore-like object.
+
+    It is defensive and works with:
+        - memory_store.get_citations(goal=...)
+        - memory_store.get_all_citations()
+
+    Args:
+        memory_store: Memory store instance (or compatible object).
+        goal: Optional goal filter if supported by get_citations.
+        run_id: Optional run filter (applied after retrieval if present).
+        limit: Maximum number of citations after normalization and dedup.
+        default_source: Fallback source label.
+
+    Returns:
+        A normalized, deduplicated list of citation dicts.
+    """
+    try:
+        base: List[Dict[str, Any]] = []
+
+        if hasattr(memory_store, "get_citations"):
+            # MemoryStore.get_citations(goal=None) returns all citations
+            if goal is not None:
+                raw = memory_store.get_citations(goal=goal)
+            else:
+                raw = memory_store.get_citations(goal=None)
+            if isinstance(raw, list):
+                base = raw
+        elif hasattr(memory_store, "get_all_citations"):
+            raw = memory_store.get_all_citations()
+            if isinstance(raw, list):
+                base = raw
+        else:
+            return []
+
+        # Optional run_id filter
+        if run_id is not None:
+            base = [c for c in base if isinstance(c, dict) and c.get("run_id") == run_id]
+
+        norm = normalize_citation_list(base, default_source=default_source)
+
+        # Dedup and trim
+        seen = set()
+        unique: List[Dict[str, Any]] = []
+        for c in norm:
+            key = _citation_key(c)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(c)
+            if len(unique) >= limit:
+                break
+        return unique
+    except Exception:
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Merging, deduplication, and limiting
 # ---------------------------------------------------------------------------
@@ -529,8 +615,8 @@ def format_citation_markdown(c: Dict[str, Any]) -> str:
 
     Example:
 
-        **[pubmed]** Title of the paper (Smith et al., 2023)  
-           https://...
+        **[pubmed]** Title of the paper (Smith et al., 2023)
+           - https://...
 
     If there is no url, only the text part is returned.
     """
@@ -601,7 +687,7 @@ def build_bibliography_markdown(
 
 
 # ---------------------------------------------------------------------------
-# Cycle attachment helpers
+# Cycle and memory_store attachment helpers
 # ---------------------------------------------------------------------------
 
 
@@ -626,10 +712,21 @@ def attach_citations_to_memory_store(
     citations: Iterable[Dict[str, Any]],
     max_items: int = 200,
 ) -> None:
-    """Optional helper if the memory_store exposes cycle mutation.
+    """Attach citations to a cycle and optionally persist them in a MemoryStore.
 
-    This function is defensive: if memory_store does not support the
-    relevant methods, it simply does nothing instead of raising.
+    Behavior:
+        - If memory_store exposes get_cycle_history, the target cycle is
+          selected by index (or the last one if index is missing).
+        - Citations are merged into that cycle in memory.
+        - If memory_store exposes update_cycle(idx, cycle) or
+          save_cycle_history(history), those are used to persist the
+          updated cycle list.
+        - If memory_store exposes add_citation(...), normalized citations
+          are also written into the top level citation log using the
+          cycle goal/domain/run metadata where available.
+
+    This function is fully defensive: if anything is missing or unexpected,
+    it simply returns without raising.
     """
     try:
         if not hasattr(memory_store, "get_cycle_history"):
@@ -639,19 +736,53 @@ def attach_citations_to_memory_store(
             return
 
         if cycle_index is None or cycle_index < 0 or cycle_index >= len(history):
-            # Default to last cycle if index is missing
             idx = len(history) - 1
         else:
             idx = cycle_index
 
         cycle = history[idx]
+        if not isinstance(cycle, dict):
+            return
+
+        # Merge into the in memory cycle object
         attach_citations_to_cycle(cycle, citations, max_items=max_items)
 
-        # Persist back if supported
+        # Persist back to the memory store if it supports cycle mutation
         if hasattr(memory_store, "update_cycle"):
             memory_store.update_cycle(idx, cycle)
         elif hasattr(memory_store, "save_cycle_history"):
             memory_store.save_cycle_history(history)
+
+        # If the store has add_citation, also record normalized citations
+        if hasattr(memory_store, "add_citation"):
+            goal = cycle.get("goal") or "global"
+            run_id = cycle.get("run_id")
+            domain = cycle.get("domain")
+            role = cycle.get("role")
+            try:
+                cyc_idx_num = int(cycle.get("cycle")) if "cycle" in cycle else None
+            except Exception:
+                cyc_idx_num = None
+
+            # Use the merged list attached to the cycle to avoid divergence
+            merged = cycle.get("citations") or []
+            norm_merged = normalize_citation_list(merged)
+
+            for c in norm_merged:
+                try:
+                    memory_store.add_citation(
+                        goal=goal,
+                        citation=c,
+                        run_id=run_id,
+                        role=role,
+                        domain=domain,
+                        cycle_index=cyc_idx_num,
+                        tool_name=_safe_str(c.get("source")) or None,
+                        extra=None,
+                    )
+                except Exception:
+                    # Never let a single bad citation break the run
+                    continue
     except Exception:
         # Fail silent. Reporting code will still work with whatever is present.
         return
