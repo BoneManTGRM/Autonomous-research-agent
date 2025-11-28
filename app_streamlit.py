@@ -54,9 +54,14 @@ import streamlit as st
 import yaml
 
 # Ensure repository root is on sys.path so imports work on Render and local
-ROOT_DIR = Path(__file__).resolve().parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+# This is robust whether this file lives in repo root or in a subfolder (e.g. app/)
+_THIS_FILE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = _THIS_FILE_DIR
+if not (REPO_ROOT / "agent").is_dir() and (_THIS_FILE_DIR.parent / "agent").is_dir():
+    REPO_ROOT = _THIS_FILE_DIR.parent
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 # Prefer package style imports, fall back to flat layout if needed
 try:
@@ -181,7 +186,8 @@ except ImportError:
         TOOL_REGISTRY = {}  # type: ignore[assignment]
 
 
-CONFIG_PATH_DEFAULT = "config/settings.yaml"
+# Use absolute path for default config relative to repo root
+CONFIG_PATH_DEFAULT = str(REPO_ROOT / "config" / "settings.yaml")
 
 # Rough estimate for how many cycles you expect per hour in continuous mode.
 # This is now used to derive a safe local cycle budget for 1h / 8h / 24h runs
@@ -404,7 +410,7 @@ def role_specific_goal(base_goal: str, role: str) -> str:
     archetype = role.split("_", 1)[0] if "_" in role else role
 
     if archetype == "researcher":
-        return (
+        return(
             f"Primary deep research agent for goal: {base_goal}.\n"
             "Focus on high quality sources, detailed notes, and clear summaries."
         )
