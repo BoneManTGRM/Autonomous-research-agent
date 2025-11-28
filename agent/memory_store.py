@@ -752,11 +752,68 @@ class MemoryStore:
         tool_name: Optional[str] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Add a structured citation object."""
+        """Add a structured citation object.
+
+        This function is tolerant to multiple citation shapes, including:
+            - older browser style: {title, snippet, url, source}
+            - Tavily style: {provider, source, title, url, content, raw_content, ...}
+            - minimal shapes where only url or content is present
+
+        It normalizes the citation for storage and for vector memory.
+        """
+        # Ensure we have a dict
+        if not isinstance(citation, dict):
+            citation = {"raw": str(citation)}
+
+        # Shallow copy to avoid mutating caller state
+        c = dict(citation)
+
+        # Provider/source normalization
+        provider = c.get("provider")
+        source = c.get("source") or provider or "web"
+
+        # Title normalization
+        title_val = c.get("title")
+        if isinstance(title_val, str):
+            title = title_val.strip()
+        else:
+            title = ""
+
+        # URL normalization
+        url_val = c.get("url")
+        url = str(url_val).strip() if isinstance(url_val, str) else ""
+
+        # Content or snippet normalization
+        snippet = ""
+        # Prefer explicit snippet if present
+        if isinstance(c.get("snippet"), str) and c["snippet"].strip():
+            snippet = c["snippet"].strip()
+        else:
+            # Fallback sequence for Tavily and other providers
+            for key in ("content", "text", "raw_content", "body"):
+                val = c.get(key)
+                if isinstance(val, str) and val.strip():
+                    snippet = val.strip()
+                    break
+
+        # Store normalized fields back into the citation dict
+        c["source"] = source
+        if title:
+            c["title"] = title
+        elif url:
+            c["title"] = url
+        else:
+            c.setdefault("title", source)
+
+        if url:
+            c["url"] = url
+        if snippet:
+            c["snippet"] = snippet
+
         entry: Dict[str, Any] = {
             "timestamp": _utc_now_iso(),
             "goal": goal,
-            "citation": citation,
+            "citation": c,
         }
         if run_id is not None:
             entry["run_id"] = run_id
@@ -783,16 +840,17 @@ class MemoryStore:
         if self.vector_memory is not None:
             try:
                 text_parts = [
-                    str(citation.get("title", "")),
-                    str(citation.get("snippet", "")),
-                    str(citation.get("url", "")),
+                    str(c.get("title", "")),
+                    str(c.get("snippet", "")),
+                    str(c.get("content", "")),
+                    str(c.get("url", "")),
                 ]
                 text = " ".join([p for p in text_parts if p])
                 meta: Dict[str, Any] = {
                     "goal": goal,
                     "type": "citation",
-                    "source": citation.get("source", "web"),
-                    "url": citation.get("url", ""),
+                    "source": c.get("source", "web"),
+                    "url": c.get("url", ""),
                 }
                 if run_id is not None:
                     meta["run_id"] = run_id
