@@ -46,6 +46,13 @@ Typical usage (optional)
 
     # For full run summaries:
     run_view = msil.summarise_run(goal="anti aging longevity master run")
+
+You can also use the light wrapper:
+
+    from agent.msil import analyze_run
+    profile = analyze_run(history, goal="longevity")
+
+which does not require a full MemoryStore instance.
 """
 
 from __future__ import annotations
@@ -94,7 +101,10 @@ except Exception:  # pragma: no cover
             return 0.0
         if len(values) < 2:
             return 0.0
-        return max(0.0, min(1.0, (values[-1] - values[0]) / max(1e-6, abs(values[0]) + 1e-6)))
+        return max(
+            0.0,
+            min(1.0, (values[-1] - values[0]) / max(1e-6, abs(values[0]) + 1e-6)),
+        )
 
     def regression_rye_slope(values: List[float]) -> float:
         n = len(values)
@@ -303,10 +313,18 @@ class MetaSkillIntelligenceLayer:
         self.window: int = int(self.config.get("msil_window", 200))
         self.long_window: int = int(self.config.get("msil_long_window", 1000))
         self.min_cycles: int = int(self.config.get("msil_min_cycles", 20))
-        self.breakthrough_high: float = float(self.config.get("msil_breakthrough_high", 0.8))
-        self.breakthrough_mid: float = float(self.config.get("msil_breakthrough_mid", 0.6))
-        self.use_replay_density: bool = bool(self.config.get("msil_use_replay_density", True))
-        self.frontier_threshold: float = float(self.config.get("msil_frontier_threshold", 0.9))
+        self.breakthrough_high: float = float(
+            self.config.get("msil_breakthrough_high", 0.8)
+        )
+        self.breakthrough_mid: float = float(
+            self.config.get("msil_breakthrough_mid", 0.6)
+        )
+        self.use_replay_density: bool = bool(
+            self.config.get("msil_use_replay_density", True)
+        )
+        self.frontier_threshold: float = float(
+            self.config.get("msil_frontier_threshold", 0.9)
+        )
 
     # ------------------------------------------------------------------
     # Public entry points
@@ -324,7 +342,7 @@ class MetaSkillIntelligenceLayer:
         history = self._get_history_for_goal(goal, limit=self.long_window)
         total_cycles = len(history)
 
-        # If MemoryStore has not yet recorded this cycle, prepend it
+        # If MemoryStore has not yet recorded this cycle, append it
         if not history or history[-1].get("cycle") != cycle_log.get("cycle"):
             history.append(cycle_log)
             total_cycles = len(history)
@@ -340,7 +358,12 @@ class MetaSkillIntelligenceLayer:
         max_rye_goal: Optional[float] = None
         try:
             if hasattr(self.memory_store, "get_rye_stats"):
-                avg_rye_goal, min_rye_goal, max_rye_goal, _count = self.memory_store.get_rye_stats(  # type: ignore[attr-defined]
+                (
+                    avg_rye_goal,
+                    min_rye_goal,
+                    max_rye_goal,
+                    _count,
+                ) = self.memory_store.get_rye_stats(  # type: ignore[attr-defined]
                     goal=goal
                 )
         except Exception:
@@ -368,7 +391,9 @@ class MetaSkillIntelligenceLayer:
             "replay_stats": replay_stats,
             "last_cycle_index": cycle_log.get("cycle"),
             "last_cycle_rye": cycle_log.get("RYE"),
-            "last_cycle_breakthrough_score": (cycle_log.get("breakthrough") or {}).get("breakthrough_score"),
+            "last_cycle_breakthrough_score": (
+                cycle_log.get("breakthrough") or {}
+            ).get("breakthrough_score"),
         }
 
         snapshot = MSILSnapshot(
@@ -391,26 +416,16 @@ class MetaSkillIntelligenceLayer:
         run_id: Optional[str] = None,
         limit: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Produce a full MSIL view for a goal or run id.
-
-        Args:
-            goal:
-                If provided, restrict to cycles for this goal.
-            run_id:
-                Optional run identifier if MemoryStore tracks runs.
-            limit:
-                Optional limit on number of cycles inspected.
-
-        Returns:
-            Dict with high level run diagnostics and MSIL metrics.
-        """
+        """Produce a full MSIL view for a goal or run id."""
         if not self.enabled:
             return {
                 "enabled": False,
                 "reason": "msil_enabled is False in config",
             }
 
-        history = self._get_history(goal=goal, run_id=run_id, limit=limit or self.long_window)
+        history = self._get_history(
+            goal=goal, run_id=run_id, limit=limit or self.long_window
+        )
         if not history:
             return {
                 "enabled": True,
@@ -449,7 +464,9 @@ class MetaSkillIntelligenceLayer:
         """Get cycle history for a single goal with soft fallbacks."""
         try:
             if hasattr(self.memory_store, "get_cycle_history_for_goal"):
-                rows = self.memory_store.get_cycle_history_for_goal(goal, limit=limit)  # type: ignore[attr-defined]
+                rows = self.memory_store.get_cycle_history_for_goal(  # type: ignore[attr-defined]
+                    goal, limit=limit
+                )
                 if isinstance(rows, list):
                     return rows
         except Exception:
@@ -519,7 +536,9 @@ class MetaSkillIntelligenceLayer:
         }
         try:
             if hasattr(self.memory_store, "get_replay_items_for_goal"):
-                items = self.memory_store.get_replay_items_for_goal(goal)  # type: ignore[attr-defined]
+                items = self.memory_store.get_replay_items_for_goal(  # type: ignore[attr-defined]
+                    goal
+                )
             else:
                 return stats
         except Exception:
@@ -557,7 +576,9 @@ class MetaSkillIntelligenceLayer:
     # ------------------------------------------------------------------
     # Skill and domain scoring
     # ------------------------------------------------------------------
-    def _compute_skill_dimensions(self, history: List[Dict[str, Any]]) -> SkillDimensionScores:
+    def _compute_skill_dimensions(
+        self, history: List[Dict[str, Any]]
+    ) -> SkillDimensionScores:
         """Compute core skill dimensions from cycle history."""
         if not history:
             return SkillDimensionScores()
@@ -613,9 +634,15 @@ class MetaSkillIntelligenceLayer:
             # Domain issue flags (longevity and math specific)
             dom_flags_before = row.get("domain_issue_flags_before") or {}
             dom_flags_after = row.get("domain_issue_flags_after") or {}
-            if any(dom_flags_before.get(k) or dom_flags_after.get(k) for k in ["missing_biomarkers", "missing_mechanisms"]):
+            if any(
+                dom_flags_before.get(k) or dom_flags_after.get(k)
+                for k in ["missing_biomarkers", "missing_mechanisms"]
+            ):
                 longevity_issue_cycles += 1
-            if any(dom_flags_before.get(k) or dom_flags_after.get(k) for k in ["missing_formalism", "missing_connections"]):
+            if any(
+                dom_flags_before.get(k) or dom_flags_after.get(k)
+                for k in ["missing_formalism", "missing_connections"]
+            ):
                 math_issue_cycles += 1
 
         # Reasoning: based on RYE level, trend slope, and stability
@@ -656,7 +683,9 @@ class MetaSkillIntelligenceLayer:
         avg_hyp = statistics.mean(hypothesis_counts) if hypothesis_counts else 0.0
         focused_cycles = sum(1 for h in hypothesis_counts if 1 <= h <= 5)
         focused_ratio = focused_cycles / max(1, len(hypothesis_counts))
-        avg_breakthrough = statistics.mean(breakthrough_vals) if breakthrough_vals else 0.0
+        avg_breakthrough = (
+            statistics.mean(breakthrough_vals) if breakthrough_vals else 0.0
+        )
 
         hypothesis_skill = 0.35 * min(1.0, avg_hyp / 10.0)
         hypothesis_skill += 0.35 * focused_ratio
@@ -695,19 +724,33 @@ class MetaSkillIntelligenceLayer:
         planning_skill += 0.2 * curriculum_balance
 
         # Stability and safety: equilibrium labels, oscillation, open questions and contradictions
-        stable_cycles = sum(1 for label in equilibrium_labels if label in {"high_equilibrium", "plateau_equilibrium"})
-        unstable_cycles = sum(1 for label in equilibrium_labels if label in {"oscillating", "low_efficiency"})
+        stable_cycles = sum(
+            1
+            for label in equilibrium_labels
+            if label in {"high_equilibrium", "plateau_equilibrium"}
+        )
+        unstable_cycles = sum(
+            1
+            for label in equilibrium_labels
+            if label in {"oscillating", "low_efficiency"}
+        )
         total = max(1, len(equilibrium_labels))
         stability_fraction = stable_cycles / total
         instability_fraction = unstable_cycles / total
         avg_osc = statistics.mean(oscillation_scores) if oscillation_scores else 0.0
 
-        avg_open_questions = statistics.mean(open_questions_counts) if open_questions_counts else 0.0
+        avg_open_questions = (
+            statistics.mean(open_questions_counts) if open_questions_counts else 0.0
+        )
         avg_todos = statistics.mean(todo_counts) if todo_counts else 0.0
-        avg_contradictions = statistics.mean(contradictions_counts) if contradictions_counts else 0.0
+        avg_contradictions = (
+            statistics.mean(contradictions_counts) if contradictions_counts else 0.0
+        )
 
         # Penalize if contradictions never drop
-        unresolved_pressure = min(1.0, (avg_open_questions + avg_todos + avg_contradictions) / 10.0)
+        unresolved_pressure = min(
+            1.0, (avg_open_questions + avg_todos + avg_contradictions) / 10.0
+        )
         longevity_penalty = 0.0
         math_penalty = 0.0
 
@@ -733,7 +776,9 @@ class MetaSkillIntelligenceLayer:
             stability_and_safety=stability_skill,
         )
 
-    def _compute_domain_profiles(self, history: List[Dict[str, Any]]) -> List[DomainProfile]:
+    def _compute_domain_profiles(
+        self, history: List[Dict[str, Any]]
+    ) -> List[DomainProfile]:
         """Compute per domain MSIL profiles."""
         if not history:
             return []
@@ -872,7 +917,9 @@ class MetaSkillIntelligenceLayer:
         if pubmed_calls_all:
             extra_diag["avg_pubmed_calls_per_cycle"] = statistics.mean(pubmed_calls_all)
         if semantic_calls_all:
-            extra_diag["avg_semantic_calls_per_cycle"] = statistics.mean(semantic_calls_all)
+            extra_diag[
+                "avg_semantic_calls_per_cycle"
+            ] = statistics.mean(semantic_calls_all)
         if tokens_all:
             extra_diag["avg_tokens_per_cycle"] = statistics.mean(tokens_all)
 
@@ -1013,7 +1060,9 @@ class MetaSkillIntelligenceLayer:
         recent_osc = [
             _safe_float(eq.get("oscillation_score"), default=0.0) for eq in recent_eq
         ]
-        recent_labels = [str(eq.get("equilibrium_label") or "unknown") for eq in recent_eq]
+        recent_labels = [
+            str(eq.get("equilibrium_label") or "unknown") for eq in recent_eq
+        ]
         osc_high = any(v >= 0.7 for v in recent_osc)
         oscillating_recent = any(lab == "oscillating" for lab in recent_labels)
 
@@ -1040,10 +1089,90 @@ class MetaSkillIntelligenceLayer:
             skills=SkillDimensionScores(),
             per_domain_profiles=[],
             actions={
-                "priority": ["MSIL is disabled in config. Set msil_enabled to True to activate."],
+                "priority": [
+                    "MSIL is disabled in config. Set msil_enabled to True to activate."
+                ],
                 "swarm_config": {},
                 "curriculum": {},
                 "monitoring": {},
             },
             extras={},
         )
+
+
+# ----------------------------------------------------------------------
+# Lightweight adapter so the UI can call analyze_run(history, ...)
+# without needing a real MemoryStore. This helps fix the
+# "MSIL module not detected or no MSIL profile available" state
+# when only cycle history is available in app_streamlit.
+# ----------------------------------------------------------------------
+
+
+class _HistoryBackedMemoryStore:
+    """Minimal MemoryStore like wrapper around an in memory history list.
+
+    It supports the subset of methods that MSIL expects and is only used
+    when callers have a plain history list instead of a real store.
+    """
+
+    def __init__(self, history: List[Dict[str, Any]]) -> None:
+        # Make a shallow copy to avoid accidental mutation from outside
+        self._history: List[Dict[str, Any]] = list(history or [])
+
+    def get_cycle_history_for_goal(
+        self, goal: str, limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        rows = [row for row in self._history if row.get("goal") == goal]
+        if limit is not None and len(rows) > limit:
+            rows = rows[-limit:]
+        return rows
+
+    def get_cycle_history(
+        self, limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        rows = list(self._history)
+        if limit is not None and len(rows) > limit:
+            rows = rows[-limit:]
+        return rows
+
+
+def analyze_run(
+    history: List[Dict[str, Any]],
+    goal: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Convenience helper for UIs.
+
+    Args:
+        history:
+            List of cycle logs, as usually returned by MemoryStore.
+        goal:
+            Optional goal filter. If None, uses the goal from the last cycle.
+        config:
+            Optional MSIL config dict.
+
+    Returns:
+        A summarise_run style dict with MSIL metrics.
+    """
+    if not history:
+        return {
+            "enabled": True,
+            "cycles": 0,
+            "msil_score": 0.0,
+            "intelligence_stage": "cold_start",
+            "skills": SkillDimensionScores().to_dict(),
+            "domain_profiles": [],
+            "diagnostics": {},
+            "run_stats": {},
+        }
+
+    if goal is None:
+        goal = str(history[-1].get("goal") or "unknown_goal")
+
+    store = _HistoryBackedMemoryStore(history)
+    msil = MetaSkillIntelligenceLayer(store, config=config or {})
+    return msil.summarise_run(goal=goal, limit=len(history))
+
+
+# Backward compatible alias in case some code calls analyze_history
+analyze_history = analyze_run
