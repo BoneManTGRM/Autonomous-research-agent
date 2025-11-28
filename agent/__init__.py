@@ -23,15 +23,29 @@ from __future__ import annotations
 import os
 from typing import Any, Callable, Dict, List, Optional, Type
 
-from .browser_tool import BrowserTool
-from .code_sandbox import CodeSandbox
-from .data_connectors import DataConnectors
+# Optional core tool classes.
+# These imports are all guarded so that missing dependencies never
+# break the entire agent at import time.
+try:
+    from .browser_tool import BrowserTool
+except Exception:
+    BrowserTool = None  # type: ignore[assignment]
+
+try:
+    from .code_sandbox import CodeSandbox
+except Exception:
+    CodeSandbox = None  # type: ignore[assignment]
+
+try:
+    from .data_connectors import DataConnectors
+except Exception:
+    DataConnectors = None  # type: ignore[assignment]
 
 # Optional EXTREME MODE web search bridge (Tavily + RYE metadata)
 try:
-    from .web_search import web_search_tool as extreme_web_search_tool  # type: ignore
+    from .web_search import web_search_tool as extreme_web_search_tool  # type: ignore[import]
 except Exception:
-    extreme_web_search_tool = None  # type: ignore
+    extreme_web_search_tool = None  # type: ignore[assignment]
 
 __all__ = [
     "BrowserTool",
@@ -52,14 +66,14 @@ __all__ = [
 #
 #   name -> {
 #       "kind": "browser" | "sandbox" | "data",
-#       "cls":  <class>,
+#       "cls":  <class> or None,
 #       "description": <str>,
 #       "tags": [<str>, ...],
 #       "enabled": <bool>,
 #       "fn": Optional[Callable],   # optional callable entry (e.g. web_search_tool)
 #   }
 #
-# The values are *descriptors*, not instantiated objects. CoreAgent or
+# The values are descriptors, not instantiated objects. CoreAgent or
 # any caller can use build_tool_instance(name, **kwargs) to create a
 # concrete tool object when needed.
 #
@@ -67,13 +81,12 @@ __all__ = [
 #   from agent.tools import TOOL_REGISTRY, build_tool_instance
 #   if "browser" in TOOL_REGISTRY:
 #       browser = build_tool_instance("browser")
-#       # And for unified web search:
-#       web_fn = TOOL_REGISTRY["web_search"].get("fn")
-#       if web_fn:
-#           res = web_fn(query="reparodynamics RYE TGRM")
+#   web_fn = TOOL_REGISTRY.get("web_search", {}).get("fn")
+#   if web_fn:
+#       res = web_fn(query="reparodynamics RYE TGRM")
 #
 # The Streamlit UI and engine_worker.detect_tools() mostly care about
-# the *names* (keys) existing, not the exact descriptor shape.
+# the names existing, not the exact descriptor shape.
 # -------------------------------------------------------------------
 
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {}
@@ -102,12 +115,12 @@ def _safe_register(
     Safely register a tool descriptor.
 
     - Never raises.
-    - Skips registration if cls is None or enabled is False.
-    - Optionally attaches a callable under 'fn' (for web search, etc).
+    - Skips registration if both cls and fn are None or enabled is False.
+    - Allows pure function tools (cls is None, fn is not None).
     """
     if not enabled:
         return
-    if cls is None:
+    if cls is None and fn is None:
         return
 
     try:
@@ -129,12 +142,12 @@ def _safe_register(
 # -------------------------------------------------------------------
 #
 # Environment flags:
-#   DISABLE_BROWSER_TOOLS=1  -> skip BrowserTool registration
-#   DISABLE_SANDBOX_TOOLS=1  -> skip CodeSandbox registration
-#   DISABLE_DATA_TOOLS=1     -> skip DataConnectors registration
+#   DISABLE_BROWSER_TOOLS=1  -> skip BrowserTool-style registrations
+#   DISABLE_SANDBOX_TOOLS=1  -> skip CodeSandbox registrations
+#   DISABLE_DATA_TOOLS=1     -> skip DataConnectors registrations
 # -------------------------------------------------------------------
 
-# Browser / web tools
+# Browser and web tools
 browser_enabled = not _env_flag("DISABLE_BROWSER_TOOLS", default=False)
 
 # Single unified callable for all web-style entries if EXTREME MODE is present
@@ -146,7 +159,7 @@ _safe_register(
     cls=BrowserTool if browser_enabled else None,
     description="HTTP web browsing and scraping helper (Playwright + requests).",
     tags=["web", "browser"],
-    fn=None,  # BrowserTool is a class; web_fn is for search
+    fn=None,  # BrowserTool is a class; web_fn is for unified search
 )
 
 # Aliases so detect_tools() and the UI can see web capability
@@ -187,6 +200,7 @@ _safe_register(
 
 # Sandbox tools
 sandbox_enabled = not _env_flag("DISABLE_SANDBOX_TOOLS", default=False)
+
 _safe_register(
     "sandbox",
     kind="sandbox",
@@ -219,7 +233,6 @@ _safe_register(
 # Data connectors
 data_enabled = not _env_flag("DISABLE_DATA_TOOLS", default=False)
 
-# Primary data tool
 _safe_register(
     "data_connectors",
     kind="data",
@@ -240,7 +253,6 @@ _safe_register(
     tags=["data", "alias"],
 )
 
-# More specific aliases (for UI/agent hints)
 _safe_register(
     "data_csv",
     kind="data",
@@ -256,7 +268,6 @@ _safe_register(
     tags=["data", "xlsx", "alias"],
 )
 
-
 # -------------------------------------------------------------------
 # Public helpers
 # -------------------------------------------------------------------
@@ -266,7 +277,7 @@ def get_tool_descriptor(name: str) -> Optional[Dict[str, Any]]:
 
     Descriptor fields:
         kind: str
-        cls:  type
+        cls:  type or None
         description: str
         tags: list[str]
         enabled: bool
