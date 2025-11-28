@@ -63,8 +63,11 @@ if not (REPO_ROOT / "agent").is_dir() and (_THIS_FILE_DIR.parent / "agent").is_d
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-# Prefer package style imports, fall back to flat layout if needed
+# -------------------------------------------------------------------
+# Imports: prefer package layout `agent.*`, guarded flat fallback
+# -------------------------------------------------------------------
 try:
+    # Package layout (recommended, what you have on Render)
     from agent.core_agent import CoreAgent
     from agent.memory_store import MemoryStore
     from agent.presets import PRESETS, get_preset, RUNTIME_PROFILES  # domain presets and runtime profiles
@@ -125,7 +128,13 @@ try:
     except Exception:  # pragma: no cover
         TOOL_REGISTRY = {}  # type: ignore[assignment]
 
-except ImportError:
+except ModuleNotFoundError as e:
+    # If the 'agent' package itself is missing, allow flat layout fallback.
+    # If something *inside* agent.* is missing, re-raise so we see the real error
+    # instead of masking it with a bogus `core_agent` import failure.
+    if "agent" not in str(e):
+        raise
+
     # Flat layout fallback: all modules live next to this file
     from core_agent import CoreAgent
     from memory_store import MemoryStore
