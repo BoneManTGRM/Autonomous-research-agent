@@ -723,6 +723,22 @@ def build_run_diagnostics(
     return diagnostics
 
 
+# Backwards-compatible alias for older code / MSIL imports
+def run_diagnostics(
+    history: List[Dict[str, Any]],
+    *,
+    domain: Optional[str] = None,
+    window: int = 10,
+) -> Dict[str, Any]:
+    """
+    Backwards compatible alias for build_run_diagnostics.
+
+    Some callers expect `run_diagnostics(...)` to exist either in a separate
+    module or here. This keeps MSIL and UI code simple.
+    """
+    return build_run_diagnostics(history, domain=domain, window=window)
+
+
 # ---------------------------------------------------------------------------
 # Tool RYE diagnostics (for MemoryStore.get_tool_stats hook)
 # ---------------------------------------------------------------------------
@@ -1379,6 +1395,28 @@ def build_option_c_signature(
         "early_failure_warning": fail,
         "run_tier": tier_info,
     }
+
+
+# Backwards-compatible alias for Option C
+def option_c_signature(
+    history: List[Dict[str, Any]],
+    *,
+    domain: Optional[str] = None,
+    hours_run_so_far: Optional[float] = None,
+    window: int = 10,
+) -> Dict[str, Any]:
+    """
+    Backwards compatible alias for build_option_c_signature.
+
+    Some offline analytics or MSIL probes may import `option_c_signature`
+    directly.
+    """
+    return build_option_c_signature(
+        history,
+        domain=domain,
+        hours_run_so_far=hours_run_so_far,
+        window=window,
+    )
 
 
 # ======================================================================
