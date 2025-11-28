@@ -19,3 +19,5 @@ scikit-learn
 faiss-cpu
 
 python-dateutil
+
+reportlab
