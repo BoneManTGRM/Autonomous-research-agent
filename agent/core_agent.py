@@ -337,7 +337,7 @@ class CoreAgent:
         # Prefer TOOL_REGISTRY (so Tavily + mail tools are visible),
         # and expose legacy Toolbelt under a namespaced key if present.
         if self.tool_registry:
-            self.tools = dict(self.tool_registry)
+            self.tools: Any = dict(self.tool_registry)
             if Toolbelt is not None:
                 try:
                     legacy_toolbelt = Toolbelt()
@@ -686,6 +686,26 @@ class CoreAgent:
         else:
             self.intelligence_profile = {}
         self._apply_intelligence_profile()
+
+    # ------------------------------------------------------------------
+    # Tools inspection helpers
+    # ------------------------------------------------------------------
+    def get_tool_registry(self) -> Dict[str, Any]:
+        """Return a shallow copy of the static TOOL_REGISTRY snapshot."""
+        return dict(self.tool_registry)
+
+    def get_tools_status(self) -> Dict[str, Any]:
+        """Return a compact view of tool layer status for UI panels."""
+        status: Dict[str, Any] = {
+            "has_registry": bool(self.tool_registry),
+            "registry_keys": list(self.tool_registry.keys()),
+            "has_legacy_toolbelt": bool(
+                isinstance(self.tools, dict) and "legacy_toolbelt" in self.tools
+            )
+            or isinstance(self.tools, Toolbelt) if Toolbelt is not None else False,
+            "tools_type": type(self.tools).__name__,
+        }
+        return status
 
     # ------------------------------------------------------------------
     # Source controls helpers
@@ -1616,9 +1636,11 @@ class CoreAgent:
                 pdf_bytes=effective_pdf_bytes,
                 biomarker_snapshot=biomarker_snapshot,
                 domain=domain,
-                msil_mode=self.msil_mode,               # type: ignore[arg-type]
-                msil_track_mode=self.msil_track_mode,   # type: ignore[arg-type]
-                rye_mode=self.rye_mode,                 # type: ignore[arg-type]
+                msil_mode=self.msil_mode,             # type: ignore[arg-type]
+                msil_track_mode=self.msil_track_mode, # type: ignore[arg-type]
+                rye_mode=self.rye_mode,               # type: ignore[arg-type]
+                run_id=run_id,
+                experiment_mode=experiment_mode,
             )
         except TypeError:
             # Backward compatibility
@@ -1714,6 +1736,8 @@ class CoreAgent:
                     msil_mode=self.msil_mode,
                     msil_track_mode=self.msil_track_mode,
                     rye_mode=self.rye_mode,
+                    run_id=run_id,
+                    experiment_mode=experiment_mode,
                 )
                 summary = result.get("summary", {})
                 if isinstance(summary, dict):
