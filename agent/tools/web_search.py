@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import time
+import inspect
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -140,7 +141,7 @@ def _compute_learning_context(
 
 
 # ---------------------------------------------------------------------
-# Logging + caching
+# Logging plus caching
 # ---------------------------------------------------------------------
 LOG_PATH = Path("logs/web_search_log.json")
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -376,38 +377,7 @@ def web_search_tool(
     learning_speed_factor: Optional[float] = None,
     burst_profile_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Perform a Tavily web search with extreme mode and learning aware intelligence.
-
-    Parameters
-    ----------
-    query:
-        Natural language search query.
-    max_results:
-        Upper bound on number of results to request from Tavily.
-    topic:
-        Tavily topic hint (general, news, finance, health, etc) but
-        also used as a domain key (general, longevity, math) for
-        learning aware defaults.
-    search_depth:
-        Tavily search depth ("basic" or "advanced").
-    time_range:
-        Optional Tavily time range string.
-    auto_parameters:
-        Let Tavily auto tune some parameters when True.
-    include_answer:
-        Request Tavily synthesized answer when True.
-    include_raw_content:
-        Include raw page content when available.
-    include_images:
-        Include Tavily image results when available.
-    learning_speed_factor:
-        Optional override from TGRM or swarm for 10x learning modes.
-        If None, topic defaults and environment multipliers apply.
-    burst_profile_hint:
-        Optional runtime profile hint, for example "light", "balanced",
-        or "aggressive". Stored for downstream analysis and UI but not
-        required by Tavily.
-    """
+    """Perform a Tavily web search with extreme mode and learning aware intelligence."""
     q = (query or "").strip()
     learning_ctx = _compute_learning_context(
         topic=topic,
@@ -440,18 +410,33 @@ def web_search_tool(
 
     start = time.time()
 
+    # Build kwargs only for parameters this version of TavilyClient.search supports.
     try:
-        raw = client.search(
-            query=q,
-            max_results=max_results,
-            topic=topic,
-            search_depth=search_depth,
-            time_range=time_range,
-            auto_parameters=auto_parameters,
-            include_answer=include_answer,
-            include_raw_content=include_raw_content,
-            include_images=include_images,
-        )
+        sig = inspect.signature(client.search)
+        allowed = sig.parameters.keys()
+    except Exception:
+        allowed = {"query", "max_results", "topic", "search_depth",
+                   "include_answer", "include_raw_content", "include_images"}
+
+    candidate_kwargs = {
+        "query": q,
+        "max_results": max_results,
+        "topic": topic,
+        "search_depth": search_depth,
+        "time_range": time_range,
+        "auto_parameters": auto_parameters,
+        "include_answer": include_answer,
+        "include_raw_content": include_raw_content,
+        "include_images": include_images,
+    }
+    call_kwargs = {
+        name: value
+        for name, value in candidate_kwargs.items()
+        if name in allowed and value is not None
+    }
+
+    try:
+        raw = client.search(**call_kwargs)
     except Exception as e:
         summary_base = _stub_summary(q, str(e))
         _cache_set(cache_key, summary_base)
