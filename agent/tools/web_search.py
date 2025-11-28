@@ -24,6 +24,13 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
+# Tavily API key wiring
+# ---------------------------------------------------------------------
+# Hard wired key with optional environment override.
+# If you set TAVILY_API_KEY in Render or locally, that will take precedence.
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY") or "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"
+
+# ---------------------------------------------------------------------
 # Try to import the Tavily client
 # ---------------------------------------------------------------------
 try:
@@ -181,16 +188,16 @@ def _get_tavily_client() -> Tuple[Optional[Any], Optional[str]]:
     if TavilyClient is None:
         return None, "tavily-python not installed."
 
-    api_key = os.getenv("TAVILY_API_KEY")
+    api_key = TAVILY_API_KEY
     if not api_key:
-        return None, "No TAVILY_API_KEY found in environment."
+        return None, "No Tavily API key configured."
 
     try:
         # First try the explicit api_key signature
         try:
             client = TavilyClient(api_key=api_key)
         except TypeError:
-            # Newer SDK reads from env only
+            # Some SDK versions only read from env
             os.environ["TAVILY_API_KEY"] = api_key
             client = TavilyClient()
         return client, None
