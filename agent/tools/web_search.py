@@ -26,9 +26,9 @@ from typing import Any, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------
 # Tavily API key wiring
 # ---------------------------------------------------------------------
-# Hard wired key with optional environment override.
-# If you set TAVILY_API_KEY in Render or locally, that will take precedence.
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY") or "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"
+# Single source of truth: TAVILY_API_KEY must be provided via environment
+# (Render env var, .env file, or set at runtime from Streamlit UI).
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 # Tavily has a hard 400 character query limit.
 # Use a safety margin so the swarm never triggers the error.
