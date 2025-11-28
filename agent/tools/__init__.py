@@ -153,6 +153,15 @@ _safe_register(
     description="Alias for BrowserTool (internet search).",
     tags=["web", "internet", "alias"],
 )
+# Explicit Tavily-style name so agents or LangChain-style configs
+# that look for "tavily_search" can still find a browser-capable tool.
+_safe_register(
+    "tavily_search",
+    kind="browser",
+    cls=BrowserTool if browser_enabled else None,
+    description="Tavily-powered web search via BrowserTool backend.",
+    tags=["web", "search", "tavily"],
+)
 
 # Sandbox tools
 sandbox_enabled = not _env_flag("DISABLE_SANDBOX_TOOLS", default=False)
