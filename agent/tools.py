@@ -59,11 +59,11 @@ try:
 except Exception:
     sqlalchemy = None  # type: ignore
 
-# Optional Tavily client for real web search
+# Use the EXTREME MODE web search tool if available
 try:
-    from tavily import TavilyClient  # type: ignore
+    from .web_search import web_search_tool as extreme_web_search_tool  # type: ignore
 except Exception:
-    TavilyClient = None  # type: ignore
+    extreme_web_search_tool = None  # type: ignore
 
 
 # ----------------------------------------------------------
@@ -211,7 +211,7 @@ class BrowserTool:
             {"op": "click", "selector": "#login"},
             {"op": "fill", "selector": "#email", "value": "user@example.com"},
             {"op": "fill", "selector": "#password", "value": "secret"},
-            {"op": "click", "selector": "button[type=submit]"},
+            {"op": "click", "selector": "button[type=submit"},
             {"op": "wait_for", "selector": "#dashboard", "timeout_ms": 10000},
         ]
     """
@@ -673,7 +673,9 @@ class CodeSandbox:
         stderr_buffer = _io.StringIO()
 
         try:
-            with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(stderr_buffer):
+            with contextlib.redirect_stdout(stdout_buffer), contextlib.redirect_stderr(
+                stderr_buffer
+            ):
                 exec(code, sandbox_globals, sandbox_locals)
             err = None
         except Exception:
@@ -1128,106 +1130,8 @@ class DataPipelines:
 
 
 # ----------------------------------------------------------
-# Tavily backed web search helper
+# EXTREME MODE web search bridge
 # ----------------------------------------------------------
-
-TAVILY_MAX_QUERY_LEN = 400  # hard limit enforced by Tavily API
-
-
-def _get_tavily_client() -> Optional["TavilyClient"]:
-    """
-    Return a TavilyClient instance if both the library and API key are available.
-    Otherwise return None so callers can fall back to browser scraping.
-    """
-    if TavilyClient is None:
-        return None
-    key = os.getenv("TAVILY_API_KEY") or ""
-    if not key:
-        return None
-    try:
-        return TavilyClient(api_key=key)  # type: ignore[call-arg]
-    except Exception:
-        return None
-
-
-def tavily_search(
-    query: str,
-    max_results: int = 8,
-    search_depth: str = "advanced",
-) -> Dict[str, Any]:
-    """
-    Perform a real Tavily search when possible.
-
-    Returns a dict that always has:
-        - provider: "tavily" or "browser_fallback"
-        - results: a list of {source, title, url, content, raw_html}
-        - error: optional error string
-        - meta: optional metadata (e.g. truncation info)
-    """
-    meta: Dict[str, Any] = {}
-    # Tavily has a hard 400 char query limit; avoid "query too long" errors
-    safe_query = query
-    if len(safe_query) > TAVILY_MAX_QUERY_LEN:
-        safe_query = safe_query[: TAVILY_MAX_QUERY_LEN]
-        meta["truncated_for_tavily"] = True
-        meta["original_length"] = len(query)
-        meta["used_length"] = len(safe_query)
-
-    client = _get_tavily_client()
-    if client is not None:
-        try:
-            # Tavily native result. We keep original payload for flexibility,
-            # but also normalize a minimal "results" list for citation utils.
-            raw = client.search(
-                query=safe_query,
-                max_results=max_results,
-                search_depth=search_depth,
-                include_raw_content=True,
-            )
-            norm_results: List[Dict[str, Any]] = []
-            for item in raw.get("results", []):
-                norm_results.append(
-                    {
-                        "source": item.get("source") or item.get("url") or "tavily",
-                        "title": item.get("title") or "",
-                        "url": item.get("url") or "",
-                        "content": item.get("content") or item.get("raw_content") or "",
-                        "raw_html": item.get("raw_content") or "",
-                    }
-                )
-            return {
-                "provider": "tavily",
-                "results": norm_results,
-                "raw": raw,
-                "error": None,
-                "meta": meta,
-            }
-        except Exception as e:
-            # Fall through to browser based stub below
-            fallback_error = f"Tavily error: {e}"
-    else:
-        fallback_error = "Tavily client or key not available"
-
-    # Browser based fallback stub. This keeps the system usable offline.
-    browser = BrowserTool()
-    # Simple meta search page so at least something comes back
-    url = f"https://duckduckgo.com/html/?q={safe_query}"
-    page = browser.fetch_page(url)
-
-    return {
-        "provider": "browser_fallback",
-        "results": [
-            {
-                "source": "duckduckgo",
-                "title": page.title or "",
-                "url": page.url or url,
-                "content": page.text_snippet or "",
-                "raw_html": page.html or "",
-            }
-        ],
-        "error": page.error or fallback_error,
-        "meta": meta,
-    }
 
 
 def web_search(
@@ -1236,17 +1140,55 @@ def web_search(
     tool_usage: Optional[ToolUsage] = None,
     max_results: int = 8,
     search_depth: str = "advanced",
+    topic: str = "general",
+    **extra: Any,
 ) -> Dict[str, Any]:
     """
     Unified web search entry point for the agent.
 
-    - If Tavily is installed and a key is set, use Tavily.
-    - Otherwise, fall back to a browser based stub search.
-    - Optionally records usage into a ToolUsage tracker.
+    This is a thin bridge into agent.web_search.web_search_tool (EXTREME MODE).
+    It also maintains the classic signature expected by CoreAgent / engine_worker.
+
+    - Records tool_usage.web_calls
+    - If EXTREME MODE module is missing, falls back to a browser stub.
     """
     if tool_usage is not None:
         tool_usage.record_web_call(query)
-    return tavily_search(query=query, max_results=max_results, search_depth=search_depth)
+
+    # If EXTREME MODE search is available, delegate
+    if extreme_web_search_tool is not None:
+        return extreme_web_search_tool(
+            query=query,
+            max_results=max_results,
+            topic=topic,
+            search_depth=search_depth,
+            **extra,
+        )
+
+    # Fallback: browser based stub search so the system keeps working
+    browser = BrowserTool()
+    url = f"https://duckduckgo.com/html/?q={query}"
+    page = browser.fetch_page(url)
+
+    return {
+        "query": query,
+        "stubbed": True,
+        "error": page.error or "EXTREME web_search module not available",
+        "results": [
+            {
+                "title": page.title or "",
+                "url": page.url or url,
+                "snippet": page.text_snippet or "",
+                "source": "browser_fallback",
+            }
+        ],
+        "response_time": None,
+        "request_id": None,
+        "info_gain": None,
+        "search_energy": None,
+        "difficulty": None,
+        "semantic_diversity": None,
+    }
 
 
 def web_search_tool(
@@ -1255,6 +1197,8 @@ def web_search_tool(
     tool_usage: Optional[ToolUsage] = None,
     max_results: int = 8,
     search_depth: str = "advanced",
+    topic: str = "general",
+    **extra: Any,
 ) -> Dict[str, Any]:
     """
     Thin wrapper used by tgrm_loop and other modules that expect a function
@@ -1265,6 +1209,8 @@ def web_search_tool(
         tool_usage=tool_usage,
         max_results=max_results,
         search_depth=search_depth,
+        topic=topic,
+        **extra,
     )
 
 
@@ -1313,14 +1259,6 @@ class Toolbelt:
 # TOOL_REGISTRY for engine_worker and capability detection
 # ----------------------------------------------------------
 
-# The engine worker imports TOOL_REGISTRY from agent.tools and checks
-# for keys like "web", "browser", "sandbox", "code_sandbox", etc.
-# We keep the values simple descriptors so other parts of the system
-# can introspect available tools if desired.
-#
-# Only the keys are required for detect_tools(); changing these names
-# would change capability detection, so they are chosen to match the
-# sets in engine_worker.detect_tools.
 
 TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     # Web / browser capabilities
@@ -1328,19 +1266,19 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "kind": "web",
         "class": BrowserTool,
         "description": "HTTP/HTML browser and scraper (Playwright plus requests fallback).",
-        # Optional callable entry so engines can call a unified search helper.
+        # Unified search helper (EXTREME MODE bridge)
         "fn": web_search_tool,
     },
     "web_search": {
         "kind": "web",
         "class": BrowserTool,
-        "description": "Alias for web/browser capability plus Tavily backed search when available.",
+        "description": "Alias for web/browser capability plus Tavily-backed EXTREME search when available.",
         "fn": web_search_tool,
     },
     "tavily_search": {
         "kind": "web",
         "class": BrowserTool,
-        "description": "Direct Tavily-backed web search with browser fallback.",
+        "description": "Alias for EXTREME Tavily-based web search with browser fallback.",
         "fn": web_search_tool,
     },
     "browser": {
