@@ -59,6 +59,12 @@ try:
 except Exception:
     sqlalchemy = None  # type: ignore
 
+# Optional Tavily client for real web search
+try:
+    from tavily import TavilyClient  # type: ignore
+except Exception:
+    TavilyClient = None  # type: ignore
+
 
 # ----------------------------------------------------------
 # Cost accounting structure for tools
@@ -926,7 +932,7 @@ class DataPipelines:
                 name=name,
                 rows=0,
                 cols=0,
-                preview=[],
+               preview=[],
                 error=str(e),
             )
 
@@ -1122,6 +1128,114 @@ class DataPipelines:
 
 
 # ----------------------------------------------------------
+# Tavily backed web search helper
+# ----------------------------------------------------------
+
+
+def _get_tavily_client() -> Optional["TavilyClient"]:
+    """
+    Return a TavilyClient instance if both the library and API key are available.
+    Otherwise return None so callers can fall back to browser scraping.
+    """
+    if TavilyClient is None:
+        return None
+    key = os.getenv("TAVILY_API_KEY") or ""
+    if not key:
+        return None
+    try:
+        return TavilyClient(api_key=key)  # type: ignore[call-arg]
+    except Exception:
+        return None
+
+
+def tavily_search(
+    query: str,
+    max_results: int = 8,
+    search_depth: str = "advanced",
+) -> Dict[str, Any]:
+    """
+    Perform a real Tavily search when possible.
+
+    Returns a dict that always has:
+        - provider: "tavily" or "browser_fallback"
+        - results: a list of {source, title, url, content, raw_html?}
+        - error: optional error string
+    """
+    client = _get_tavily_client()
+    if client is not None:
+        try:
+            # Tavily native result. We keep original payload for flexibility,
+            # but also normalize a minimal "results" list for citation utils.
+            raw = client.search(
+                query=query,
+                max_results=max_results,
+                search_depth=search_depth,
+                include_raw_content=True,
+            )
+            norm_results: List[Dict[str, Any]] = []
+            for item in raw.get("results", []):
+                norm_results.append(
+                    {
+                        "source": item.get("source") or item.get("url") or "tavily",
+                        "title": item.get("title") or "",
+                        "url": item.get("url") or "",
+                        "content": item.get("content") or item.get("raw_content") or "",
+                        "raw_html": item.get("raw_content") or "",
+                    }
+                )
+            return {
+                "provider": "tavily",
+                "results": norm_results,
+                "raw": raw,
+                "error": None,
+            }
+        except Exception as e:
+            # Fall through to browser based stub below
+            fallback_error = f"Tavily error: {e}"
+    else:
+        fallback_error = "Tavily client or key not available"
+
+    # Browser based fallback stub. This keeps the system usable offline.
+    browser = BrowserTool()
+    # Simple meta search page so at least something comes back
+    url = f"https://duckduckgo.com/html/?q={query}"
+    page = browser.fetch_page(url)
+
+    return {
+        "provider": "browser_fallback",
+        "results": [
+            {
+                "source": "duckduckgo",
+                "title": page.title or "",
+                "url": page.url or url,
+                "content": page.text_snippet or "",
+                "raw_html": page.html or "",
+            }
+        ],
+        "error": page.error or fallback_error,
+    }
+
+
+def web_search(
+    query: str,
+    *,
+    tool_usage: Optional[ToolUsage] = None,
+    max_results: int = 8,
+    search_depth: str = "advanced",
+) -> Dict[str, Any]:
+    """
+    Unified web search entry point for the agent.
+
+    - If Tavily is installed and a key is set, use Tavily.
+    - Otherwise, fall back to a browser based stub search.
+    - Optionally records usage into a ToolUsage tracker.
+    """
+    if tool_usage is not None:
+        tool_usage.record_web_call(query)
+    return tavily_search(query=query, max_results=max_results, search_depth=search_depth)
+
+
+# ----------------------------------------------------------
 # Toolbelt facade for CoreAgent
 # ----------------------------------------------------------
 
@@ -1134,6 +1248,8 @@ class Toolbelt:
 
         tool_usage = self.tools.new_usage_tracker()
 
+        search_res = web_search("NAD longevity review", tool_usage=tool_usage)
+        # or
         page = self.tools.browser.fetch_page(url)
         tool_usage.web_calls += 1
         tool_usage.add_tokens_for_text(page.text_snippet or "")
@@ -1169,7 +1285,7 @@ class Toolbelt:
 # We keep the values simple descriptors so other parts of the system
 # can introspect available tools if desired.
 #
-# Only the *keys* are required for detect_tools(); changing these names
+# Only the keys are required for detect_tools(); changing these names
 # would change capability detection, so they are chosen to match the
 # sets in engine_worker.detect_tools.
 
@@ -1178,12 +1294,15 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "web": {
         "kind": "web",
         "class": BrowserTool,
-        "description": "HTTP/HTML browser and scraper (Playwright + requests fallback).",
+        "description": "HTTP/HTML browser and scraper (Playwright plus requests fallback).",
+        # Optional callable entry so engines can call a unified search helper.
+        "fn": web_search,
     },
     "web_search": {
         "kind": "web",
         "class": BrowserTool,
-        "description": "Alias for web/browser capability.",
+        "description": "Alias for web/browser capability plus Tavily backed search when available.",
+        "fn": web_search,
     },
     "browser": {
         "kind": "web",
@@ -1200,7 +1319,7 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "sandbox": {
         "kind": "code",
         "class": CodeSandbox,
-        "description": "Python code sandbox (in-process + subprocess).",
+        "description": "Python code sandbox (in-process plus subprocess).",
     },
     "code_sandbox": {
         "kind": "code",
