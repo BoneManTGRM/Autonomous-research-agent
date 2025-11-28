@@ -21,6 +21,7 @@ Features:
 - Multi agent insight graph for roles, hypotheses, and discoveries
 - Report generation from full cycle history
 - Optional PDF report export (if reportlab is installed)
+- Optional MSIL meta skill intelligence view when msil module is available
 
 Reparodynamics:
     The UI is a front panel on a reparodynamic system:
@@ -108,6 +109,12 @@ try:
     except Exception:  # pragma: no cover
         _pruner_module = None  # type: ignore[assignment]
 
+    # Optional MSIL meta skill intelligence layer
+    try:  # type: ignore[import]
+        from agent import msil as _msil_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _msil_module = None  # type: ignore[assignment]
+
     # Optional tools registry (for web browser and sandbox status)
     try:
         from agent.tools import TOOL_REGISTRY  # type: ignore[import]
@@ -162,6 +169,12 @@ except ImportError:
         import memory_pruner as _pruner_module  # pragma: no cover
     except Exception:  # pragma: no cover
         _pruner_module = None  # type: ignore[assignment]
+
+    # Optional MSIL meta skill intelligence layer
+    try:  # type: ignore[import]
+        import msil as _msil_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _msil_module = None  # type: ignore[assignment]
 
     try:
         from tools import TOOL_REGISTRY  # type: ignore[import]
@@ -539,6 +552,30 @@ def compute_run_hours(history: List[Dict[str, Any]]) -> Optional[float]:
     end = max(timestamps)
     delta = end - start
     return max(delta.total_seconds() / 3600.0, 0.0)
+
+
+def compute_msil_profile(history: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Call optional MSIL layer if available to compute meta skill intelligence profile."""
+    if not history or _msil_module is None:
+        return None
+    try:
+        # Preferred simple function style
+        analyze_run = getattr(_msil_module, "analyze_run", None)
+        if callable(analyze_run):
+            return analyze_run(history=history, domain=None)
+
+        # Class based API
+        layer_cls = getattr(_msil_module, "MetaSkillIntelligenceLayer", None)
+        if layer_cls is None:
+            return None
+        layer = layer_cls()
+        if hasattr(layer, "analyze_run") and callable(getattr(layer, "analyze_run")):
+            return layer.analyze_run(history=history, domain=None)
+        if hasattr(layer, "analyze") and callable(getattr(layer, "analyze")):
+            return layer.analyze(history=history, domain=None)
+    except Exception:
+        return None
+    return None
 
 
 # -------------------------------------------------------------------
@@ -1628,6 +1665,9 @@ def main() -> None:
     if not history:
         st.write("No cycles yet.")
     else:
+        # Pre compute optional MSIL profile
+        msil_profile_full = compute_msil_profile(history)
+
         # Top level tabs
         tab_history, tab_citations, tab_discovery, tab_snapshots, tab_hypo, tab_memory, tab_verify, tab_graph = st.tabs(
             [
@@ -1744,6 +1784,36 @@ def main() -> None:
             with ls_cols[3]:
                 st.metric("Run tier", tier_label or "n/a")
 
+            # Optional MSIL meta intelligence view
+            st.markdown("### Meta skill intelligence (MSIL)")
+
+            if msil_profile_full:
+                msil_score = msil_profile_full.get("msil_score")
+                skills = msil_profile_full.get("skills") or msil_profile_full.get("dimensions") or {}
+                domains_profile = msil_profile_full.get("domains") or msil_profile_full.get("domain_profiles") or {}
+                dynamics = msil_profile_full.get("dynamics") or {}
+
+                msil_cols = st.columns(3)
+                with msil_cols[0]:
+                    if isinstance(msil_score, (int, float)):
+                        st.metric("MSIL score", f"{msil_score:.3f}")
+                    else:
+                        st.metric("MSIL score", "n/a")
+                with msil_cols[1]:
+                    st.metric("Skill dimensions", len(skills) if isinstance(skills, dict) else 0)
+                with msil_cols[2]:
+                    st.metric("Domain profiles", len(domains_profile) if isinstance(domains_profile, dict) else 0)
+
+                with st.expander("Skill breakdown"):
+                    st.json(skills)
+                with st.expander("Domain intelligence profile"):
+                    st.json(domains_profile)
+                if dynamics:
+                    with st.expander("Learning and stability dynamics"):
+                        st.json(dynamics)
+            else:
+                st.info("MSIL module not detected or no MSIL profile available. This panel stays optional and non blocking.")
+
             # New Option C style 10x learning dashboard
             st.markdown("#### 10x learning dashboard (Option C signals)")
 
@@ -1825,6 +1895,7 @@ def main() -> None:
                     "breakthrough_near_term": bp_short,
                     "breakthrough_90d": bp90,
                     "run_tier": tier_info,
+                    "msil_profile": msil_profile_full,
                 }
                 st.code(json.dumps(raw_signals, indent=2), language="json")
 
@@ -2322,6 +2393,7 @@ def main() -> None:
 
     history_for_reports = memory.get_cycle_history()
     hours_run_for_reports = compute_run_hours(history_for_reports) if history_for_reports else None
+    msil_profile_for_reports = compute_msil_profile(history_for_reports) if history_for_reports else None
 
     col_rep1, col_rep2, col_rep3 = st.columns(3)
 
@@ -2357,7 +2429,7 @@ def main() -> None:
                 domain=None,
                 hours_run_so_far=hours_run_for_reports,
                 swarm_stats=None,
-                intelligence_profile=None,
+                intelligence_profile=msil_profile_for_reports,
                 biomarker_snapshot=None,
             )
             st.markdown(option_md)
