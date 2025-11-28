@@ -166,10 +166,13 @@ except Exception:  # pragma: no cover
 
 
 # Optional Toolbelt / ToolUsage import to mirror CoreAgent behavior.
+# We also import the unified web_search helper so that even if tools_web
+# is missing, we can still run real Tavily backed search via tools.py.
 try:
-    from .tools import Toolbelt, ToolUsage  # type: ignore[attr-defined]
+    from .tools import Toolbelt, ToolUsage, web_search as core_web_search  # type: ignore[attr-defined]
 except Exception:  # pragma: no cover
     Toolbelt = None  # type: ignore[assignment]
+    core_web_search = None  # type: ignore[assignment]
 
     class ToolUsage:  # type: ignore[no-redef]
         """Minimal fallback usage tracker if tools.ToolUsage is unavailable."""
@@ -235,16 +238,81 @@ def compute_energy(
 
 
 class _NullWebTool:
-    """Fallback web research tool when tools_web or dependencies are missing."""
+    """Fallback web research tool.
+
+    Updated to use the same Tavily backed web_search helper defined in
+    tools.py when available, so that TGRM runs get real web results even
+    if tools_web.WebResearchTool is missing or disabled.
+    """
+
+    def __init__(self) -> None:
+        # core_web_search is injected from tools.py if the import succeeded.
+        # If it is None we fall back to an empty stub.
+        self._web_search_fn = core_web_search
 
     def search(self, query: str, **kwargs: Any) -> List[Dict[str, Any]]:
-        return []
+        """Return a list of result dicts using tools.web_search if possible."""
+        if self._web_search_fn is None:
+            return []
+
+        # Respect max_results if provided, otherwise default to 8.
+        max_results = kwargs.get("max_results")
+        if not isinstance(max_results, int) or max_results <= 0:
+            max_results = 8
+
+        try:
+            res = self._web_search_fn(
+                query=query,
+                tool_usage=None,
+                max_results=max_results,
+                search_depth="advanced",
+            )
+        except Exception:
+            return []
+
+        items: List[Dict[str, Any]] = []
+        for item in res.get("results", []):
+            items.append(
+                {
+                    "title": item.get("title") or "",
+                    "url": item.get("url") or "",
+                    "source": item.get("source") or res.get("provider") or "web",
+                    "content": item.get("content") or "",
+                    "raw_html": item.get("raw_html") or "",
+                }
+            )
+        return items
 
     def summarize_results(self, results: List[Dict[str, Any]]) -> str:
-        return "Web search disabled or unavailable for this run."
+        """Simple text summary of top web results for note logging."""
+        if not results:
+            # Preserve old behavior but clarify that search ran.
+            return "Web search returned no usable results for this cycle."
+
+        lines: List[str] = []
+        for idx, r in enumerate(results[:5], start=1):
+            title = (r.get("title") or "").strip() or "(no title)"
+            url = (r.get("url") or "").strip()
+            content = (r.get("content") or "").replace("\n", " ").strip()
+            snippet = content[:400]
+            if url:
+                lines.append(f"{idx}. {title} [{url}]\n   {snippet}")
+            else:
+                lines.append(f"{idx}. {title}\n   {snippet}")
+        return "\n".join(lines)
 
     def to_citations(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        return []
+        """Normalize search results into citation dicts."""
+        citations: List[Dict[str, Any]] = []
+        for r in results or []:
+            citations.append(
+                {
+                    "title": r.get("title") or "",
+                    "url": r.get("url") or "",
+                    "source": r.get("source") or "web",
+                }
+            )
+        return citations
 
 
 class _NullPaperTool:
@@ -335,6 +403,7 @@ class TGRMLoop:
             if WebResearchTool is not None:
                 self.web_tool = WebResearchTool()  # type: ignore[call-arg]
             else:
+                # Use the Tavily aware null tool which wraps tools.web_search.
                 self.web_tool = _NullWebTool()
         except Exception:
             self.web_tool = _NullWebTool()
