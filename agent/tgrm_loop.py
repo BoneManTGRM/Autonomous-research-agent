@@ -1506,7 +1506,12 @@ class TGRMLoop:
         maintenance_mode: bool = False,
         domain: Optional[str] = None,
         tool_usage: Optional[ToolUsage] = None,
-    ):
+    ) -> Tuple[
+        List[Dict[str, str]],
+        List[str],
+        List[Dict[str, Any]],
+        Dict[str, Any],
+    ]:
         """Apply repairs to address detected issues."""
         repair_actions: List[Dict[str, str]] = []
         notes_added: List[str] = []
