@@ -66,7 +66,7 @@ class WebSearchSummary:
     response_time: Optional[float] = None
     request_id: Optional[str] = None
 
-    # Extreme mode RYE/AGI signals
+    # Extreme mode RYE and AGI signals
     info_gain: Optional[float] = None
     search_energy: Optional[float] = None
     difficulty: Optional[float] = None
@@ -123,8 +123,10 @@ def _compute_learning_context(
     topic_key = (topic or "general").lower()
     base = LEARNING_TOPIC_DEFAULTS.get(topic_key, LEARNING_TOPIC_DEFAULTS["default"])
 
-    factor = override_factor if override_factor is not None else float(
-        base.get("learning_speed_factor", 1.0)
+    factor = (
+        override_factor
+        if override_factor is not None
+        else float(base.get("learning_speed_factor", 1.0))
     )
     burst = override_burst_profile or str(base.get("burst_profile_hint", "balanced"))
 
@@ -147,7 +149,7 @@ def _compute_learning_context(
 
 
 # ---------------------------------------------------------------------
-# Logging + caching
+# Logging and caching
 # ---------------------------------------------------------------------
 LOG_PATH = Path("logs/web_search_log.json")
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -206,7 +208,7 @@ def _get_tavily_client() -> Tuple[Optional[Any], Optional[str]]:
 
 
 # ---------------------------------------------------------------------
-# Extreme-mode analysis helpers
+# Extreme mode analysis helpers
 # ---------------------------------------------------------------------
 def _semantic_signature(text: str) -> str:
     """Stable hash used to compute redundancy and diversity."""
@@ -351,7 +353,9 @@ def _apply_learning_speed(
 
     if summary.info_gain is not None:
         if effective_energy > 0:
-            summary.info_gain_per_energy = round(summary.info_gain / effective_energy, 4)
+            summary.info_gain_per_energy = round(
+                summary.info_gain / effective_energy, 4
+            )
         else:
             summary.info_gain_per_energy = None
 
@@ -361,7 +365,7 @@ def _apply_learning_speed(
 
 
 # ---------------------------------------------------------------------
-# Caching
+# Caching helpers
 # ---------------------------------------------------------------------
 def _cache_get(key: Tuple[str, int, str, str]) -> Optional[WebSearchSummary]:
     ts = _CACHE_TIMESTAMPS.get(key)
@@ -408,7 +412,9 @@ def web_search_tool(
 
     if not q:
         summary_base = _stub_summary("", "Empty query.")
-        summary = _apply_learning_speed(_clone_summary(summary_base), eff_factor, eff_burst)
+        summary = _apply_learning_speed(
+            _clone_summary(summary_base), eff_factor, eff_burst
+        )
         _log_event({"event": "empty_query", "summary": asdict(summary)})
         return asdict(summary)
 
@@ -417,14 +423,18 @@ def web_search_tool(
 
     cached = _cache_get(cache_key)
     if cached is not None:
-        summary = _apply_learning_speed(_clone_summary(cached), eff_factor, eff_burst)
+        summary = _apply_learning_speed(
+            _clone_summary(cached), eff_factor, eff_burst
+        )
         return asdict(summary)
 
     client, err = _get_tavily_client()
     if client is None:
         summary_base = _stub_summary(q, err or "Client unavailable.")
         _cache_set(cache_key, summary_base)
-        summary = _apply_learning_speed(_clone_summary(summary_base), eff_factor, eff_burst)
+        summary = _apply_learning_speed(
+            _clone_summary(summary_base), eff_factor, eff_burst
+        )
         return asdict(summary)
 
     start = time.time()
@@ -449,7 +459,9 @@ def web_search_tool(
     except Exception as e:
         summary_base = _stub_summary(q, str(e))
         _cache_set(cache_key, summary_base)
-        summary = _apply_learning_speed(_clone_summary(summary_base), eff_factor, eff_burst)
+        summary = _apply_learning_speed(
+            _clone_summary(summary_base), eff_factor, eff_burst
+        )
         _log_event(
             {
                 "event": "web_search_error",
@@ -466,7 +478,9 @@ def web_search_tool(
 
     _cache_set(cache_key, summary_base)
 
-    summary = _apply_learning_speed(_clone_summary(summary_base), eff_factor, eff_burst)
+    summary = _apply_learning_speed(
+        _clone_summary(summary_base), eff_factor, eff_burst
+    )
 
     _log_event(
         {
