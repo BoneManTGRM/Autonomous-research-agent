@@ -932,7 +932,7 @@ class DataPipelines:
                 name=name,
                 rows=0,
                 cols=0,
-               preview=[],
+                preview=[],
                 error=str(e),
             )
 
@@ -1158,7 +1158,7 @@ def tavily_search(
 
     Returns a dict that always has:
         - provider: "tavily" or "browser_fallback"
-        - results: a list of {source, title, url, content, raw_html?}
+        - results: a list of {source, title, url, content, raw_html}
         - error: optional error string
     """
     client = _get_tavily_client()
@@ -1235,6 +1235,25 @@ def web_search(
     return tavily_search(query=query, max_results=max_results, search_depth=search_depth)
 
 
+def web_search_tool(
+    query: str,
+    *,
+    tool_usage: Optional[ToolUsage] = None,
+    max_results: int = 8,
+    search_depth: str = "advanced",
+) -> Dict[str, Any]:
+    """
+    Thin wrapper used by tgrm_loop and other modules that expect a function
+    named web_search_tool. Delegates to web_search with the same signature.
+    """
+    return web_search(
+        query=query,
+        tool_usage=tool_usage,
+        max_results=max_results,
+        search_depth=search_depth,
+    )
+
+
 # ----------------------------------------------------------
 # Toolbelt facade for CoreAgent
 # ----------------------------------------------------------
@@ -1296,13 +1315,13 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "class": BrowserTool,
         "description": "HTTP/HTML browser and scraper (Playwright plus requests fallback).",
         # Optional callable entry so engines can call a unified search helper.
-        "fn": web_search,
+        "fn": web_search_tool,
     },
     "web_search": {
         "kind": "web",
         "class": BrowserTool,
         "description": "Alias for web/browser capability plus Tavily backed search when available.",
-        "fn": web_search,
+        "fn": web_search_tool,
     },
     "browser": {
         "kind": "web",
