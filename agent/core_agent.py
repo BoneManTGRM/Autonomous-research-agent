@@ -234,10 +234,16 @@ except Exception:
     DiscoveryEngine = None  # type: ignore
 
 # Optional advanced controllers and kernels
+# MSIL: support both msil_controller.py and msil.py (MetaSkillIntelligenceLayer)
 try:
+    # Preferred controller wrapper if it exists
     from .msil_controller import MSILController  # type: ignore[attr-defined]
 except Exception:
-    MSILController = None  # type: ignore
+    try:
+        # Backward compatible: use MetaSkillIntelligenceLayer from msil.py
+        from .msil import MetaSkillIntelligenceLayer as MSILController  # type: ignore[attr-defined]
+    except Exception:
+        MSILController = None  # type: ignore
 
 try:
     from .stability_kernel import StabilityKernel  # type: ignore[attr-defined]
@@ -369,11 +375,25 @@ class CoreAgent:
         if self.msil_track_mode not in {"single", "dual"}:
             self.msil_track_mode = "single"
 
+        # Flexible MSIL initialization: supports both MSILController and MetaSkillIntelligenceLayer
         if MSILController is not None:
+            msil_instance: Optional[Any] = None
             try:
-                self.msil_controller = MSILController(config=self.config)
+                # Preferred simple signature
+                msil_instance = MSILController(config=self.config)
+            except TypeError:
+                # Fallback for MetaSkillIntelligenceLayer-style constructor
+                try:
+                    msil_instance = MSILController(
+                        memory_store=self.memory_store,
+                        config=self.config,
+                        rye_metrics_module=_rye_metrics_mod,
+                    )
+                except Exception:
+                    msil_instance = None
             except Exception:
-                self.msil_controller = None
+                msil_instance = None
+            self.msil_controller = msil_instance
         else:
             self.msil_controller = None
 
@@ -1584,9 +1604,9 @@ class CoreAgent:
                 pdf_bytes=effective_pdf_bytes,
                 biomarker_snapshot=biomarker_snapshot,
                 domain=domain,
-                msil_mode=self.msil_mode,          # type: ignore[arg-type]
-                msil_track_mode=self.msil_track_mode,  # type: ignore[arg-type]
-                rye_mode=self.rye_mode,            # type: ignore[arg-type]
+                msil_mode=self.msil_mode,               # type: ignore[arg-type]
+                msil_track_mode=self.msil_track_mode,   # type: ignore[arg-type]
+                rye_mode=self.rye_mode,                 # type: ignore[arg-type]
             )
         except TypeError:
             # Backward compatibility
