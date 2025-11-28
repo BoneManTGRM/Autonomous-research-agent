@@ -334,12 +334,24 @@ class CoreAgent:
         else:
             self.tool_registry = {}
 
-        # Legacy Toolbelt instance if it exists, otherwise fall back to registry.
-        if Toolbelt is not None:
-            self.tools = Toolbelt()
+        # Prefer TOOL_REGISTRY (so Tavily + mail tools are visible),
+        # and expose legacy Toolbelt under a namespaced key if present.
+        if self.tool_registry:
+            self.tools = dict(self.tool_registry)
+            if Toolbelt is not None:
+                try:
+                    legacy_toolbelt = Toolbelt()
+                    self.tools.setdefault("legacy_toolbelt", legacy_toolbelt)
+                except Exception:
+                    pass
+        elif Toolbelt is not None:
+            try:
+                self.tools = Toolbelt()
+            except Exception:
+                self.tools = {}
         else:
             # TGRMLoop will receive a plain dict of tool callables
-            self.tools = self.tool_registry
+            self.tools = {}
 
         # ------------------------------------------------------------------
         # Swarm Orchestrator (hierarchical swarm engine on top of CoreAgent)
