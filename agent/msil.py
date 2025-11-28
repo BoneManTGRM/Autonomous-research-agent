@@ -36,7 +36,7 @@ Design goals
 
 Typical usage (optional)
 ------------------------
-    from agent.msil import MetaSkillIntelligenceLayer
+    from msil import MetaSkillIntelligenceLayer
 
     msil = MetaSkillIntelligenceLayer(memory_store, config={"msil_window": 200})
 
@@ -49,7 +49,7 @@ Typical usage (optional)
 
 You can also use the light wrapper:
 
-    from agent.msil import analyze_run
+    from msil import analyze_run
     profile = analyze_run(history, goal="longevity")
 
 which does not require a full MemoryStore instance.
@@ -65,14 +65,25 @@ import statistics
 
 # Optional imports from rye_metrics. Fallbacks are defined if not present.
 try:
-    from .rye_metrics import (  # type: ignore[attr-defined]
-        rolling_rye,
-        stability_index,
-        recovery_momentum,
-        regression_rye_slope,
-        rye_percentiles,
-        build_run_diagnostics,
-    )
+    # Try absolute import first (top-level file layout), then relative.
+    try:
+        from rye_metrics import (  # type: ignore[attr-defined]
+            rolling_rye,
+            stability_index,
+            recovery_momentum,
+            regression_rye_slope,
+            rye_percentiles,
+            build_run_diagnostics,
+        )
+    except Exception:  # pragma: no cover
+        from .rye_metrics import (  # type: ignore[attr-defined]
+            rolling_rye,
+            stability_index,
+            recovery_momentum,
+            regression_rye_slope,
+            rye_percentiles,
+            build_run_diagnostics,
+        )
 except Exception:  # pragma: no cover
     def rolling_rye(values: List[float], window: int = 20) -> List[float]:
         if not values:
@@ -457,6 +468,49 @@ class MetaSkillIntelligenceLayer:
             "run_stats": run_stats,
         }
 
+    def compute_profile(
+        self,
+        cycle_history: List[Dict[str, Any]],
+        goal: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Build a compact MSIL profile from an in-memory cycle history.
+
+        This is a lightweight helper intended for:
+            - Streamlit UI panels that already hold cycle history
+            - Diagnostics code that wants a single profile dict
+
+        Returns:
+            dict with msil_score, stage, skills, domain_profiles, diagnostics
+            or None if there is not enough data.
+        """
+        if not cycle_history:
+            return None
+
+        # Optional goal filter
+        if goal is not None:
+            history = [row for row in cycle_history if row.get("goal") == goal]
+        else:
+            history = list(cycle_history)
+
+        if not history:
+            return None
+
+        skills = self._compute_skill_dimensions(history)
+        domain_profiles = self._compute_domain_profiles(history)
+        msil_score = self._aggregate_msil_score(skills, domain_profiles)
+        diagnostics = self._build_run_diagnostics(history)
+        intelligence_stage = self._infer_stage(msil_score, len(history))
+
+        profile: Dict[str, Any] = {
+            "cycles": len(history),
+            "msil_score": msil_score,
+            "intelligence_stage": intelligence_stage,
+            "skills": skills.to_dict(),
+            "domain_profiles": [p.to_dict() for p in domain_profiles],
+            "diagnostics": diagnostics,
+        }
+        return profile
+
     # ------------------------------------------------------------------
     # History helpers
     # ------------------------------------------------------------------
@@ -619,7 +673,9 @@ class MetaSkillIntelligenceLayer:
 
             eq = row.get("equilibrium") or {}
             equilibrium_labels.append(str(eq.get("equilibrium_label") or "unknown"))
-            oscillation_scores.append(_safe_float(eq.get("oscillation_score"), default=0.0))
+            oscillation_scores.append(
+                _safe_float(eq.get("oscillation_score"), default=0.0)
+            )
 
             ms = row.get("meta_signals") or {}
             open_questions_counts.append(_safe_int(ms.get("open_questions")))
@@ -667,8 +723,12 @@ class MetaSkillIntelligenceLayer:
         richness_ratio = rich_citation_cycles / max(1, len(citation_counts))
 
         avg_web_calls = statistics.mean(web_calls_all) if web_calls_all else 0.0
-        avg_pubmed_calls = statistics.mean(pubmed_calls_all) if pubmed_calls_all else 0.0
-        avg_sem_calls = statistics.mean(semantic_calls_all) if semantic_calls_all else 0.0
+        avg_pubmed_calls = (
+            statistics.mean(pubmed_calls_all) if pubmed_calls_all else 0.0
+        )
+        avg_sem_calls = (
+            statistics.mean(semantic_calls_all) if semantic_calls_all else 0.0
+        )
 
         sci_calls = avg_pubmed_calls + avg_sem_calls
         sci_factor = min(1.0, sci_calls / 4.0)
@@ -1045,7 +1105,7 @@ class MetaSkillIntelligenceLayer:
             )
         else:
             actions["monitoring"]["note"] = (
-                "Track MSIL score, stability_index, and breakthrough_density weekly for long runs."
+                "Track MSIL score, in stability_index, and breakthrough_density weekly for long runs."
             )
 
         actions["monitoring"]["recommended_metrics"] = [
