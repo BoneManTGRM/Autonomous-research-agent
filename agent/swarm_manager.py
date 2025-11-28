@@ -299,6 +299,7 @@ class SwarmManager:
         if global_context is None:
             global_context = {}
 
+        step_start = time.time()
         self._step_index += 1
         now = time.time()
         agent_results: List[Dict[str, Any]] = []
@@ -308,7 +309,11 @@ class SwarmManager:
             agent_results.append(result)
             self._update_agent_state_from_result(state, result)
 
-        swarm_metrics = self._compute_swarm_metrics(agent_results)
+        step_seconds = max(0.0, time.time() - step_start)
+        swarm_metrics = self._compute_swarm_metrics(
+            agent_results,
+            step_seconds=step_seconds,
+        )
         self._history.append(
             SwarmHistoryEntry(
                 step_index=self._step_index,
@@ -319,6 +324,10 @@ class SwarmManager:
                 notes={
                     "step_seconds": swarm_metrics.get("step_seconds"),
                     "agent_count": len(self._agents),
+                    "learning_speed_factor": swarm_metrics.get(
+                        "learning_speed_factor"
+                    ),
+                    "burst_profile_hint": swarm_metrics.get("burst_profile_hint"),
                 },
             )
         )
@@ -529,6 +538,7 @@ class SwarmManager:
     def _compute_swarm_metrics(
         self,
         agent_results: List[Dict[str, Any]],
+        step_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Aggregate swarm level metrics from agent results and states."""
         now = time.time()
@@ -550,6 +560,8 @@ class SwarmManager:
             avg_rye_overall = total_rye / total_energy
 
         stability_index = self._estimate_stability_index()
+        learning_speed_factor = self.get_effective_learning_speed_factor()
+        burst_profile_hint = self.get_learning_burst_profile_hint()
 
         metrics: Dict[str, Any] = {
             "timestamp": now,
@@ -558,7 +570,10 @@ class SwarmManager:
             "avg_rye": avg_rye_overall,
             "peak_rye": self._max_rye_seen(),
             "stability_index": stability_index,
-            "step_seconds": None,  # caller can fill if desired
+            "step_seconds": step_seconds,
+            "agent_count": len(self._agent_states),
+            "learning_speed_factor": learning_speed_factor,
+            "burst_profile_hint": burst_profile_hint,
         }
         return metrics
 
@@ -604,7 +619,7 @@ class SwarmManager:
         # Simple heuristic: smaller spread relative to max value is more stable
         max_abs = max(abs(v) for v in values) or 1.0
         ratio = spread / max_abs
-        # Compress to 0-1, lower ratio means higher stability
+        # Compress to 0 to 1, lower ratio means higher stability
         stability = max(0.0, min(1.0, 1.0 - ratio))
         return stability
 
@@ -668,6 +683,9 @@ class SwarmManager:
             if stability_values:
                 stability = sum(stability_values) / len(stability_values)
 
+        learning_speed_factor = self.get_effective_learning_speed_factor()
+        burst_profile_hint = self.get_learning_burst_profile_hint()
+
         return SwarmRunSummary(
             preset_name=self.preset_name,
             runtime_profile_name=self.runtime_profile_name,
@@ -676,7 +694,7 @@ class SwarmManager:
             total_seconds=total_seconds,
             avg_rye=avg_rye,
             peak_rye=peak_rye,
-            learning_speed_factor=self.get_effective_learning_speed_factor(),
+            learning_speed_factor=learning_speed_factor,
             agents=list(self._agent_states),
             history=list(self._history),
             metadata={
@@ -684,6 +702,10 @@ class SwarmManager:
                 "swarm_config": self._swarm_cfg,
                 "swarm_orchestration": self._swarm_orchestration,
                 "stability_index_avg": stability,
+                "agent_count": len(self._agent_states),
+                "learning_speed_factor": learning_speed_factor,
+                "burst_profile_hint": burst_profile_hint,
+                "run_config": asdict(run_config),
             },
         )
 
