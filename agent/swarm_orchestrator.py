@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import time
 import uuid
+import copy
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
@@ -610,7 +611,8 @@ class SwarmOrchestrator:
         **agent_extra: Any,
     ) -> Dict[str, Any]:
         """Clone and decorate the base preset for a single agent."""
-        preset = dict(base_preset or {})
+        # Deep copy so each agent can mutate its preset safely
+        preset = copy.deepcopy(base_preset or {})
         preset["role_name"] = role.name
         preset["role_domain"] = role.domain
         if role.system_hint:
