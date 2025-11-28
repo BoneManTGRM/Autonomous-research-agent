@@ -1131,6 +1131,8 @@ class DataPipelines:
 # Tavily backed web search helper
 # ----------------------------------------------------------
 
+TAVILY_MAX_QUERY_LEN = 400  # hard limit enforced by Tavily API
+
 
 def _get_tavily_client() -> Optional["TavilyClient"]:
     """
@@ -1160,14 +1162,24 @@ def tavily_search(
         - provider: "tavily" or "browser_fallback"
         - results: a list of {source, title, url, content, raw_html}
         - error: optional error string
+        - meta: optional metadata (e.g. truncation info)
     """
+    meta: Dict[str, Any] = {}
+    # Tavily has a hard 400 char query limit; avoid "query too long" errors
+    safe_query = query
+    if len(safe_query) > TAVILY_MAX_QUERY_LEN:
+        safe_query = safe_query[: TAVILY_MAX_QUERY_LEN]
+        meta["truncated_for_tavily"] = True
+        meta["original_length"] = len(query)
+        meta["used_length"] = len(safe_query)
+
     client = _get_tavily_client()
     if client is not None:
         try:
             # Tavily native result. We keep original payload for flexibility,
             # but also normalize a minimal "results" list for citation utils.
             raw = client.search(
-                query=query,
+                query=safe_query,
                 max_results=max_results,
                 search_depth=search_depth,
                 include_raw_content=True,
@@ -1188,6 +1200,7 @@ def tavily_search(
                 "results": norm_results,
                 "raw": raw,
                 "error": None,
+                "meta": meta,
             }
         except Exception as e:
             # Fall through to browser based stub below
@@ -1198,7 +1211,7 @@ def tavily_search(
     # Browser based fallback stub. This keeps the system usable offline.
     browser = BrowserTool()
     # Simple meta search page so at least something comes back
-    url = f"https://duckduckgo.com/html/?q={query}"
+    url = f"https://duckduckgo.com/html/?q={safe_query}"
     page = browser.fetch_page(url)
 
     return {
@@ -1213,6 +1226,7 @@ def tavily_search(
             }
         ],
         "error": page.error or fallback_error,
+        "meta": meta,
     }
 
 
@@ -1321,6 +1335,12 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "kind": "web",
         "class": BrowserTool,
         "description": "Alias for web/browser capability plus Tavily backed search when available.",
+        "fn": web_search_tool,
+    },
+    "tavily_search": {
+        "kind": "web",
+        "class": BrowserTool,
+        "description": "Direct Tavily-backed web search with browser fallback.",
         "fn": web_search_tool,
     },
     "browser": {
