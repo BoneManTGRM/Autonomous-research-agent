@@ -483,7 +483,7 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
     # Collect candidate findings from notes, repairs, and hypotheses
     findings: List[str] = []
     for e in history:
-        for n in e.get("notes_added", []) or []:
+        for n in (e.get("notes_added") or []):
             findings.append(str(n))
         for r in e.get("repairs") or []:
             findings.append(str(r))
@@ -553,27 +553,38 @@ def compute_run_hours(history: List[Dict[str, Any]]) -> Optional[float]:
     return max(delta.total_seconds() / 3600.0, 0.0)
 
 
-def compute_msil_profile(history: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Call optional MSIL layer if available to compute meta skill intelligence profile."""
+def compute_msil_profile(
+    history: List[Dict[str, Any]],
+    goal: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Call optional MSIL layer if available to compute meta skill intelligence profile.
+
+    This is wired to the msil.analyze_run helper when present, and falls back
+    to constructing an internal MetaSkillIntelligenceLayer using the
+    msil._HistoryBackedMemoryStore wrapper if needed.
+    """
     if not history or _msil_module is None:
         return None
+
+    if goal is None:
+        goal = str(history[-1].get("goal") or "unknown_goal")
+
     try:
-        # Preferred simple function style
+        # Preferred simple function style (matches msil.analyze_run signature)
         analyze_run = getattr(_msil_module, "analyze_run", None)
         if callable(analyze_run):
-            return analyze_run(history=history, domain=None)
+            return analyze_run(history=history, goal=goal, config=None)
 
-        # Class based API
+        # Class based API fallback using msil._HistoryBackedMemoryStore
         layer_cls = getattr(_msil_module, "MetaSkillIntelligenceLayer", None)
-        if layer_cls is None:
-            return None
-        layer = layer_cls()
-        if hasattr(layer, "analyze_run") and callable(getattr(layer, "analyze_run")):
-            return layer.analyze_run(history=history, domain=None)
-        if hasattr(layer, "analyze") and callable(getattr(layer, "analyze")):
-            return layer.analyze(history=history, domain=None)
+        store_cls = getattr(_msil_module, "_HistoryBackedMemoryStore", None)
+        if layer_cls is not None and store_cls is not None:
+            store = store_cls(history)  # type: ignore[call-arg]
+            layer = layer_cls(memory_store=store, config={})  # type: ignore[call-arg]
+            return layer.summarise_run(goal=goal, run_id=None, limit=len(history))  # type: ignore[call-arg]
     except Exception:
         return None
+
     return None
 
 
@@ -1789,7 +1800,11 @@ def main() -> None:
             if msil_profile_full:
                 msil_score = msil_profile_full.get("msil_score")
                 skills = msil_profile_full.get("skills") or msil_profile_full.get("dimensions") or {}
-                domains_profile = msil_profile_full.get("domains") or msil_profile_full.get("domain_profiles") or {}
+                domains_profile = (
+                    msil_profile_full.get("domains")
+                    or msil_profile_full.get("domain_profiles")
+                    or []
+                )
                 dynamics = msil_profile_full.get("dynamics") or {}
 
                 msil_cols = st.columns(3)
@@ -1801,7 +1816,12 @@ def main() -> None:
                 with msil_cols[1]:
                     st.metric("Skill dimensions", len(skills) if isinstance(skills, dict) else 0)
                 with msil_cols[2]:
-                    st.metric("Domain profiles", len(domains_profile) if isinstance(domains_profile, dict) else 0)
+                    dom_count = 0
+                    if isinstance(domains_profile, list):
+                        dom_count = len(domains_profile)
+                    elif isinstance(domains_profile, dict):
+                        dom_count = len(domains_profile)
+                    st.metric("Domain profiles", dom_count)
 
                 with st.expander("Skill breakdown"):
                     st.json(skills)
