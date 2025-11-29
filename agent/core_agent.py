@@ -696,13 +696,20 @@ class CoreAgent:
 
     def get_tools_status(self) -> Dict[str, Any]:
         """Return a compact view of tool layer status for UI panels."""
+        has_legacy_toolbelt = False
+        try:
+            if Toolbelt is not None:
+                if isinstance(self.tools, dict) and "legacy_toolbelt" in self.tools:
+                    has_legacy_toolbelt = True
+                elif isinstance(self.tools, Toolbelt):
+                    has_legacy_toolbelt = True
+        except Exception:
+            has_legacy_toolbelt = False
+
         status: Dict[str, Any] = {
             "has_registry": bool(self.tool_registry),
             "registry_keys": list(self.tool_registry.keys()),
-            "has_legacy_toolbelt": bool(
-                isinstance(self.tools, dict) and "legacy_toolbelt" in self.tools
-            )
-            or isinstance(self.tools, Toolbelt) if Toolbelt is not None else False,
+            "has_legacy_toolbelt": has_legacy_toolbelt,
             "tools_type": type(self.tools).__name__,
         }
         return status
