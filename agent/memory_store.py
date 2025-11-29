@@ -81,6 +81,11 @@ MAX_RUN_MANIFESTS = 2_000
 MAX_MILESTONES = 5_000
 MAX_BENCHMARKS = 50_000
 
+# Explicit caps for evolution and frontier diagnostics
+MAX_HYPOTHESIS_EVOLUTION = 5_000
+MAX_OPTION_C_DIAGNOSTICS = 5_000
+MAX_SWARM_CONTRACTS = 5_000
+
 
 def _utc_now_iso() -> str:
     """Return current UTC time in ISO 8601 with Z suffix."""
@@ -726,8 +731,8 @@ class MemoryStore:
         }
         arr = self._data.setdefault("hypothesis_evolution", [])
         arr.append(entry)
-        if len(arr) > 5_000:
-            self._data["hypothesis_evolution"] = arr[-5_000:]
+        if len(arr) > MAX_HYPOTHESIS_EVOLUTION:
+            self._data["hypothesis_evolution"] = arr[-MAX_HYPOTHESIS_EVOLUTION:]
         self._save()
 
     def get_hypothesis_evolution(self, goal: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -1236,15 +1241,17 @@ class MemoryStore:
         """
         wd = self._data.setdefault("watchdog", {})
         now = _utc_now_iso()
-        entry = wd.get(label, {})
-        if isinstance(entry, dict):
-            count = int(entry.get("count", 0)) + 1
+        existing = wd.get(label)
+        if isinstance(existing, dict):
+            count = int(existing.get("count", 0)) + 1
+            prev_run_id = existing.get("run_id")
         else:
             count = 1
+            prev_run_id = None
         wd[label] = {
             "last_beat": now,
             "count": count,
-            "run_id": run_id or entry.get("run_id"),
+            "run_id": run_id or prev_run_id,
         }
         self._save()
 
@@ -1681,8 +1688,8 @@ class MemoryStore:
         }
         arr = self._data.setdefault("option_c_diagnostics", [])
         arr.append(entry)
-        if len(arr) > 5_000:
-            self._data["option_c_diagnostics"] = arr[-5_000:]
+        if len(arr) > MAX_OPTION_C_DIAGNOSTICS:
+            self._data["option_c_diagnostics"] = arr[-MAX_OPTION_C_DIAGNOSTICS:]
         self._save()
 
     def get_option_c_diagnostics(self, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -1705,8 +1712,8 @@ class MemoryStore:
         }
         arr = self._data.setdefault("swarm_contracts", [])
         arr.append(entry)
-        if len(arr) > 5_000:
-            self._data["swarm_contracts"] = arr[-5_000:]
+        if len(arr) > MAX_SWARM_CONTRACTS:
+            self._data["swarm_contracts"] = arr[-MAX_SWARM_CONTRACTS:]
         self._save()
 
     def get_swarm_contracts(
@@ -2262,6 +2269,46 @@ class MemoryStore:
         return self.get_citations(goal=goal)
 
     # ------------------------------------------------------------------
+    # Source index helpers
+    # ------------------------------------------------------------------
+    def get_source_index(self, key: Optional[str] = None) -> Dict[str, Any]:
+        """Return source_index entry for a key, or the entire index if key is None."""
+        src = self._data.get("source_index") or {}
+        if not isinstance(src, dict):
+            src = {}
+        if key is None:
+            return dict(src)
+        entry = src.get(key)
+        if isinstance(entry, dict):
+            return dict(entry)
+        return {}
+
+    def upsert_source_index(
+        self,
+        key: str,
+        value: Dict[str, Any],
+        *,
+        merge: bool = True,
+    ) -> None:
+        """Upsert a single source_index entry.
+
+        If merge is True and an entry exists, shallow merge the dicts.
+        Otherwise, overwrite the existing entry.
+        """
+        src = self._data.get("source_index")
+        if not isinstance(src, dict):
+            src = {}
+        existing = src.get(key)
+        if merge and isinstance(existing, dict):
+            merged = dict(existing)
+            merged.update(dict(value))
+            src[key] = merged
+        else:
+            src[key] = dict(value)
+        self._data["source_index"] = src
+        self._save()
+
+    # ------------------------------------------------------------------
     # Goal index accessors for swarm analytics
     # ------------------------------------------------------------------
     def list_goals(self) -> List[str]:
@@ -2281,7 +2328,10 @@ class MemoryStore:
             return {}
         if goal is None:
             return dict(gi)
-        return dict(gi.get(goal, {}))
+        entry = gi.get(goal, {})
+        if isinstance(entry, dict):
+            return dict(entry)
+        return {}
 
     def get_goal_summary(self, goal: str) -> Dict[str, Any]:
         """Return a compact, UI-ready summary for a single goal."""
