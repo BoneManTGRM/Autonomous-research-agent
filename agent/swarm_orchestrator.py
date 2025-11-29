@@ -289,6 +289,7 @@ class SwarmOrchestrator:
     -----------
     - agent_fn: default single agent runner (can be overridden per call).
     - max_workers: max parallel threads for burst and pulse modes.
+    - max_swarm_size: hard cap on agents per swarm.
     - default_mode: burst, pulse, sequential, or hybrid.
     - default_domain: domain label when none is provided.
     - enable_cross_domain_bridge: plug into CrossDomainFederation.
@@ -687,6 +688,7 @@ class SwarmOrchestrator:
             for future in as_completed(future_to_index):
                 idx = future_to_index[future]
 
+                # Global soft timeout for the swarm
                 if deadline is not None and time.time() > deadline:
                     # Mark remaining agents as timed out
                     for f, j in future_to_index.items():
@@ -764,19 +766,33 @@ class SwarmOrchestrator:
         if total_tokens > 0:
             diagnostics["total_tokens"] = total_tokens
 
-        # RYE style diagnostics
+        # RYE style diagnostics (Option C friendly)
         if build_run_diagnostics is not None:
             try:
-                traces = []
+                traces: List[Dict[str, Any]] = []
                 for agent in agent_summaries:
                     trace = agent.get("rye_trace") or agent.get(
                         "diagnostics", {}
                     ).get("rye_trace")
-                    if trace:
+                    if isinstance(trace, list):
                         traces.extend(trace)
+
                 if traces:
-                    diagnostics["rye"] = build_run_diagnostics(traces)
+                    # Try to infer a dominant domain for this swarm
+                    domains = {
+                        agent.get("domain", "general") for agent in agent_summaries
+                    }
+                    if len(domains) == 1:
+                        domain_for_rye = next(iter(domains))
+                    else:
+                        domain_for_rye = "mixed"
+
+                    diagnostics["rye"] = build_run_diagnostics(
+                        traces,
+                        domain=domain_for_rye,
+                    )
             except Exception:
+                # RYE diagnostics are optional; never break the swarm
                 pass
 
         # Stability kernel
