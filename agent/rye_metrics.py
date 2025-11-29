@@ -28,6 +28,7 @@ Backwards compatibility:
 """
 
 from __future__ import annotations
+
 from typing import Any, Dict, List, Optional, Tuple
 import statistics
 
@@ -1070,15 +1071,14 @@ def estimate_breakthrough_probability(
     horizon_hours: Optional[int] = None,
 ) -> Dict[str, Optional[Any]]:
     """
-    Estimate the probability that this run configuration could yield a
-    meaningful breakthrough within a given horizon.
+    Estimate a *heuristic* probability-like score that this run configuration
+    could yield a meaningful breakthrough within a given horizon.
 
-    Inputs (from diagnostics):
-        - trend_slope
-        - recovery_momentum
-        - stability_index
-        - high_percentile
-        - rye_avg
+    Important:
+        - This is NOT a calibrated real-world probability.
+        - Treat `probability` as a confidence-style gauge derived from
+          RYE dynamics (trend, momentum, stability, tails), not as
+          "52.1% chance of Nobel-tier discovery".
     """
     trend = diagnostics.get("trend_slope") or 0.0
     momentum = diagnostics.get("recovery_momentum") or 0.0
@@ -1211,6 +1211,11 @@ def classify_run_tier(
         Tier 1: normal working agent (positive average RYE)
         Tier 2: self repairing, long run stable
         Tier 3: "Major Breakthrough Zone" candidate
+
+    Note:
+        This uses the heuristic breakthrough probability, not a calibrated
+        real-world chance. Treat it as "zone tagging" rather than a
+        literal probability label.
     """
     count = diagnostics.get("count") or 0
     stab = diagnostics.get("stability_index") or 0.0
@@ -1326,6 +1331,8 @@ def breakthrough_likelihood_90d(
     Convenience wrapper: estimate breakthrough likelihood specifically for
     a 90 day horizon, optionally conditioned on how long the system has
     already been running.
+
+    The output is still a heuristic score, not a calibrated probability.
     """
     horizon_hours = 90 * 24
     base = estimate_breakthrough_probability(
@@ -1368,8 +1375,8 @@ def build_option_c_signature(
         - volatility signature
         - equilibrium detection
         - TGRM harmonic index
-        - breakthrough probability
-        - 90 day breakthrough likelihood
+        - breakthrough probability (heuristic)
+        - 90 day breakthrough likelihood (heuristic)
         - autonomy safety envelope
         - early failure warning
         - run tier classification
@@ -1563,7 +1570,7 @@ def build_msil_ready_snapshot(
     hours_run_so_far: Optional[float] = None,
     window: int = 10,
     max_points: int = 500,
-) -> Dict[str, Any]:
+) -> Dict[str, Any]]:
     """
     Optional high level helper for msil.py and IQ style probes.
 
