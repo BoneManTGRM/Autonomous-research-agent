@@ -59,7 +59,7 @@ try:
 except Exception:
     sqlalchemy = None  # type: ignore
 
-# EXTREME MODE real web research tool (Tavily + truncation + caching)
+# EXTREME MODE real web research tool (optional external search + truncation + caching)
 try:
     from .web_search import WebResearchTool  # type: ignore
 except Exception:
@@ -1164,11 +1164,11 @@ def web_search(
     """
     Unified web search entry point for the agent.
 
-    This is a bridge into WebResearchTool (EXTREME MODE Tavily module).
+    This is a bridge into WebResearchTool (EXTREME MODE external search module).
     It also maintains the classic signature expected by CoreAgent / engine_worker.
 
     - Records tool_usage.web_calls
-    - Uses Tavily with query length clamping when available
+    - Uses external search with query length clamping when available
     - Falls back to a browser stub if WebResearchTool is missing
     """
     if tool_usage is not None:
@@ -1328,13 +1328,13 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
     "web_search": {
         "kind": "web",
         "class": BrowserTool,
-        "description": "Alias for web/browser capability plus Tavily-backed EXTREME search when available.",
+        "description": "Alias for web/browser capability plus EXTREME search module when available.",
         "fn": web_search_tool,
     },
     "tavily_search": {
         "kind": "web",
         "class": BrowserTool,
-        "description": "Alias for EXTREME Tavily-based web search with browser fallback.",
+        "description": "Alias name kept for compatibility; currently routed to the generic web_search_tool.",
         "fn": web_search_tool,
     },
     "browser": {
