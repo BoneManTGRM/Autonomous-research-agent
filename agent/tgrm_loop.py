@@ -97,6 +97,7 @@ are missing or misconfigured.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -813,6 +814,7 @@ class TGRMLoop:
         run_id: Optional[str] = None,
         agent_id: Optional[str] = None,
         swarm_profile: Optional[Dict[str, Any]] = None,
+        deadline_ts: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Run one TGRM cycle for a given research goal.
 
@@ -863,6 +865,10 @@ class TGRMLoop:
             swarm_profile:
                 Optional dict describing swarm context such as size, layer,
                 and role weights. Safe to omit.
+            deadline_ts:
+                Optional absolute wall-clock deadline (time.time() seconds).
+                If provided, the cycle will avoid starting heavy repair work
+                after this time and mark itself as interrupted if hit.
         Returns:
             Dict with:
                 {
@@ -878,6 +884,26 @@ class TGRMLoop:
         stage_tag = (stage or "idea").lower()
         if stage_tag not in {"idea", "verify"}:
             stage_tag = "idea"
+
+        # Interrupt flags for time limit or other future reasons
+        interrupted: bool = False
+        stop_reason: Optional[str] = None
+
+        def _deadline_hit() -> bool:
+            return deadline_ts is not None and time.time() >= deadline_ts
+
+        def _empty_stats() -> Dict[str, Any]:
+            return {
+                "web_calls": 0,
+                "pubmed_calls": 0,
+                "semantic_calls": 0,
+                "pdf_ingestions": 0,
+                "contradictions_resolved": 0,
+                "sources_used": 0,
+                "browser_actions": 0,
+                "code_execs": 0,
+                "data_loads": 0,
+            }
 
         # Per cycle tool usage tracker (for energy E and diagnostics)
         tool_usage: ToolUsage = self._usage_factory()
@@ -950,51 +976,91 @@ class TGRMLoop:
         has_todos_before = "todo_item" in issues
         has_contradictions_before = "contradiction" in issues
 
-        # REPAIR phase (tool aware)
-        (
-            repair_actions,
-            notes_added,
-            citations,
-            stats,
-        ) = self._repair(
-            goal=goal,
-            issues=issues,
-            descriptions=issue_descriptions,
-            role=role,
-            source_controls=src_ctrl,
-            pdf_bytes=pdf_bytes,
-            maintenance_mode=maintenance_mode,
-            domain=domain_tag,
-            tool_usage=tool_usage,
-        )
-        phases["repair"] = {
-            "handled_issue_codes": [a.get("issue") for a in repair_actions],
-            "notes_added_count": len(notes_added),
-            "citations_added_count": len(citations),
-        }
+        # If the wall-clock deadline is already hit, skip heavy REPAIR/VERIFY
+        # and finish the cycle with zero delta_R and minimal energy.
+        if _deadline_hit():
+            interrupted = True
+            stop_reason = "time_limit"
 
-        # VERIFY phase
-        new_notes = self.memory_store.get_notes(goal)
-        new_status_report = self._test(goal, new_notes)
-        issues_after, _ = self._detect(new_status_report, domain=domain_tag)
+            repair_actions: List[Dict[str, str]] = []
+            notes_added: List[str] = []
+            citations: List[Dict[str, Any]] = []
+            stats: Dict[str, Any] = _empty_stats()
 
-        phases["test_after"] = {
-            "known_notes_count": new_status_report.get(
-                "known_notes_count", len(new_notes)
-            ),
-        }
-        phases["detect_after"] = {
-            "issue_codes": issues_after,
-        }
+            # Re-test quickly to get an "after" view; we did no repairs,
+            # so this should match the "before" state in most cases.
+            new_notes = self.memory_store.get_notes(goal)
+            new_status_report = self._test(goal, new_notes)
+            issues_after, _ = self._detect(new_status_report, domain=domain_tag)
 
-        issue_code_counts_after: Dict[str, int] = {}
-        for code in issues_after:
-            issue_code_counts_after[code] = issue_code_counts_after.get(code, 0) + 1
+            phases["test_after"] = {
+                "known_notes_count": new_status_report.get(
+                    "known_notes_count", len(new_notes)
+                ),
+            }
+            phases["detect_after"] = {
+                "issue_codes": issues_after,
+            }
 
-        domain_issue_flags_after = {code: (code in issues_after) for code in domain_issue_codes}
-        has_questions_after = "question_mark" in issues_after
-        has_todos_after = "todo_item" in issues_after
-        has_contradictions_after = "contradiction" in issues_after
+            issue_code_counts_after: Dict[str, int] = {}
+            for code in issues_after:
+                issue_code_counts_after[code] = issue_code_counts_after.get(code, 0) + 1
+
+            domain_issue_flags_after = {
+                code: (code in issues_after) for code in domain_issue_codes
+            }
+            has_questions_after = "question_mark" in issues_after
+            has_todos_after = "todo_item" in issues_after
+            has_contradictions_after = "contradiction" in issues_after
+
+        else:
+            # REPAIR phase (tool aware)
+            (
+                repair_actions,
+                notes_added,
+                citations,
+                stats,
+            ) = self._repair(
+                goal=goal,
+                issues=issues,
+                descriptions=issue_descriptions,
+                role=role,
+                source_controls=src_ctrl,
+                pdf_bytes=pdf_bytes,
+                maintenance_mode=maintenance_mode,
+                domain=domain_tag,
+                tool_usage=tool_usage,
+            )
+            phases["repair"] = {
+                "handled_issue_codes": [a.get("issue") for a in repair_actions],
+                "notes_added_count": len(notes_added),
+                "citations_added_count": len(citations),
+            }
+
+            # VERIFY phase
+            new_notes = self.memory_store.get_notes(goal)
+            new_status_report = self._test(goal, new_notes)
+            issues_after, _ = self._detect(new_status_report, domain=domain_tag)
+
+            phases["test_after"] = {
+                "known_notes_count": new_status_report.get(
+                    "known_notes_count", len(new_notes)
+                ),
+            }
+            phases["detect_after"] = {
+                "issue_codes": issues_after,
+            }
+
+            issue_code_counts_after: Dict[str, int] = {}
+            for code in issues_after:
+                issue_code_counts_after[code] = issue_code_counts_after.get(code, 0) + 1
+
+            domain_issue_flags_after = {
+                code: (code in issues_after) for code in domain_issue_codes
+            }
+            has_questions_after = "question_mark" in issues_after
+            has_todos_after = "todo_item" in issues_after
+            has_contradictions_after = "contradiction" in issues_after
 
         # Hypothesis generation (now structured for discovery and learning)
         max_h = 3 if self.tgrm_level == 1 else 5
@@ -1177,6 +1243,8 @@ class TGRMLoop:
                 "recovery_momentum"
             ),
             "discovery_tier": (discovery_snapshot or {}).get("tier"),
+            "interrupted": interrupted,
+            "stop_reason": stop_reason,
         }
 
         # Meta controller friendly signals
@@ -1198,6 +1266,8 @@ class TGRMLoop:
             "agent_id": agent_id,
             "stability": stability_snapshot,
             "discovery": discovery_snapshot,
+            "interrupted": interrupted,
+            "stop_reason": stop_reason,
         }
 
         # Machine facing log
@@ -1269,6 +1339,9 @@ class TGRMLoop:
             "meta_signals": meta_signals,
             # Swarm profile metadata (if any)
             "swarm_profile": swarm_profile or {},
+            # Interrupt flags
+            "interrupted": interrupted,
+            "stop_reason": stop_reason,
         }
 
         # Replay buffer logging and metadata tagging for longevity aware loops
@@ -1326,6 +1399,8 @@ class TGRMLoop:
             "curriculum_state": curriculum_state,
             "replay_item_ids": replay_item_ids,
             "swarm_profile": swarm_profile or {},
+            "interrupted": interrupted,
+            "stop_reason": stop_reason,
         }
 
         # Expose stats and citations at the top level so CoreAgent and the UI
