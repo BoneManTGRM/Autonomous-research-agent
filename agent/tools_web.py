@@ -48,6 +48,7 @@ Environment safety controls:
     - WEB_TOOL_CACHE_SIZE      : max cached queries before eviction (default 256)
     - WEB_TOOL_MAX_RETRIES     : max retry attempts for Tavily (default 3)
     - WEB_TOOL_BASE_BACKOFF_S  : base backoff seconds for retries (default 2.0)
+    - TAVILY_MAX_QUERY_CHARS   : hard cap for query length (default 380, must be <= Tavily limit)
 """
 
 from __future__ import annotations
@@ -138,6 +139,15 @@ class WebResearchTool:
         except ValueError:
             self.base_backoff_s = 2.0
 
+        # Hard cap for Tavily query length
+        # Tavily currently errors if query > 400 characters, so default to 380
+        try:
+            self.max_query_chars: int = max(
+                50, min(int(os.getenv("TAVILY_MAX_QUERY_CHARS", "380")), 400)
+            )
+        except ValueError:
+            self.max_query_chars = 380
+
     # ------------------------------------------------------------------
     # CAPABILITY INTROSPECTION
     # ------------------------------------------------------------------
@@ -158,7 +168,29 @@ class WebResearchTool:
             "stub_mode": bool(self.client is None),
             "max_retries": int(self.max_retries),
             "base_backoff_s": float(self.base_backoff_s),
+            "max_query_chars": int(self.max_query_chars),
         }
+
+    # ------------------------------------------------------------------
+    # INTERNAL: QUERY SHRINKING
+    # ------------------------------------------------------------------
+    def _shrink_query(self, query: str) -> str:
+        """Clamp query length to Tavily-safe size.
+
+        Strategy:
+            - Collapse whitespace so we don't waste characters on spaces.
+            - If still too long, truncate hard at max_query_chars.
+        """
+        if not query:
+            return ""
+
+        # Collapse repeated whitespace
+        compact = " ".join(str(query).split())
+        if len(compact) <= self.max_query_chars:
+            return compact
+
+        # Hard truncate to max_query_chars
+        return compact[: self.max_query_chars].rstrip()
 
     # ------------------------------------------------------------------
     # INTERNAL: CACHE HELPERS
@@ -319,6 +351,11 @@ class WebResearchTool:
         # Enforce safety level cap
         safe_level = max(1, min(level, self.max_level))
 
+        # Clamp query to Tavily-safe length
+        raw_query = query or ""
+        safe_query = self._shrink_query(raw_query)
+        truncated = safe_query != " ".join(str(raw_query).split())
+
         # Adjust behavior per level
         if safe_level == 1:
             tavily_depth = "basic"
@@ -333,7 +370,9 @@ class WebResearchTool:
             effective_max_results = max(1, max_results)
             deep_fetch = True
 
-        cache_key = self._make_cache_key(query, safe_level, effective_max_results, topic)
+        cache_key = self._make_cache_key(
+            safe_query, safe_level, effective_max_results, topic
+        )
         cached = self._get_from_cache(cache_key)
         if cached is not None:
             # Return a copy to avoid mutation from callers and tag
@@ -350,12 +389,19 @@ class WebResearchTool:
 
         # STUB FALLBACK MODE
         if not self.client:
+            stub_snippet = (
+                "Tavily API key missing or Tavily client not initialised. "
+                f"Using placeholder result at level={safe_level} instead of real web search."
+            )
+            if truncated:
+                stub_snippet += (
+                    f" Original query exceeded {self.max_query_chars} characters and "
+                    "was truncated before use."
+                )
+
             stub: Dict[str, Any] = {
-                "title": f"[STUB] No Tavily key: query='{query}'",
-                "snippet": (
-                    "Tavily API key missing or Tavily client not initialised. "
-                    f"Using placeholder result at level={safe_level} instead of real web search."
-                ),
+                "title": f"[STUB] No Tavily key",
+                "snippet": stub_snippet,
                 "url": "",
             }
             if agent_role is not None:
@@ -368,7 +414,7 @@ class WebResearchTool:
         # REAL Tavily API call with retries
         try:
             response = self._tavily_search_with_retries(
-                query=query,
+                query=safe_query,
                 max_results=effective_max_results,
                 topic=topic,
                 search_depth=tavily_depth,
@@ -392,6 +438,11 @@ class WebResearchTool:
                 if swarm_id is not None:
                     res["swarm_id"] = swarm_id
 
+                # If the query was truncated, annotate first result once
+                if truncated and "query_truncated" not in res:
+                    res["query_truncated"] = True
+                    res["query_used"] = safe_query
+
                 results.append(res)
 
             if not results:
@@ -404,6 +455,9 @@ class WebResearchTool:
                     res2["agent_role"] = agent_role
                 if swarm_id is not None:
                     res2["swarm_id"] = swarm_id
+                if truncated:
+                    res2["query_truncated"] = True
+                    res2["query_used"] = safe_query
                 results = [res2]
 
             # Store version without role and swarm tags so cache is reusable
@@ -419,9 +473,16 @@ class WebResearchTool:
 
         except Exception as e:
             # Safe fallback on API errors
+            err_snippet = str(e)
+            if truncated:
+                err_snippet += (
+                    f" (Query was truncated to {self.max_query_chars} characters "
+                    "before calling Tavily.)"
+                )
+
             err: Dict[str, Any] = {
                 "title": "Tavily Search Error",
-                "snippet": str(e),
+                "snippet": err_snippet,
                 "url": "",
             }
             if agent_role is not None:
