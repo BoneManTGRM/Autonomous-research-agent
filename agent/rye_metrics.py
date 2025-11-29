@@ -1570,7 +1570,7 @@ def build_msil_ready_snapshot(
     hours_run_so_far: Optional[float] = None,
     window: int = 10,
     max_points: int = 500,
-) -> Dict[str, Any]]:
+) -> Dict[str, Any]:
     """
     Optional high level helper for msil.py and IQ style probes.
 
