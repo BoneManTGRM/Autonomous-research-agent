@@ -57,7 +57,7 @@ class RunConfig:
 
     # Cycles and time
     total_cycles: int = 1
-    max_seconds: Optional[int] = None  # optional hard time cap
+    max_seconds: Optional[int] = None  # optional hard time cap (wall clock)
 
     # RYE and safety controls
     rye_stop_threshold: Optional[float] = None
@@ -147,12 +147,18 @@ class RunManager:
         start_ts = datetime.utcnow().isoformat() + "Z"
         start_time = time.time()
 
+        # Hard wall clock deadline (if configured)
+        if run_config.max_seconds is not None:
+            deadline_ts: Optional[float] = start_time + float(run_config.max_seconds)
+        else:
+            deadline_ts = None
+
         if run_config.mode == "single":
-            summary = self._run_single(run_config, progress_cb, start_time)
+            summary = self._run_single(run_config, progress_cb, start_time, deadline_ts)
         elif run_config.mode == "two_stage":
-            summary = self._run_two_stage(run_config, progress_cb, start_time)
+            summary = self._run_two_stage(run_config, progress_cb, start_time, deadline_ts)
         elif run_config.mode == "swarm":
-            summary = self._run_swarm(run_config, progress_cb, start_time)
+            summary = self._run_swarm(run_config, progress_cb, start_time, deadline_ts)
         else:
             raise ValueError(f"Unknown run mode: {run_config.mode}")
 
@@ -168,6 +174,10 @@ class RunManager:
         summary["elapsed_seconds"] = end_time - start_time
         summary["notes"] = run_config.notes
 
+        # Attach the configured max_seconds and an explicit stop_reason if missing
+        summary.setdefault("max_seconds", run_config.max_seconds)
+        summary.setdefault("stop_reason", "completed")
+
         return summary
 
     # ------------------------------------------------------------------
@@ -178,14 +188,17 @@ class RunManager:
         run_config: RunConfig,
         progress_cb: Optional[RunProgressCallback],
         start_time: float,
+        deadline_ts: Optional[float],
     ) -> Dict[str, Any]:
         agent = self._build_agent(role="agent", run_config=run_config)
         cycles: List[Dict[str, Any]] = []
         best_rye: Optional[float] = None
         last_cycle_meta: Dict[str, Any] = {}
+        stop_reason: str = "completed"
 
         for cycle_index in range(1, run_config.total_cycles + 1):
-            if self._time_exceeded(run_config, start_time):
+            if self._time_exceeded(deadline_ts):
+                stop_reason = "time_limit"
                 break
 
             cycle_kwargs = self._build_cycle_kwargs(
@@ -222,6 +235,7 @@ class RunManager:
                 rye=rye_val,
                 equilibrium_label=eq_label,
             ):
+                stop_reason = "early_stop"
                 break
 
         return self._build_run_summary(
@@ -229,6 +243,7 @@ class RunManager:
             cycles=cycles,
             best_rye=best_rye,
             last_cycle_meta=last_cycle_meta,
+            stop_reason=stop_reason,
         )
 
     # ------------------------------------------------------------------
@@ -239,11 +254,12 @@ class RunManager:
         run_config: RunConfig,
         progress_cb: Optional[RunProgressCallback],
         start_time: float,
+        deadline_ts: Optional[float],
     ) -> Dict[str, Any]:
         stage_cfg = run_config.stage_config
         if not stage_cfg.enable_two_stage:
             # Fallback to single if two stage is not enabled
-            return self._run_single(run_config, progress_cb, start_time)
+            return self._run_single(run_config, progress_cb, start_time, deadline_ts)
 
         idea_agent = self._build_agent(role="researcher", run_config=run_config)
         critic_agent = self._build_agent(role="critic", run_config=run_config)
@@ -251,17 +267,20 @@ class RunManager:
         cycles: List[Dict[str, Any]] = []
         best_rye: Optional[float] = None
         last_cycle_meta: Dict[str, Any] = {}
+        stop_reason: str = "completed"
 
         cycle_index = 1
         while cycle_index <= run_config.total_cycles:
-            if self._time_exceeded(run_config, start_time):
+            if self._time_exceeded(deadline_ts):
+                stop_reason = "time_limit"
                 break
 
             # Idea stage block
             for _ in range(stage_cfg.idea_cycles):
                 if cycle_index > run_config.total_cycles:
                     break
-                if self._time_exceeded(run_config, start_time):
+                if self._time_exceeded(deadline_ts):
+                    stop_reason = "time_limit"
                     break
 
                 cycle_kwargs = self._build_cycle_kwargs(
@@ -291,26 +310,32 @@ class RunManager:
                         }
                     )
 
-                cycle_index += 1
-
                 if self._should_stop_early(
                     run_config=run_config,
                     cycle_index=cycle_index,
                     rye=rye_val,
                     equilibrium_label=eq_label,
                 ):
+                    stop_reason = "early_stop"
+                    cycle_index += 1
                     break
 
-            if self._time_exceeded(run_config, start_time):
+                cycle_index += 1
+
+            if self._time_exceeded(deadline_ts):
+                stop_reason = "time_limit"
                 break
             if cycle_index > run_config.total_cycles:
+                break
+            if stop_reason == "early_stop":
                 break
 
             # Verify stage block
             for _ in range(stage_cfg.verify_cycles):
                 if cycle_index > run_config.total_cycles:
                     break
-                if self._time_exceeded(run_config, start_time):
+                if self._time_exceeded(deadline_ts):
+                    stop_reason = "time_limit"
                     break
 
                 cycle_kwargs = self._build_cycle_kwargs(
@@ -340,21 +365,32 @@ class RunManager:
                         }
                     )
 
-                cycle_index += 1
-
                 if self._should_stop_early(
                     run_config=run_config,
                     cycle_index=cycle_index,
                     rye=rye_val,
                     equilibrium_label=eq_label,
                 ):
+                    stop_reason = "early_stop"
+                    cycle_index += 1
                     break
+
+                cycle_index += 1
+
+            if self._time_exceeded(deadline_ts):
+                stop_reason = "time_limit"
+                break
+            if cycle_index > run_config.total_cycles:
+                break
+            if stop_reason == "early_stop":
+                break
 
         return self._build_run_summary(
             run_config=run_config,
             cycles=cycles,
             best_rye=best_rye,
             last_cycle_meta=last_cycle_meta,
+            stop_reason=stop_reason,
         )
 
     # ------------------------------------------------------------------
@@ -365,10 +401,11 @@ class RunManager:
         run_config: RunConfig,
         progress_cb: Optional[RunProgressCallback],
         start_time: float,
+        deadline_ts: Optional[float],
     ) -> Dict[str, Any]:
         swarm_cfg = run_config.swarm_config
         if swarm_cfg.swarm_size <= 1:
-            return self._run_single(run_config, progress_cb, start_time)
+            return self._run_single(run_config, progress_cb, start_time, deadline_ts)
 
         agents: List[CoreAgent] = []
         agent_roles: List[str] = []
@@ -382,16 +419,19 @@ class RunManager:
         cycles: List[Dict[str, Any]] = []
         best_rye: Optional[float] = None
         last_cycle_meta: Dict[str, Any] = {}
+        stop_reason: str = "completed"
 
         total_cycles_budget = run_config.total_cycles * swarm_cfg.swarm_size
         cycle_index_global = 0
 
         while cycle_index_global < total_cycles_budget:
-            if self._time_exceeded(run_config, start_time):
+            if self._time_exceeded(deadline_ts):
+                stop_reason = "time_limit"
                 break
 
             for agent_idx, agent in enumerate(agents):
-                if self._time_exceeded(run_config, start_time):
+                if self._time_exceeded(deadline_ts):
+                    stop_reason = "time_limit"
                     break
                 if cycle_index_global >= total_cycles_budget:
                     break
@@ -436,7 +476,14 @@ class RunManager:
                     rye=rye_val,
                     equilibrium_label=eq_label,
                 ):
+                    stop_reason = "early_stop"
                     break
+
+            if self._time_exceeded(deadline_ts):
+                stop_reason = "time_limit"
+                break
+            if stop_reason == "early_stop":
+                break
 
         return self._build_run_summary(
             run_config=run_config,
@@ -445,15 +492,17 @@ class RunManager:
             last_cycle_meta=last_cycle_meta,
             is_swarm=True,
             swarm_roles=agent_roles,
+            stop_reason=stop_reason,
         )
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-    def _time_exceeded(self, run_config: RunConfig, start_time: float) -> bool:
-        if run_config.max_seconds is None:
+    def _time_exceeded(self, deadline_ts: Optional[float]) -> bool:
+        """Return True if the wall-clock deadline has passed."""
+        if deadline_ts is None:
             return False
-        return (time.time() - start_time) >= run_config.max_seconds
+        return time.time() >= deadline_ts
 
     def _update_best(
         self,
@@ -542,6 +591,7 @@ class RunManager:
         last_cycle_meta: Dict[str, Any],
         is_swarm: bool = False,
         swarm_roles: Optional[List[str]] = None,
+        stop_reason: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Create a compact run level summary from cycle logs."""
 
@@ -571,5 +621,8 @@ class RunManager:
 
         if is_swarm and swarm_roles is not None:
             summary["swarm_roles"] = swarm_roles
+
+        if stop_reason is not None:
+            summary["stop_reason"] = stop_reason
 
         return summary
