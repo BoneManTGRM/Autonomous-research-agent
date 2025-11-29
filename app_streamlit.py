@@ -54,7 +54,7 @@ import streamlit as st
 import yaml
 
 # Ensure repository root is on sys.path so imports work on Render and local
-# This is robust whether this file lives in repo root or in a subfolder (e.g. app/)
+# This is robust whether this file lives in repo root or in a subfolder (for example app/)
 _THIS_FILE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = _THIS_FILE_DIR
 if not (REPO_ROOT / "agent").is_dir() and (_THIS_FILE_DIR.parent / "agent").is_dir():
@@ -64,19 +64,19 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 # -------------------------------------------------------------------
-# Imports: prefer package layout `agent.*`, guarded flat fallback
+# Imports: prefer package layout agent.*, guarded flat fallback
 # -------------------------------------------------------------------
 try:
     # Package layout (recommended, what you have on Render)
     from agent.core_agent import CoreAgent
     from agent.memory_store import MemoryStore
-    from agent.presets import PRESETS, get_preset, RUNTIME_PROFILES  # domain presets and runtime profiles
+    from agent.presets import PRESETS, get_preset, RUNTIME_PROFILES
     from agent.report_generator import (
         generate_report,
         generate_findings_report,
         generate_report_pdf,
         generate_findings_report_pdf,
-    )  # report builders and PDF exporters
+    )
     from agent.rye_metrics import (
         rolling_rye,
         efficiency_trend,
@@ -93,7 +93,7 @@ try:
         early_failure_warning_score,
         classify_run_tier,
     )
-    from agent.report_builder import build_agent_report  # full Option C report with learning speed
+    from agent.report_builder import build_agent_report
 
     # Optional discovery and verification helpers (imported lazily if present)
     try:  # type: ignore[import]
@@ -129,9 +129,8 @@ try:
         TOOL_REGISTRY = {}  # type: ignore[assignment]
 
 except ModuleNotFoundError as e:
-    # If the 'agent' package itself is missing, allow flat layout fallback.
-    # If something *inside* agent.* is missing, re-raise so we see the real error
-    # instead of masking it with a bogus `core_agent` import failure.
+    # If the agent package itself is missing, allow flat layout fallback.
+    # If something inside agent.* is missing, re raise so we see the real error.
     if "agent" not in str(e):
         raise
 
@@ -139,12 +138,12 @@ except ModuleNotFoundError as e:
     from core_agent import CoreAgent
     from memory_store import MemoryStore
     from presets import PRESETS, get_preset, RUNTIME_PROFILES  # type: ignore[no-redef]
-    from report_generator import (
+    from report_generator import (  # type: ignore[no-redef]
         generate_report,
         generate_findings_report,
         generate_report_pdf,
         generate_findings_report_pdf,
-    )  # type: ignore[no-redef]
+    )
     from rye_metrics import (  # type: ignore[no-redef]
         rolling_rye,
         efficiency_trend,
@@ -198,9 +197,8 @@ except ModuleNotFoundError as e:
 # Use absolute path for default config relative to repo root
 CONFIG_PATH_DEFAULT = str(REPO_ROOT / "config" / "settings.yaml")
 
-# Rough estimate for how many cycles you expect per hour in continuous mode.
-# This is now used to derive a safe local cycle budget for 1h / 8h / 24h runs
-# so those modes actually end when launched from the Streamlit UI.
+# Rough estimate for cycles per hour in continuous mode.
+# Used to derive a safe local cycle budget for 1h / 8h / 24h runs.
 CYCLES_PER_HOUR_ESTIMATE = 120
 
 # Swarm roles: base archetypes for mini agents
@@ -281,7 +279,6 @@ def init_agent(config_path: str = CONFIG_PATH_DEFAULT) -> Tuple[CoreAgent, Memor
 
 def tavily_status() -> Dict[str, Any]:
     """Check whether a Tavily API key is available (per user or env)."""
-
     # 1) Prefer per user key stored in session state (from sidebar input)
     key = st.session_state.get("tavily_key", None)
 
@@ -299,7 +296,10 @@ def tavily_status() -> Dict[str, Any]:
     if key:
         tail = key[-4:]
         return {"has_key": True, "display": f"Tavily key detected (...{tail})"}
-    return {"has_key": False, "display": "No Tavily API key found. Web search will use stubbed results."}
+    return {
+        "has_key": False,
+        "display": "No Tavily API key found. Web search will use stubbed results.",
+    }
 
 
 def detect_tools() -> Dict[str, bool]:
@@ -419,7 +419,7 @@ def role_specific_goal(base_goal: str, role: str) -> str:
     archetype = role.split("_", 1)[0] if "_" in role else role
 
     if archetype == "researcher":
-        return(
+        return (
             f"Primary deep research agent for goal: {base_goal}.\n"
             "Focus on high quality sources, detailed notes, and clear summaries."
         )
@@ -848,7 +848,7 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
         if d_id not in domain_ids.values():
             safe_d2_label = _clean_label_text(f"Domain: {d}")
             nodes.append(f'{d_id} [label="{safe_d2_label}", shape=box]')
-        if r_id not in domain_ids.values():
+        if r_id not in role_ids.values():
             safe_r2_label = _clean_label_text(f"Role: {r}")
             nodes.append(f'{r_id} [label="{safe_r2_label}", shape=ellipse]')
         edges.append(f"{d_id} -> {hyp_id}")
@@ -1018,12 +1018,15 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
 # -------------------------------------------------------------------
 def main() -> None:
     st.title("Autonomous Research Agent")
-    st.caption("Reparodynamics, RYE, and TGRM powered research loop (with swarm mode, web browser, sandbox, background worker, and advanced discovery panels)")
+    st.caption(
+        "Reparodynamics, RYE, and TGRM powered research loop "
+        "(with swarm mode, web browser, sandbox, background worker, and advanced discovery panels)"
+    )
 
     agent, memory = init_agent()
 
     # -----------------------------
-    # Sidebar - settings
+    # Sidebar settings
     # -----------------------------
     st.sidebar.header("Run settings")
 
@@ -1050,7 +1053,7 @@ def main() -> None:
     preset_keys = list(PRESETS.keys())
     preset_labels = [PRESETS[k]["label"] for k in preset_keys]
 
-    default_preset_index = 0  # default to first key
+    default_preset_index = 0
     if "general" in preset_keys:
         default_preset_index = preset_keys.index("general")
 
@@ -1064,7 +1067,7 @@ def main() -> None:
     preset = get_preset(selected_key)
     domain_tag = preset.get("domain", selected_key)
 
-    # Show runtime profile info from presets if configured
+    # Runtime profile info from presets if configured
     st.sidebar.subheader("Runtime profile")
     default_runtime_profile = preset.get("default_runtime_profile")
     if default_runtime_profile:
@@ -1078,7 +1081,10 @@ def main() -> None:
         if rp_desc:
             st.sidebar.caption(rp_desc)
     else:
-        st.sidebar.caption("This preset has no runtime profile configured. Manual and timed modes use generic defaults.")
+        st.sidebar.caption(
+            "This preset has no runtime profile configured. "
+            "Manual and timed modes use generic defaults."
+        )
 
     # Tavily status (after handling key input)
     status = tavily_status()
@@ -1087,7 +1093,10 @@ def main() -> None:
         st.sidebar.success(status["display"])
     else:
         st.sidebar.warning(status["display"])
-        st.sidebar.write("Paste a Tavily key above to enable real web search. Otherwise, stubbed results are used.")
+        st.sidebar.write(
+            "Paste a Tavily key above to enable real web search. "
+            "Otherwise, stubbed results are used."
+        )
 
     # Tool status (web browser and sandbox)
     st.sidebar.subheader("Tools status")
@@ -1096,7 +1105,10 @@ def main() -> None:
     if tool_flags["web"]:
         st.sidebar.success("Web browser tool is available in tools.py.")
     else:
-        st.sidebar.info("Web browser tool not detected in tools.py. CoreAgent may still use Tavily directly.")
+        st.sidebar.info(
+            "Web browser tool not detected in tools.py. "
+            "CoreAgent may still use Tavily directly."
+        )
 
     if tool_flags["sandbox"]:
         st.sidebar.success("Sandbox tool is available for safe code execution.")
@@ -1254,7 +1266,10 @@ def main() -> None:
     # Run cycles or configure worker
     # ------------------------------
     if run_button:
-        st.write(f"Running or configuring agent with preset: {preset.get('label', selected_label)} (domain: {domain_tag})")
+        st.write(
+            f"Running or configuring agent with preset: {preset.get('label', selected_label)} "
+            f"(domain: {domain_tag})"
+        )
         history = memory.get_cycle_history()
         next_index = len(history)
         results: List[Dict[str, Any]] = []
@@ -1681,7 +1696,7 @@ def main() -> None:
         st.write("No worker_state saved yet.")
 
     # ------------------------------
-    # History + Advanced Panels
+    # History and advanced panels
     # ------------------------------
     st.markdown("---")
     st.subheader("History and advanced analysis")
@@ -1846,7 +1861,10 @@ def main() -> None:
                     with st.expander("Learning and stability dynamics"):
                         st.json(dynamics)
             else:
-                st.info("MSIL module not detected or no MSIL profile available. This panel stays optional and non blocking.")
+                st.info(
+                    "MSIL module not detected or no MSIL profile available. "
+                    "This panel stays optional and non blocking."
+                )
 
             # New Option C style 10x learning dashboard
             st.markdown("#### 10x learning dashboard (Option C signals)")
@@ -2025,7 +2043,9 @@ def main() -> None:
             st.markdown("### Discovery log")
             discoveries = load_discovery_log()
             if not discoveries:
-                st.info("No discovery log found yet. The worker will populate it once discovery logging is enabled.")
+                st.info(
+                    "No discovery log found yet. The worker will populate it once discovery logging is enabled."
+                )
             else:
                 # High level stats for discoveries
                 total_disc = len(discoveries)
@@ -2105,7 +2125,9 @@ def main() -> None:
 
             snapshots = load_snapshots()
             if not snapshots:
-                st.info("No snapshots found yet. The worker will create them when snapshot generation is enabled.")
+                st.info(
+                    "No snapshots found yet. The worker will create them when snapshot generation is enabled."
+                )
             else:
                 labels = []
                 for s in snapshots:
@@ -2157,18 +2179,42 @@ def main() -> None:
                 st.markdown("#### Snapshot 1 equilibrium view")
                 eq1 = equilibrium_from_snapshot(s1["data"])
                 col_eq1 = st.columns(4)
-                col_eq1[0].metric("RYE avg", f"{eq1['rye_avg']:.3f}" if eq1["rye_avg"] is not None else "n/a")
-                col_eq1[1].metric("Stability idx", f"{eq1['stability_index']:.3f}" if eq1["stability_index"] is not None else "n/a")
-                col_eq1[2].metric("Coherence plateau", f"{eq1['coherence_plateau']:.3f}" if eq1["coherence_plateau"] is not None else "n/a")
-                col_eq1[3].metric("Equilibrium fraction", f"{eq1['equilibrium_fraction']:.3f}" if eq1["equilibrium_fraction"] is not None else "n/a")
+                col_eq1[0].metric(
+                    "RYE avg",
+                    f"{eq1['rye_avg']:.3f}" if eq1["rye_avg"] is not None else "n/a",
+                )
+                col_eq1[1].metric(
+                    "Stability idx",
+                    f"{eq1['stability_index']:.3f}" if eq1["stability_index"] is not None else "n/a",
+                )
+                col_eq1[2].metric(
+                    "Coherence plateau",
+                    f"{eq1['coherence_plateau']:.3f}" if eq1["coherence_plateau"] is not None else "n/a",
+                )
+                col_eq1[3].metric(
+                    "Equilibrium fraction",
+                    f"{eq1['equilibrium_fraction']:.3f}" if eq1["equilibrium_fraction"] is not None else "n/a",
+                )
 
                 st.markdown("#### Snapshot 2 equilibrium view")
                 eq2 = equilibrium_from_snapshot(s2["data"])
                 col_eq2 = st.columns(4)
-                col_eq2[0].metric("RYE avg", f"{eq2['rye_avg']:.3f}" if eq2["rye_avg"] is not None else "n/a")
-                col_eq2[1].metric("Stability idx", f"{eq2['stability_index']:.3f}" if eq2["stability_index"] is not None else "n/a")
-                col_eq2[2].metric("Coherence plateau", f"{eq2['coherence_plateau']:.3f}" if eq2["coherence_plateau"] is not None else "n/a")
-                col_eq2[3].metric("Equilibrium fraction", f"{eq2['equilibrium_fraction']:.3f}" if eq2["equilibrium_fraction"] is not None else "n/a")
+                col_eq2[0].metric(
+                    "RYE avg",
+                    f"{eq2['rye_avg']:.3f}" if eq2["rye_avg"] is not None else "n/a",
+                )
+                col_eq2[1].metric(
+                    "Stability idx",
+                    f"{eq2['stability_index']:.3f}" if eq2["stability_index"] is not None else "n/a",
+                )
+                col_eq2[2].metric(
+                    "Coherence plateau",
+                    f"{eq2['coherence_plateau']:.3f}" if eq2["coherence_plateau"] is not None else "n/a",
+                )
+                col_eq2[3].metric(
+                    "Equilibrium fraction",
+                    f"{eq2['equilibrium_fraction']:.3f}" if eq2["equilibrium_fraction"] is not None else "n/a",
+                )
 
                 st.markdown("#### Equilibrium delta (snapshot2 - snapshot1)")
 
@@ -2183,10 +2229,20 @@ def main() -> None:
                 d_eqfrac = _delta(eq1["equilibrium_fraction"], eq2["equilibrium_fraction"])
 
                 col_de = st.columns(4)
-                col_de[0].metric("Delta RYE avg", f"{d_rye:+.3f}" if d_rye is not None else "n/a")
-                col_de[1].metric("Delta stability", f"{d_stab:+.3f}" if d_stab is not None else "n/a")
-                col_de[2].metric("Delta plateau", f"{d_plateau:+.3f}" if d_plateau is not None else "n/a")
-                col_de[3].metric("Delta equilibrium", f"{d_eqfrac:+.3f}" if d_eqfrac is not None else "n/a")
+                col_de[0].metric(
+                    "Delta RYE avg", f"{d_rye:+.3f}" if d_rye is not None else "n/a"
+                )
+                col_de[1].metric(
+                    "Delta stability", f"{d_stab:+.3f}" if d_stab is not None else "n/a"
+                )
+                col_de[2].metric(
+                    "Delta plateau",
+                    f"{d_plateau:+.3f}" if d_plateau is not None else "n/a",
+                )
+                col_de[3].metric(
+                    "Delta equilibrium",
+                    f"{d_eqfrac:+.3f}" if d_eqfrac is not None else "n/a",
+                )
 
                 with st.expander("Raw snapshot 1 JSON"):
                     st.code(json.dumps(s1["data"], indent=2), language="json")
@@ -2238,7 +2294,9 @@ def main() -> None:
                         continue
                     filtered_h.append(h)
 
-                st.write(f"Total hypotheses: {len(all_hyps)}, after filters: {len(filtered_h)}")
+                st.write(
+                    f"Total hypotheses: {len(all_hyps)}, after filters: {len(filtered_h)}"
+                )
 
                 # Sort by confidence if present
                 def _score(h: Dict[str, Any]) -> float:
@@ -2268,7 +2326,9 @@ def main() -> None:
                     conf_txt = ""
                     if isinstance(h.get("confidence"), (int, float)):
                         conf_txt = f" (confidence ~ {h['confidence']:.2f})"
-                    hypo_md.append(f"- [{h['domain']}/{h['role']} cycle {h['cycle']}] {h['text']}{conf_txt}")
+                    hypo_md.append(
+                        f"- [{h['domain']}/{h['role']} cycle {h['cycle']}] {h['text']}{conf_txt}"
+                    )
                 hypo_md_text = "\n".join(hypo_md)
                 st.download_button(
                     "Download hypotheses as Markdown",
@@ -2281,19 +2341,25 @@ def main() -> None:
         with tab_memory:
             st.markdown("### Memory pruning and compaction")
 
-            st.write("This panel calls optional pruning methods on the MemoryStore if they exist. "
-                     "If not, it just shows high level stats.")
+            st.write(
+                "This panel calls optional pruning methods on the MemoryStore if they exist. "
+                "If not, it just shows high level stats."
+            )
 
             total_cycles = len(history)
             st.metric("Total cycles in history", total_cycles)
 
             # Check for optional pruning hooks on MemoryStore or pruner module
-            has_prune_method = hasattr(memory, "prune_low_value_notes") or hasattr(memory, "prune_history")
+            has_prune_method = hasattr(memory, "prune_low_value_notes") or hasattr(
+                memory, "prune_history"
+            )
             has_pruner_module = _pruner_module is not None
 
             if not has_prune_method and not has_pruner_module:
-                st.info("No pruning hooks detected on MemoryStore or memory_pruner module. "
-                        "You can still manually clear history by deleting the memory file on disk.")
+                st.info(
+                    "No pruning hooks detected on MemoryStore or memory_pruner module. "
+                    "You can still manually clear history by deleting the memory file on disk."
+                )
             else:
                 threshold = st.number_input(
                     "Approximate minimum RYE gain to keep entries (used if supported)",
@@ -2316,21 +2382,37 @@ def main() -> None:
                     try:
                         if hasattr(memory, "prune_low_value_notes"):
                             func = getattr(memory, "prune_low_value_notes")
-                            pruned_count = int(func(threshold=threshold, max_keep=max_keep))  # type: ignore[arg-type]
+                            pruned_count = int(
+                                func(threshold=threshold, max_keep=max_keep)  # type: ignore[arg-type]
+                            )
                         elif hasattr(memory, "prune_history"):
                             func = getattr(memory, "prune_history")
-                            pruned_count = int(func(threshold=threshold, max_keep=max_keep))  # type: ignore[arg-type]
-                        elif has_pruner_module and hasattr(_pruner_module, "run_memory_pruning"):
+                            pruned_count = int(
+                                func(threshold=threshold, max_keep=max_keep)  # type: ignore[arg-type]
+                            )
+                        elif has_pruner_module and hasattr(
+                            _pruner_module, "run_memory_pruning"
+                        ):
                             func = getattr(_pruner_module, "run_memory_pruning")
-                            pruned_count = int(func(memory_store=memory, threshold=threshold, max_keep=max_keep))  # type: ignore[arg-type]
+                            pruned_count = int(
+                                func(
+                                    memory_store=memory,
+                                    threshold=threshold,
+                                    max_keep=max_keep,
+                                )  # type: ignore[arg-type]
+                            )
                     except Exception as e:
                         error_msg = str(e)
 
                     if error_msg:
                         st.error(f"Pruning call raised an error: {error_msg}")
                     else:
-                        st.success(f"Pruning completed. Approximate entries removed: {pruned_count}")
-                        st.info("Reload the page to reflect updated history and diagnostics.")
+                        st.success(
+                            f"Pruning completed. Approximate entries removed: {pruned_count}"
+                        )
+                        st.info(
+                            "Reload the page to reflect updated history and diagnostics."
+                        )
 
         # ----------------- Verification and cures tab -----------------
         with tab_verify:
@@ -2338,7 +2420,9 @@ def main() -> None:
 
             verifications = load_verification_log()
             if not verifications:
-                st.info("No verification log found yet. Verification engine has not written results or file is empty.")
+                st.info(
+                    "No verification log found yet. Verification engine has not written results or file is empty."
+                )
             else:
                 # Summaries
                 success_flags = []
@@ -2346,7 +2430,11 @@ def main() -> None:
                 for v in verifications:
                     ok = v.get("verified") or v.get("success")
                     success_flags.append(bool(ok))
-                    delta = v.get("rye_gain") or v.get("delta_rye") or v.get("delta_RYE")
+                    delta = (
+                        v.get("rye_gain")
+                        or v.get("delta_rye")
+                        or v.get("delta_RYE")
+                    )
                     try:
                         rye_deltas.append(float(delta))
                     except Exception:
@@ -2356,11 +2444,20 @@ def main() -> None:
                 successful = sum(1 for x in success_flags if x)
                 st.metric("Total verifications", total)
                 st.metric("Successful verifications", successful)
-                st.metric("Success rate", f"{(successful / total * 100.0):.1f}%" if total > 0 else "n/a")
+                st.metric(
+                    "Success rate",
+                    f"{(successful / total * 100.0):.1f}%" if total > 0 else "n/a",
+                )
                 if rye_deltas:
-                    st.metric("Average RYE change when verified", f"{(sum(rye_deltas) / len(rye_deltas)):.3f}")
+                    st.metric(
+                        "Average RYE change when verified",
+                        f"{(sum(rye_deltas) / len(rye_deltas)):.3f}",
+                    )
                 else:
-                    st.metric("Average RYE change when verified", "n/a")
+                    st.metric(
+                        "Average RYE change when verified",
+                        "n/a",
+                    )
 
                 # Table
                 view_rows_v = []
@@ -2368,7 +2465,11 @@ def main() -> None:
                     label = v.get("label") or v.get("id") or v.get("target") or "item"
                     hyp = v.get("hypothesis") or v.get("text")
                     ok = bool(v.get("verified") or v.get("success"))
-                    d_rye = v.get("rye_gain") or v.get("delta_rye") or v.get("delta_RYE")
+                    d_rye = (
+                        v.get("rye_gain")
+                        or v.get("delta_rye")
+                        or v.get("delta_RYE")
+                    )
                     domain = v.get("domain", "general")
                     view_rows_v.append(
                         {
@@ -2376,7 +2477,8 @@ def main() -> None:
                             "domain": domain,
                             "verified": ok,
                             "delta_RYE": d_rye,
-                            "hypothesis": (hyp or "")[:120] + ("..." if hyp and len(hyp) > 120 else ""),
+                            "hypothesis": (hyp or "")[:120]
+                            + ("..." if hyp and len(hyp) > 120 else ""),
                         }
                     )
                 st.dataframe(view_rows_v, use_container_width=True)
@@ -2392,7 +2494,9 @@ def main() -> None:
             if not history:
                 st.info("No history yet to build a graph.")
             else:
-                dot = build_insight_graph(history=history, discoveries=discoveries_for_graph)
+                dot = build_insight_graph(
+                    history=history, discoveries=discoveries_for_graph
+                )
                 st.graphviz_chart(dot)
 
     # ------------------------------
@@ -2412,7 +2516,9 @@ def main() -> None:
             st.json(state)
             if st.button("Clear saved run state", key="clear_run_state_btn"):
                 memory.clear_run_state()
-                st.success("Saved run state cleared. It will be rebuilt on the next continuous run by the worker.")
+                st.success(
+                    "Saved run state cleared. It will be rebuilt on the next continuous run by the worker."
+                )
 
     with col_watchdog:
         st.markdown("**Watchdog heartbeat (MemoryStore)**")
@@ -2440,8 +2546,12 @@ def main() -> None:
     )
 
     history_for_reports = memory.get_cycle_history()
-    hours_run_for_reports = compute_run_hours(history_for_reports) if history_for_reports else None
-    msil_profile_for_reports = compute_msil_profile(history_for_reports) if history_for_reports else None
+    hours_run_for_reports = (
+        compute_run_hours(history_for_reports) if history_for_reports else None
+    )
+    msil_profile_for_reports = (
+        compute_msil_profile(history_for_reports) if history_for_reports else None
+    )
 
     col_rep1, col_rep2, col_rep3 = st.columns(3)
 
@@ -2457,7 +2567,11 @@ def main() -> None:
             )
             # Optional PDF
             try:
-                pdf_path = generate_report_pdf(memory_store=memory, goal=None, output_path="autonomous_research_report.pdf")
+                pdf_path = generate_report_pdf(
+                    memory_store=memory,
+                    goal=None,
+                    output_path="autonomous_research_report.pdf",
+                )
                 with open(pdf_path, "rb") as f:
                     st.download_button(
                         "Download full report (PDF)",
@@ -2468,7 +2582,9 @@ def main() -> None:
             except RuntimeError as e:
                 st.info(str(e))
             except Exception:
-                st.info("PDF generation failed unexpectedly. Check server logs for details.")
+                st.info(
+                    "PDF generation failed unexpectedly. Check server logs for details."
+                )
 
         if st.button("Full Option C learning speed report", key="option_c_report_btn"):
             option_md = build_agent_report(
@@ -2526,11 +2642,15 @@ def main() -> None:
             except RuntimeError as e:
                 st.info(str(e))
             except Exception:
-                st.info("PDF generation failed unexpectedly. Check server logs for details.")
+                st.info(
+                    "PDF generation failed unexpectedly. Check server logs for details."
+                )
 
         if st.button("Breakthrough snapshot report"):
             discoveries = load_discovery_log()
-            breakthrough_md = build_breakthrough_report(memory.get_cycle_history(), discoveries)
+            breakthrough_md = build_breakthrough_report(
+                memory.get_cycle_history(), discoveries
+            )
             st.markdown(breakthrough_md)
             st.download_button(
                 "Download breakthrough snapshot",
