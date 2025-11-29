@@ -9,7 +9,7 @@ Adds:
 - Information gain estimation
 - Domain aware weighting (longevity, math, general)
 - RYE friendly metadata (search_energy, info_density)
-- Full Tavily support + safe stub fallback
+- Optional Tavily support + safe stub fallback
 - Learning aware search energy and info_gain_per_energy for 10x modes
 """
 
@@ -24,10 +24,14 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
-# Tavily API key wiring
+# Tavily configuration (OPTIONAL, DISABLED BY DEFAULT)
 # ---------------------------------------------------------------------
-# Single source of truth: TAVILY_API_KEY must be provided via environment
-# (Render env var, .env file, or set at runtime from Streamlit UI).
+# If you ever want to re-enable real Tavily search:
+#   1) Set ENABLE_TAVILY = True
+#   2) Set TAVILY_API_KEY in your environment
+#
+# With ENABLE_TAVILY = False, this module ALWAYS uses the offline stub.
+ENABLE_TAVILY = False
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 # Tavily has a hard 400 character query limit.
@@ -35,7 +39,7 @@ TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 MAX_TAVILY_QUERY_CHARS = 360
 
 # ---------------------------------------------------------------------
-# Try to import the Tavily client
+# Try to import the Tavily client (optional)
 # ---------------------------------------------------------------------
 try:
     from tavily import TavilyClient
@@ -182,15 +186,22 @@ def _log_event(event: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------
-# Tavily wrapper
+# Tavily wrapper (now optional and disabled by default)
 # ---------------------------------------------------------------------
 def _get_tavily_client() -> Tuple[Optional[Any], Optional[str]]:
     """Return a TavilyClient instance or an error string.
 
-    Handles both new and old SDK styles:
-    - TavilyClient(api_key="...") where the key is passed explicitly
-    - TavilyClient() where the key is read from TAVILY_API_KEY env
+    If ENABLE_TAVILY is False, this will always return (None, reason)
+    so the system uses the offline stub path.
+
+    To re-enable:
+        - Set ENABLE_TAVILY = True in this file
+        - Provide TAVILY_API_KEY via environment
     """
+    # Hard kill switch: default to offline mode
+    if not ENABLE_TAVILY:
+        return None, "Tavily disabled (ENABLE_TAVILY=False)."
+
     if TavilyClient is None:
         return None, "tavily-python not installed."
 
@@ -404,7 +415,12 @@ def web_search_tool(
     learning_speed_factor: Optional[float] = None,
     burst_profile_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Perform a Tavily web search with extreme mode and learning aware intelligence."""
+    """Perform a web search with extreme mode and learning aware intelligence.
+
+    With ENABLE_TAVILY = False, this will always use the offline stub and never
+    call the Tavily API. To enable real web search, set ENABLE_TAVILY = True and
+    configure TAVILY_API_KEY in the environment.
+    """
     raw_q = (query or "").strip()
 
     # Clamp to Tavily max length with safety margin.
@@ -532,7 +548,7 @@ def web_search_tool(
 # ADDITIONS REQUIRED BY TGRM LOOP
 # ---------------------------------------------------------------------
 def summarize_results(raw: Dict[str, Any]) -> str:
-    """Convert raw Tavily extreme mode results into a readable text block."""
+    """Convert raw web_search_tool results into a readable text block."""
     if not raw or raw.get("error"):
         return f"Search failed: {raw.get('error', 'unknown error')}"
 
