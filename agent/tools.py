@@ -59,11 +59,29 @@ try:
 except Exception:
     sqlalchemy = None  # type: ignore
 
-# Use the EXTREME MODE web search tool if available
+# EXTREME MODE real web research tool (Tavily + truncation + caching)
 try:
-    from .web_search import web_search_tool as extreme_web_search_tool  # type: ignore
+    from .web_search import WebResearchTool  # type: ignore
 except Exception:
-    extreme_web_search_tool = None  # type: ignore
+    WebResearchTool = None  # type: ignore
+
+
+# Singleton instance for module level web_search bridge
+_WEB_RESEARCH_INSTANCE: Optional["WebResearchTool"] = None  # type: ignore
+
+
+def _get_web_research_instance() -> Optional["WebResearchTool"]:  # type: ignore
+    """Lazily construct a shared WebResearchTool instance."""
+    global _WEB_RESEARCH_INSTANCE
+    if _WEB_RESEARCH_INSTANCE is not None:
+        return _WEB_RESEARCH_INSTANCE
+    if WebResearchTool is None:
+        return None
+    try:
+        _WEB_RESEARCH_INSTANCE = WebResearchTool()
+    except Exception:
+        _WEB_RESEARCH_INSTANCE = None
+    return _WEB_RESEARCH_INSTANCE
 
 
 # ----------------------------------------------------------
@@ -667,7 +685,7 @@ class CodeSandbox:
 
         import contextlib
         import io as _io
-        import sys
+        import sys  # noqa: F401  (kept for potential future use in sandbox)
 
         stdout_buffer = _io.StringIO()
         stderr_buffer = _io.StringIO()
@@ -1146,24 +1164,60 @@ def web_search(
     """
     Unified web search entry point for the agent.
 
-    This is a thin bridge into agent.web_search.web_search_tool (EXTREME MODE).
+    This is a bridge into WebResearchTool (EXTREME MODE Tavily module).
     It also maintains the classic signature expected by CoreAgent / engine_worker.
 
     - Records tool_usage.web_calls
-    - If EXTREME MODE module is missing, falls back to a browser stub.
+    - Uses Tavily with query length clamping when available
+    - Falls back to a browser stub if WebResearchTool is missing
     """
     if tool_usage is not None:
         tool_usage.record_web_call(query)
 
+    tool = _get_web_research_instance()
+
+    # Map search_depth to WebResearchTool level
+    depth_norm = (search_depth or "advanced").strip().lower()
+    if depth_norm in {"basic", "shallow", "cheap"}:
+        level = 1
+    elif depth_norm in {"deep", "deepdive", "max"}:
+        level = 3
+    else:
+        level = 2
+
+    # Optional swarm metadata
+    agent_role = extra.get("agent_role")
+    swarm_id = extra.get("swarm_id")
+
     # If EXTREME MODE search is available, delegate
-    if extreme_web_search_tool is not None:
-        return extreme_web_search_tool(
+    if tool is not None:
+        started = time.time()
+        results = tool.search(
             query=query,
+            level=level,
             max_results=max_results,
             topic=topic,
-            search_depth=search_depth,
-            **extra,
+            agent_role=agent_role,
+            swarm_id=swarm_id,
         )
+        elapsed = time.time() - started
+
+        caps = tool.describe_capabilities()
+        stubbed = bool(caps.get("stub_mode", False))
+
+        search_energy = tool.estimate_energy_cost(level=level, max_results=max_results)
+
+        return {
+            "query": query,
+            "stubbed": stubbed,
+            "results": results,
+            "response_time": elapsed,
+            "request_id": None,
+            "info_gain": None,
+            "search_energy": search_energy,
+            "difficulty": None,
+            "semantic_diversity": None,
+        }
 
     # Fallback: browser based stub search so the system keeps working
     browser = BrowserTool()
@@ -1173,7 +1227,7 @@ def web_search(
     return {
         "query": query,
         "stubbed": True,
-        "error": page.error or "EXTREME web_search module not available",
+        "error": page.error or "WebResearchTool module not available",
         "results": [
             {
                 "title": page.title or "",
@@ -1249,6 +1303,8 @@ class Toolbelt:
         self.browser = BrowserTool()
         self.sandbox = CodeSandbox()
         self.data = DataPipelines()
+        # Expose WebResearchTool instance for UIs or diagnostics if needed
+        self.web_research = _get_web_research_instance()
 
     def new_usage_tracker(self) -> ToolUsage:
         """Return a fresh ToolUsage object for one cycle."""
