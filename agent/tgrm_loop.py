@@ -102,6 +102,28 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .rye_metrics import compute_delta_r, compute_rye
 
+# ---------------------------------------------------------------------------
+# Global limits and helpers
+# ---------------------------------------------------------------------------
+
+# Tavily imposes a maximum query length of 400 characters. We clamp slightly
+# below that to leave room for any internal decorations.
+MAX_WEB_QUERY_LEN = 380
+
+
+def _clamp_query(q: str, limit: int = MAX_WEB_QUERY_LEN) -> str:
+    """Clamp web search queries to Tavily-safe length.
+
+    Preserves core meaning while preventing "Query is too long" errors.
+    """
+    if not isinstance(q, str):
+        return ""
+    text = q.strip().replace("\n", " ")
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "..."
+
+
 # Optional stability kernel integration
 try:
     from .stability_kernel import StabilityKernel  # type: ignore[import]
@@ -213,11 +235,7 @@ def compute_energy(
     external_calls = web_calls + pubmed_calls + semantic_calls + pdf_ingestions
     token_cost = tokens_estimate / 1000.0
 
-    energy = (
-        0.5 * base_actions
-        + 0.75 * external_calls
-        + 0.2 * token_cost
-    )
+    energy = 0.5 * base_actions + 0.75 * external_calls + 0.2 * token_cost
 
     if swarm_size:
         energy *= 1.0 + min(2.0, max(0.0, (swarm_size - 1) / 32.0))
@@ -254,6 +272,9 @@ class _NullWebTool:
         """Return a list of result dicts using tools.web_search if possible."""
         if self._web_search_fn is None:
             return []
+
+        # Clamp to Tavily-safe length
+        query = _clamp_query(query)
 
         # Respect max_results if provided, otherwise default to 8.
         max_results = kwargs.get("max_results")
@@ -605,7 +626,7 @@ class TGRMLoop:
         var_val = 0.0
         if n > 1:
             var_val = sum((x - mean_val) ** 2 for x in window) / (n - 1)
-        std_val = var_val ** 0.5
+        std_val = var_val**0.5
 
         result["rye_window_mean"] = mean_val
         result["rye_window_std"] = std_val
@@ -923,9 +944,7 @@ class TGRMLoop:
             "missing_formalism",
             "missing_connections",
         ]
-        domain_issue_flags_before = {
-            code: (code in issues) for code in domain_issue_codes
-        }
+        domain_issue_flags_before = {code: (code in issues) for code in domain_issue_codes}
 
         has_questions_before = "question_mark" in issues
         has_todos_before = "todo_item" in issues
@@ -972,9 +991,7 @@ class TGRMLoop:
         for code in issues_after:
             issue_code_counts_after[code] = issue_code_counts_after.get(code, 0) + 1
 
-        domain_issue_flags_after = {
-            code: (code in issues_after) for code in domain_issue_codes
-        }
+        domain_issue_flags_after = {code: (code in issues_after) for code in domain_issue_codes}
         has_questions_after = "question_mark" in issues_after
         has_todos_after = "todo_item" in issues_after
         has_contradictions_after = "contradiction" in issues_after
@@ -1881,7 +1898,8 @@ class TGRMLoop:
                 domain=domain,
                 purpose="initial",
             )
-            web_results = self.web_tool.search(goal, **web_params)
+            search_query = _clamp_query(goal)
+            web_results = self.web_tool.search(search_query, **web_params)
             stats["web_calls"] += 1
             if tool_usage is not None:
                 tool_usage.web_calls += 1
@@ -1891,7 +1909,7 @@ class TGRMLoop:
             web_cites = self._tag_citations(
                 web_cites_raw,
                 goal=goal,
-                query=goal,
+                query=search_query,
                 channel="web",
                 phase="initial",
             )
@@ -2097,7 +2115,8 @@ class TGRMLoop:
                     domain=domain,
                     purpose="targeted",
                 )
-                web_results = self.web_tool.search(q, **web_params)
+                search_query = _clamp_query(q)
+                web_results = self.web_tool.search(search_query, **web_params)
                 stats["web_calls"] += 1
                 if tool_usage is not None:
                     tool_usage.web_calls += 1
@@ -2107,7 +2126,7 @@ class TGRMLoop:
                 web_cites = self._tag_citations(
                     web_cites_raw,
                     goal=goal,
-                    query=q,
+                    query=search_query,
                     channel="web",
                     phase="targeted",
                 )
@@ -2210,7 +2229,8 @@ class TGRMLoop:
                 domain=domain,
                 purpose="strengthen",
             )
-            web_results = self.web_tool.search(query, **web_params)
+            search_query = _clamp_query(query)
+            web_results = self.web_tool.search(search_query, **web_params)
             stats["web_calls"] += 1
             if tool_usage is not None:
                 tool_usage.web_calls += 1
@@ -2220,7 +2240,7 @@ class TGRMLoop:
             web_cites = self._tag_citations(
                 web_cites_raw,
                 goal=goal,
-                query=query,
+                query=search_query,
                 channel="web",
                 phase="strengthen",
             )
@@ -2351,7 +2371,8 @@ class TGRMLoop:
                 domain=domain,
                 purpose="gap_repair",
             )
-            web_results = self.web_tool.search(query, **web_params)
+            search_query = _clamp_query(query)
+            web_results = self.web_tool.search(search_query, **web_params)
             stats["web_calls"] += 1
             if tool_usage is not None:
                 tool_usage.web_calls += 1
@@ -2361,7 +2382,7 @@ class TGRMLoop:
             web_cites = self._tag_citations(
                 web_cites_raw,
                 goal=goal,
-                query=query,
+                query=search_query,
                 channel="web",
                 phase="gap_repair",
             )
