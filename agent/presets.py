@@ -27,7 +27,7 @@ from __future__ import annotations
 from typing import Dict, Any, List, Optional
 
 # Simple version tag so the app and UI can display which preset set is loaded.
-PRESETS_VERSION: str = "2025-11-27-10x-speed-rt"
+PRESETS_VERSION: str = "2025-11-29-search-energy-v1"
 
 # ---------------------------------------------------------------------
 # Global Runtime Profiles (applies for all presets)
@@ -187,6 +187,50 @@ DEFAULT_ADVANCED_RYE_EXPECTATIONS: Dict[str, Any] = {
     "stability_index_target": 0.6,       # 0 to 1 scale
     "recovery_momentum_target": 0.1,     # positive values show recovery after perturbation
     "max_oscillation_std": 0.25,
+}
+
+# ---------------------------------------------------------------------
+# Global search energy template for presets
+# This is used as a conceptual template. Individual presets override
+# fields where they need domain specific behavior.
+# ---------------------------------------------------------------------
+SEARCH_ENERGY_TEMPLATE: Dict[str, Any] = {
+    "mode": "dynamic",  # static or dynamic
+    # Role level hints are merged with config.search_energy.role_multipliers
+    "role_bias": {
+        "researcher": 1.0,
+        "critic": 0.8,
+        "explorer": 1.1,
+        "integrator": 0.7,
+        "planner": 0.7,
+        "synthesizer": 0.7,
+    },
+    # Phase hints follow config.search_energy phases
+    "exploration": {
+        "min_cycles": 3,
+        "max_cycles": 6,
+        "intensity_multiplier": 1.0,
+        "novelty_priority": "balanced",  # aggressive, conservative, balanced
+    },
+    "compression": {
+        "enabled": True,
+        "intensity_multiplier": 0.5,
+        "novelty_drop_threshold": 0.35,
+        "min_rye_window": 5,
+    },
+    "verification": {
+        "enabled": True,
+        "intensity_multiplier": 0.3,
+        "contradiction_density_trigger": 0.25,
+        "hypothesis_uncertainty_trigger": 0.6,
+    },
+    # Tavily budget profile is used by tools and orchestration layers
+    "tavily_budget_profile": {
+        "hourly_soft_cap": 600,
+        "hourly_hard_cap": 1000,
+        "daily_soft_cap": 5000,
+        "daily_hard_cap": 10000,
+    },
 }
 
 # ---------------------------------------------------------------------
@@ -526,6 +570,43 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "max_redundant_cycles": 8,
         },
 
+        # Search energy hints for this preset
+        "search_energy": {
+            **SEARCH_ENERGY_TEMPLATE,
+            "role_bias": {
+                "researcher": 1.0,
+                "critic": 0.8,
+                "explorer": 1.1,
+                "integrator": 0.7,
+                "planner": 0.7,
+                "synthesizer": 0.8,
+            },
+            "exploration": {
+                "min_cycles": 3,
+                "max_cycles": 6,
+                "intensity_multiplier": 1.0,
+                "novelty_priority": "balanced",
+            },
+            "compression": {
+                "enabled": True,
+                "intensity_multiplier": 0.5,
+                "novelty_drop_threshold": 0.35,
+                "min_rye_window": 5,
+            },
+            "verification": {
+                "enabled": True,
+                "intensity_multiplier": 0.3,
+                "contradiction_density_trigger": 0.25,
+                "hypothesis_uncertainty_trigger": 0.6,
+            },
+            "tavily_budget_profile": {
+                "hourly_soft_cap": 600,
+                "hourly_hard_cap": 1000,
+                "daily_soft_cap": 5000,
+                "daily_hard_cap": 10000,
+            },
+        },
+
         # Tool intelligence for this preset
         "tool_intelligence": {
             "browser_usage": {
@@ -843,6 +924,44 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "max_redundant_cycles": 5,
             "prefer_clinical_evidence": True,
             "penalize_hype_language": True,
+        },
+
+        # Search energy hints for longevity (more aggressive exploration,
+        # strong verification, but still respecting Tavily budget)
+        "search_energy": {
+            **SEARCH_ENERGY_TEMPLATE,
+            "role_bias": {
+                "researcher": 1.2,
+                "critic": 1.1,
+                "explorer": 1.0,
+                "integrator": 1.1,
+                "planner": 1.0,
+                "synthesizer": 0.9,
+            },
+            "exploration": {
+                "min_cycles": 4,
+                "max_cycles": 8,
+                "intensity_multiplier": 1.2,
+                "novelty_priority": "aggressive",
+            },
+            "compression": {
+                "enabled": True,
+                "intensity_multiplier": 0.6,
+                "novelty_drop_threshold": 0.30,
+                "min_rye_window": 6,
+            },
+            "verification": {
+                "enabled": True,
+                "intensity_multiplier": 0.4,
+                "contradiction_density_trigger": 0.20,
+                "hypothesis_uncertainty_trigger": 0.5,
+            },
+            "tavily_budget_profile": {
+                "hourly_soft_cap": 700,
+                "hourly_hard_cap": 1100,
+                "daily_soft_cap": 6000,
+                "daily_hard_cap": 11000,
+            },
         },
 
         # Tool intelligence
@@ -1306,6 +1425,44 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "min_novelty_fraction": 0.2,
             "max_redundant_cycles": 3,
             "require_formal_structures": True,
+        },
+
+        # Search energy hints for math (conservative Tavily usage,
+        # more reliance on internal reasoning and PDFs)
+        "search_energy": {
+            **SEARCH_ENERGY_TEMPLATE,
+            "role_bias": {
+                "researcher": 0.9,
+                "critic": 0.9,
+                "explorer": 0.7,
+                "integrator": 0.9,
+                "planner": 0.7,
+                "synthesizer": 0.9,
+            },
+            "exploration": {
+                "min_cycles": 2,
+                "max_cycles": 4,
+                "intensity_multiplier": 0.8,
+                "novelty_priority": "conservative",
+            },
+            "compression": {
+                "enabled": True,
+                "intensity_multiplier": 0.4,
+                "novelty_drop_threshold": 0.30,
+                "min_rye_window": 6,
+            },
+            "verification": {
+                "enabled": True,
+                "intensity_multiplier": 0.25,
+                "contradiction_density_trigger": 0.20,
+                "hypothesis_uncertainty_trigger": 0.5,
+            },
+            "tavily_budget_profile": {
+                "hourly_soft_cap": 400,
+                "hourly_hard_cap": 800,
+                "daily_soft_cap": 4000,
+                "daily_hard_cap": 9000,
+            },
         },
 
         # Tool intelligence
