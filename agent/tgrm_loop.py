@@ -497,6 +497,26 @@ class TGRMLoop:
         self.ultra_speed = bool(self.config.get("ultra_speed", False))
         self.strict_pipeline = bool(self.config.get("strict_pipeline", True))
 
+        # Dynamic search energy controls for Tavily and web usage.
+        # Mode:
+        #   "auto"  -> TGRM adjusts search intensity using RYE and history.
+        #   "fixed" -> always use search_energy_base as a constant multiplier.
+        self.search_energy_mode = str(self.config.get("search_energy_mode", "auto")).lower()
+        try:
+            self.search_energy_base = float(self.config.get("search_energy_base", 1.0))
+        except Exception:
+            self.search_energy_base = 1.0
+        try:
+            self.search_energy_min = float(self.config.get("search_energy_min", 0.4))
+        except Exception:
+            self.search_energy_min = 0.4
+        try:
+            self.search_energy_max = float(self.config.get("search_energy_max", 1.6))
+        except Exception:
+            self.search_energy_max = 1.6
+        # Per cycle value updated inside run_cycle.
+        self.search_energy: float = self.search_energy_base
+
     # ------------------------------------------------------------------
     # Small helper for token estimation (for energy accounting)
     # ------------------------------------------------------------------
@@ -795,6 +815,65 @@ class TGRMLoop:
         return info
 
     # ------------------------------------------------------------------
+    # Search energy control helpers
+    # ------------------------------------------------------------------
+    def _compute_search_energy(
+        self,
+        avg_rye: Optional[float],
+        total_cycles_for_goal: int,
+        stage_tag: str,
+        maintenance_mode: bool,
+        domain: str,
+    ) -> float:
+        """Compute a per cycle search_energy multiplier for web usage.
+
+        This is a reparodynamic control knob:
+
+            search_energy > 1.0  -> more aggressive web and paper search
+            search_energy ~ 1.0  -> normal behavior
+            search_energy < 1.0  -> reduced external calls, more synthesis
+
+        The rule is intentionally simple and only depends on history level
+        signals so it is safe to run before this cycle's metrics exist.
+        """
+        base = self.search_energy_base
+
+        # Fixed mode gives a stable value for debugging or careful runs.
+        if self.search_energy_mode == "fixed":
+            return max(self.search_energy_min, min(self.search_energy_max, base))
+
+        energy = base
+        dom = (domain or "general").lower()
+
+        # Very early cycles: gently favor higher exploration.
+        if avg_rye is None or total_cycles_for_goal < 3:
+            energy *= 1.05
+        else:
+            # If RYE is low for this goal, push exploration a bit.
+            if avg_rye < 0.4:
+                energy *= 1.15
+            # If RYE is quite high and we have many cycles, favor compression.
+            elif avg_rye > 0.8 and total_cycles_for_goal >= 15:
+                energy *= 0.75
+
+        # Stage hints: verify runs tend to need fewer new sources.
+        if stage_tag == "verify":
+            energy *= 0.8
+
+        # Maintenance mode is already a sign of saturation.
+        if maintenance_mode:
+            energy *= 0.7
+
+        # Longevity tends to be data starved, so allow a bit more exploration
+        # when RYE is not obviously high.
+        if dom == "longevity" and avg_rye is not None and avg_rye < 0.6:
+            energy *= 1.1
+
+        # Clamp inside safe training envelope.
+        energy = max(self.search_energy_min, min(self.search_energy_max, energy))
+        return float(energy)
+
+    # ------------------------------------------------------------------
     # Main cycle
     # ------------------------------------------------------------------
     def run_cycle(
@@ -934,12 +1013,22 @@ class TGRMLoop:
         ):
             maintenance_mode = True
 
+        # Dynamic search energy for this cycle, used by web search helpers.
+        self.search_energy = self._compute_search_energy(
+            avg_rye=avg_rye,
+            total_cycles_for_goal=total_cycles_for_goal,
+            stage_tag=stage_tag,
+            maintenance_mode=maintenance_mode,
+            domain=domain_tag,
+        )
+
         # Strict pipeline phase log for Ultra mode and debugging
         phases: Dict[str, Any] = {
             "stage": stage_tag,
             "hallmark": hallmark,
             "subgoal": subgoal,
             "curriculum_state": curriculum_state or {},
+            "search_energy": self.search_energy,
         }
 
         # TEST phase
@@ -1230,6 +1319,7 @@ class TGRMLoop:
             "agent_id": agent_id,
             "ultra_speed": self.ultra_speed,
             "maintenance_mode": maintenance_mode,
+            "search_energy": self.search_energy,
             "issues_before": issues,
             "issues_after": issues_after,
             "repairs": [a.get("description", "") for a in repair_actions][:5],
@@ -1268,6 +1358,7 @@ class TGRMLoop:
             "discovery": discovery_snapshot,
             "interrupted": interrupted,
             "stop_reason": stop_reason,
+            "search_energy": self.search_energy,
         }
 
         # Machine facing log
@@ -1312,6 +1403,7 @@ class TGRMLoop:
             "energy_E": energy_e,
             "Energy": energy_e,  # mirror CoreAgent expectations
             "RYE": rye_value,
+            "search_energy": self.search_energy,
             # RYE gradient and equilibrium and breakthrough
             "equilibrium": equilibrium_info,
             "breakthrough": breakthrough_info,
@@ -1380,6 +1472,7 @@ class TGRMLoop:
             "energy_E": energy_e,
             "Energy": energy_e,  # mirror CoreAgent discovery expectations
             "RYE": rye_value,
+            "search_energy": self.search_energy,
             "delta_R_components": delta_r_components,
             "equilibrium": equilibrium_info,
             "breakthrough": breakthrough_info,
@@ -1874,19 +1967,47 @@ class TGRMLoop:
         merged.update({k: bool(v) for k, v in source_controls.items()})
         return merged
 
+    def _should_use_web(self, purpose: str, maintenance_mode: bool) -> bool:
+        """Decide whether to perform a web search for this purpose.
+
+        purpose in {"initial", "targeted", "strengthen", "gap_repair"}.
+        This is a cheap gate driven by the current search_energy so that
+        heavily saturated phases do not waste Tavily credits.
+        """
+        try:
+            energy_val = float(getattr(self, "search_energy", 1.0))
+        except Exception:
+            energy_val = 1.0
+
+        # If search energy is extremely low, skip web entirely.
+        if energy_val <= 0.2:
+            return False
+
+        # In maintenance mode, aggressively trim secondary web usage.
+        if maintenance_mode and energy_val < 0.6 and purpose in {
+            "targeted",
+            "strengthen",
+            "gap_repair",
+        }:
+            return False
+
+        return True
+
     def _select_web_search_params(
         self,
         role: str,
         maintenance_mode: bool,
         domain: Optional[str],
         purpose: str,
+        search_energy: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Hybrid mode selection of web search level and size.
 
         purpose in {"initial", "targeted", "strengthen", "gap_repair"}.
 
         Tavily only supports topics: "general", "news", or "finance".
-        This helper always clamps to that set.
+        This helper always clamps to that set and then applies a light
+        scaling with search_energy to modulate result counts.
         """
         role_lower = (role or "agent").lower()
         dom = (domain or "general").lower()
@@ -1936,6 +2057,26 @@ class TGRMLoop:
         else:
             max_results = base_max
 
+        # Apply search_energy scaling as a gentle multiplier on max_results.
+        if search_energy is None:
+            try:
+                search_energy = float(getattr(self, "search_energy", 1.0))
+            except Exception:
+                search_energy = 1.0
+        else:
+            try:
+                search_energy = float(search_energy)
+            except Exception:
+                search_energy = 1.0
+
+        if search_energy != 1.0:
+            scaled = int(round(max_results * search_energy))
+            if scaled < 1:
+                scaled = 1
+            # Allow at most a doubling to avoid runaway result counts.
+            max_cap = max(max_results, base_max * 2)
+            max_results = max(1, min(scaled, max_cap))
+
         return {"level": level, "max_results": max_results, "topic": topic}
 
     def _initial_research(
@@ -1970,7 +2111,7 @@ class TGRMLoop:
         first_url: Optional[str] = None
 
         # Web search
-        if source_controls.get("web", True):
+        if source_controls.get("web", True) and self._should_use_web("initial", maintenance_mode):
             web_params = self._select_web_search_params(
                 role=role,
                 maintenance_mode=maintenance_mode,
@@ -2187,7 +2328,9 @@ class TGRMLoop:
             note_lines.append(q)
             note_lines.append("")
 
-            if source_controls.get("web", True):
+            if source_controls.get("web", True) and self._should_use_web(
+                "targeted", maintenance_mode
+            ):
                 web_params = self._select_web_search_params(
                     role=role,
                     maintenance_mode=maintenance_mode,
@@ -2301,7 +2444,9 @@ class TGRMLoop:
         note_lines.append(f"Search query for stronger evidence: {query}")
         note_lines.append("")
 
-        if source_controls.get("web", True):
+        if source_controls.get("web", True) and self._should_use_web(
+            "strengthen", maintenance_mode=False
+        ):
             web_params = self._select_web_search_params(
                 role=role,
                 maintenance_mode=False,
@@ -2443,7 +2588,9 @@ class TGRMLoop:
         note_lines.append(f"Focused query used for gap repair: {query}")
         note_lines.append("")
 
-        if source_controls.get("web", True):
+        if source_controls.get("web", True) and self._should_use_web(
+            "gap_repair", maintenance_mode=False
+        ):
             web_params = self._select_web_search_params(
                 role=role,
                 maintenance_mode=False,
