@@ -170,6 +170,57 @@ rye:
 
 
 # ------------------------------------------------
+# SEARCH ENERGY AND TAVILY BUDGET
+# ------------------------------------------------
+search_energy:
+  # Global mode for search control:
+  #   static = respect per-role defaults only
+  #   dynamic = Exploration -> Compression -> Verification based on signals
+  mode: dynamic
+
+  # Per-role multipliers applied on top of any base search intensity
+  role_multipliers:
+    researcher: 1.0
+    critic: 0.6
+    explorer: 1.2
+    integrator: 0.5
+    planner: 0.5
+    synthesis: 0.5
+    generic_agent: 0.8
+
+  # Phase 1: Exploration
+  exploration:
+    enabled: true
+    min_cycles: 3          # minimum cycles to stay in high search mode
+    max_cycles: 6          # soft limit before considering compression
+    base_intensity: 1.0    # 1.0 = current search behavior
+
+  # Phase 2: Compression (use more memory, less Tavily)
+  compression:
+    enabled: true
+    novelty_drop_threshold: 0.35     # trigger when novelty stays below this
+    min_rye_window: 5                # how many cycles to check for novelty
+    intensity_factor: 0.5            # 50 percent of exploration search load
+
+  # Phase 3: Verification (search only when needed)
+  verification:
+    enabled: true
+    contradiction_density_trigger: 0.25   # above this, allow extra checking
+    hypothesis_uncertainty_trigger: 0.6   # 0 to 1 scale, higher = more uncertain
+    intensity_factor: 0.3                # 30 percent of exploration search load
+
+  # Hard and soft Tavily budget hints, for gating and reporting
+  tavily_budget:
+    enabled: true
+    estimated_credits_per_hour: 450    # based on your real 32-agent usage
+    soft_hourly_cap: 600               # above this, reduce search intensity
+    hard_hourly_cap: 1000              # above this, block non-critical searches
+    soft_daily_cap: 5000               # warn and compress search once hit
+    hard_daily_cap: 10000              # block non-critical searches if exceeded
+    log_credit_usage: true             # allow tools to log estimated credits
+
+
+# ------------------------------------------------
 # LOGGING + SYSTEM INFO
 # ------------------------------------------------
 logging:
