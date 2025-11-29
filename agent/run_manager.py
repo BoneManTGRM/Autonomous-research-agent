@@ -57,7 +57,13 @@ class RunConfig:
 
     # Cycles and time
     total_cycles: int = 1
-    max_seconds: Optional[int] = None  # optional hard time cap (wall clock)
+    # Hard wall clock limit for the entire run in seconds.
+    # For example:
+    #   1 hour  -> 3600
+    #   8 hours -> 8 * 3600
+    #   24h     -> 24 * 3600
+    #   1 week  -> 7 * 24 * 3600
+    max_seconds: Optional[int] = None
 
     # RYE and safety controls
     rye_stop_threshold: Optional[float] = None
@@ -96,6 +102,9 @@ class RunManager:
     - Two stage idea plus verify runs.
     - Swarm runs with role based staging (explorer vs critic).
     - Run level learning speed summaries that the UI can show as trends.
+
+    It also enforces a hard wall clock budget when max_seconds is set so
+    1h / 8h / 24h / 1w / 1m / 90d style runs cut off at the right time.
     """
 
     def __init__(
@@ -148,8 +157,9 @@ class RunManager:
         start_time = time.time()
 
         # Hard wall clock deadline (if configured)
+        deadline_ts: Optional[float]
         if run_config.max_seconds is not None:
-            deadline_ts: Optional[float] = start_time + float(run_config.max_seconds)
+            deadline_ts = start_time + float(run_config.max_seconds)
         else:
             deadline_ts = None
 
@@ -174,8 +184,15 @@ class RunManager:
         summary["elapsed_seconds"] = end_time - start_time
         summary["notes"] = run_config.notes
 
-        # Attach the configured max_seconds and an explicit stop_reason if missing
-        summary.setdefault("max_seconds", run_config.max_seconds)
+        # Attach the configured time budget and deadline
+        summary.setdefault("time_limit_seconds", run_config.max_seconds)
+        if deadline_ts is not None:
+            summary.setdefault(
+                "deadline_timestamp_utc",
+                datetime.utcfromtimestamp(deadline_ts).isoformat() + "Z",
+            )
+
+        # Make sure stop_reason is always present
         summary.setdefault("stop_reason", "completed")
 
         return summary
@@ -207,7 +224,15 @@ class RunManager:
                 role="agent",
                 stage="idea",
             )
-            result = agent.run_cycle(**cycle_kwargs)
+
+            result = self._run_cycle_with_optional_timeout(
+                agent=agent,
+                cycle_kwargs=cycle_kwargs,
+                deadline_ts=deadline_ts,
+            )
+            if result is None:
+                stop_reason = "time_limit"
+                break
 
             cycle_log = result.get("log", {})
             cycles.append(cycle_log)
@@ -289,7 +314,16 @@ class RunManager:
                     role="researcher",
                     stage="idea",
                 )
-                idea_result = idea_agent.run_cycle(**cycle_kwargs)
+
+                idea_result = self._run_cycle_with_optional_timeout(
+                    agent=idea_agent,
+                    cycle_kwargs=cycle_kwargs,
+                    deadline_ts=deadline_ts,
+                )
+                if idea_result is None:
+                    stop_reason = "time_limit"
+                    break
+
                 idea_log = idea_result.get("log", {})
                 cycles.append(idea_log)
 
@@ -322,7 +356,7 @@ class RunManager:
 
                 cycle_index += 1
 
-            if self._time_exceeded(deadline_ts):
+            if self._time_exceeded(deadline_ts) or stop_reason == "time_limit":
                 stop_reason = "time_limit"
                 break
             if cycle_index > run_config.total_cycles:
@@ -344,7 +378,16 @@ class RunManager:
                     role="critic",
                     stage="verify",
                 )
-                verify_result = critic_agent.run_cycle(**cycle_kwargs)
+
+                verify_result = self._run_cycle_with_optional_timeout(
+                    agent=critic_agent,
+                    cycle_kwargs=cycle_kwargs,
+                    deadline_ts=deadline_ts,
+                )
+                if verify_result is None:
+                    stop_reason = "time_limit"
+                    break
+
                 verify_log = verify_result.get("log", {})
                 cycles.append(verify_log)
 
@@ -377,7 +420,7 @@ class RunManager:
 
                 cycle_index += 1
 
-            if self._time_exceeded(deadline_ts):
+            if self._time_exceeded(deadline_ts) or stop_reason == "time_limit":
                 stop_reason = "time_limit"
                 break
             if cycle_index > run_config.total_cycles:
@@ -448,7 +491,16 @@ class RunManager:
                     role=role,
                     stage=stage,
                 )
-                result = agent.run_cycle(**cycle_kwargs)
+
+                result = self._run_cycle_with_optional_timeout(
+                    agent=agent,
+                    cycle_kwargs=cycle_kwargs,
+                    deadline_ts=deadline_ts,
+                )
+                if result is None:
+                    stop_reason = "time_limit"
+                    break
+
                 cycle_log = result.get("log", {})
                 cycles.append(cycle_log)
 
@@ -479,7 +531,7 @@ class RunManager:
                     stop_reason = "early_stop"
                     break
 
-            if self._time_exceeded(deadline_ts):
+            if self._time_exceeded(deadline_ts) or stop_reason == "time_limit":
                 stop_reason = "time_limit"
                 break
             if stop_reason == "early_stop":
@@ -499,10 +551,50 @@ class RunManager:
     # Helpers
     # ------------------------------------------------------------------
     def _time_exceeded(self, deadline_ts: Optional[float]) -> bool:
-        """Return True if the wall-clock deadline has passed."""
+        """Return True if the wall clock deadline has passed."""
         if deadline_ts is None:
             return False
         return time.time() >= deadline_ts
+
+    def _remaining_seconds(self, deadline_ts: Optional[float]) -> Optional[float]:
+        """Return remaining seconds until the deadline, or None if no deadline."""
+        if deadline_ts is None:
+            return None
+        remaining = float(deadline_ts) - time.time()
+        if remaining <= 0:
+            return 0.0
+        return remaining
+
+    def _run_cycle_with_optional_timeout(
+        self,
+        agent: CoreAgent,
+        cycle_kwargs: Dict[str, Any],
+        deadline_ts: Optional[float],
+    ) -> Optional[Dict[str, Any]]:
+        """Run a single cycle, respecting remaining wall clock when possible.
+
+        If a deadline is present, we attach a soft_timeout_s hint into the
+        kwargs. If CoreAgent.run_cycle does not accept that argument, we
+        fall back to a plain call. If there is no time left, we return None.
+        """
+        remaining = self._remaining_seconds(deadline_ts)
+        if remaining is not None and remaining <= 0:
+            return None
+
+        # Copy so we do not mutate the caller side dict
+        kwargs = dict(cycle_kwargs)
+
+        if remaining is not None and remaining > 0:
+            # Soft hint: please try to finish this cycle within the remaining budget.
+            # CoreAgent is free to ignore this if it does not support it.
+            kwargs.setdefault("soft_timeout_s", float(remaining))
+
+        try:
+            return agent.run_cycle(**kwargs)
+        except TypeError:
+            # Remove soft_timeout_s and retry for older signatures.
+            kwargs.pop("soft_timeout_s", None)
+            return agent.run_cycle(**kwargs)
 
     def _update_best(
         self,
