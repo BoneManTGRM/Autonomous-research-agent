@@ -24,14 +24,15 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------
-# Tavily configuration (OPTIONAL, DISABLED BY DEFAULT)
+# Tavily configuration (OPTIONAL, ENABLED IF POSSIBLE)
 # ---------------------------------------------------------------------
-# If you ever want to re-enable real Tavily search:
-#   1) Set ENABLE_TAVILY = True
-#   2) Set TAVILY_API_KEY in your environment
+# To use real Tavily search:
+#   1) Make sure ENABLE_TAVILY is True.
+#   2) Set TAVILY_API_KEY in your environment (Render dashboard or local env).
 #
-# With ENABLE_TAVILY = False, this module ALWAYS uses the offline stub.
-ENABLE_TAVILY = False
+# If ENABLE_TAVILY is False or the key is missing or tavily is not installed,
+# this module falls back to the offline stub.
+ENABLE_TAVILY = True
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
 
 # Tavily has a hard 400 character query limit.
@@ -186,19 +187,14 @@ def _log_event(event: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------
-# Tavily wrapper (now optional and disabled by default)
+# Tavily wrapper (now optional and enabled if configured)
 # ---------------------------------------------------------------------
 def _get_tavily_client() -> Tuple[Optional[Any], Optional[str]]:
     """Return a TavilyClient instance or an error string.
 
-    If ENABLE_TAVILY is False, this will always return (None, reason)
+    If ENABLE_TAVILY is False, this will return (None, reason)
     so the system uses the offline stub path.
-
-    To re-enable:
-        - Set ENABLE_TAVILY = True in this file
-        - Provide TAVILY_API_KEY via environment
     """
-    # Hard kill switch: default to offline mode
     if not ENABLE_TAVILY:
         return None, "Tavily disabled (ENABLE_TAVILY=False)."
 
@@ -417,9 +413,8 @@ def web_search_tool(
 ) -> Dict[str, Any]:
     """Perform a web search with extreme mode and learning aware intelligence.
 
-    With ENABLE_TAVILY = False, this will always use the offline stub and never
-    call the Tavily API. To enable real web search, set ENABLE_TAVILY = True and
-    configure TAVILY_API_KEY in the environment.
+    If ENABLE_TAVILY is False or Tavily is not available, this uses the offline stub.
+    To enable real web search, set ENABLE_TAVILY = True and configure TAVILY_API_KEY.
     """
     raw_q = (query or "").strip()
 
