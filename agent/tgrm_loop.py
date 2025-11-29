@@ -1809,14 +1809,18 @@ class TGRMLoop:
         """Hybrid mode selection of web search level and size.
 
         purpose in {"initial", "targeted", "strengthen", "gap_repair"}.
+
+        Tavily only supports topics: "general", "news", or "finance".
+        This helper always clamps to that set.
         """
         role_lower = (role or "agent").lower()
         dom = (domain or "general").lower()
 
-        if dom in {"longevity", "biology", "medicine", "health"}:
-            topic = "science"
-        elif dom in {"math", "physics", "chemistry"}:
-            topic = "science"
+        # Map domain to one of Tavily's allowed topics
+        if dom in {"macro", "markets", "trading", "finance", "economics"}:
+            topic = "finance"
+        elif dom in {"policy", "geopolitics", "news", "world"}:
+            topic = "news"
         else:
             topic = "general"
 
