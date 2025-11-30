@@ -25,27 +25,30 @@ Features:
 
 Reparodynamics:
     The UI is a front panel on a reparodynamic system:
-    - Each click runs the TGRM loop (Test, Detect, Repair, Verify).
-    - Each cycle computes RYE = delta_R / E and is logged.
+    - It never runs TGRM cycles directly.
+    - Each run request is written as a job file and picked up by an external engine worker.
+    - The worker runs TGRM loops, computes RYE = delta_R / E, and logs results.
 
 Time:
-    All continuous run presets (1h, 8h, 24h, 1 week, 1 month, 90 days) map to real
-    wall clock minutes via the CoreAgent's max_minutes budget.
+    All run mode presets (Manual, 1h, 8h, 24h, 1 week, 1 month, 90 days, Forever) are
+    interpreted as hints in the job payload. The engine worker is responsible for mapping
+    them to real wall clock minutes and cycle budgets.
 
 Note:
-    For safety and to ensure runs actually finish when launched from
-    this Streamlit UI, the 1h / 8h / 24h modes use an approximate
-    cycle budget locally instead of relying solely on an external
-    background worker. 1 week / 1 month / 90 days and Forever still
-    configure the background worker via control_state.json.
+    This keeps the Streamlit app thin and safe:
+    - It only queues jobs into runs/pending/
+    - It never imports or invokes the core loop
+    - It only reads finished JSON artifacts from runs/finished/ and from MemoryStore.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime
@@ -68,7 +71,6 @@ if str(REPO_ROOT) not in sys.path:
 # -------------------------------------------------------------------
 try:
     # Package layout (recommended, what you have on Render)
-    from agent.core_agent import CoreAgent
     from agent.memory_store import MemoryStore
     from agent.presets import PRESETS, get_preset, RUNTIME_PROFILES
     from agent.report_generator import (
@@ -135,7 +137,6 @@ except ModuleNotFoundError as e:
         raise
 
     # Flat layout fallback: all modules live next to this file
-    from core_agent import CoreAgent
     from memory_store import MemoryStore
     from presets import PRESETS, get_preset, RUNTIME_PROFILES  # type: ignore[no-redef]
     from report_generator import (  # type: ignore[no-redef]
@@ -198,7 +199,7 @@ except ModuleNotFoundError as e:
 CONFIG_PATH_DEFAULT = str(REPO_ROOT / "config" / "settings.yaml")
 
 # Rough estimate for cycles per hour in continuous mode.
-# Used to derive a safe local cycle budget for 1h / 8h / 24h runs.
+# Used to derive a safe local cycle budget for older modes, now only advisory for worker.
 CYCLES_PER_HOUR_ESTIMATE = 120
 
 # Swarm roles: base archetypes for mini agents
@@ -211,14 +212,99 @@ SWARM_ROLES: List[Tuple[str, str]] = [
 ]
 
 # Safe upper bound for swarm size on typical Render or Streamlit setups.
-# All swarm agents are still run sequentially in a single process.
+# All swarm agents are still run sequentially in a single process by the worker.
 MAX_SWARM_AGENTS: int = 32
 
 # Limit points in charts so the frontend does not hit RangeError on very long runs.
 MAX_POINTS_FOR_CHARTS: int = 1000
 
-# Where UI and worker coordinate long runs
+# Where legacy background worker control_state is stored (still view-only / control-only)
 CONTROL_STATE_PATH = Path("logs/control_state.json")
+
+# Job queue directories for decoupled engine worker
+BASE_RUN_DIR = Path("runs")
+PENDING_DIR = BASE_RUN_DIR / "pending"
+FINISHED_DIR = BASE_RUN_DIR / "finished"
+
+
+# -------------------------------------------------------------------
+# Job queue helpers (runs/pending and runs/finished)
+# -------------------------------------------------------------------
+def ensure_run_dirs() -> None:
+    """Ensure that runs/pending and runs/finished exist."""
+    BASE_RUN_DIR.mkdir(exist_ok=True)
+    PENDING_DIR.mkdir(parents=True, exist_ok=True)
+    FINISHED_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def generate_job_id() -> str:
+    """Generate a human-inspectable job id."""
+    return datetime.utcnow().strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
+
+
+def write_pending_job(job_id: str, payload: Dict[str, Any]) -> Path:
+    """Write a pending job request to runs/pending/{job_id}.json."""
+    ensure_run_dirs()
+    path = PENDING_DIR / f"{job_id}.json"
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
+    return path
+
+
+def list_pending_jobs() -> List[Dict[str, Any]]:
+    """List pending jobs from runs/pending/."""
+    ensure_run_dirs()
+    jobs: List[Dict[str, Any]] = []
+    if not PENDING_DIR.exists():
+        return jobs
+    for fp in sorted(PENDING_DIR.glob("*.json")):
+        try:
+            with fp.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                continue
+            data.setdefault("status", "pending")
+            data["job_id"] = fp.stem
+            jobs.append(data)
+        except Exception:
+            continue
+    return jobs
+
+
+def list_finished_jobs() -> List[Dict[str, Any]]:
+    """List finished jobs from runs/finished/."""
+    ensure_run_dirs()
+    jobs: List[Dict[str, Any]] = []
+    if not FINISHED_DIR.exists():
+        return jobs
+    for fp in sorted(FINISHED_DIR.glob("*.json"), reverse=True):
+        try:
+            with fp.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                continue
+            data.setdefault("status", "finished")
+            data["job_id"] = fp.stem
+            jobs.append(data)
+        except Exception:
+            continue
+    return jobs
+
+
+def load_job_result(job_id: str) -> Optional[Dict[str, Any]]:
+    """Load a finished job result from runs/finished/{job_id}.json."""
+    ensure_run_dirs()
+    fp = FINISHED_DIR / f"{job_id}.json"
+    if not fp.exists():
+        return None
+    try:
+        with fp.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        return None
+    except Exception:
+        return None
 
 
 # -------------------------------------------------------------------
@@ -233,15 +319,16 @@ def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
 
 
 def ensure_directories() -> None:
-    """Ensure that log directories exist."""
+    """Ensure that log directories exist, plus run dirs."""
     logs_path = Path("logs")
     sessions_path = logs_path / "sessions"
     logs_path.mkdir(exist_ok=True)
     sessions_path.mkdir(exist_ok=True)
+    ensure_run_dirs()
 
 
 def load_control_state() -> Dict[str, Any]:
-    """Load the shared control state used by the background worker."""
+    """Load the shared control state used by the background worker (legacy)."""
     ensure_directories()
     if not CONTROL_STATE_PATH.exists():
         return {}
@@ -256,7 +343,7 @@ def load_control_state() -> Dict[str, Any]:
 
 
 def save_control_state(state: Dict[str, Any]) -> None:
-    """Persist the shared control state for the background worker."""
+    """Persist the shared control state for the background worker (legacy)."""
     ensure_directories()
     try:
         with CONTROL_STATE_PATH.open("w", encoding="utf-8") as f:
@@ -267,14 +354,13 @@ def save_control_state(state: Dict[str, Any]) -> None:
 
 
 @st.cache_resource
-def init_agent(config_path: str = CONFIG_PATH_DEFAULT) -> Tuple[CoreAgent, MemoryStore]:
-    """Create a single CoreAgent instance for the Streamlit app."""
+def init_memory_store(config_path: str = CONFIG_PATH_DEFAULT) -> MemoryStore:
+    """Create a single MemoryStore instance for the Streamlit app (read only)."""
     ensure_directories()
     config = load_settings(config_path)
     memory_file = config.get("memory_file", "logs/sessions/default_memory.json")
     memory = MemoryStore(memory_file)
-    agent = CoreAgent(memory_store=memory, config=config)
-    return agent, memory
+    return memory
 
 
 def tavily_status() -> Dict[str, Any]:
@@ -445,6 +531,113 @@ def role_specific_goal(base_goal: str, role: str) -> str:
         )
     # Fallback: use the original goal
     return base_goal
+
+
+def render_job_summary(job: Dict[str, Any]) -> None:
+    """Compact header row for a job (pending or finished)."""
+    job_id = job.get("job_id", "unknown")
+    status = job.get("status", "unknown")
+    created_at = job.get("created_at", "unknown")
+    domain = job.get("domain", "general")
+
+    if isinstance(domain, dict):
+        domain = domain.get("tag") or domain.get("name") or "general"
+
+    swarm_cfg = job.get("swarm") or {}
+    mode = job.get("mode")
+    if not mode:
+        if swarm_cfg.get("enabled"):
+            mode = "swarm"
+        elif job.get("multi_agent_pair"):
+            mode = "multi"
+        else:
+            mode = "single"
+
+    label = job.get("run_label") or job.get("label") or job_id
+
+    cols = st.columns([3, 2, 2, 2])
+    cols[0].markdown(f"**{label}**")
+    cols[1].markdown(f"Job: `{job_id}`")
+    cols[2].markdown(f"Status: `{status}`")
+    cols[3].markdown(f"Domain: `{str(domain).title()}`")
+
+    st.caption(f"Mode: {mode} • Created at: {created_at}")
+
+
+def render_result_details(result: Dict[str, Any]) -> None:
+    """Safe read-only result viewer for a finished job.
+
+    Assumes worker writes JSON with fields such as:
+    - summary or human_summary: str
+    - key_findings or discoveries: list[str]
+    - cycles: list[dict] with delta_r, energy, rye, etc.
+    - rye_metrics or rye: dict with aggregates
+    - sources or citations: list[dict] with title/url/snippet
+    Adjust this to match your worker schema.
+    """
+    st.markdown("### Run summary")
+
+    summary = result.get("summary") or result.get("human_summary")
+    if summary:
+        st.write(summary)
+    else:
+        st.info("No summary was provided by the engine.")
+
+    key_findings = result.get("key_findings") or result.get("discoveries")
+    if isinstance(key_findings, list) and key_findings:
+        st.markdown("#### Key findings")
+        for item in key_findings:
+            st.markdown(f"- {item}")
+
+    rye_metrics = result.get("rye_metrics") or result.get("rye")
+    if isinstance(rye_metrics, dict):
+        st.markdown("#### RYE metrics")
+        cols = st.columns(3)
+        avg_rye = rye_metrics.get("avg_rye")
+        if avg_rye is not None:
+            cols[0].metric("Average RYE", f"{avg_rye:.4f}")
+        trend = rye_metrics.get("trend_slope")
+        if trend is not None:
+            cols[1].metric("RYE trend slope", f"{trend:.4f}")
+        stability = rye_metrics.get("stability_index")
+        if stability is not None:
+            cols[2].metric("Stability index", f"{stability:.3f}")
+
+    cycles = result.get("cycles")
+    if isinstance(cycles, list) and cycles:
+        st.markdown("#### Cycle timeline")
+        cycle_numbers = [c.get("cycle", idx + 1) for idx, c in enumerate(cycles)]
+        delta_r_values = [c.get("delta_r") for c in cycles]
+        energy_values = [c.get("energy") for c in cycles]
+        rye_values = [c.get("rye") for c in cycles]
+
+        chart_data: Dict[str, List[Any]] = {"cycle": cycle_numbers}
+        if any(v is not None for v in delta_r_values):
+            chart_data["delta_r"] = delta_r_values
+        if any(v is not None for v in energy_values):
+            chart_data["energy"] = energy_values
+        if any(v is not None for v in rye_values):
+            chart_data["rye"] = rye_values
+
+        if len(chart_data) > 1:
+            st.line_chart(chart_data)
+
+    sources = result.get("sources") or result.get("citations")
+    if isinstance(sources, list) and sources:
+        st.markdown("#### Sources and citations")
+        for s in sources:
+            title = s.get("title", "Source")
+            url = s.get("url") or s.get("link")
+            snippet = s.get("snippet") or s.get("summary") or ""
+            if url:
+                st.markdown(f"- [{title}]({url})  \n  {snippet}")
+            else:
+                st.markdown(f"- {title}  \n  {snippet}")
+
+    debug = result.get("debug") or result.get("diagnostics")
+    if debug:
+        with st.expander("Diagnostics and debug"):
+            st.json(debug)
 
 
 # -------------------------------------------------------------------
@@ -1020,10 +1213,10 @@ def main() -> None:
     st.title("Autonomous Research Agent")
     st.caption(
         "Reparodynamics, RYE, and TGRM powered research loop "
-        "(with swarm mode, web browser, sandbox, background worker, and advanced discovery panels)"
+        "(UI only queues jobs and reads results; all cycles run in a separate worker)."
     )
 
-    agent, memory = init_agent()
+    memory = init_memory_store()
 
     # -----------------------------
     # Sidebar settings
@@ -1086,6 +1279,14 @@ def main() -> None:
             "Manual and timed modes use generic defaults."
         )
 
+    # Friendly label per run
+    st.sidebar.subheader("Run label")
+    run_label = st.sidebar.text_input(
+        "Run label",
+        value="experiment",
+        help="Human friendly label for this run request.",
+    )
+
     # Tavily status (after handling key input)
     status = tavily_status()
     st.sidebar.subheader("Internet research")
@@ -1107,7 +1308,7 @@ def main() -> None:
     else:
         st.sidebar.info(
             "Web browser tool not detected in tools.py. "
-            "CoreAgent may still use Tavily directly."
+            "Core engine may still use Tavily directly."
         )
 
     if tool_flags["sandbox"]:
@@ -1120,7 +1321,7 @@ def main() -> None:
         "Use web browser tool",
         value=status["has_key"],
         help=(
-            "If enabled, the agent will use the web browser tool for searches. "
+            "If enabled, the engine can use the web browser tool for searches. "
             "If disabled, only local notes and PDFs are used."
         ),
     )
@@ -1129,7 +1330,7 @@ def main() -> None:
         "Allow sandbox code execution",
         value=tool_flags["sandbox"],
         help=(
-            "If enabled and the sandbox tool is present, the agent can run code in a bounded sandbox. "
+            "If enabled and the sandbox tool is present, the engine can run code in a bounded sandbox. "
             "If disabled, code execution tools are not used."
         ),
     )
@@ -1140,8 +1341,8 @@ def main() -> None:
         "Enable Swarm (multi role mini agents)",
         value=False,
         help=(
-            "Run up to dozens of specialized agents (researchers, critics, explorers, "
-            "theorists, integrators). All agents run sequentially in one process for safety."
+            "Request up to dozens of specialized agents (researchers, critics, explorers, "
+            "theorists, integrators). The worker runs them sequentially for safety."
         ),
     )
 
@@ -1155,7 +1356,6 @@ def main() -> None:
             value=min(5, MAX_SWARM_AGENTS),
             help=(
                 "Total number of mini agents in the swarm. "
-                "They share memory but take on specialized roles. "
                 "Higher values mean more total cycles and more API usage."
             ),
         )
@@ -1170,7 +1370,7 @@ def main() -> None:
         multi_agent = st.sidebar.checkbox(
             "Enable classic Multi Agent (Researcher + Critic)",
             value=False,
-            help="If swarm is disabled, you can still run a simple researcher plus critic pair.",
+            help="If swarm is disabled, you can still request a simple researcher plus critic pair.",
         )
     else:
         st.sidebar.info("Classic Multi Agent is disabled when Swarm is enabled.")
@@ -1215,24 +1415,24 @@ def main() -> None:
         ],
         index=0,
         help=(
-            "Manual mode runs a fixed number of cycles locally.\n"
-            "1h / 8h / 24h run an approximate cycle budget locally so they actually end.\n"
-            "1 week / 1 month / 90 days and Forever configure the background worker via control_state.json."
+            "Manual mode requests a fixed number of cycles from the engine worker.\n"
+            "Timed modes provide approximate wall clock budgets for the worker.\n"
+            "The Streamlit UI never runs cycles itself; it only queues jobs."
         ),
     )
 
-    # Optional RYE stop for continuous modes
+    # Optional RYE stop for continuous modes (passed as hint to worker)
     stop_rye_threshold: Optional[float] = None
     if run_mode != "Manual (finite cycles)":
-        stop_rye_threshold = st.sidebar.number_input(
+        stop_rye_threshold_val = st.sidebar.number_input(
             "Optional stop when RYE falls below (0 = ignore)",
             min_value=0.0,
             max_value=10.0,
             value=0.0,
             step=0.1,
         )
-        if stop_rye_threshold <= 0:
-            stop_rye_threshold = None
+        if stop_rye_threshold_val > 0:
+            stop_rye_threshold = stop_rye_threshold_val
 
     # -----------------------------
     # Main area
@@ -1250,357 +1450,158 @@ def main() -> None:
     goal = st.text_area("Enter research goal:", value=st.session_state["goal_text"], height=160)
     st.session_state["goal_text"] = goal
 
-    # Cycles only matter in manual mode
+    # Cycles only matter in manual mode (hint to worker)
     cycles = st.number_input(
-        "Number of TGRM cycles to run (manual mode, UI only)",
+        "Number of TGRM cycles to request (manual mode)",
         min_value=1,
         max_value=200,
         value=3,
         step=1,
-        help="Used when Run mode is Manual. Timed modes use a local cycle budget or a background worker.",
+        help="Used when Run mode is Manual. Timed modes use time budgets interpreted by the worker.",
     )
 
-    run_button = st.button("Run agent (manual or timed)")
+    run_button = st.button("Queue run request")
 
     # ------------------------------
-    # Run cycles or configure worker
+    # Queue job (never run cycles here)
     # ------------------------------
     if run_button:
-        st.write(
-            f"Running or configuring agent with preset: {preset.get('label', selected_label)} "
-            f"(domain: {domain_tag})"
-        )
-        history = memory.get_cycle_history()
-        next_index = len(history)
-        results: List[Dict[str, Any]] = []
-
-        # Source controls for TGRM loop, including web browser and sandbox flags
-        source_controls = {
-            "web": bool(use_web_tool),
-            "pubmed": bool(use_pubmed),
-            "semantic": bool(use_semantic),
-            "pdf": bool(use_pdf and uploaded_pdf is not None),
-            "biomarkers": bool(use_biomarkers),
-            "sandbox": bool(allow_sandbox and tool_flags["sandbox"]),
-        }
-
-        # PDF bytes (if provided)
-        pdf_bytes: Optional[bytes] = None
-        if use_pdf and uploaded_pdf is not None:
-            try:
-                pdf_bytes = uploaded_pdf.getvalue()
-            except Exception:
-                pdf_bytes = None
-
-        # Manual finite mode stays inside Streamlit for quick tests.
-        if run_mode == "Manual (finite cycles)":
-            # Swarm manual mode
-            if enable_swarm and swarm_roles:
-                total_cycles = len(swarm_roles) * int(cycles)
-                st.info(
-                    f"Manual Swarm mode: {len(swarm_roles)} agents x {int(cycles)} cycles "
-                    f"(total {total_cycles} mini cycles)."
-                )
-                for i in range(int(cycles)):
-                    base_index = next_index + i * len(swarm_roles)
-                    for j, (role_name, _) in enumerate(swarm_roles):
-                        ci = base_index + j
-                        role_goal = role_specific_goal(goal, role_name)
-                        out = agent.run_cycle(
-                            goal=role_goal,
-                            cycle_index=ci,
-                            role=role_name,
-                            source_controls=source_controls,
-                            pdf_bytes=pdf_bytes,
-                            biomarker_snapshot=None,
-                            domain=domain_tag,
-                        )
-                        summary = out["summary"]
-                        results.append(summary)
-            else:
-                # Classic single or researcher plus critic manual mode
-                if not multi_agent:
-                    for i in range(int(cycles)):
-                        ci = next_index + i
-                        out = agent.run_cycle(
-                            goal=goal,
-                            cycle_index=ci,
-                            role="agent",
-                            source_controls=source_controls,
-                            pdf_bytes=pdf_bytes,
-                            biomarker_snapshot=None,
-                            domain=domain_tag,
-                        )
-                        results.append(out["summary"])
-                else:
-                    for i in range(int(cycles)):
-                        base = next_index + 2 * i
-
-                        # Researcher
-                        r = agent.run_cycle(
-                            goal=goal,
-                            cycle_index=base,
-                            role="researcher",
-                            source_controls=source_controls,
-                            pdf_bytes=pdf_bytes,
-                            biomarker_snapshot=None,
-                            domain=domain_tag,
-                        )
-                        results.append(r["summary"])
-
-                        # Critic
-                        critic_goal = f"Critically review and refine notes for: {goal}"
-                        c = agent.run_cycle(
-                            goal=critic_goal,
-                            cycle_index=base + 1,
-                            role="critic",
-                            source_controls=source_controls,
-                            pdf_bytes=None,
-                            biomarker_snapshot=None,
-                            domain=domain_tag,
-                        )
-                        results.append(c["summary"])
-
-            # Show cycle summaries for manual runs
-            st.subheader("Cycle Summaries (manual)")
-            for cs in results:
-                render_cycle_summary(cs)
-
+        goal_clean = goal.strip()
+        if not goal_clean:
+            st.error("Please provide a research goal or question before queuing a run.")
         else:
-            # Timed modes.
-            # For 1h / 8h / 24h we run an approximate local cycle budget so the run
-            # actually finishes even without an external worker. 1 week / 1 month /
-            # 90 days and Forever are configured via control_state.json for a
-            # separate worker.
-            if run_mode in (
-                "1 hour (real clock)",
-                "8 hours (real clock)",
-                "24 hours (real clock)",
-            ):
-                if run_mode == "1 hour (real clock)":
-                    hours = 1.0
-                    profile_label = "1 Hour Run (local)"
-                elif run_mode == "8 hours (real clock)":
-                    hours = 8.0
-                    profile_label = "8 Hour Run (local, approximated)"
-                else:
-                    hours = 24.0
-                    profile_label = "24 Hour Run (local, approximated)"
+            ensure_run_dirs()
 
-                # Derive a safe, capped cycle budget so the run ends.
-                approx_cycles = int(CYCLES_PER_HOUR_ESTIMATE * hours)
-                # Cap cycles to avoid extreme sessions from the UI side.
-                approx_cycles = max(1, min(approx_cycles, 200))
+            # Source controls for the engine worker
+            source_controls = {
+                "web": bool(use_web_tool),
+                "pubmed": bool(use_pubmed),
+                "semantic": bool(use_semantic),
+                "pdf": bool(use_pdf and uploaded_pdf is not None),
+                "biomarkers": bool(use_biomarkers),
+                "sandbox": bool(allow_sandbox and tool_flags["sandbox"]),
+            }
 
-                st.info(
-                    f"{profile_label}: running approximately {approx_cycles} core cycles "
-                    f"(capped) so this timed run actually ends in this Streamlit session."
-                )
-
-                rye_below_counter = 0
-                rye_threshold_hits_required = 3 if stop_rye_threshold is not None else 0
-
-                if enable_swarm and swarm_roles:
-                    total_mini_cycles = len(swarm_roles) * approx_cycles
-                    st.write(
-                        f"Timed Swarm: {len(swarm_roles)} agents x {approx_cycles} outer cycles "
-                        f"(total up to {total_mini_cycles} mini cycles)."
-                    )
-                    outer_done = 0
-                    for i in range(approx_cycles):
-                        base_index = next_index + i * len(swarm_roles)
-                        for j, (role_name, _) in enumerate(swarm_roles):
-                            ci = base_index + j
-                            role_goal = role_specific_goal(goal, role_name)
-                            out = agent.run_cycle(
-                                goal=role_goal,
-                                cycle_index=ci,
-                                role=role_name,
-                                source_controls=source_controls,
-                                pdf_bytes=pdf_bytes,
-                                biomarker_snapshot=None,
-                                domain=domain_tag,
-                            )
-                            summary = out["summary"]
-                            results.append(summary)
-
-                            rye_val = summary.get("RYE")
-                            if stop_rye_threshold is not None and isinstance(rye_val, (int, float)):
-                                if rye_val < stop_rye_threshold:
-                                    rye_below_counter += 1
-                                else:
-                                    rye_below_counter = 0
-                                if rye_below_counter >= rye_threshold_hits_required:
-                                    st.warning(
-                                        f"Stopping early: RYE fell below {stop_rye_threshold} "
-                                        f"for {rye_threshold_hits_required} consecutive mini cycles."
-                                    )
-                                    outer_done = approx_cycles
-                                    break
-                        outer_done += 1
-                        if outer_done >= approx_cycles:
-                            break
-                else:
-                    if not multi_agent:
-                        for i in range(approx_cycles):
-                            ci = next_index + i
-                            out = agent.run_cycle(
-                                goal=goal,
-                                cycle_index=ci,
-                                role="agent",
-                                source_controls=source_controls,
-                                pdf_bytes=pdf_bytes,
-                                biomarker_snapshot=None,
-                                domain=domain_tag,
-                            )
-                            summary = out["summary"]
-                            results.append(summary)
-
-                            rye_val = summary.get("RYE")
-                            if stop_rye_threshold is not None and isinstance(rye_val, (int, float)):
-                                if rye_val < stop_rye_threshold:
-                                    rye_below_counter += 1
-                                else:
-                                    rye_below_counter = 0
-                                if rye_below_counter >= rye_threshold_hits_required:
-                                    st.warning(
-                                        f"Stopping early: RYE fell below {stop_rye_threshold} "
-                                        f"for {rye_threshold_hits_required} consecutive cycles."
-                                    )
-                                    break
-                    else:
-                        for i in range(approx_cycles):
-                            base = next_index + 2 * i
-
-                            # Researcher
-                            r = agent.run_cycle(
-                                goal=goal,
-                                cycle_index=base,
-                                role="researcher",
-                                source_controls=source_controls,
-                                pdf_bytes=pdf_bytes,
-                                biomarker_snapshot=None,
-                                domain=domain_tag,
-                            )
-                            r_summary = r["summary"]
-                            results.append(r_summary)
-
-                            rye_val = r_summary.get("RYE")
-                            if stop_rye_threshold is not None and isinstance(rye_val, (int, float)):
-                                if rye_val < stop_rye_threshold:
-                                    rye_below_counter += 1
-                                else:
-                                    rye_below_counter = 0
-                                if rye_below_counter >= rye_threshold_hits_required:
-                                    st.warning(
-                                        f"Stopping early after researcher: RYE fell below {stop_rye_threshold} "
-                                        f"for {rye_threshold_hits_required} consecutive cycles."
-                                    )
-                                    break
-
-                            # Critic
-                            critic_goal = f"Critically review and refine notes for: {goal}"
-                            c = agent.run_cycle(
-                                goal=critic_goal,
-                                cycle_index=base + 1,
-                                role="critic",
-                                source_controls=source_controls,
-                                pdf_bytes=None,
-                                biomarker_snapshot=None,
-                                domain=domain_tag,
-                            )
-                            c_summary = c["summary"]
-                            results.append(c_summary)
-
-                            rye_val_c = c_summary.get("RYE")
-                            if stop_rye_threshold is not None and isinstance(rye_val_c, (int, float)):
-                                if rye_val_c < stop_rye_threshold:
-                                    rye_below_counter += 1
-                                else:
-                                    rye_below_counter = 0
-                                if rye_below_counter >= rye_threshold_hits_required:
-                                    st.warning(
-                                        f"Stopping early after critic: RYE fell below {stop_rye_threshold} "
-                                        f"for {rye_threshold_hits_required} consecutive cycles."
-                                    )
-                                    break
-
-                st.subheader("Cycle Summaries (timed local run)")
-                for cs in results:
-                    render_cycle_summary(cs)
-
-            else:
-                # 1 week / 1 month / 90 days and Forever: configure background worker only.
-                max_minutes: Optional[float] = None
-                forever_flag: bool = False
-                runtime_profile: Optional[str] = None
-
-                if run_mode == "1 week (real clock)":
-                    max_minutes = 7.0 * 24.0 * 60.0
-                    runtime_profile = "1_week"
-                elif run_mode == "1 month (real clock)":
-                    max_minutes = 30.0 * 24.0 * 60.0
-                    runtime_profile = "1_month"
-                elif run_mode == "90 days (real clock)":
-                    max_minutes = 90.0 * 24.0 * 60.0
-                    runtime_profile = "90_days"
-                elif run_mode == "Forever (until stopped)":
-                    max_minutes = None
-                    forever_flag = True
-                    runtime_profile = "forever"
-
-                control_state = load_control_state()
-                new_state: Dict[str, Any] = dict(control_state)
-
-                # Base fields
-                new_state.update(
-                    {
-                        "status": "running",
-                        "mode": "swarm" if enable_swarm else ("multi" if multi_agent else "single"),
-                        "run_profile": runtime_profile,
-                        "goal": goal,
-                        "domain": domain_tag,
-                        "max_minutes": max_minutes,
-                        "forever": forever_flag,
-                        "stop_rye": stop_rye_threshold,
-                        "source_controls": source_controls,
-                        "use_biomarkers": bool(use_biomarkers),
-                        "timestamp_utc": datetime.utcnow().isoformat(),
+            # Optional PDF embedded as base64 (worker can decode)
+            pdf_payload: Optional[Dict[str, Any]] = None
+            if use_pdf and uploaded_pdf is not None:
+                try:
+                    pdf_bytes = uploaded_pdf.getvalue()
+                    pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+                    pdf_payload = {
+                        "name": uploaded_pdf.name,
+                        "base64": pdf_b64,
                     }
-                )
-
-                # Swarm configuration for the worker
-                if enable_swarm and swarm_roles:
-                    new_state["swarm"] = {
-                        "enabled": True,
-                        "roles": [name for name, _ in swarm_roles],
-                        "size": len(swarm_roles),
+                except Exception:
+                    pdf_payload = {
+                        "name": uploaded_pdf.name,
+                        "base64": None,
                     }
-                else:
-                    new_state["swarm"] = {"enabled": False, "roles": [], "size": 0}
 
-                # Classic multi agent flag
-                new_state["multi_agent_pair"] = bool(multi_agent)
+            # Runtime hints for the worker
+            runtime_hints: Dict[str, Any] = {
+                "run_mode": run_mode,
+                "manual_cycles": int(cycles) if run_mode == "Manual (finite cycles)" else None,
+                "stop_rye_threshold": stop_rye_threshold,
+                "cycles_per_hour_estimate": CYCLES_PER_HOUR_ESTIMATE,
+            }
 
-                # Optional attached pdf flag (worker can decide whether to re ingest files)
-                new_state["has_pdf"] = bool(use_pdf and uploaded_pdf is not None)
+            # Swarm configuration for the worker
+            swarm_config: Dict[str, Any] = {
+                "enabled": bool(enable_swarm),
+                "size": int(swarm_size if enable_swarm else 1),
+                "roles": [name for name, _ in swarm_roles] if enable_swarm and swarm_roles else [],
+            }
 
-                save_control_state(new_state)
+            job_id = generate_job_id()
+            now = datetime.utcnow().isoformat() + "Z"
 
-                if max_minutes is not None:
-                    st.success(
-                        f"Configured background worker for continuous mode {run_mode} "
-                        f"with time budget ~ {max_minutes:.1f} minutes. "
-                        "The worker will now run cycles and update history while this UI just monitors."
-                    )
-                else:
-                    st.success(
-                        "Configured background worker for continuous mode Forever. "
-                        "The worker will run until stopped by status or environment limits."
-                    )
+            job_payload: Dict[str, Any] = {
+                "job_id": job_id,
+                "created_at": now,
+                "status": "pending",
+                "run_label": (run_label or "experiment").strip(),
+                "preset_key": selected_key,
+                "preset_label": preset.get("label", selected_label),
+                "domain": domain_tag,
+                "goal": goal_clean,
+                "tavily_enabled": bool(status["has_key"]),
+                "source_controls": source_controls,
+                "use_biomarkers": bool(use_biomarkers),
+                "multi_agent_pair": bool(multi_agent),
+                "swarm": swarm_config,
+                "runtime_hints": runtime_hints,
+                "ui_metadata": {
+                    "requested_from": "streamlit",
+                    "client_version": "v2-job-queue",
+                },
+            }
+
+            if pdf_payload is not None:
+                job_payload["pdf"] = pdf_payload
+
+            write_pending_job(job_id, job_payload)
+
+            st.success(f"Run request queued with job id `{job_id}`.")
+            st.info(
+                "Your engine worker should watch runs/pending/ for new jobs and write "
+                "results into runs/finished/ when done."
+            )
 
     # ------------------------------
-    # Engine control panel (for worker)
+    # Runs and job queue (pending / finished)
+    # ------------------------------
+    st.markdown("---")
+    st.subheader("Runs and job queue")
+
+    finished_jobs = list_finished_jobs()
+    pending_jobs = list_pending_jobs()
+
+    col_runs_left, col_runs_right = st.columns([2, 1])
+
+    with col_runs_left:
+        st.markdown("#### Finished runs")
+        if not finished_jobs:
+            st.info("No finished runs found in runs/finished/ yet.")
+        else:
+            selected_job_id = st.selectbox(
+                "Select a finished run",
+                options=[j["job_id"] for j in finished_jobs],
+                format_func=lambda jid: next(
+                    (j.get("run_label", j["job_id"]) for j in finished_jobs if j["job_id"] == jid),
+                    jid,
+                ),
+            )
+            if selected_job_id:
+                selected_job_header = next(
+                    (j for j in finished_jobs if j["job_id"] == selected_job_id),
+                    None,
+                )
+                if selected_job_header:
+                    render_job_summary(selected_job_header)
+                result = load_job_result(selected_job_id)
+                if result is None:
+                    st.warning(
+                        "Result file missing or unreadable for this job. "
+                        "The engine worker may not have written it yet."
+                    )
+                else:
+                    st.markdown("---")
+                    render_result_details(result)
+
+    with col_runs_right:
+        st.markdown("#### Pending runs")
+        if not pending_jobs:
+            st.info("No pending jobs in runs/pending/.")
+        else:
+            for job in pending_jobs:
+                with st.container():
+                    render_job_summary(job)
+                    st.caption("Waiting for engine worker to start.")
+                    st.markdown("---")
+
+    # ------------------------------
+    # Engine control panel (legacy background worker control_state)
     # ------------------------------
     st.markdown("---")
     st.subheader("Engine control panel (for background worker)")
@@ -1659,7 +1660,7 @@ def main() -> None:
         with st.expander("Raw control state"):
             st.code(json.dumps(control_state, indent=2), language="json")
     else:
-        st.write("No control state file yet. Configure a 1 week, 1 month, 90 day or Forever run to create one.")
+        st.write("No control state file yet. The worker may not be configured via control_state.json.")
 
     col_start, col_pause, col_stop = st.columns(3)
 
