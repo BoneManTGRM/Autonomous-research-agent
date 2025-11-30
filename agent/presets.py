@@ -21,13 +21,19 @@ These settings do not break existing code but unlock future power for:
 - stricter verification and smarter hypothesis selection
 - repair efficiency signatures per domain and per preset
 - adaptive learning based on RYE gradients and stability metrics
+
+Finite-only note:
+- Engine and worker are now finite-only. Runtime profiles are treated as
+  *hints* for learning speed, reporting cadence, and diagnostics.
+- The "forever" profile is legacy and should be hidden in the UI; if used,
+  engines still enforce finite limits via max_minutes / cycles / rounds.
 """
 
 from __future__ import annotations
 from typing import Dict, Any, List, Optional
 
 # Simple version tag so the app and UI can display which preset set is loaded.
-PRESETS_VERSION: str = "2025-11-29-search-energy-v1"
+PRESETS_VERSION: str = "2025-11-30-finite-only-v1"
 
 # ---------------------------------------------------------------------
 # Global Runtime Profiles (applies for all presets)
@@ -38,7 +44,7 @@ PRESETS_VERSION: str = "2025-11-29-search-energy-v1"
 # New field: wallclock_minutes
 #   Exact intended duration in minutes so timed runs map to real time:
 #   1 hour, 8 hours, 24 hours, 1 week, 1 month, 90 days.
-#   The forever profile omits a fixed wallclock_minutes value.
+#   The forever profile is treated as a legacy hint only in finite mode.
 # ---------------------------------------------------------------------
 RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
     "1_hour": {
@@ -149,16 +155,19 @@ RUNTIME_PROFILES: Dict[str, Dict[str, Any]] = {
         "spread_of_learning_strength": 1.5,
     },
     "forever": {
-        "label": "Run Until Stopped",
+        "label": "Run Until Stopped (legacy)",
         "estimated_cycles": 10_000_000,
         "rye_stop_threshold": None,
         "energy_scaling": 1.0,
         "report_frequency": 5,
-        "description": "Unbounded autonomous operation until the user or environment stops it.",
+        "description": (
+            "Legacy unbounded profile. In finite-only mode, engines still enforce "
+            "finite limits via max_minutes / cycles / rounds. UI should hide this."
+        ),
         "use_advanced_rye": True,
         "expected_equilibrium": "mixed",
         "target_rye_range": [0.04, 0.24],
-        # No fixed wallclock_minutes for forever
+        # No fixed wallclock_minutes for forever in legacy mode
         "learning_speed_factor": 5.0,
         "burst_profile_hint": "balanced",
         "spread_of_learning_strength": 1.0,
@@ -280,6 +289,7 @@ PDF_REPORT_DEFAULTS: Dict[str, Any] = {
 # ---------------------------------------------------------------------
 # Continuous mode defaults for single agent and swarm runs
 # These are read by CoreAgent and engine_worker to keep behavior aligned.
+# In finite-only mode, these are treated as policy and hint values.
 # ---------------------------------------------------------------------
 CONTINUOUS_MODE_DEFAULTS: Dict[str, Any] = {
     "watchdog_interval_minutes": 5.0,
