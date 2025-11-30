@@ -195,6 +195,9 @@ class RunManager:
         # Make sure stop_reason is always present
         summary.setdefault("stop_reason", "completed")
 
+        # New: push a run manifest into MemoryStore if supported
+        self._log_run_manifest_if_available(run_config, summary)
+
         return summary
 
     # ------------------------------------------------------------------
@@ -718,3 +721,36 @@ class RunManager:
             summary["stop_reason"] = stop_reason
 
         return summary
+
+    # ------------------------------------------------------------------
+    # New helper for manifest logging
+    # ------------------------------------------------------------------
+    def _log_run_manifest_if_available(
+        self,
+        run_config: RunConfig,
+        summary: Dict[str, Any],
+    ) -> None:
+        """If MemoryStore supports log_run_manifest, write a compact manifest."""
+        ms = self.memory_store
+        if ms is None or not hasattr(ms, "log_run_manifest"):
+            return
+
+        learning = summary.get("learning_speed") or {}
+        manifest: Dict[str, Any] = {
+            "run_id": summary.get("run_id", run_config.run_id),
+            "mode": summary.get("mode", run_config.mode),
+            "domain": summary.get("domain", run_config.domain),
+            "goal": summary.get("goal", run_config.goal),
+            "time_limit_seconds": summary.get("time_limit_seconds", run_config.max_seconds),
+            "elapsed_seconds": summary.get("elapsed_seconds"),
+            "stop_reason": summary.get("stop_reason"),
+            "num_cycles": learning.get("num_cycles"),
+            "rye_avg": learning.get("avg_rye"),
+            "rye_best": learning.get("best_rye"),
+        }
+
+        try:
+            ms.log_run_manifest(manifest["run_id"], manifest)
+        except Exception:
+            # Never let manifest logging crash a run
+            return
