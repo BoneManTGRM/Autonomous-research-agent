@@ -30,9 +30,8 @@ Reparodynamics:
     - The worker runs TGRM loops, computes RYE = delta_R / E, and logs results.
 
 Time:
-    All run mode presets (Manual, 1h, 8h, 24h, 1 week, 1 month, 90 days, Forever) are
-    interpreted as hints in the job payload. The engine worker is responsible for mapping
-    them to real wall clock minutes and cycle budgets.
+    In this finite only build, the Streamlit UI only sends explicit cycle budgets.
+    The engine worker decides how to map these to wall clock time if needed.
 
 Note:
     This keeps the Streamlit app thin and safe:
@@ -199,7 +198,7 @@ except ModuleNotFoundError as e:
 CONFIG_PATH_DEFAULT = str(REPO_ROOT / "config" / "settings.yaml")
 
 # Rough estimate for cycles per hour in continuous mode.
-# Used to derive a safe local cycle budget for older modes, now only advisory for worker.
+# Used historically; now only advisory metadata for the worker.
 CYCLES_PER_HOUR_ESTIMATE = 120
 
 # Swarm roles: base archetypes for mini agents
@@ -505,27 +504,27 @@ def role_specific_goal(base_goal: str, role: str) -> str:
     archetype = role.split("_", 1)[0] if "_" in role else role
 
     if archetype == "researcher":
-        return (
+        return(
             f"Primary deep research agent for goal: {base_goal}.\n"
             "Focus on high quality sources, detailed notes, and clear summaries."
         )
     if archetype == "critic":
-        return (
+        return(
             f"Critically review, cross check, and refine all existing Reparodynamic notes and hypotheses for: {base_goal}.\n"
             "Identify weaknesses, gaps, and overclaims."
         )
     if archetype == "explorer":
-        return (
+        return(
             f"Exploration agent for goal: {base_goal}.\n"
             "Look for unusual angles, analogies, adjacent fields, and surprising connections."
         )
     if archetype == "theorist":
-        return (
+        return(
             f"Theory building agent for goal: {base_goal}.\n"
             "Try to organize findings into coherent models, equations, or structured frameworks."
         )
     if archetype == "integrator":
-        return (
+        return(
             f"Integration agent for goal: {base_goal}.\n"
             "Synthesize results from all prior agents into clear narratives, tables, and distilled insights."
         )
@@ -546,7 +545,7 @@ def render_job_summary(job: Dict[str, Any]) -> None:
     swarm_cfg = job.get("swarm") or {}
     mode = job.get("mode")
     if not mode:
-        if swarm_cfg.get("enabled"):
+        if swarm_cfg.get("swarm_size", 1) and swarm_cfg.get("swarm_size", 1) > 1:
             mode = "swarm"
         elif job.get("multi_agent_pair"):
             mode = "multi"
@@ -606,18 +605,45 @@ def render_result_details(result: Dict[str, Any]) -> None:
     cycles = result.get("cycles")
     if isinstance(cycles, list) and cycles:
         st.markdown("#### Cycle timeline")
-        cycle_numbers = [c.get("cycle", idx + 1) for idx, c in enumerate(cycles)]
-        delta_r_values = [c.get("delta_r") for c in cycles]
-        energy_values = [c.get("energy") for c in cycles]
-        rye_values = [c.get("rye") for c in cycles]
+        cycle_numbers: List[Any] = []
+        delta_r_values: List[Any] = []
+        energy_values: List[Any] = []
+        rye_values: List[Any] = []
+
+        for idx, c in enumerate(cycles):
+            # Cycle index
+            c_num = c.get("cycle")
+            if c_num is None:
+                c_num = c.get("cycle_index")
+            if c_num is None:
+                c_num = idx + 1
+            cycle_numbers.append(c_num)
+
+            # delta_R
+            d_val = c.get("delta_r")
+            if d_val is None:
+                d_val = c.get("delta_R")
+            delta_r_values.append(d_val)
+
+            # energy
+            e_val = c.get("energy")
+            if e_val is None:
+                e_val = c.get("energy_E")
+            energy_values.append(e_val)
+
+            # RYE
+            r_val = c.get("rye")
+            if r_val is None:
+                r_val = c.get("RYE")
+            rye_values.append(r_val)
 
         chart_data: Dict[str, List[Any]] = {"cycle": cycle_numbers}
         if any(v is not None for v in delta_r_values):
-            chart_data["delta_r"] = delta_r_values
+            chart_data["delta_R"] = delta_r_values
         if any(v is not None for v in energy_values):
             chart_data["energy"] = energy_values
         if any(v is not None for v in rye_values):
-            chart_data["rye"] = rye_values
+            chart_data["RYE"] = rye_values
 
         if len(chart_data) > 1:
             st.line_chart(chart_data)
@@ -1478,20 +1504,44 @@ def main() -> None:
                         "base64": None,
                     }
 
-            # Runtime hints for the worker
+            # Runtime hints for the worker (finite only)
             runtime_hints: Dict[str, Any] = {
-                "run_mode": run_mode,
+                "run_mode": "finite_manual",
                 "manual_cycles": int(cycles),
+                "max_cycles": int(cycles),
                 "stop_rye_threshold": stop_rye_threshold,
                 "cycles_per_hour_estimate": CYCLES_PER_HOUR_ESTIMATE,
             }
 
             # Swarm configuration for the worker
-            swarm_config: Dict[str, Any] = {
-                "enabled": bool(enable_swarm),
-                "size": int(swarm_size if enable_swarm else 1),
-                "roles": [name for name, _ in swarm_roles] if enable_swarm and swarm_roles else [],
-            }
+            # Aligned with SwarmConfig dataclass:
+            # swarm_size, roles, max_cycles_per_agent, stagger_start, max_agents_per_tick
+            if enable_swarm:
+                swarm_config: Dict[str, Any] = {
+                    "swarm_size": int(swarm_size),
+                    "roles": [name for name, _ in swarm_roles] if swarm_roles else ["agent"],
+                    "max_cycles_per_agent": int(cycles),
+                    "stagger_start": False,
+                    "max_agents_per_tick": 0,
+                }
+            else:
+                swarm_config = {
+                    "swarm_size": 1,
+                    "roles": ["agent"],
+                    "max_cycles_per_agent": int(cycles),
+                    "stagger_start": False,
+                    "max_agents_per_tick": 0,
+                }
+
+            # Optional longevity config stub for worker (safe, defaults only)
+            longevity_config: Dict[str, Any] = {}
+            if str(domain_tag).lower() in {"longevity", "aging", "anti_aging"}:
+                longevity_defaults = preset.get("longevity_config", {})
+                if isinstance(longevity_defaults, dict):
+                    longevity_config = {
+                        "hallmark_targets": longevity_defaults.get("hallmark_targets", []),
+                        "curriculum_profile": longevity_defaults.get("curriculum_profile"),
+                    }
 
             job_id = generate_job_id()
             now = datetime.utcnow().isoformat() + "Z"
@@ -1513,9 +1563,12 @@ def main() -> None:
                 "runtime_hints": runtime_hints,
                 "ui_metadata": {
                     "requested_from": "streamlit",
-                    "client_version": "v2-job-queue-finite-only",
+                    "client_version": "v3-run-manager-finite-only",
                 },
             }
+
+            if longevity_config:
+                job_payload["longevity"] = longevity_config
 
             if pdf_payload is not None:
                 job_payload["pdf"] = pdf_payload
