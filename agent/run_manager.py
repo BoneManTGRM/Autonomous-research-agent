@@ -31,7 +31,7 @@ class SwarmConfig:
         The engine worker is expected to map job payload swarm settings into this:
             swarm_size             -> number of agents
             roles                  -> list of role labels (researcher, critic, etc)
-            max_cycles_per_agent   -> optional per-agent cap
+            max_cycles_per_agent   -> optional per agent cap
             stagger_start          -> reserved for future use
             max_agents_per_tick    -> reserved for future throttling
     """
@@ -74,6 +74,10 @@ class RunConfig:
     goal: str
     mode: str = "single"  # single, swarm, two_stage
     domain: str = "general"
+
+    # Optional label like "1_hour", "8_hours" for UI and reporting.
+    # Engine is free to ignore this and treat runs as finite only.
+    runtime_profile: Optional[str] = None
 
     # Cycles and time (finite only in the current engine design)
     total_cycles: int = 1
@@ -124,7 +128,7 @@ class RunManager:
     - Run level learning speed summaries that the UI can show as trends.
 
     It also enforces a hard wall clock budget when max_seconds is set so
-    1h / 8h / 24h / 1w / 1m / 90d style runs cut off at the right time.
+    1h / 8h / 24h / 1w / 1m style runs cut off at the right time.
 
     In the new architecture, an external engine worker:
         1) Reads job JSON from runs/pending/.
@@ -160,6 +164,10 @@ class RunManager:
         # Small default so tests do not break if tgrm_level is not set
         cfg.setdefault("tgrm_level", 3)
 
+        # Optional: pass runtime_profile through for logging or tuning
+        if run_config.runtime_profile:
+            cfg.setdefault("runtime_profile", run_config.runtime_profile)
+
         return CoreAgent(
             memory_store=self.memory_store,
             config=cfg,
@@ -183,9 +191,8 @@ class RunManager:
         start_time = time.time()
 
         # Hard wall clock deadline (if configured)
-        deadline_ts: Optional[float]
         if run_config.max_seconds is not None:
-            deadline_ts = start_time + float(run_config.max_seconds)
+            deadline_ts: Optional[float] = start_time + float(run_config.max_seconds)
         else:
             deadline_ts = None
 
@@ -209,6 +216,8 @@ class RunManager:
         summary["end_timestamp"] = end_ts
         summary["elapsed_seconds"] = end_time - start_time
         summary["notes"] = run_config.notes
+        if run_config.runtime_profile:
+            summary["runtime_profile"] = run_config.runtime_profile
 
         # Attach the configured time budget and deadline
         summary.setdefault("time_limit_seconds", run_config.max_seconds)
@@ -493,12 +502,26 @@ class RunManager:
         last_cycle_meta: Dict[str, Any] = {}
         stop_reason: str = "completed"
 
-        total_cycles_budget = run_config.total_cycles * swarm_cfg.swarm_size
+        # Respect per agent cap when provided, otherwise fall back to total_cycles.
+        effective_max_per_agent = (
+            swarm_cfg.max_cycles_per_agent
+            if swarm_cfg.max_cycles_per_agent > 0
+            else run_config.total_cycles
+        )
+        total_cycles_budget = effective_max_per_agent * swarm_cfg.swarm_size
+
+        # Track per agent cycle counts so we do not exceed max_cycles_per_agent
+        per_agent_counts: List[int] = [0 for _ in agents]
+
         cycle_index_global = 0
 
         while cycle_index_global < total_cycles_budget:
             if self._time_exceeded(deadline_ts):
                 stop_reason = "time_limit"
+                break
+
+            # If all agents reached their cap, stop
+            if all(count >= effective_max_per_agent for count in per_agent_counts):
                 break
 
             for agent_idx, agent in enumerate(agents):
@@ -507,12 +530,15 @@ class RunManager:
                     break
                 if cycle_index_global >= total_cycles_budget:
                     break
+                if per_agent_counts[agent_idx] >= effective_max_per_agent:
+                    continue
 
                 role = agent_roles[agent_idx]
                 stage = self._infer_stage_from_role(role)
 
                 cycle_index_global += 1
-                local_cycle_index = cycle_index_global
+                per_agent_counts[agent_idx] += 1
+                local_cycle_index = per_agent_counts[agent_idx]
 
                 cycle_kwargs = self._build_cycle_kwargs(
                     run_config=run_config,
@@ -547,6 +573,7 @@ class RunManager:
                             "agent_index": agent_idx,
                             "role": role,
                             "cycle_index_global": cycle_index_global,
+                            "cycle_index_agent": local_cycle_index,
                             "short_view": short_view,
                         }
                     )
@@ -740,6 +767,9 @@ class RunManager:
             "is_swarm": is_swarm,
         }
 
+        if run_config.runtime_profile:
+            summary["runtime_profile"] = run_config.runtime_profile
+
         if is_swarm and swarm_roles is not None:
             summary["swarm_roles"] = swarm_roles
 
@@ -767,6 +797,7 @@ class RunManager:
             "mode": summary.get("mode", run_config.mode),
             "domain": summary.get("domain", run_config.domain),
             "goal": summary.get("goal", run_config.goal),
+            "runtime_profile": summary.get("runtime_profile", run_config.runtime_profile),
             "time_limit_seconds": summary.get("time_limit_seconds", run_config.max_seconds),
             "elapsed_seconds": summary.get("elapsed_seconds"),
             "stop_reason": summary.get("stop_reason"),
