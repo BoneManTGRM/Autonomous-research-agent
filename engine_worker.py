@@ -621,6 +621,11 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         source_controls: optional explicit source controls dict
         resume: optional resume flag (default True)
         watchdog_minutes: optional watchdog interval
+
+    New behavior:
+        If explicit cycle or round limits are provided in the job config,
+        the worker ignores max_minutes so the job runs until the specified
+        cycles or rounds complete (or stop_rye triggers).
     """
     if move_job is not None:
         move_job(job.run_id, "queued", "active")
@@ -645,13 +650,24 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             except Exception:
                 roles_list = ["agent"]
 
+    # Explicit cycle and round flags
+    max_cycles_explicit = "max_cycles" in job.config or "cycles" in job.config
+    max_rounds_explicit = "max_rounds" in job.config or "rounds" in job.config
+
     max_cycles = int(job.config.get("max_cycles", job.config.get("cycles", 10_000_000)))
     max_rounds = int(job.config.get("max_rounds", max_cycles))
-    max_minutes = job.config.get("max_minutes")
-    if max_minutes is not None:
-        try:
-            max_minutes = float(max_minutes)
-        except Exception:
+
+    # Time guard: only used when there is no explicit cycles or rounds limit
+    raw_max_minutes = job.config.get("max_minutes")
+    if (mode == "single" and max_cycles_explicit) or (mode == "swarm" and max_rounds_explicit):
+        max_minutes: Optional[float] = None
+    else:
+        if raw_max_minutes is not None:
+            try:
+                max_minutes = float(raw_max_minutes)
+            except Exception:
+                max_minutes = None
+        else:
             max_minutes = None
 
     stop_rye = job.config.get("stop_rye")
@@ -701,9 +717,9 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     print(f"Domain: {domain}")
     print(f"Role (single): {role}")
     print(f"Roles (swarm): {roles_list if roles_list is not None else 'auto'}")
-    print(f"Max cycles (single): {max_cycles}")
-    print(f"Max rounds (swarm): {max_rounds}")
-    print(f"Max minutes: {max_minutes if max_minutes is not None else 'None'}")
+    print(f"Max cycles (single): {max_cycles} (explicit: {max_cycles_explicit})")
+    print(f"Max rounds (swarm): {max_rounds} (explicit: {max_rounds_explicit})")
+    print(f"Max minutes guard: {max_minutes if max_minutes is not None else 'None (cycles/rounds driven)'}")
     print(f"Stop RYE: {stop_rye if stop_rye is not None else 'None'}")
     print(f"Runtime profile: {runtime_profile or 'None'}")
     print(f"Resume: {resume}")
@@ -1530,7 +1546,7 @@ def _compute_segment_stats(segment_summaries: List[Dict[str, Any]]) -> Dict[str,
     if not rye_vals:
         return {
             "count": len(segment_summaries),
-            "avg_rye": None,
+            "avg_rye": diag.get("rye_avg"),
             "max_rye": None,
             "min_rye": None,
             "last_rye": None,
