@@ -26,7 +26,7 @@ Features:
 Reparodynamics:
     The UI is a front panel on a reparodynamic system:
     - It never runs TGRM cycles directly.
-    - Each run request is written as a job file and picked up by an external engine worker.
+    - Each run request is written as a job in a file based queue and picked up by an external engine worker.
     - The worker runs TGRM loops, computes RYE = delta_R / E, and logs results.
 
 Time:
@@ -35,9 +35,9 @@ Time:
 
 Note:
     This keeps the Streamlit app thin and safe:
-    - It only queues jobs into runs/pending/
+    - It only queues jobs through run_jobs.py
     - It never imports or invokes the core loop
-    - It only reads finished JSON artifacts from runs/finished/ and from MemoryStore.
+    - It only reads finished JSON artifacts and MemoryStore.
 """
 
 from __future__ import annotations
@@ -47,7 +47,6 @@ import json
 import os
 import re
 import sys
-import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime
@@ -129,6 +128,14 @@ try:
     except Exception:  # pragma: no cover
         TOOL_REGISTRY = {}  # type: ignore[assignment]
 
+    # Job queue abstraction
+    try:
+        from agent.run_jobs import create_job, list_jobs as list_run_jobs, result_path
+    except Exception:
+        create_job = None  # type: ignore[assignment]
+        list_run_jobs = None  # type: ignore[assignment]
+        result_path = None  # type: ignore[assignment]
+
 except ModuleNotFoundError as e:
     # If the agent package itself is missing, allow flat layout fallback.
     # If something inside agent.* is missing, re raise so we see the real error.
@@ -193,6 +200,14 @@ except ModuleNotFoundError as e:
     except Exception:  # pragma: no cover
         TOOL_REGISTRY = {}  # type: ignore[assignment]
 
+    # Flat layout run_jobs fallback
+    try:
+        from run_jobs import create_job, list_jobs as list_run_jobs, result_path  # type: ignore[no-redef]
+    except Exception:
+        create_job = None  # type: ignore[assignment]
+        list_run_jobs = None  # type: ignore[assignment]
+        result_path = None  # type: ignore[assignment]
+
 
 # Use absolute path for default config relative to repo root
 CONFIG_PATH_DEFAULT = str(REPO_ROOT / "config" / "settings.yaml")
@@ -217,93 +232,8 @@ MAX_SWARM_AGENTS: int = 32
 # Limit points in charts so the frontend does not hit RangeError on very long runs.
 MAX_POINTS_FOR_CHARTS: int = 1000
 
-# Where legacy background worker control_state is stored (still view-only / control-only)
+# Where legacy background worker control_state is stored (still view only / control only)
 CONTROL_STATE_PATH = Path("logs/control_state.json")
-
-# Job queue directories for decoupled engine worker
-BASE_RUN_DIR = Path("runs")
-PENDING_DIR = BASE_RUN_DIR / "pending"
-FINISHED_DIR = BASE_RUN_DIR / "finished"
-
-
-# -------------------------------------------------------------------
-# Job queue helpers (runs/pending and runs/finished)
-# -------------------------------------------------------------------
-def ensure_run_dirs() -> None:
-    """Ensure that runs/pending and runs/finished exist."""
-    BASE_RUN_DIR.mkdir(exist_ok=True)
-    PENDING_DIR.mkdir(parents=True, exist_ok=True)
-    FINISHED_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def generate_job_id() -> str:
-    """Generate a human-inspectable job id."""
-    return datetime.utcnow().strftime("%Y%m%d%H%M%S") + "-" + uuid.uuid4().hex[:8]
-
-
-def write_pending_job(job_id: str, payload: Dict[str, Any]) -> Path:
-    """Write a pending job request to runs/pending/{job_id}.json."""
-    ensure_run_dirs()
-    path = PENDING_DIR / f"{job_id}.json"
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2, ensure_ascii=False)
-    return path
-
-
-def list_pending_jobs() -> List[Dict[str, Any]]:
-    """List pending jobs from runs/pending/."""
-    ensure_run_dirs()
-    jobs: List[Dict[str, Any]] = []
-    if not PENDING_DIR.exists():
-        return jobs
-    for fp in sorted(PENDING_DIR.glob("*.json")):
-        try:
-            with fp.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                continue
-            data.setdefault("status", "pending")
-            data["job_id"] = fp.stem
-            jobs.append(data)
-        except Exception:
-            continue
-    return jobs
-
-
-def list_finished_jobs() -> List[Dict[str, Any]]:
-    """List finished jobs from runs/finished/."""
-    ensure_run_dirs()
-    jobs: List[Dict[str, Any]] = []
-    if not FINISHED_DIR.exists():
-        return jobs
-    for fp in sorted(FINISHED_DIR.glob("*.json"), reverse=True):
-        try:
-            with fp.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            if not isinstance(data, dict):
-                continue
-            data.setdefault("status", "finished")
-            data["job_id"] = fp.stem
-            jobs.append(data)
-        except Exception:
-            continue
-    return jobs
-
-
-def load_job_result(job_id: str) -> Optional[Dict[str, Any]]:
-    """Load a finished job result from runs/finished/{job_id}.json."""
-    ensure_run_dirs()
-    fp = FINISHED_DIR / f"{job_id}.json"
-    if not fp.exists():
-        return None
-    try:
-        with fp.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-        return None
-    except Exception:
-        return None
 
 
 # -------------------------------------------------------------------
@@ -318,12 +248,11 @@ def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
 
 
 def ensure_directories() -> None:
-    """Ensure that log directories exist, plus run dirs."""
+    """Ensure that log directories exist."""
     logs_path = Path("logs")
     sessions_path = logs_path / "sessions"
     logs_path.mkdir(exist_ok=True)
     sessions_path.mkdir(exist_ok=True)
-    ensure_run_dirs()
 
 
 def load_control_state() -> Dict[str, Any]:
@@ -360,6 +289,23 @@ def init_memory_store(config_path: str = CONFIG_PATH_DEFAULT) -> MemoryStore:
     memory_file = config.get("memory_file", "logs/sessions/default_memory.json")
     memory = MemoryStore(memory_file)
     return memory
+
+
+def load_job_result(run_id: str) -> Optional[Dict[str, Any]]:
+    """Load a finished job result using run_jobs.result_path."""
+    if result_path is None:
+        return None
+    fp = result_path(run_id)
+    if not fp.exists():
+        return None
+    try:
+        with fp.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        return None
+    except Exception:
+        return None
 
 
 def tavily_status() -> Dict[str, Any]:
@@ -504,27 +450,27 @@ def role_specific_goal(base_goal: str, role: str) -> str:
     archetype = role.split("_", 1)[0] if "_" in role else role
 
     if archetype == "researcher":
-        return(
+        return (
             f"Primary deep research agent for goal: {base_goal}.\n"
             "Focus on high quality sources, detailed notes, and clear summaries."
         )
     if archetype == "critic":
-        return(
+        return (
             f"Critically review, cross check, and refine all existing Reparodynamic notes and hypotheses for: {base_goal}.\n"
             "Identify weaknesses, gaps, and overclaims."
         )
     if archetype == "explorer":
-        return(
+        return (
             f"Exploration agent for goal: {base_goal}.\n"
             "Look for unusual angles, analogies, adjacent fields, and surprising connections."
         )
     if archetype == "theorist":
-        return(
+        return (
             f"Theory building agent for goal: {base_goal}.\n"
             "Try to organize findings into coherent models, equations, or structured frameworks."
         )
     if archetype == "integrator":
-        return(
+        return (
             f"Integration agent for goal: {base_goal}.\n"
             "Synthesize results from all prior agents into clear narratives, tables, and distilled insights."
         )
@@ -532,31 +478,89 @@ def role_specific_goal(base_goal: str, role: str) -> str:
     return base_goal
 
 
-def render_job_summary(job: Dict[str, Any]) -> None:
-    """Compact header row for a job (pending or finished)."""
-    job_id = job.get("job_id", "unknown")
-    status = job.get("status", "unknown")
-    created_at = job.get("created_at", "unknown")
-    domain = job.get("domain", "general")
+def _get_job_id(job: Any) -> str:
+    """Extract a run id or job id from RunJob or legacy dict."""
+    if hasattr(job, "run_id"):
+        return str(getattr(job, "run_id"))
+    if isinstance(job, dict):
+        return str(job.get("run_id") or job.get("job_id") or "unknown")
+    return "unknown"
+
+
+def _get_job_config(job: Any) -> Dict[str, Any]:
+    """Get config dict from RunJob or legacy dict, safe default."""
+    cfg = getattr(job, "config", None)
+    if isinstance(job, dict):
+        cfg = job.get("config", cfg)
+    if not isinstance(cfg, dict):
+        return {}
+    return cfg
+
+
+def _get_job_meta(job: Any) -> Dict[str, Any]:
+    """Get meta dict from RunJob or legacy dict, safe default."""
+    meta = getattr(job, "meta", None)
+    if isinstance(job, dict):
+        meta = job.get("meta", meta)
+    if not isinstance(meta, dict):
+        return {}
+    return meta
+
+
+def _get_job_label(job: Any) -> str:
+    """Human friendly label for a job."""
+    cfg = _get_job_config(job)
+    meta = _get_job_meta(job)
+    label = (
+        meta.get("run_label")
+        or meta.get("label")
+        or cfg.get("notes")
+        or cfg.get("goal")
+        or _get_job_id(job)
+    )
+    return str(label)
+
+
+def render_job_summary(job: Any) -> None:
+    """Compact header row for a job (queued or finished)."""
+    job_id = _get_job_id(job)
+    if hasattr(job, "status"):
+        status = getattr(job, "status", "unknown")
+        created_at_raw = getattr(job, "created_at", None)
+    elif isinstance(job, dict):
+        status = job.get("status", "unknown")
+        created_at_raw = job.get("created_at")
+    else:
+        status = "unknown"
+        created_at_raw = None
+
+    config = _get_job_config(job)
+    domain = config.get("domain", "general")
 
     if isinstance(domain, dict):
         domain = domain.get("tag") or domain.get("name") or "general"
 
-    swarm_cfg = job.get("swarm") or {}
-    mode = job.get("mode")
+    # Mode detection from config
+    mode = config.get("mode")
+    swarm_cfg = config.get("swarm_config") or config.get("swarm") or {}
     if not mode:
         if swarm_cfg.get("swarm_size", 1) and swarm_cfg.get("swarm_size", 1) > 1:
             mode = "swarm"
-        elif job.get("multi_agent_pair"):
-            mode = "multi"
+        elif config.get("multi_agent_pair"):
+            mode = "two_stage"
         else:
             mode = "single"
 
-    label = job.get("run_label") or job.get("label") or job_id
+    label = _get_job_label(job)
+
+    if isinstance(created_at_raw, (int, float)):
+        created_at = datetime.utcfromtimestamp(created_at_raw).isoformat() + "Z"
+    else:
+        created_at = str(created_at_raw or "unknown")
 
     cols = st.columns([3, 2, 2, 2])
     cols[0].markdown(f"**{label}**")
-    cols[1].markdown(f"Job: `{job_id}`")
+    cols[1].markdown(f"Run: `{job_id}`")
     cols[2].markdown(f"Status: `{status}`")
     cols[3].markdown(f"Domain: `{str(domain).title()}`")
 
@@ -1475,9 +1479,12 @@ def main() -> None:
         goal_clean = goal.strip()
         if not goal_clean:
             st.error("Please provide a research goal or question before queuing a run.")
+        elif create_job is None:
+            st.error(
+                "Job queue backend (run_jobs.py) is not available. "
+                "Make sure agent/run_jobs.py exists and is importable."
+            )
         else:
-            ensure_run_dirs()
-
             # Source controls for the engine worker
             source_controls = {
                 "web": bool(use_web_tool),
@@ -1504,7 +1511,7 @@ def main() -> None:
                         "base64": None,
                     }
 
-            # Runtime hints for the worker (finite only)
+            # Runtime hints for the worker (finite only, advisory)
             runtime_hints: Dict[str, Any] = {
                 "run_mode": "finite_manual",
                 "manual_cycles": int(cycles),
@@ -1514,8 +1521,6 @@ def main() -> None:
             }
 
             # Swarm configuration for the worker
-            # Aligned with SwarmConfig dataclass:
-            # swarm_size, roles, max_cycles_per_agent, stagger_start, max_agents_per_tick
             if enable_swarm:
                 swarm_config: Dict[str, Any] = {
                     "swarm_size": int(swarm_size),
@@ -1533,7 +1538,7 @@ def main() -> None:
                     "max_agents_per_tick": 0,
                 }
 
-            # Optional longevity config stub for worker (safe, defaults only)
+            # Optional longevity config stub for worker
             longevity_config: Dict[str, Any] = {}
             if str(domain_tag).lower() in {"longevity", "aging", "anti_aging"}:
                 longevity_defaults = preset.get("longevity_config", {})
@@ -1543,79 +1548,100 @@ def main() -> None:
                         "curriculum_profile": longevity_defaults.get("curriculum_profile"),
                     }
 
-            job_id = generate_job_id()
-            now = datetime.utcnow().isoformat() + "Z"
+            # Decide mode for RunManager
+            if enable_swarm and swarm_config.get("swarm_size", 1) > 1:
+                mode = "swarm"
+            elif multi_agent:
+                mode = "two_stage"
+            else:
+                mode = "single"
 
-            job_payload: Dict[str, Any] = {
-                "job_id": job_id,
-                "created_at": now,
-                "status": "pending",
+            # Core run configuration that engine_worker can map to RunConfig
+            run_config: Dict[str, Any] = {
+                "goal": goal_clean,
+                "domain": domain_tag,
+                "mode": mode,
+                "total_cycles": int(cycles),
+                "max_seconds": None,
+                "rye_stop_threshold": stop_rye_threshold,
+                "equilibrium_stop_label": None,
+                "min_cycles_before_stop": 3,
+                "source_controls": source_controls,
+                "runtime_hints": runtime_hints,
+                "swarm_config": swarm_config,
+                "longevity_config": longevity_config,
+                "use_biomarkers": bool(use_biomarkers),
+                "multi_agent_pair": bool(multi_agent),
+                "notes": (run_label or "experiment").strip(),
+            }
+
+            if pdf_payload is not None:
+                run_config["pdf"] = pdf_payload
+
+            # Meta for UI and analytics (does not go into RunConfig directly)
+            meta: Dict[str, Any] = {
                 "run_label": (run_label or "experiment").strip(),
                 "preset_key": selected_key,
                 "preset_label": preset.get("label", selected_label),
                 "domain": domain_tag,
-                "goal": goal_clean,
                 "tavily_enabled": bool(status["has_key"]),
-                "source_controls": source_controls,
-                "use_biomarkers": bool(use_biomarkers),
-                "multi_agent_pair": bool(multi_agent),
-                "swarm": swarm_config,
-                "runtime_hints": runtime_hints,
                 "ui_metadata": {
                     "requested_from": "streamlit",
                     "client_version": "v3-run-manager-finite-only",
                 },
             }
 
-            if longevity_config:
-                job_payload["longevity"] = longevity_config
-
-            if pdf_payload is not None:
-                job_payload["pdf"] = pdf_payload
-
-            write_pending_job(job_id, job_payload)
-
-            st.success(f"Run request queued with job id `{job_id}`.")
+            run_id = create_job(config=run_config, meta=meta)
+            st.success(f"Run request queued with run id `{run_id}`.")
             st.info(
-                "Your engine worker should watch runs/pending/ for new jobs and write "
-                "results into runs/finished/ when done."
+                "Your engine worker should watch the queue via run_jobs.list_jobs(status='queued') "
+                "and write results via run_jobs.result_path(run_id) when done."
             )
 
     # ------------------------------
-    # Runs and job queue (pending / finished)
+    # Runs and job queue (queued / finished via run_jobs.py)
     # ------------------------------
     st.markdown("---")
     st.subheader("Runs and job queue")
 
-    finished_jobs = list_finished_jobs()
-    pending_jobs = list_pending_jobs()
+    if list_run_jobs is not None:
+        finished_jobs = list_run_jobs(status="finished")
+        pending_jobs = list_run_jobs(status="queued")
+    else:
+        finished_jobs = []
+        pending_jobs = []
 
     col_runs_left, col_runs_right = st.columns([2, 1])
 
     with col_runs_left:
         st.markdown("#### Finished runs")
         if not finished_jobs:
-            st.info("No finished runs found in runs/finished/ yet.")
+            st.info("No finished runs found yet.")
         else:
-            selected_job_id = st.selectbox(
+            run_ids = [_get_job_id(j) for j in finished_jobs]
+
+            def _format_run(jid: str) -> str:
+                for j in finished_jobs:
+                    if _get_job_id(j) == jid:
+                        return _get_job_label(j)
+                return jid
+
+            selected_run_id = st.selectbox(
                 "Select a finished run",
-                options=[j["job_id"] for j in finished_jobs],
-                format_func=lambda jid: next(
-                    (j.get("run_label", j["job_id"]) for j in finished_jobs if j["job_id"] == jid),
-                    jid,
-                ),
+                options=run_ids,
+                format_func=_format_run,
             )
-            if selected_job_id:
+            if selected_run_id:
                 selected_job_header = next(
-                    (j for j in finished_jobs if j["job_id"] == selected_job_id),
+                    (j for j in finished_jobs if _get_job_id(j) == selected_run_id),
                     None,
                 )
                 if selected_job_header:
                     render_job_summary(selected_job_header)
-                result = load_job_result(selected_job_id)
+                result = load_job_result(selected_run_id)
                 if result is None:
                     st.warning(
-                        "Result file missing or unreadable for this job. "
+                        "Result file missing or unreadable for this run. "
                         "The engine worker may not have written it yet."
                     )
                 else:
@@ -1623,9 +1649,9 @@ def main() -> None:
                     render_result_details(result)
 
     with col_runs_right:
-        st.markdown("#### Pending runs")
+        st.markdown("#### Queued runs")
         if not pending_jobs:
-            st.info("No pending jobs in runs/pending/.")
+            st.info("No queued runs. Use the form above to queue one.")
         else:
             for job in pending_jobs:
                 with st.container():
