@@ -2,7 +2,7 @@
 ### Powered by Reparodynamics • TGRM • RYE • Swarm Intelligence • MSIL
 
 **Live Deployment**  
-https://autonomous-research-agent-hqby.onrender.com
+https://autonomous-research-agent-6tqt.onrender.com
 
 **Important**  
 Add your Tavily API key in the sidebar. Without it, search runs in offline stub mode.
@@ -30,14 +30,14 @@ The **Autonomous Research Agent** is a long-run scientific intelligence engine b
 
 Powered by:
 
-- **Reparodynamics** — self-repair physics for AI  
-- **TGRM v3** — high-precision gradient-repair cycles  
-- **RYE v3** — efficiency-driven learning laws  
-- **MSIL v2** — Meta Stability Intelligence Layer  
-- **Stability Kernel v2** — equilibrium and oscillation analysis  
-- **Ultra Swarm Engine** — 5 to 32 autonomous agents  
-- **Discovery Engine v3** — breakthrough-tier detection  
-- **MemoryStore v3** — persistent long-run learning  
+- **Reparodynamics** - self-repair physics for AI  
+- **TGRM v3** - high-precision gradient-repair cycles  
+- **RYE v3** - efficiency-driven learning laws  
+- **MSIL v2** - Meta Stability Intelligence Layer  
+- **Stability Kernel v2** - equilibrium and oscillation analysis  
+- **Ultra Swarm Engine** - 5 to 32 autonomous agents  
+- **Discovery Engine v3** - breakthrough-tier detection  
+- **MemoryStore v3** - persistent long-run learning  
 
 This system is engineered for **multi-hour to multi-month** autonomous scientific reasoning:
 
@@ -240,75 +240,75 @@ Actual real-world minutes are used — no artificial shortcuts.
 
 # 🧱 Repository Structure
 
-Autonomous-research-agent/
-│
-├── config/
-│   └── settings.yaml
-│
-├── agent/
-│   ├── core_agent.py
-│   ├── tgrm_loop.py
-│   ├── memory_store.py
-│   ├── presets.py
-│   ├── stability_kernel.py
-│   ├── msil.py
-│   ├── discovery_manager.py
-│   ├── protocol_synthesizer.py
-│   ├── swarm_orchestrator.py
-│   ├── rye_metrics.py
-│   ├── verification_engine.py
-│   ├── contradictions.py
-│   ├── hypothesis_engine.py
-│   ├── hypothesis_manager.py
-│   ├── snapshot_generator.py
-│   ├── meta_agent.py
-│   ├── replay_buffer.py
-│   ├── memory_pruner.py
-│   ├── intelligence_profiles.py
-│   ├── multi_hallmark_pipeline.py
-│   │
-│   ├── specialists/
-│   │   ├── biomarker_agent.py
-│   │   ├── critic_agent.py
-│   │   ├── pdf_summarizer_agent.py
-│   │   ├── synergy_agent.py
-│   │   └── meta_evaluator.py
-│   │
-│   └── tools/
-│       ├── browser_tool.py
-│       ├── code_sandbox.py
-│       ├── web_search.py
-│       ├── data_connectors.py
-│       ├── tool_router.py
-│       └── pdf_reporter.py
-│
-├── swarm/
-│   ├── swarm_coordinator.py
-│   └── swarm_profiles.yaml
-│
-├── tests/
-│   ├── test_stability_kernel.py
-│   ├── test_msil.py
-│   ├── test_discovery_manager.py
-│   ├── test_citations.py
-│   ├── test_curriculum.py
-│   └── test_replay_buffer.py
-│
-├── app_streamlit.py
-├── engine_worker.py
-├── run_agent.py
-├── daily_runner.py
-├── storage.py
-├── config.py
-├── main.py
-├── render.yaml
-├── .env.example
-├── requirements.txt
-└── README.md
+Autonomous-research-agent/  
+│  
+├── config/  
+│   └── settings.yaml  
+│  
+├── agent/  
+│   ├── core_agent.py  
+│   ├── tgrm_loop.py  
+│   ├── memory_store.py  
+│   ├── presets.py  
+│   ├── stability_kernel.py  
+│   ├── msil.py  
+│   ├── discovery_manager.py  
+│   ├── protocol_synthesizer.py  
+│   ├── swarm_orchestrator.py  
+│   ├── rye_metrics.py  
+│   ├── verification_engine.py  
+│   ├── contradictions.py  
+│   ├── hypothesis_engine.py  
+│   ├── hypothesis_manager.py  
+│   ├── snapshot_generator.py  
+│   ├── meta_agent.py  
+│   ├── replay_buffer.py  
+│   ├── memory_pruner.py  
+│   ├── intelligence_profiles.py  
+│   ├── multi_hallmark_pipeline.py  
+│   │  
+│   ├── specialists/  
+│   │   ├── biomarker_agent.py  
+│   │   ├── critic_agent.py  
+│   │   ├── pdf_summarizer_agent.py  
+│   │   ├── synergy_agent.py  
+│   │   └── meta_evaluator.py  
+│   │  
+│   └── tools/  
+│       ├── browser_tool.py  
+│       ├── code_sandbox.py  
+│       ├── web_search.py  
+│       ├── data_connectors.py  
+│       ├── tool_router.py  
+│       └── pdf_reporter.py  
+│  
+├── swarm/  
+│   ├── swarm_coordinator.py  
+│   └── swarm_profiles.yaml  
+│  
+├── tests/  
+│   ├── test_stability_kernel.py  
+│   ├── test_msil.py  
+│   ├── test_discovery_manager.py  
+│   ├── test_citations.py  
+│   ├── test_curriculum.py  
+│   └── test_replay_buffer.py  
+│  
+├── app_streamlit.py  
+├── engine_worker.py  
+├── run_agent.py  
+├── daily_runner.py  
+├── storage.py  
+├── config.py  
+├── main.py  
+├── render.yaml  
+├── .env.example  
+├── requirements.txt  
+└── README.md  
 
 ---
 
-# 🛡 Licensing (Option C — Strong Legal Tone)
+# 🛡 Licensing (Option C - Strong Legal Tone)
 
 **This software is PROPRIETARY. All rights reserved.**
 
