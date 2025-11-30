@@ -20,6 +20,11 @@ Key ideas:
 - Streams worker_state, run_manifests, milestones, and basic events into MemoryStore
   so the UI and logs have a first class view of long runs.
 
+NEW:
+- Queue mode using agent/run_jobs.py:
+    - WORKER_QUEUE_MODE=1 (default) -> file-based job queue
+    - Worker polls runs/queue, executes jobs, writes results to runs/finished
+
 You can start it with commands like:
     WORKER_GOAL="Long run test on reparodynamics" \
     WORKER_RUNTIME_PROFILE="8_hours" \
@@ -34,6 +39,7 @@ from __future__ import annotations
 import os
 import sys
 import json
+import time
 import hashlib
 import traceback
 from pathlib import Path
@@ -51,6 +57,27 @@ try:
     from agent.tools import TOOL_REGISTRY  # type: ignore[import]
 except Exception:  # pragma: no cover
     TOOL_REGISTRY = {}  # type: ignore[assignment]
+
+# File-based run queue
+try:
+    from agent.run_jobs import (
+        RunJob,
+        QUEUE_DIR,
+        load_job as load_job_from_path,
+        move_job,
+        progress_path,
+        result_path,
+        error_log_path,
+    )
+except Exception:
+    # If run_jobs is not present, queue mode will not work
+    RunJob = None  # type: ignore[assignment]
+    QUEUE_DIR = Path("runs/queue")
+    progress_path = lambda run_id: Path("runs/active") / f"{run_id}_progress.json"  # type: ignore[assignment]
+    result_path = lambda run_id: Path("runs/finished") / f"{run_id}_result.json"  # type: ignore[assignment]
+    error_log_path = lambda run_id: Path("runs/error") / f"{run_id}_error.txt"  # type: ignore[assignment]
+    load_job_from_path = None  # type: ignore[assignment]
+    move_job = None  # type: ignore[assignment]
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
@@ -563,6 +590,364 @@ def _run_post_run_intelligence(
             pass
 
     return info
+
+
+# ---------------------------------------------------------------------------
+# Queue mode: process jobs from agent/run_jobs
+# ---------------------------------------------------------------------------
+
+
+def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJob) -> None:
+    """
+    Execute a single RunJob from the file based queue.
+
+    Job config can include:
+        mode: "single" or "swarm" (default "single")
+        goal: optional override goal
+        domain: optional override domain
+        role: role for single agent (default "agent")
+        roles: list of roles for swarm
+        max_cycles: finite cycles for single
+        max_rounds: finite rounds for swarm
+        max_minutes: optional wall time guard
+        stop_rye: optional stop threshold
+        runtime_profile: optional profile name
+        source_controls: optional explicit source controls dict
+        resume: optional resume flag (default True)
+        watchdog_minutes: optional watchdog interval
+    """
+    if move_job is not None:
+        move_job(job.run_id, "queued", "active")
+
+    base_goal, base_domain = build_goal_and_domain()
+    goal = str(job.config.get("goal", base_goal))
+    domain = str(job.config.get("domain", base_domain))
+
+    preset_cfg = get_preset(domain)
+    runtime_profile = job.config.get("runtime_profile", preset_cfg.get("default_runtime_profile"))
+
+    mode = str(job.config.get("mode", job.config.get("engine_mode", "single"))).lower()
+    role = str(job.config.get("role", "agent"))
+    roles_list: Optional[List[str]] = None
+    if mode == "swarm":
+        raw_roles = job.config.get("roles")
+        if isinstance(raw_roles, (list, tuple)):
+            roles_list = [str(r) for r in raw_roles]
+        else:
+            try:
+                roles_list = agent.get_agent_roles()
+            except Exception:
+                roles_list = ["agent"]
+
+    max_cycles = int(job.config.get("max_cycles", job.config.get("cycles", 10_000_000)))
+    max_rounds = int(job.config.get("max_rounds", max_cycles))
+    max_minutes = job.config.get("max_minutes")
+    if max_minutes is not None:
+        try:
+            max_minutes = float(max_minutes)
+        except Exception:
+            max_minutes = None
+
+    stop_rye = job.config.get("stop_rye")
+    if stop_rye is not None:
+        try:
+            stop_rye = float(stop_rye)
+        except Exception:
+            stop_rye = None
+
+    resume = bool(job.config.get("resume", True))
+    watchdog_minutes = float(job.config.get("watchdog_minutes", 5.0))
+
+    cfg_for_sources = dict(base_config)
+    if "default_source_controls" not in cfg_for_sources:
+        sc_preset = preset_cfg.get("source_controls")
+        if isinstance(sc_preset, dict):
+            cfg_for_sources["default_source_controls"] = sc_preset
+
+    source_controls = _build_source_controls(cfg_for_sources)
+    if isinstance(job.config.get("source_controls"), dict):
+        override_sc = job.config["source_controls"]
+        for k, v in override_sc.items():
+            source_controls[str(k)] = bool(v)
+
+    tool_flags = detect_tools()
+
+    env_keys_for_fingerprint = [
+        "WORKER_QUEUE_MODE",
+        "WORKER_DOMAIN",
+        "WORKER_GOAL",
+    ]
+    experiment_fingerprint = _build_experiment_fingerprint(
+        goal=goal,
+        domain=domain,
+        mode=f"queue_{mode}",
+        runtime_profile=runtime_profile,
+        source_controls=source_controls,
+        roles=roles_list if mode == "swarm" else [role],
+        env_keys=env_keys_for_fingerprint,
+    )
+
+    print("")
+    print("=== Queue worker: starting job ===")
+    print(f"Run id: {job.run_id}")
+    print(f"Mode: {mode}")
+    print(f"Goal: {goal}")
+    print(f"Domain: {domain}")
+    print(f"Role (single): {role}")
+    print(f"Roles (swarm): {roles_list if roles_list is not None else 'auto'}")
+    print(f"Max cycles (single): {max_cycles}")
+    print(f"Max rounds (swarm): {max_rounds}")
+    print(f"Max minutes: {max_minutes if max_minutes is not None else 'None'}")
+    print(f"Stop RYE: {stop_rye if stop_rye is not None else 'None'}")
+    print(f"Runtime profile: {runtime_profile or 'None'}")
+    print(f"Resume: {resume}")
+    print(f"Watchdog minutes: {watchdog_minutes}")
+    print(f"Source controls: {source_controls}")
+    print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
+    print(f"Experiment fingerprint: {experiment_fingerprint}")
+    sys.stdout.flush()
+
+    _update_worker_state(
+        agent,
+        status="running_job",
+        mode=mode,
+        goal=goal,
+        domain=domain,
+        roles=roles_list if mode == "swarm" else [role],
+        runtime_profile=runtime_profile,
+        stop_rye=stop_rye,
+        max_minutes=max_minutes,
+        run_id=job.run_id,
+        experiment_mode="queue_worker",
+        extra={
+            "experiment_fingerprint": experiment_fingerprint,
+            "job_meta": job.meta,
+        },
+    )
+    _heartbeat(agent, label="queue_job_start", run_id=job.run_id)
+
+    summaries: List[Dict[str, Any]] = []
+
+    try:
+        if mode == "swarm":
+            if roles_list is None:
+                try:
+                    roles_list = agent.get_agent_roles()
+                except Exception:
+                    roles_list = ["agent"]
+
+            summaries = agent.run_swarm_continuous(
+                goal=goal,
+                max_rounds=max_rounds,
+                stop_rye=stop_rye,
+                roles=roles_list,
+                source_controls=source_controls,
+                pdf_bytes=None,
+                biomarker_snapshot=None,
+                domain=domain,
+                max_minutes=max_minutes,
+                forever=False,
+                resume_from_checkpoint=resume,
+                watchdog_interval_minutes=watchdog_minutes,
+                runtime_profile=runtime_profile,
+            )
+        else:
+            summaries = agent.run_continuous(
+                goal=goal,
+                max_cycles=max_cycles,
+                stop_rye=stop_rye,
+                role=role,
+                source_controls=source_controls,
+                pdf_bytes=None,
+                biomarker_snapshot=None,
+                domain=domain,
+                max_minutes=max_minutes,
+                forever=False,
+                resume_from_checkpoint=resume,
+                watchdog_interval_minutes=watchdog_minutes,
+                runtime_profile=runtime_profile,
+            )
+
+        _heartbeat(agent, label="queue_job_finished", run_id=job.run_id)
+
+        print(f"=== Queue worker: job {job.run_id} finished cleanly ===")
+        print(f"Total summaries: {len(summaries)}")
+
+        diag: Dict[str, Any] = {}
+        try:
+            diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
+            print(f"RYE avg: {diag.get('rye_avg')}")
+            print(f"RYE median: {diag.get('rye_median')}")
+            print(f"RYE last: {diag.get('rye_last')}")
+            print(f"Stability index: {diag.get('stability_index')}")
+            print(f"Recovery momentum: {diag.get('recovery_momentum')}")
+        except Exception:
+            print("Diagnostics computation failed for job, see logs for details.")
+
+        intelligence_info = _run_post_run_intelligence(
+            agent,
+            mode=mode,
+            goal=goal,
+            domain=domain,
+            run_id=job.run_id,
+            history=summaries,
+        )
+
+        extra_manifest: Dict[str, Any] = {
+            "engine": f"queue_{mode}",
+            "experiment_fingerprint": experiment_fingerprint,
+            "job_meta": job.meta,
+        }
+        if diag:
+            extra_manifest["diagnostics_snapshot"] = diag
+        if intelligence_info:
+            extra_manifest["intelligence"] = intelligence_info
+
+        try:
+            _log_run_manifest(
+                agent,
+                job.run_id,
+                mode=mode,
+                domain=domain,
+                goal=goal,
+                runtime_profile=runtime_profile,
+                stop_rye=stop_rye,
+                max_minutes=max_minutes,
+                summaries=summaries,
+                extra=extra_manifest,
+            )
+        except Exception:
+            print("Manifest logging failed for job, see logs for details.")
+
+        # Write result JSON for the UI to read
+        result_obj: Dict[str, Any] = {
+            "run_id": job.run_id,
+            "mode": mode,
+            "goal": goal,
+            "domain": domain,
+            "runtime_profile": runtime_profile,
+            "max_minutes": max_minutes,
+            "max_cycles": max_cycles if mode == "single" else None,
+            "max_rounds": max_rounds if mode == "swarm" else None,
+            "stop_rye": stop_rye,
+            "summaries": summaries,
+            "diagnostics": diag,
+            "intelligence": intelligence_info,
+            "experiment_fingerprint": experiment_fingerprint,
+            "job_meta": job.meta,
+        }
+        try:
+            rp = result_path(job.run_id)
+            rp.parent.mkdir(parents=True, exist_ok=True)
+            with rp.open("w", encoding="utf8") as f:
+                json.dump(result_obj, f, indent=2)
+        except Exception:
+            print("Failed to write result JSON for job, see logs for details.")
+
+        if move_job is not None:
+            move_job(job.run_id, "active", "finished")
+
+        _update_worker_state(
+            agent,
+            status="idle",
+            mode=mode,
+            goal=goal,
+            domain=domain,
+            roles=roles_list if mode == "swarm" else [role],
+            runtime_profile=runtime_profile,
+            stop_rye=stop_rye,
+            max_minutes=max_minutes,
+            run_id=job.run_id,
+            experiment_mode="queue_worker",
+            extra={
+                "experiment_fingerprint": experiment_fingerprint,
+                "final_diagnostics": diag,
+                "intelligence": intelligence_info if intelligence_info else None,
+            },
+        )
+    except Exception as e:
+        print(f"Fatal error while running job {job.run_id}: {e}")
+        traceback.print_exc()
+        try:
+            ep = error_log_path(job.run_id)
+            ep.parent.mkdir(parents=True, exist_ok=True)
+            with ep.open("w", encoding="utf8") as f:
+                traceback.print_exc(file=f)
+        except Exception:
+            pass
+        if move_job is not None:
+            move_job(job.run_id, "active", "error")
+        _update_worker_state(
+            agent,
+            status="error",
+            mode=mode,
+            goal=goal,
+            domain=domain,
+            roles=roles_list if mode == "swarm" else [role],
+            runtime_profile=runtime_profile,
+            stop_rye=stop_rye,
+            max_minutes=max_minutes,
+            run_id=job.run_id,
+            experiment_mode="queue_worker",
+            extra={
+                "experiment_fingerprint": experiment_fingerprint,
+                "error_message": str(e),
+            },
+        )
+
+
+def run_job_queue_worker() -> None:
+    """
+    Main loop for queue mode.
+
+    Behavior:
+        - Initializes CoreAgent and MemoryStore once.
+        - Polls runs/queue for new job JSON files.
+        - For each job:
+            * Loads job
+            * Runs it with _process_single_job
+            * Loops forever so Render worker can stay alive.
+    """
+    if RunJob is None or load_job_from_path is None:
+        print("Queue mode requested but agent/run_jobs.py is not available.")
+        return
+
+    print("Starting Autonomous Research Agent queue worker (file based jobs)...")
+    sys.stdout.flush()
+
+    _configure_tavily_from_env()
+    agent, config = init_agent_from_config()
+
+    while True:
+        jobs = sorted(QUEUE_DIR.glob("*.json"))
+        if not jobs:
+            _heartbeat(agent, label="queue_idle")
+            time.sleep(5.0)
+            continue
+
+        for path in jobs:
+            try:
+                job = load_job_from_path(path)
+            except Exception as e:
+                print(f"Failed to load job file {path}: {e}")
+                traceback.print_exc()
+                try:
+                    bad_id = path.stem
+                    ep = error_log_path(bad_id)
+                    ep.parent.mkdir(parents=True, exist_ok=True)
+                    with ep.open("w", encoding="utf8") as f:
+                        f.write(f"Job file could not be parsed: {e}")
+                except Exception:
+                    pass
+                try:
+                    path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                continue
+
+            _process_single_job(agent, config, job)
+
+        time.sleep(1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -1639,13 +2024,20 @@ def main() -> None:
     Entry point for the background worker.
 
     Mode selection:
-    - WORKER_META=1          -> run meta controller (Option C, default)
-    - WORKER_META=0          -> classic behavior
-        - WORKER_MODE=swarm  or WORKER_SWARM=1   -> classic swarm engine
-        - anything else                           -> classic single agent engine
+    - WORKER_QUEUE_MODE=1 (default) -> file-based queue worker using agent/run_jobs.
+    - WORKER_QUEUE_MODE=0 -> classic behavior:
+        - WORKER_META=1          -> run meta controller (Option C)
+        - WORKER_META=0 and WORKER_MODE=swarm or WORKER_SWARM=1 -> classic swarm engine
+        - otherwise             -> classic single agent engine
     """
     print("Starting Autonomous Research Agent background engine...")
     sys.stdout.flush()
+
+    queue_mode = _env_bool("WORKER_QUEUE_MODE", default=True)
+
+    if queue_mode:
+        run_job_queue_worker()
+        return
 
     _configure_tavily_from_env()
     agent, config = init_agent_from_config()
