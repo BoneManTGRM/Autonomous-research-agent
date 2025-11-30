@@ -12,14 +12,21 @@ from typing import Any, Dict, List, Optional, Tuple
 # Base folder for all runs
 BASE_DIR = Path("runs")
 
-# Subfolders that define a simple file based queue
-QUEUE_DIR = BASE_DIR / "queue"
+# New job layout used by the engine worker:
+#   - runs/pending/   : file based queue of pending jobs (was "queue")
+#   - runs/active/    : in progress metadata + optional progress JSON
+#   - runs/finished/  : final result JSON (one file per run_id)
+#   - runs/error/     : failed job metadata + optional traceback
+PENDING_DIR = BASE_DIR / "pending"
 ACTIVE_DIR = BASE_DIR / "active"
 FINISHED_DIR = BASE_DIR / "finished"
 ERROR_DIR = BASE_DIR / "error"
 
+# Backwards compatible alias for old name "queue"
+QUEUE_DIR = PENDING_DIR
+
 # Make sure directories exist at import time
-for folder in [BASE_DIR, QUEUE_DIR, ACTIVE_DIR, FINISHED_DIR, ERROR_DIR]:
+for folder in [BASE_DIR, PENDING_DIR, ACTIVE_DIR, FINISHED_DIR, ERROR_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
 
 
@@ -31,15 +38,20 @@ class RunJob:
     Each job has:
         run_id      - stable identifier used in filenames and UI
         config      - full configuration dict for RunManager or your engine
-        status      - queued, active, finished, or error
+        status      - pending, active, finished, or error
         created_at  - unix timestamp when job was created
         updated_at  - unix timestamp when job was last updated
         meta        - optional metadata for UI (user prompt, domain, etc)
+
+    NOTE:
+        - "pending" is the new canonical status (replaces older "queued").
+        - For backwards compatibility, helper functions still understand
+          "queued" as an alias for "pending".
     """
 
     run_id: str
     config: Dict[str, Any]
-    status: str = "queued"
+    status: str = "pending"
     created_at: float = time.time()
     updated_at: float = time.time()
     meta: Optional[Dict[str, Any]] = None
@@ -54,6 +66,9 @@ class RunJob:
     def save_to(self, folder: Path) -> Path:
         """
         Save the job JSON inside the given folder using run_id as filename.
+
+        This writes only the job metadata (config, status, meta, timestamps).
+        The engine worker should write the final result into result_path(run_id).
         """
         self.updated_at = time.time()
         path = folder / f"{self.run_id}.json"
@@ -65,14 +80,22 @@ class RunJob:
 def _job_path_for_status(run_id: str, status: str) -> Path:
     """
     Return the expected job metadata path given run_id and status.
+
+    Supported statuses:
+        - "pending"  (canonical)
+        - "queued"   (alias for pending, for older code)
+        - "active"
+        - "finished"
+        - "error"
     """
-    if status == "queued":
-        base = QUEUE_DIR
-    elif status == "active":
+    norm = status.lower()
+    if norm in ("queued", "pending"):
+        base = PENDING_DIR
+    elif norm == "active":
         base = ACTIVE_DIR
-    elif status == "finished":
+    elif norm == "finished":
         base = FINISHED_DIR
-    elif status == "error":
+    elif norm == "error":
         base = ERROR_DIR
     else:
         raise ValueError(f"Unknown job status: {status}")
@@ -82,31 +105,42 @@ def _job_path_for_status(run_id: str, status: str) -> Path:
 def create_job(
     config: Dict[str, Any],
     meta: Optional[Dict[str, Any]] = None,
+    run_id: Optional[str] = None,
 ) -> str:
     """
-    Create a new queued job on disk and return its run_id.
+    Create a new pending job on disk and return its run_id.
 
-    Typical use from Streamlit:
+    Typical use from a UI:
         run_id = create_job(
             {
                 "goal": user_goal,
-                "cycles": cycles,
-                "swarm_size": swarm_size,
+                "runtime_hints": {...},
+                "swarm": {...},
                 ...
             },
             meta={"domain": domain, "created_by": "streamlit_ui"},
         )
+
+    Args:
+        config: Arbitrary configuration dict for the engine worker.
+        meta:   Optional metadata for UI / logging (domain, label, etc).
+        run_id: Optional externally generated ID. If omitted, uuid4 is used.
+
+    Returns:
+        The run_id string.
     """
-    run_id = str(uuid.uuid4())
+    if run_id is None:
+        run_id = str(uuid.uuid4())
+
     job = RunJob(
         run_id=run_id,
         config=config,
-        status="queued",
+        status="pending",
         created_at=time.time(),
         updated_at=time.time(),
         meta=meta or {},
     )
-    job.save_to(QUEUE_DIR)
+    job.save_to(PENDING_DIR)
     return run_id
 
 
@@ -124,7 +158,7 @@ def load_job_by_id(run_id: str) -> Optional[RunJob]:
     Try to load a job by id from any status folder.
     Returns None if not found.
     """
-    for folder in [QUEUE_DIR, ACTIVE_DIR, FINISHED_DIR, ERROR_DIR]:
+    for folder in [PENDING_DIR, ACTIVE_DIR, FINISHED_DIR, ERROR_DIR]:
         path = folder / f"{run_id}.json"
         if path.exists():
             return load_job(path)
@@ -135,17 +169,18 @@ def move_job(run_id: str, from_status: str, to_status: str) -> Tuple[Optional[Ru
     """
     Move job metadata between status folders.
 
-    Returns (job, new_path) or (None, None) if job was not found.
+    Returns (job, new_path) or (None, None) if job was not found
+    in the expected source folder.
     """
     src_path = _job_path_for_status(run_id, from_status)
     if not src_path.exists():
         return None, None
 
     job = load_job(src_path)
-    job.status = to_status
+    job.status = "pending" if to_status == "queued" else to_status
     job.updated_at = time.time()
 
-    dst_path = _job_path_for_status(run_id, to_status)
+    dst_path = _job_path_for_status(run_id, job.status)
     # Remove old file and save new one
     src_path.unlink(missing_ok=True)
     job.save_to(dst_path.parent)
@@ -158,14 +193,20 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
 
     It searches all folders for run_id, then moves it to the requested status.
     Returns the updated job or None if not found.
+
+    new_status can be "pending", "active", "finished", "error" or legacy "queued".
     """
-    for status in ["queued", "active", "finished", "error"]:
+    norm_new = new_status.lower()
+    if norm_new == "queued":
+        norm_new = "pending"
+
+    for status in ["pending", "queued", "active", "finished", "error"]:
         src_path = _job_path_for_status(run_id, status)
         if src_path.exists():
             job = load_job(src_path)
-            job.status = new_status
+            job.status = norm_new
             job.updated_at = time.time()
-            dst_path = _job_path_for_status(run_id, new_status)
+            dst_path = _job_path_for_status(run_id, norm_new)
             src_path.unlink(missing_ok=True)
             job.save_to(dst_path.parent)
             return job
@@ -178,7 +219,8 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
 
     status:
         None        - search all statuses
-        queued      - only queued jobs
+        pending     - only pending jobs (new canonical)
+        queued      - alias for pending (backwards compatible)
         active      - only active jobs
         finished    - only finished jobs
         error       - only error jobs
@@ -194,16 +236,20 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
                 continue
 
     if status is None:
-        for folder in [QUEUE_DIR, ACTIVE_DIR, FINISHED_DIR, ERROR_DIR]:
+        for folder in [PENDING_DIR, ACTIVE_DIR, FINISHED_DIR, ERROR_DIR]:
             collect(folder)
     else:
+        norm = status.lower()
+        if norm == "queued":
+            norm = "pending"
+
         folder_map = {
-            "queued": QUEUE_DIR,
+            "pending": PENDING_DIR,
             "active": ACTIVE_DIR,
             "finished": FINISHED_DIR,
             "error": ERROR_DIR,
         }
-        folder = folder_map.get(status)
+        folder = folder_map.get(norm)
         if folder is not None:
             collect(folder)
 
@@ -215,6 +261,16 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
 def progress_path(run_id: str) -> Path:
     """
     Path where the worker should write live progress JSON for a run.
+
+    Recommended schema (example):
+        {
+            "run_id": "...",
+            "status": "active",
+            "current_cycle": 12,
+            "total_cycles": 90,
+            "last_update_utc": "...",
+            "notes": "optional human readable progress"
+        }
     """
     return ACTIVE_DIR / f"{run_id}_progress.json"
 
@@ -222,8 +278,28 @@ def progress_path(run_id: str) -> Path:
 def result_path(run_id: str) -> Path:
     """
     Path where the worker should write final result JSON for a run.
+
+    IMPORTANT:
+        This now returns runs/finished/{run_id}.json to match the Streamlit
+        UI, which expects finished results in that location and with that
+        naming convention.
+
+    Recommended schema (example):
+        {
+            "job_id": "...",
+            "status": "finished",
+            "created_at": "...",
+            "completed_at": "...",
+            "goal": "...",
+            "summary": "...",
+            "key_findings": [...],
+            "cycles": [...],
+            "rye_metrics": {...},
+            "sources": [...],
+            "debug": {...}
+        }
     """
-    return FINISHED_DIR / f"{run_id}_result.json"
+    return FINISHED_DIR / f"{run_id}.json"
 
 
 def error_log_path(run_id: str) -> Path:
