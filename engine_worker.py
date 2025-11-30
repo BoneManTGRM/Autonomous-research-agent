@@ -66,6 +66,7 @@ except Exception:  # pragma: no cover
 try:
     from agent.run_jobs import (
         RunJob,
+        BASE_DIR,
         QUEUE_DIR,
         load_job as load_job_from_path,
         move_job,
@@ -77,10 +78,11 @@ except Exception:
     # If run_jobs is not present, queue mode will not work; we will
     # automatically fall back to classic engines in main().
     RunJob = None  # type: ignore[assignment]
-    QUEUE_DIR = Path("runs/queue")
-    progress_path = lambda run_id: Path("runs/active") / f"{run_id}_progress.json"  # type: ignore[assignment]
-    result_path = lambda run_id: Path("runs/finished") / f"{run_id}_result.json"  # type: ignore[assignment]
-    error_log_path = lambda run_id: Path("runs/error") / f"{run_id}_error.txt"  # type: ignore[assignment]
+    BASE_DIR = Path("runs")  # type: ignore[assignment]
+    QUEUE_DIR = BASE_DIR / "queue"  # type: ignore[assignment]
+    progress_path = lambda run_id: BASE_DIR / "active" / f"{run_id}_progress.json"  # type: ignore[assignment]
+    result_path = lambda run_id: BASE_DIR / "finished" / f"{run_id}_result.json"  # type: ignore[assignment]
+    error_log_path = lambda run_id: BASE_DIR / "error" / f"{run_id}_error.txt"  # type: ignore[assignment]
     load_job_from_path = None  # type: ignore[assignment]
     move_job = None  # type: ignore[assignment]
 
@@ -906,7 +908,8 @@ def run_job_queue_worker() -> None:
 
     Behavior:
         - Initializes CoreAgent and MemoryStore once.
-        - Polls runs/queue for new job JSON files.
+        - Polls runs/pending for new job JSON files.
+        - Also polls legacy runs/queue for backwards compatibility.
         - For each job:
             * Loads job
             * Runs it with _process_single_job
@@ -923,12 +926,30 @@ def run_job_queue_worker() -> None:
     _configure_tavily_from_env()
     agent, config = init_agent_from_config()
 
+    # Watch both the new pending directory (QUEUE_DIR) and any legacy "queue" folder
+    queue_roots: List[Path] = [QUEUE_DIR]
+    legacy_queue_dir = BASE_DIR / "queue"
+    if legacy_queue_dir not in queue_roots:
+        queue_roots.append(legacy_queue_dir)
+
+    print("Queue worker watching these folders for jobs:")
+    for root in queue_roots:
+        print(f" - {root.resolve()}")
+    sys.stdout.flush()
+
     while True:
-        jobs = sorted(QUEUE_DIR.glob("*.json"))
+        jobs: List[Path] = []
+        for root in queue_roots:
+            if root.exists():
+                jobs.extend(sorted(root.glob("*.json")))
+
         if not jobs:
             _heartbeat(agent, label="queue_idle")
             time.sleep(5.0)
             continue
+
+        print(f"Found {len(jobs)} job file(s) in queue folders.")
+        sys.stdout.flush()
 
         for path in jobs:
             try:
