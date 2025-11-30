@@ -25,7 +25,16 @@ class StageConfig:
 
 @dataclass
 class SwarmConfig:
-    """Configuration for swarm runs."""
+    """Configuration for swarm runs.
+
+    NOTE:
+        The engine worker is expected to map job payload swarm settings into this:
+            swarm_size             -> number of agents
+            roles                  -> list of role labels (researcher, critic, etc)
+            max_cycles_per_agent   -> optional per-agent cap
+            stagger_start          -> reserved for future use
+            max_agents_per_tick    -> reserved for future throttling
+    """
 
     swarm_size: int = 1
     roles: List[str] = field(default_factory=lambda: ["agent"])
@@ -48,14 +57,25 @@ class RunConfig:
     """Top level configuration for a run.
 
     This config is deliberately rich so you can drive many patterns
-    from the Streamlit UI or from scripts without changing code.
+    from a job payload (engine worker) or from scripts without changing code.
+
+    Typical mapping from a job file:
+        goal            <- job["goal"]
+        domain          <- job["domain"]
+        mode            <- "single" | "two_stage" | "swarm"
+        total_cycles    <- job["runtime_hints"]["manual_cycles"]
+        max_seconds     <- job["runtime_hints"]["max_seconds"] (if used)
+        source_controls <- job["source_controls"]
+        swarm_config    <- job["swarm"]
+        longevity_config<- optional longevity fields
+        run_id          <- job["job_id"]
     """
 
     goal: str
     mode: str = "single"  # single, swarm, two_stage
     domain: str = "general"
 
-    # Cycles and time
+    # Cycles and time (finite only in the current engine design)
     total_cycles: int = 1
     # Hard wall clock limit for the entire run in seconds.
     # For example:
@@ -105,6 +125,12 @@ class RunManager:
 
     It also enforces a hard wall clock budget when max_seconds is set so
     1h / 8h / 24h / 1w / 1m / 90d style runs cut off at the right time.
+
+    In the new architecture, an external engine worker:
+        1) Reads job JSON from runs/pending/.
+        2) Builds a RunConfig from that payload.
+        3) Calls RunManager.run(run_config, progress_cb=...).
+        4) Writes summary + cycles into runs/finished/{job_id}.json.
     """
 
     def __init__(
@@ -151,7 +177,7 @@ class RunManager:
         """Run according to the given configuration.
 
         The return value is a run level summary that can be logged
-        or rendered in the UI.
+        or rendered in the UI or stored in runs/finished/{run_id}.json.
         """
         start_ts = datetime.utcnow().isoformat() + "Z"
         start_time = time.time()
