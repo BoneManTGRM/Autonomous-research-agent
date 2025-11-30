@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -23,6 +23,7 @@ FINISHED_DIR = BASE_DIR / "finished"
 ERROR_DIR = BASE_DIR / "error"
 
 # Backwards compatible alias for old name "queue"
+# The engine worker imports QUEUE_DIR and will therefore look in runs/pending.
 QUEUE_DIR = PENDING_DIR
 
 # Make sure directories exist at import time
@@ -61,7 +62,33 @@ class RunJob:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "RunJob":
-        return cls(**data)
+        """
+        Robust loader that tolerates extra keys and missing optional fields.
+
+        This allows older job files (or hand-edited JSON) to be loaded
+        without crashing due to unexpected keys.
+        """
+        field_names = {f.name for f in fields(cls)}
+        filtered: Dict[str, Any] = {k: v for k, v in data.items() if k in field_names}
+
+        # Ensure required fields exist; raise a clear error if not.
+        required = {"run_id", "config"}
+        missing_required = [k for k in required if k not in filtered]
+        if missing_required:
+            raise ValueError(f"RunJob.from_dict missing required fields: {missing_required}")
+
+        # Fill in optional fields if missing
+        now = time.time()
+        if "status" not in filtered:
+            filtered["status"] = "pending"
+        if "created_at" not in filtered:
+            filtered["created_at"] = now
+        if "updated_at" not in filtered:
+            filtered["updated_at"] = now
+        if "meta" not in filtered:
+            filtered["meta"] = None
+
+        return cls(**filtered)
 
     def save_to(self, folder: Path) -> Path:
         """
