@@ -1,7 +1,7 @@
 """Enhanced Streamlit interface for the Autonomous Research Agent.
 
 Features:
-- Continuous Mode with duration presets (1h, 8h, 24h, 1 week, 1 month, 90 days, Forever)
+- Finite mode only with manual cycle budgets (no timed presets in this build)
 - Researcher + Critic multi agent mode
 - Swarm mode with up to dozens of mini agents
 - Domain presets (General, Longevity, Math)
@@ -1568,7 +1568,7 @@ def main() -> None:
                 "min_cycles_before_stop": 3,
                 "source_controls": source_controls,
                 "runtime_hints": runtime_hints,
-                "swarm_config": swarm_config,
+                "swarm": swarm_config,
                 "longevity_config": longevity_config,
                 "use_biomarkers": bool(use_biomarkers),
                 "multi_agent_pair": bool(multi_agent),
@@ -1873,16 +1873,21 @@ def main() -> None:
                 )
             with ls_cols[1]:
                 if isinstance(bp_prob, (int, float)):
-                    st.metric("Breakthrough chance (near term)", f"{bp_prob * 100:.1f}%")
+                    st.metric("Breakthrough heat (near term, heuristic)", f"{bp_prob * 100:.1f}")
                 else:
-                    st.metric("Breakthrough chance (near term)", "n/a")
+                    st.metric("Breakthrough heat (near term, heuristic)", "n/a")
             with ls_cols[2]:
                 if isinstance(bp90_prob, (int, float)):
-                    st.metric("Breakthrough likelihood 90d", f"{bp90_prob * 100:.1f}%")
+                    st.metric("Breakthrough heat 90d (heuristic)", f"{bp90_prob * 100:.1f}")
                 else:
-                    st.metric("Breakthrough likelihood 90d", "n/a")
+                    st.metric("Breakthrough heat 90d (heuristic)", "n/a")
             with ls_cols[3]:
                 st.metric("Run tier", tier_label or "n/a")
+
+            st.caption(
+                "Breakthrough heat values are heuristic scores derived from RYE and stability trends, "
+                "not calibrated real world probabilities."
+            )
 
             # Optional MSIL meta intelligence view
             st.markdown("### Meta skill intelligence (MSIL)")
