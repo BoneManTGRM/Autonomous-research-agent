@@ -77,12 +77,8 @@ try:
         generate_report_pdf,
         generate_findings_report_pdf,
     )
+    # Only import the rye_metrics symbols that are actually used here
     from agent.rye_metrics import (
-        rolling_rye,
-        efficiency_trend,
-        regression_rye_slope,
-        stability_index,
-        recovery_momentum,
         build_run_diagnostics,
         rye_volatility_signature,
         detect_rye_equilibrium,
@@ -152,11 +148,6 @@ except ModuleNotFoundError as e:
         generate_findings_report_pdf,
     )
     from rye_metrics import (  # type: ignore[no-redef]
-        rolling_rye,
-        efficiency_trend,
-        regression_rye_slope,
-        stability_index,
-        recovery_momentum,
         build_run_diagnostics,
         rye_volatility_signature,
         detect_rye_equilibrium,
@@ -1591,6 +1582,8 @@ def main() -> None:
                 },
             }
 
+            # The create_job call is the only thing that touches the queue
+            # Engine worker should watch list_jobs(status="queued") and pick these up.
             run_id = create_job(config=run_config, meta=meta)
             st.success(f"Run request queued with run id `{run_id}`.")
             st.info(
@@ -1605,8 +1598,15 @@ def main() -> None:
     st.subheader("Runs and job queue")
 
     if list_run_jobs is not None:
-        finished_jobs = list_run_jobs(status="finished")
-        pending_jobs = list_run_jobs(status="queued")
+        try:
+            finished_jobs = list_run_jobs(status="finished")
+        except TypeError:
+            # Fallback if signature is list_jobs() without args
+            finished_jobs = list_run_jobs()  # type: ignore[call-arg]
+        try:
+            pending_jobs = list_run_jobs(status="queued")
+        except TypeError:
+            pending_jobs = []
     else:
         finished_jobs = []
         pending_jobs = []
@@ -1749,11 +1749,15 @@ def main() -> None:
 
     # Live worker_state snapshot from MemoryStore
     st.markdown("#### Worker live status (from MemoryStore)")
-    worker_state = memory.get_worker_state()
-    if worker_state:
-        st.json(worker_state)
+    get_worker_state = getattr(memory, "get_worker_state", None)
+    if callable(get_worker_state):
+        worker_state = get_worker_state()
+        if worker_state:
+            st.json(worker_state)
+        else:
+            st.write("No worker_state saved yet.")
     else:
-        st.write("No worker_state saved yet.")
+        st.write("MemoryStore.get_worker_state not available in this build.")
 
     # ------------------------------
     # History and advanced panels
@@ -1761,7 +1765,12 @@ def main() -> None:
     st.markdown("---")
     st.subheader("History and advanced analysis")
 
-    history = memory.get_cycle_history()
+    get_cycle_history = getattr(memory, "get_cycle_history", None)
+    if callable(get_cycle_history):
+        history = get_cycle_history()
+    else:
+        history = []
+
     if not history:
         st.write("No cycles yet.")
     else:
@@ -1824,7 +1833,11 @@ def main() -> None:
             # Advanced RYE diagnostics using rye_metrics build_run_diagnostics
             st.markdown("### Advanced RYE diagnostics")
 
-            diagnostics = build_run_diagnostics(history=history, domain=None, window=10)
+            try:
+                diagnostics = build_run_diagnostics(history=history, domain=None, window=10)
+            except Exception:
+                diagnostics = {}
+
             roll_val = diagnostics.get("rolling_rye")
             trend_val = diagnostics.get("trend_simple")
             slope_val = diagnostics.get("trend_slope")
@@ -1847,10 +1860,22 @@ def main() -> None:
             st.markdown("### Learning speed and breakthrough profile")
 
             hours_run = compute_run_hours(history)
-            bp_short = estimate_breakthrough_probability(diagnostics, domain=None, horizon_hours=hours_run)
-            bp90 = breakthrough_likelihood_90d(diagnostics, domain=None, hours_run_so_far=hours_run)
-            env = autonomy_safety_envelope(diagnostics)
-            fail = early_failure_warning_score(diagnostics)
+            try:
+                bp_short = estimate_breakthrough_probability(diagnostics, domain=None, horizon_hours=hours_run)
+            except Exception:
+                bp_short = None
+            try:
+                bp90 = breakthrough_likelihood_90d(diagnostics, domain=None, hours_run_so_far=hours_run)
+            except Exception:
+                bp90 = None
+            try:
+                env = autonomy_safety_envelope(diagnostics)
+            except Exception:
+                env = {}
+            try:
+                fail = early_failure_warning_score(diagnostics)
+            except Exception:
+                fail = {}
 
             bp_prob = None
             if isinstance(bp_short, dict):
@@ -1860,7 +1885,11 @@ def main() -> None:
             if isinstance(bp90, dict):
                 bp90_prob = bp90.get("probability")
 
-            tier_info = classify_run_tier(diagnostics, breakthrough_prob=bp_prob)
+            try:
+                tier_info = classify_run_tier(diagnostics, breakthrough_prob=bp_prob)
+            except Exception:
+                tier_info = None
+
             tier_label = None
             if isinstance(tier_info, dict):
                 tier_label = tier_info.get("tier") or tier_info.get("label")
@@ -2406,11 +2435,6 @@ def main() -> None:
         with tab_memory:
             st.markdown("### Memory pruning and compaction")
 
-            st.write(
-                "This panel calls optional pruning methods on the MemoryStore if they exist. "
-                "If not, it just shows high level stats."
-            )
-
             total_cycles = len(history)
             st.metric("Total cycles in history", total_cycles)
 
@@ -2574,30 +2598,41 @@ def main() -> None:
 
     with col_state:
         st.markdown("**Last saved run state (MemoryStore)**")
-        state = memory.load_run_state()
+        load_run_state = getattr(memory, "load_run_state", None)
+        if callable(load_run_state):
+            state = load_run_state()
+        else:
+            state = {}
         if not state:
             st.write("No saved run state yet.")
         else:
             st.json(state)
-            if st.button("Clear saved run state", key="clear_run_state_btn"):
-                memory.clear_run_state()
-                st.success(
-                    "Saved run state cleared. It will be rebuilt on the next continuous run by the worker."
-                )
+            if callable(getattr(memory, "clear_run_state", None)):
+                if st.button("Clear saved run state", key="clear_run_state_btn"):
+                    memory.clear_run_state()  # type: ignore[call-arg]
+                    st.success(
+                        "Saved run state cleared. It will be rebuilt on the next continuous run by the worker."
+                    )
+            else:
+                st.info("MemoryStore.clear_run_state not available in this build.")
 
     with col_watchdog:
         st.markdown("**Watchdog heartbeat (MemoryStore)**")
-        info = memory.get_watchdog_info()
-        last_beat = info.get("last_beat")
-        count = info.get("count", 0)
-        seconds_since = info.get("seconds_since_last")
+        get_watchdog_info = getattr(memory, "get_watchdog_info", None)
+        if callable(get_watchdog_info):
+            info = get_watchdog_info()
+            last_beat = info.get("last_beat")
+            count = info.get("count", 0)
+            seconds_since = info.get("seconds_since_last")
 
-        st.write(f"Last beat: {last_beat if last_beat else 'None recorded'}")
-        st.write(f"Heartbeat count: {count}")
-        if isinstance(seconds_since, (int, float)):
-            st.write(f"Seconds since last beat: {seconds_since:.1f}")
+            st.write(f"Last beat: {last_beat if last_beat else 'None recorded'}")
+            st.write(f"Heartbeat count: {count}")
+            if isinstance(seconds_since, (int, float)):
+                st.write(f"Seconds since last beat: {seconds_since:.1f}")
+            else:
+                st.write("Seconds since last beat: not available")
         else:
-            st.write("Seconds since last beat: not available")
+            st.write("MemoryStore.get_watchdog_info not available in this build.")
 
     # ------------------------------
     # Report generation
@@ -2605,12 +2640,11 @@ def main() -> None:
     st.markdown("---")
     st.subheader("Generate report")
 
-    st.caption(
-        "Build summarized reports from the current cycle history. "
-        "You can rerun these after long autonomous sessions."
-    )
+    if callable(getattr(memory, "get_cycle_history", None)):
+        history_for_reports = memory.get_cycle_history()
+    else:
+        history_for_reports = []
 
-    history_for_reports = memory.get_cycle_history()
     hours_run_for_reports = (
         compute_run_hours(history_for_reports) if history_for_reports else None
     )
@@ -2671,7 +2705,9 @@ def main() -> None:
 
     with col_rep2:
         if st.button("Outcome focused summary"):
-            outcome_md = build_outcome_summary(memory.get_cycle_history())
+            outcome_md = build_outcome_summary(
+                history_for_reports if history_for_reports else []
+            )
             st.markdown(outcome_md)
             st.download_button(
                 "Download outcome summary",
@@ -2697,24 +2733,31 @@ def main() -> None:
                     goal=None,
                     output_path="autonomous_agent_findings_report.pdf",
                 )
-                with open(pdf_path, "rb") as f:
-                    st.download_button(
-                        "Download findings report (PDF)",
-                        data=f,
-                        file_name="autonomous_agent_findings_report.pdf",
-                        mime="application/pdf",
-                    )
             except RuntimeError as e:
+                pdf_path = None
                 st.info(str(e))
             except Exception:
+                pdf_path = None
                 st.info(
                     "PDF generation failed unexpectedly. Check server logs for details."
                 )
+            if pdf_path is not None:
+                try:
+                    with open(pdf_path, "rb") as f:
+                        st.download_button(
+                            "Download findings report (PDF)",
+                            data=f,
+                            file_name="autonomous_agent_findings_report.pdf",
+                            mime="application/pdf",
+                        )
+                except Exception:
+                    st.info("PDF file not available after generation attempt.")
 
         if st.button("Breakthrough snapshot report"):
             discoveries = load_discovery_log()
             breakthrough_md = build_breakthrough_report(
-                memory.get_cycle_history(), discoveries
+                history_for_reports if history_for_reports else [],
+                discoveries,
             )
             st.markdown(breakthrough_md)
             st.download_button(
