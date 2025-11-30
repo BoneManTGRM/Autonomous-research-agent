@@ -1672,9 +1672,9 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         - can stop early if time is almost exhausted or RYE has clearly collapsed
 
     Controlled by (finite-only):
-    - WORKER_MAX_MINUTES (overall macro budget; if not set, derived from runtime profile or presets)
+    - WORKER_MAX_MINUTES (overall macro budget; if not set, derived from presets)
     - WORKER_META_MAX_SEGMENTS (max number of segments, default 6)
-    - WORKER_RUNTIME_PROFILE (hint for phase profiles)
+    - WORKER_RUNTIME_PROFILE (hint for phase profiles only)
     - WORKER_MODE / WORKER_SWARM (preferred mode: single vs swarm)
     - WORKER_SOURCES etc as in classic engines
     """
@@ -1697,21 +1697,11 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
     forever_env = _env_bool("WORKER_FOREVER", default=False)
 
+    # Finite-only: macro budget does not come from timed presets anymore.
+    # If WORKER_MAX_MINUTES is not set, fall back to preset config.
+    # If WORKER_FOREVER is set, interpret it as a large but finite budget.
     if total_budget_minutes is None:
-        if runtime_profile_env == "1_hour":
-            total_budget_minutes = 60.0
-        elif runtime_profile_env == "8_hours":
-            total_budget_minutes = 8 * 60.0
-        elif runtime_profile_env == "24_hours":
-            total_budget_minutes = 24 * 60.0
-        elif runtime_profile_env == "1_week":
-            total_budget_minutes = 7 * 24 * 60.0
-        elif runtime_profile_env == "1_month":
-            total_budget_minutes = 30 * 24 * 60.0
-        elif runtime_profile_env == "90_days":
-            total_budget_minutes = 90 * 24 * 60.0
-        elif runtime_profile_env == "forever" or forever_env:
-            # In finite-only mode we interpret "forever" as a large but finite macro budget.
+        if forever_env:
             total_budget_minutes = 24 * 60.0
         else:
             total_budget_minutes = float(preset_cfg.get("runtime_minutes", 60.0))
