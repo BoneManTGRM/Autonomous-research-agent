@@ -26,7 +26,8 @@ Finite-only mode:
 NEW:
 - Queue mode using agent/run_jobs.py:
     - WORKER_QUEUE_MODE=1 (default) -> file-based job queue
-    - Worker polls runs/queue, executes jobs, writes results to runs/finished
+    - Worker polls runs/queue (or the QUEUE_DIR from run_jobs), executes jobs,
+      writes results to runs/finished
 
 You can start it with commands like:
     WORKER_GOAL="Long run test on reparodynamics" \
@@ -622,7 +623,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         resume: optional resume flag (default True)
         watchdog_minutes: optional watchdog interval
 
-    New behavior:
+    NEW behavior:
         If explicit cycle or round limits are provided in the job config,
         the worker ignores max_minutes so the job runs until the specified
         cycles or rounds complete (or stop_rye triggers).
@@ -924,12 +925,11 @@ def run_job_queue_worker() -> None:
 
     Behavior:
         - Initializes CoreAgent and MemoryStore once.
-        - Polls runs/pending for new job JSON files.
-        - Also polls legacy runs/queue for backwards compatibility.
+        - Polls QUEUE_DIR (from agent/run_jobs) for new job JSON files.
         - For each job:
             * Loads job
             * Runs it with _process_single_job
-            * Loops forever so Render worker can stay alive.
+        - Loops forever so Render worker can stay alive.
     """
     if RunJob is None or load_job_from_path is None:
         print("Queue mode requested but agent/run_jobs.py is not available.")
@@ -942,13 +942,15 @@ def run_job_queue_worker() -> None:
     _configure_tavily_from_env()
     agent, config = init_agent_from_config()
 
-    # Watch both the new pending directory (QUEUE_DIR) and any legacy "queue" folder
-    queue_roots: List[Path] = [QUEUE_DIR]
-    legacy_queue_dir = BASE_DIR / "queue"
-    if legacy_queue_dir not in queue_roots:
-        queue_roots.append(legacy_queue_dir)
+    # Make sure the queue directory exists so we don't silently idle forever
+    try:
+        QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
-    print("Queue worker watching these folders for jobs:")
+    queue_roots: List[Path] = [QUEUE_DIR]
+
+    print("Queue worker watching this folder for jobs:")
     for root in queue_roots:
         print(f" - {root.resolve()}")
     sys.stdout.flush()
@@ -964,7 +966,7 @@ def run_job_queue_worker() -> None:
             time.sleep(5.0)
             continue
 
-        print(f"Found {len(jobs)} job file(s) in queue folders.")
+        print(f"Found {len(jobs)} job file(s) in queue folder.")
         sys.stdout.flush()
 
         for path in jobs:
