@@ -1076,7 +1076,7 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
 
 
 def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[Dict[str, Any]]) -> str:
-    """Build a markdown style breakthrough snapshot from history and discovery log."""
+    """Build a markdown style breakthrough snapshot report from history and discovery log."""
     lines: List[str] = []
     lines.append("# Breakthrough snapshot report\n")
 
@@ -1276,7 +1276,7 @@ def main() -> None:
     else:
         st.sidebar.caption(
             "This preset has no runtime profile configured. "
-            "Manual and timed modes use generic defaults."
+            "Manual finite mode uses generic defaults."
         )
 
     # Friendly label per run
@@ -1400,39 +1400,19 @@ def main() -> None:
         value=bool(sc_defaults.get("biomarkers", False)),
     )
 
-    # Run mode presets
+    # Run mode presets: finite only in this build
     run_mode = st.sidebar.radio(
         "Run mode",
-        [
-            "Manual (finite cycles)",
-            "1 hour (real clock)",
-            "8 hours (real clock)",
-            "24 hours (real clock)",
-            "1 week (real clock)",
-            "1 month (real clock)",
-            "90 days (real clock)",
-            "Forever (until stopped)",
-        ],
+        ["Manual (finite cycles)"],
         index=0,
         help=(
-            "Manual mode requests a fixed number of cycles from the engine worker.\n"
-            "Timed modes provide approximate wall clock budgets for the worker.\n"
-            "The Streamlit UI never runs cycles itself; it only queues jobs."
+            "This build uses finite mode only. "
+            "Each run requests a fixed number of cycles from the engine worker."
         ),
     )
 
-    # Optional RYE stop for continuous modes (passed as hint to worker)
+    # No RYE based stop for finite only build
     stop_rye_threshold: Optional[float] = None
-    if run_mode != "Manual (finite cycles)":
-        stop_rye_threshold_val = st.sidebar.number_input(
-            "Optional stop when RYE falls below (0 = ignore)",
-            min_value=0.0,
-            max_value=10.0,
-            value=0.0,
-            step=0.1,
-        )
-        if stop_rye_threshold_val > 0:
-            stop_rye_threshold = stop_rye_threshold_val
 
     # -----------------------------
     # Main area
@@ -1457,7 +1437,7 @@ def main() -> None:
         max_value=200,
         value=3,
         step=1,
-        help="Used when Run mode is Manual. Timed modes use time budgets interpreted by the worker.",
+        help="Used when Run mode is Manual. Timed modes are disabled in this build.",
     )
 
     run_button = st.button("Queue run request")
@@ -1501,7 +1481,7 @@ def main() -> None:
             # Runtime hints for the worker
             runtime_hints: Dict[str, Any] = {
                 "run_mode": run_mode,
-                "manual_cycles": int(cycles) if run_mode == "Manual (finite cycles)" else None,
+                "manual_cycles": int(cycles),
                 "stop_rye_threshold": stop_rye_threshold,
                 "cycles_per_hour_estimate": CYCLES_PER_HOUR_ESTIMATE,
             }
@@ -1533,7 +1513,7 @@ def main() -> None:
                 "runtime_hints": runtime_hints,
                 "ui_metadata": {
                     "requested_from": "streamlit",
-                    "client_version": "v2-job-queue",
+                    "client_version": "v2-job-queue-finite-only",
                 },
             }
 
