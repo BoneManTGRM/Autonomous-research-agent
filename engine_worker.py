@@ -74,7 +74,8 @@ try:
         error_log_path,
     )
 except Exception:
-    # If run_jobs is not present, queue mode will not work
+    # If run_jobs is not present, queue mode will not work; we will
+    # automatically fall back to classic engines in main().
     RunJob = None  # type: ignore[assignment]
     QUEUE_DIR = Path("runs/queue")
     progress_path = lambda run_id: Path("runs/active") / f"{run_id}_progress.json"  # type: ignore[assignment]
@@ -248,7 +249,6 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
 
     # Web clamp is softer: if web tool is not present but Tavily key exists,
     # the CoreAgent can still use Tavily directly.
-    # So we only force web off if TOOL_REGISTRY has no web and no Tavily key.
     if not flags["web"]:
         if not os.getenv("TAVILY_API_KEY"):
             sc["web"] = False
@@ -914,6 +914,7 @@ def run_job_queue_worker() -> None:
     """
     if RunJob is None or load_job_from_path is None:
         print("Queue mode requested but agent/run_jobs.py is not available.")
+        sys.stdout.flush()
         return
 
     print("Starting Autonomous Research Agent queue worker (file based jobs)...")
@@ -2041,6 +2042,8 @@ def main() -> None:
 
     Mode selection:
     - WORKER_QUEUE_MODE=1 (default) -> file-based queue worker using agent/run_jobs.
+        * If agent/run_jobs.py is missing or fails to import, we automatically
+          fall back to the classic engines so the worker still runs.
     - WORKER_QUEUE_MODE=0 -> classic behavior:
         - WORKER_META=1          -> run meta controller (Option C, finite-only)
         - WORKER_META=0 and WORKER_MODE=swarm or WORKER_SWARM=1 -> classic swarm engine (finite-only)
@@ -2051,9 +2054,18 @@ def main() -> None:
 
     queue_mode = _env_bool("WORKER_QUEUE_MODE", default=True)
 
-    if queue_mode:
+    # Only use queue worker if the run_jobs module imported correctly
+    if queue_mode and RunJob is not None and load_job_from_path is not None:
         run_job_queue_worker()
         return
+    elif queue_mode:
+        # Helpful log so you can see why queue runs are not being picked up
+        print(
+            "Queue mode was requested (WORKER_QUEUE_MODE=1), "
+            "but agent/run_jobs.py is missing or failed to import. "
+            "Falling back to classic engines."
+        )
+        sys.stdout.flush()
 
     _configure_tavily_from_env()
     agent, config = init_agent_from_config()
