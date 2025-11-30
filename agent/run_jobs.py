@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 BASE_DIR = Path("runs")
 
 # New job layout used by the engine worker:
-#   - runs/pending/   : file based queue of pending jobs (was "queue")
+#   - runs/pending/   : file based queue of pending jobs (canonical queue)
 #   - runs/active/    : in progress metadata + optional progress JSON
 #   - runs/finished/  : final result JSON (one file per run_id)
 #   - runs/error/     : failed job metadata + optional traceback
@@ -24,9 +24,10 @@ ERROR_DIR = BASE_DIR / "error"
 
 # Backwards compatible alias for old name "queue"
 # Many engine scripts import QUEUE_DIR from this module, so this keeps them working.
+# QUEUE_DIR now points at the new canonical pending folder.
 QUEUE_DIR = PENDING_DIR
 
-# Optional legacy "queue" folder support (for older jobs)
+# Optional legacy "queue" folder support (for older jobs only - read/compat)
 LEGACY_QUEUE_DIR = BASE_DIR / "queue"
 
 # Make sure directories exist at import time
@@ -180,13 +181,15 @@ def create_job(
         updated_at=time.time(),
         meta=meta or {},
     )
+
     # Save into the canonical pending/queue folder
     job.save_to(PENDING_DIR)
-    # Also mirror into legacy 'queue' folder so any old scripts scanning runs/queue still see it
-    legacy_path = LEGACY_QUEUE_DIR / f"{run_id}.json"
-    with legacy_path.open("w", encoding="utf8") as f:
-        json.dump(job.to_dict(), f, indent=2)
 
+    # NOTE:
+    # We no longer create NEW jobs in LEGACY_QUEUE_DIR.
+    # LEGACY_QUEUE_DIR is kept read-only for old jobs created by older versions.
+    # Engine workers still read from it for compatibility, but all new writes
+    # are to runs/pending/.
     return run_id
 
 
@@ -245,7 +248,7 @@ def move_job(run_id: str, from_status: str, to_status: str) -> Tuple[Optional[Ru
 
     # Remove old file(s) and save new one
     src_path.unlink(missing_ok=True)
-    # Also remove from legacy queue if it exists
+    # Also remove from legacy queue if it exists (prevent duplicates)
     legacy_src = LEGACY_QUEUE_DIR / f"{run_id}.json"
     legacy_src.unlink(missing_ok=True)
     job.save_to(dst_path.parent)
@@ -316,11 +319,13 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
         This function does NOT filter based on the internal job.status string,
         it simply reads all *.json files from the appropriate folder(s).
         That means old jobs with status "queued" or "pending" in runs/pending
-        are all visible to the engine and the UI.
+        or runs/queue are all visible to the engine and the UI.
     """
     jobs: List[RunJob] = []
 
     def collect(folder: Path) -> None:
+        if not folder.exists():
+            return
         for path in sorted(folder.glob("*.json")):
             try:
                 # skip progress and non-metadata files
