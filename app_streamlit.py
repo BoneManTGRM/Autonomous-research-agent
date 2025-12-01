@@ -223,10 +223,6 @@ MAX_SWARM_AGENTS: int = 32
 # Limit points in charts so the frontend does not hit RangeError on very long runs.
 MAX_POINTS_FOR_CHARTS: int = 1000
 
-# Where optional background worker control_state is stored
-# (useful only if you run a timed/background worker in parallel).
-CONTROL_STATE_PATH = Path("logs/control_state.json")
-
 
 # -------------------------------------------------------------------
 # Helpers
@@ -245,32 +241,6 @@ def ensure_directories() -> None:
     sessions_path = logs_path / "sessions"
     logs_path.mkdir(exist_ok=True)
     sessions_path.mkdir(exist_ok=True)
-
-
-def load_control_state() -> Dict[str, Any]:
-    """Load the shared control state used by an optional background worker."""
-    ensure_directories()
-    if not CONTROL_STATE_PATH.exists():
-        return {}
-    try:
-        with CONTROL_STATE_PATH.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, dict):
-            return data
-        return {}
-    except Exception:
-        return {}
-
-
-def save_control_state(state: Dict[str, Any]) -> None:
-    """Persist the shared control state for an optional background worker."""
-    ensure_directories()
-    try:
-        with CONTROL_STATE_PATH.open("w", encoding="utf-8") as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
-    except Exception:
-        # Control state failure should not crash the UI
-        return
 
 
 @st.cache_resource
@@ -1659,112 +1629,6 @@ def main() -> None:
                     render_job_summary(job)
                     st.caption("Waiting for engine worker to start.")
                     st.markdown("---")
-
-    # ------------------------------
-    # Engine control panel (background worker control_state)
-    # ------------------------------
-    st.markdown("---")
-    st.subheader("Engine control panel (optional background worker)")
-
-    control_state = load_control_state()
-    current_status = control_state.get("status", "idle")
-    st.write(f"Current engine status: **{current_status}**")
-
-    # Run time progress based on control_state
-    st.markdown("#### Run time progress (if your worker uses time budgets)")
-
-    max_minutes_cfg = control_state.get("max_minutes")
-    ts_str = control_state.get("timestamp_utc")
-    elapsed_minutes: Optional[float] = None
-    remaining_minutes: Optional[float] = None
-    progress_fraction: Optional[float] = None
-
-    if isinstance(max_minutes_cfg, (int, float)) and ts_str:
-        try:
-            start_dt = datetime.fromisoformat(ts_str)
-            now_dt = datetime.utcnow()
-            diff = now_dt - start_dt
-            elapsed_minutes = max(diff.total_seconds() / 60.0, 0.0)
-            remaining_minutes = max(float(max_minutes_cfg) - elapsed_minutes, 0.0)
-            if max_minutes_cfg > 0:
-                progress_fraction = min(max(elapsed_minutes / float(max_minutes_cfg), 0.0), 1.0)
-        except Exception:
-            elapsed_minutes = None
-            remaining_minutes = None
-            progress_fraction = None
-
-    if max_minutes_cfg is None:
-        st.write(
-            "No fixed time budget recorded in control_state. "
-            "If you run only finite jobs via the queue, this panel is informational only."
-        )
-    else:
-        col_rt1, col_rt2, col_rt3 = st.columns(3)
-        with col_rt1:
-            if elapsed_minutes is not None:
-                st.metric("Elapsed minutes", f"{elapsed_minutes:.1f}")
-            else:
-                st.metric("Elapsed minutes", "n/a")
-        with col_rt2:
-            if remaining_minutes is not None:
-                st.metric("Minutes remaining", f"{remaining_minutes:.1f}")
-            else:
-                st.metric("Minutes remaining", "n/a")
-        with col_rt3:
-            if progress_fraction is not None:
-                st.metric("Time used", f"{progress_fraction * 100:.1f}%")
-            else:
-                st.metric("Time used", "n/a")
-
-        if progress_fraction is not None:
-            st.progress(progress_fraction)
-
-    if control_state:
-        with st.expander("Raw control state"):
-            st.code(json.dumps(control_state, indent=2), language="json")
-    else:
-        st.write(
-            "No control state file yet. If you only use the finite file-based queue, "
-            "you can ignore this section."
-        )
-
-    col_start, col_pause, col_stop = st.columns(3)
-
-    with col_start:
-        if st.button("Set status: running"):
-            new_state = load_control_state()
-            new_state["status"] = "running"
-            new_state["timestamp_utc"] = datetime.utcnow().isoformat()
-            save_control_state(new_state)
-            st.success("Engine status set to running.")
-
-    with col_pause:
-        if st.button("Set status: paused"):
-            new_state = load_control_state()
-            new_state["status"] = "paused"
-            new_state["timestamp_utc"] = datetime.utcnow().isoformat()
-            save_control_state(new_state)
-            st.info("Engine status set to paused.")
-
-    with col_stop:
-        if st.button("Set status: stopped"):
-            new_state = load_control_state()
-            new_state["status"] = "stopped"
-            new_state["timestamp_utc"] = datetime.utcnow().isoformat()
-            save_control_state(new_state)
-            st.warning("Engine status set to stopped. Worker should halt after the current cycle.")
-
-    # Live worker_state snapshot from MemoryStore
-    st.markdown("#### Worker live status (from MemoryStore)")
-    get_worker_state = getattr(memory, "get_worker_state", None)
-    if callable(get_worker_state):
-        worker_state = get_worker_state()
-        if worker_state:
-            st.json(worker_state)
-        else:
-            st.write("No worker_state saved yet.")
-    else:
-        st.write("MemoryStore.get_worker_state not available in this build.")
 
     # ------------------------------
     # History and advanced panels
