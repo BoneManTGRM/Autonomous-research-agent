@@ -48,6 +48,7 @@ import hashlib
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from datetime import datetime
 
 import yaml
 
@@ -69,6 +70,7 @@ try:
         load_next_pending_job,
         save_job_result,
         mark_job_error,
+        progress_path,
     )
 except Exception:
     # If run_jobs is not present, queue mode will not work
@@ -76,6 +78,7 @@ except Exception:
     load_next_pending_job = None  # type: ignore[assignment]
     save_job_result = None  # type: ignore[assignment]
     mark_job_error = None  # type: ignore[assignment]
+    progress_path = None  # type: ignore[assignment]
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
 BASE_DIR = Path("runs")
@@ -588,6 +591,40 @@ def _run_post_run_intelligence(
 # ---------------------------------------------------------------------------
 
 
+def _write_job_progress(
+    run_id: str,
+    status: str,
+    note: str = "",
+    current: Optional[int] = None,
+    total: Optional[int] = None,
+) -> None:
+    """
+    Best-effort progress writer for queue jobs.
+
+    Writes runs/active/{run_id}_progress.json using run_jobs.progress_path
+    so the Streamlit UI can show basic status, even if we don't have
+    per-cycle callbacks.
+    """
+    if progress_path is None:
+        return
+    try:
+        path = progress_path(run_id)
+        payload: Dict[str, Any] = {
+            "run_id": run_id,
+            "status": status,
+            "current_cycle": current,
+            "total_cycles": total,
+            "last_update_utc": datetime.utcnow().isoformat() + "Z",
+            "notes": note,
+        }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf8") as f:
+            json.dump(payload, f, indent=2)
+    except Exception:
+        # Progress should never crash the worker
+        return
+
+
 def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJob) -> None:
     """
     Execute a single RunJob from the file based queue.
@@ -737,6 +774,15 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     )
     _heartbeat(agent, label="queue_job_start", run_id=job.run_id)
 
+    # Initial progress write
+    _write_job_progress(
+        job.run_id,
+        status="active",
+        note="Job started",
+        current=0,
+        total=max_rounds if mode == "swarm" else max_cycles,
+    )
+
     summaries: List[Dict[str, Any]] = []
 
     try:
@@ -783,6 +829,15 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
 
         print(f"=== Queue worker: job {job.run_id} finished cleanly ===")
         print(f"Total summaries: {len(summaries)}")
+
+        # Final progress write (we only know final count now)
+        _write_job_progress(
+            job.run_id,
+            status="finished",
+            note="Job finished",
+            current=len(summaries),
+            total=max_rounds if mode == "swarm" else max_cycles,
+        )
 
         diag: Dict[str, Any] = {}
         try:
@@ -881,6 +936,16 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         print(f"Fatal error while running job {job.run_id}: {e}")
         tb = traceback.format_exc()
         print(tb)
+
+        # Progress -> error
+        _write_job_progress(
+            job.run_id,
+            status="error",
+            note=str(e),
+            current=None,
+            total=max_rounds if mode == "swarm" else max_cycles,
+        )
+
         try:
             if mark_job_error is not None:
                 mark_job_error(job, {"error": str(e), "traceback": tb})
