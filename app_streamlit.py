@@ -1018,9 +1018,9 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
                 score = 0.0
             scored.append((score, h))
         scored.sort(key=lambda x: x[0], reverse=True)
-        top_hyps = [h for _, h in scored[:8]]
     else:
-        top_hyps = []
+        scored = []
+    top_hyps = [h for _, h in scored[:8]]
 
     for idx, h in enumerate(top_hyps):
         label_text = _clean_label_text(h["text"])
@@ -1773,19 +1773,19 @@ def main() -> None:
                 )
             with ls_cols[1]:
                 if isinstance(bp_prob, (int, float)):
-                    st.metric("Breakthrough heat (near term, heuristic)", f"{bp_prob * 100:.1f}")
+                    st.metric("Breakthrough signal (near term, 0–1)", f"{bp_prob:.3f}")
                 else:
-                    st.metric("Breakthrough heat (near term, heuristic)", "n/a")
+                    st.metric("Breakthrough signal (near term, 0–1)", "n/a")
             with ls_cols[2]:
                 if isinstance(bp90_prob, (int, float)):
-                    st.metric("Breakthrough heat 90d (heuristic)", f"{bp90_prob * 100:.1f}")
+                    st.metric("Breakthrough signal 90d (0–1)", f"{bp90_prob:.3f}")
                 else:
-                    st.metric("Breakthrough heat 90d (heuristic)", "n/a")
+                    st.metric("Breakthrough signal 90d (0–1)", "n/a")
             with ls_cols[3]:
                 st.metric("Run tier", tier_label or "n/a")
 
             st.caption(
-                "Breakthrough heat values are heuristic scores derived from RYE and stability trends, "
+                "Breakthrough signals are heuristic scores on a 0–1 scale derived from RYE and stability trends, "
                 "not calibrated real world probabilities."
             )
 
