@@ -59,35 +59,34 @@ class RunConfig:
     This config is deliberately rich so you can drive many patterns
     from a job payload (engine worker) or from scripts without changing code.
 
-    Typical mapping from a job file:
-        goal            <- job["goal"]
-        domain          <- job["domain"]
-        mode            <- "single" | "two_stage" | "swarm"
-        total_cycles    <- job["runtime_hints"]["manual_cycles"]
-        max_seconds     <- job["runtime_hints"]["max_seconds"] (if used)
-        source_controls <- job["source_controls"]
-        swarm_config    <- job["swarm"]
-        longevity_config<- optional longevity fields
-        run_id          <- job["job_id"]
+    Typical mapping from a job file (job.config in runs/pending):
+        goal             <- cfg["goal"]
+        domain           <- cfg.get("domain", "general")
+        mode             <- cfg.get("mode", "single")
+        total_cycles     <- cfg.get("total_cycles") or cfg["runtime_hints"]["manual_cycles"]
+        max_seconds      <- cfg.get("max_seconds")
+        source_controls  <- cfg.get("source_controls", {})
+        swarm_config     <- cfg.get("swarm", {})
+        longevity_config <- cfg.get("longevity_config", {})
+        run_id           <- job.run_id (or cfg["run_id"] as fallback)
+        notes            <- cfg.get("notes")
+
+    In this finite only architecture:
+        - total_cycles is the primary budget.
+        - max_seconds is optional and acts as a hard wall clock cap.
+        - runtime_profile is only advisory / for logging.
     """
 
     goal: str
-    mode: str = "single"  # single, swarm, two_stage
+    mode: str = "single"  # "single", "swarm", "two_stage"
     domain: str = "general"
 
-    # Optional label like "1_hour", "8_hours" for UI and reporting.
-    # Engine is free to ignore this and treat runs as finite only.
+    # Optional label like "1_hour" for UI / reporting; engine treats runs as finite.
     runtime_profile: Optional[str] = None
 
-    # Cycles and time (finite only in the current engine design)
+    # Cycles and time (finite only)
     total_cycles: int = 1
-    # Hard wall clock limit for the entire run in seconds.
-    # For example:
-    #   1 hour  -> 3600
-    #   8 hours -> 8 * 3600
-    #   24h     -> 24 * 3600
-    #   1 week  -> 7 * 24 * 3600
-    max_seconds: Optional[int] = None
+    max_seconds: Optional[int] = None  # hard wall clock limit for the entire run
 
     # RYE and safety controls
     rye_stop_threshold: Optional[float] = None
@@ -115,26 +114,145 @@ class RunConfig:
     seed: Optional[int] = None
     notes: Optional[str] = None  # free text description or experiment label
 
+    # Optional extra fields (not required, but useful for future extensions)
+    runtime_hints: Dict[str, Any] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+    # ------------------------------------------------------------------
+    # Helper: construct RunConfig from a job.config dict
+    # ------------------------------------------------------------------
+    @classmethod
+    def from_job_config(
+        cls,
+        cfg: Dict[str, Any],
+        run_id: Optional[str] = None,
+    ) -> "RunConfig":
+        """Build a RunConfig from a job config dict written by Streamlit.
+
+        This helper is intended to be used by engine_worker, for example:
+
+            job = load_next_pending_job()
+            rc = RunConfig.from_job_config(job.config, run_id=job.run_id)
+            summary = run_manager.run(rc, progress_cb=...)
+
+        It is defensive and tolerant of missing keys to keep older jobs working.
+        """
+        goal = cfg.get("goal") or ""
+        if not goal:
+            raise ValueError("RunConfig.from_job_config requires a non empty 'goal' field.")
+
+        domain = cfg.get("domain") or "general"
+        mode = cfg.get("mode") or "single"
+
+        # Figure out total cycles:
+        #   1) explicit cfg["total_cycles"]
+        #   2) runtime_hints["manual_cycles"]
+        #   3) fallback to 1
+        runtime_hints = cfg.get("runtime_hints") or {}
+        manual_cycles = runtime_hints.get("manual_cycles") or runtime_hints.get("max_cycles")
+        total_cycles = int(cfg.get("total_cycles") or manual_cycles or 1)
+        if total_cycles < 1:
+            total_cycles = 1
+
+        max_seconds = cfg.get("max_seconds")
+        if max_seconds is not None:
+            try:
+                max_seconds = int(max_seconds)
+            except Exception:
+                max_seconds = None
+
+        rye_stop_threshold = cfg.get("rye_stop_threshold")
+        equilibrium_stop_label = cfg.get("equilibrium_stop_label")
+        min_cycles_before_stop = int(cfg.get("min_cycles_before_stop", 3))
+
+        # Source controls
+        source_controls = dict(cfg.get("source_controls") or {})
+        # Ensure all known keys exist so downstream code does not KeyError
+        for k in ["web", "pubmed", "semantic", "pdf", "biomarkers", "sandbox"]:
+            source_controls.setdefault(k, False)
+
+        # Two stage configuration
+        stage_cfg_raw = cfg.get("stage_config") or {}
+        stage_cfg = StageConfig(
+            idea_cycles=int(stage_cfg_raw.get("idea_cycles", 1)),
+            verify_cycles=int(stage_cfg_raw.get("verify_cycles", 1)),
+            enable_two_stage=bool(
+                stage_cfg_raw.get("enable_two_stage", cfg.get("multi_agent_pair", False))
+            ),
+        )
+
+        # Swarm configuration
+        swarm_raw = cfg.get("swarm") or cfg.get("swarm_config") or {}
+        swarm_cfg = SwarmConfig(
+            swarm_size=int(swarm_raw.get("swarm_size", 1)),
+            roles=list(swarm_raw.get("roles") or ["agent"]),
+            max_cycles_per_agent=int(swarm_raw.get("max_cycles_per_agent", total_cycles)),
+            stagger_start=bool(swarm_raw.get("stagger_start", False)),
+            max_agents_per_tick=int(swarm_raw.get("max_agents_per_tick", 0)),
+        )
+
+        # Longevity configuration
+        lon_raw = cfg.get("longevity_config") or {}
+        longevity_cfg = LongevityConfig(
+            hallmark_targets=list(lon_raw.get("hallmark_targets") or []),
+            curriculum_profile=lon_raw.get("curriculum_profile"),
+            subgoal=lon_raw.get("subgoal"),
+        )
+
+        runtime_profile = cfg.get("runtime_profile")
+        notes = cfg.get("notes")
+        seed = cfg.get("seed")
+
+        rc = cls(
+            goal=goal,
+            mode=mode,
+            domain=str(domain),
+            runtime_profile=runtime_profile,
+            total_cycles=total_cycles,
+            max_seconds=max_seconds,
+            rye_stop_threshold=rye_stop_threshold,
+            equilibrium_stop_label=equilibrium_stop_label,
+            min_cycles_before_stop=min_cycles_before_stop,
+            source_controls=source_controls,
+            stage_config=stage_cfg,
+            swarm_config=swarm_cfg,
+            longevity_config=longevity_cfg,
+            run_id=run_id or cfg.get("run_id") or uuid.uuid4().hex,
+            seed=seed,
+            notes=notes,
+            runtime_hints=runtime_hints,
+            extra={k: v for k, v in cfg.items() if k not in {
+                "goal",
+                "domain",
+                "mode",
+                "total_cycles",
+                "max_seconds",
+                "rye_stop_threshold",
+                "equilibrium_stop_label",
+                "min_cycles_before_stop",
+                "source_controls",
+                "stage_config",
+                "swarm",
+                "swarm_config",
+                "longevity_config",
+                "run_id",
+                "seed",
+                "notes",
+                "runtime_profile",
+                "runtime_hints",
+            }},
+        )
+        return rc
+
 
 class RunManager:
     """Orchestrate CoreAgent runs for single, two stage, and swarm modes.
 
-    This class is the central conductor for speed of learning experiments.
-    It gives you:
-
-    - Single agent runs with RYE aware early stop.
-    - Two stage idea plus verify runs.
-    - Swarm runs with role based staging (explorer vs critic).
-    - Run level learning speed summaries that the UI can show as trends.
-
-    It also enforces a hard wall clock budget when max_seconds is set so
-    1h / 8h / 24h / 1w / 1m style runs cut off at the right time.
-
     In the new architecture, an external engine worker:
         1) Reads job JSON from runs/pending/.
-        2) Builds a RunConfig from that payload.
+        2) Builds a RunConfig from job.config via RunConfig.from_job_config(...).
         3) Calls RunManager.run(run_config, progress_cb=...).
-        4) Writes summary + cycles into runs/finished/{job_id}.json.
+        4) Writes summary + cycles into runs/finished/{run_id}.json.
     """
 
     def __init__(
