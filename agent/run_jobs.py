@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import time
 import uuid
+import os
 from dataclasses import dataclass, asdict, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # Base folder for all runs
-BASE_DIR = Path("runs")
+# Use ARA_RUNS_DIR if set so UI and worker can share the same disk
+BASE_DIR = Path(os.environ.get("ARA_RUNS_DIR", "runs"))
 
 # Job layout used by the engine worker:
 #   - runs/pending/   : file based queue of pending jobs (canonical queue)
@@ -73,7 +75,7 @@ class RunJob:
         """
         Robust loader that tolerates extra keys and missing optional fields.
 
-        This allows older job files (or hand-edited JSON) to be loaded
+        This allows older job files (or hand edited JSON) to be loaded
         without crashing due to unexpected keys. Also normalizes status.
         """
         field_names = {f.name for f in fields(cls)}
@@ -81,7 +83,10 @@ class RunJob:
 
         # Ensure required fields exist; raise a clear error if not.
         required = {"run_id", "config"}
-        missing_required = [k for k in required if k not in filtered]
+        missing_required = [k for k in filtered if k in required and filtered[k] is None]
+        for req in required:
+            if req not in filtered:
+                missing_required.append(req)
         if missing_required:
             raise ValueError(f"RunJob.from_dict missing required fields: {missing_required}")
 
@@ -183,7 +188,7 @@ def create_job(
         meta=meta or {},
     )
 
-    # Save into the canonical pending/queue folder
+    # Save into the canonical pending or queue folder
     job.save_to(PENDING_DIR)
 
     # Shadow copy to queue folder for maximal compatibility.
@@ -448,7 +453,7 @@ def error_log_path(run_id: str) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# Engine-worker specific helpers (used by engine_worker.py)
+# Engine worker specific helpers (used by engine_worker.py)
 # ---------------------------------------------------------------------------
 
 def load_next_pending_job() -> Optional[RunJob]:
