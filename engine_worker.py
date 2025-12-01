@@ -23,11 +23,10 @@ Finite-only mode:
 - Runtime profiles are treated as hints for internal tuning only, not as
   permission to run forever.
 
-NEW:
-- Queue mode using agent/run_jobs.py:
+Queue mode using agent/run_jobs.py:
     - WORKER_QUEUE_MODE=1 (default) -> file-based job queue
-    - Worker polls runs/queue (or the QUEUE_DIR from run_jobs), executes jobs,
-      writes results to runs/finished
+    - Worker polls the job queue via agent.run_jobs, executes jobs,
+      and writes results via save_job_result / mark_job_error.
 
 You can start it with commands like:
     WORKER_GOAL="Long run test on reparodynamics" \
@@ -63,31 +62,23 @@ try:
 except Exception:  # pragma: no cover
     TOOL_REGISTRY = {}  # type: ignore[assignment]
 
-# File-based run queue
+# File-based run queue integration
 try:
     from agent.run_jobs import (
         RunJob,
-        BASE_DIR,
-        QUEUE_DIR,
-        load_job as load_job_from_path,
-        move_job,
-        progress_path,
-        result_path,
-        error_log_path,
+        load_next_pending_job,
+        save_job_result,
+        mark_job_error,
     )
 except Exception:
-    # If run_jobs is not present, queue mode will not work; we will
-    # automatically fall back to classic engines in main().
+    # If run_jobs is not present, queue mode will not work
     RunJob = None  # type: ignore[assignment]
-    BASE_DIR = Path("runs")  # type: ignore[assignment]
-    QUEUE_DIR = BASE_DIR / "queue"  # type: ignore[assignment]
-    progress_path = lambda run_id: BASE_DIR / "active" / f"{run_id}_progress.json"  # type: ignore[assignment]
-    result_path = lambda run_id: BASE_DIR / "finished" / f"{run_id}_result.json"  # type: ignore[assignment]
-    error_log_path = lambda run_id: BASE_DIR / "error" / f"{run_id}_error.txt"  # type: ignore[assignment]
-    load_job_from_path = None  # type: ignore[assignment]
-    move_job = None  # type: ignore[assignment]
+    load_next_pending_job = None  # type: ignore[assignment]
+    save_job_result = None  # type: ignore[assignment]
+    mark_job_error = None  # type: ignore[assignment]
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
+BASE_DIR = Path("runs")
 
 
 # ---------------------------------------------------------------------------
@@ -616,29 +607,27 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         resume: optional resume flag (default True)
         watchdog_minutes: optional watchdog interval
 
-    NEW behavior:
-        If explicit cycle or round limits are provided in the job config,
-        the worker ignores max_minutes so the job runs until the specified
-        cycles or rounds complete (or stop_rye triggers).
+    If explicit cycle or round limits are provided in the job config,
+    the worker ignores max_minutes so the job runs until the specified
+    cycles or rounds complete (or stop_rye triggers).
     """
-    if move_job is not None:
-        move_job(job.run_id, "queued", "active")
-
     base_goal, base_domain = build_goal_and_domain()
-    goal = str(job.config.get("goal", base_goal))
-    domain = str(job.config.get("domain", base_domain))
+    cfg = job.config or {}
+
+    goal = str(cfg.get("goal", base_goal))
+    domain = str(cfg.get("domain", base_domain))
 
     preset_cfg = get_preset(domain)
-    runtime_profile = job.config.get(
+    runtime_profile = cfg.get(
         "runtime_profile",
         preset_cfg.get("default_runtime_profile"),
     )
 
-    mode = str(job.config.get("mode", job.config.get("engine_mode", "single"))).lower()
-    role = str(job.config.get("role", "agent"))
+    mode = str(cfg.get("mode", cfg.get("engine_mode", "single"))).lower()
+    role = str(cfg.get("role", "agent"))
     roles_list: Optional[List[str]] = None
     if mode == "swarm":
-        raw_roles = job.config.get("roles")
+        raw_roles = cfg.get("roles")
         if isinstance(raw_roles, (list, tuple)):
             roles_list = [str(r) for r in raw_roles]
         else:
@@ -647,13 +636,13 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             except Exception:
                 roles_list = ["agent"]
 
-    max_cycles_explicit = "max_cycles" in job.config or "cycles" in job.config
-    max_rounds_explicit = "max_rounds" in job.config or "rounds" in job.config
+    max_cycles_explicit = "max_cycles" in cfg or "cycles" in cfg
+    max_rounds_explicit = "max_rounds" in cfg or "rounds" in cfg
 
-    max_cycles = int(job.config.get("max_cycles", job.config.get("cycles", 10_000_000)))
-    max_rounds = int(job.config.get("max_rounds", max_cycles))
+    max_cycles = int(cfg.get("max_cycles", cfg.get("cycles", 10_000_000)))
+    max_rounds = int(cfg.get("max_rounds", max_cycles))
 
-    raw_max_minutes = job.config.get("max_minutes")
+    raw_max_minutes = cfg.get("max_minutes")
     if (mode == "single" and max_cycles_explicit) or (mode == "swarm" and max_rounds_explicit):
         max_minutes: Optional[float] = None
     else:
@@ -665,15 +654,15 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         else:
             max_minutes = None
 
-    stop_rye = job.config.get("stop_rye")
+    stop_rye = cfg.get("stop_rye")
     if stop_rye is not None:
         try:
             stop_rye = float(stop_rye)
         except Exception:
             stop_rye = None
 
-    resume = bool(job.config.get("resume", True))
-    watchdog_minutes = float(job.config.get("watchdog_minutes", 5.0))
+    resume = bool(cfg.get("resume", True))
+    watchdog_minutes = float(cfg.get("watchdog_minutes", 5.0))
 
     cfg_for_sources = dict(base_config)
     if "default_source_controls" not in cfg_for_sources:
@@ -682,8 +671,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             cfg_for_sources["default_source_controls"] = sc_preset
 
     source_controls = _build_source_controls(cfg_for_sources)
-    if isinstance(job.config.get("source_controls"), dict):
-        override_sc = job.config["source_controls"]
+    if isinstance(cfg.get("source_controls"), dict):
+        override_sc = cfg["source_controls"]
         for k, v in override_sc.items():
             source_controls[str(k)] = bool(v)
 
@@ -703,6 +692,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         roles=roles_list if mode == "swarm" else [role],
         env_keys=env_keys_for_fingerprint,
     )
+
+    job_meta = getattr(job, "meta", None)
 
     print("")
     print("=== Queue worker: starting job ===")
@@ -741,7 +732,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         experiment_mode="queue_worker",
         extra={
             "experiment_fingerprint": experiment_fingerprint,
-            "job_meta": job.meta,
+            "job_meta": job_meta,
         },
     )
     _heartbeat(agent, label="queue_job_start", run_id=job.run_id)
@@ -816,7 +807,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         extra_manifest: Dict[str, Any] = {
             "engine": f"queue_{mode}",
             "experiment_fingerprint": experiment_fingerprint,
-            "job_meta": job.meta,
+            "job_meta": job_meta,
         }
         if diag:
             extra_manifest["diagnostics_snapshot"] = diag
@@ -853,18 +844,21 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             "diagnostics": diag,
             "intelligence": intelligence_info,
             "experiment_fingerprint": experiment_fingerprint,
-            "job_meta": job.meta,
+            "job_meta": job_meta,
         }
+
         try:
-            rp = result_path(job.run_id)
-            rp.parent.mkdir(parents=True, exist_ok=True)
-            with rp.open("w", encoding="utf8") as f:
-                json.dump(result_obj, f, indent=2)
+            if save_job_result is not None:
+                save_job_result(job, result_obj)
+            else:
+                # Best effort fallback
+                out_dir = BASE_DIR / "finished"
+                out_dir.mkdir(parents=True, exist_ok=True)
+                rp = out_dir / f"{job.run_id}.json"
+                with rp.open("w", encoding="utf8") as f:
+                    json.dump(result_obj, f, indent=2)
         except Exception:
             print("Failed to write result JSON for job, see logs for details.")
-
-        if move_job is not None:
-            move_job(job.run_id, "active", "finished")
 
         _update_worker_state(
             agent,
@@ -886,16 +880,20 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         )
     except Exception as e:
         print(f"Fatal error while running job {job.run_id}: {e}")
-        traceback.print_exc()
+        tb = traceback.format_exc()
+        print(tb)
         try:
-            ep = error_log_path(job.run_id)
-            ep.parent.mkdir(parents=True, exist_ok=True)
-            with ep.open("w", encoding="utf8") as f:
-                traceback.print_exc(file=f)
+            if mark_job_error is not None:
+                mark_job_error(job, {"error": str(e), "traceback": tb})
+            else:
+                err_dir = BASE_DIR / "error"
+                err_dir.mkdir(parents=True, exist_ok=True)
+                ep = err_dir / f"{job.run_id}.txt"
+                with ep.open("w", encoding="utf8") as f:
+                    f.write(tb)
         except Exception:
             pass
-        if move_job is not None:
-            move_job(job.run_id, "active", "error")
+
         _update_worker_state(
             agent,
             status="error",
@@ -921,13 +919,12 @@ def run_job_queue_worker() -> None:
 
     Behavior:
         - Initializes CoreAgent and MemoryStore once.
-        - Polls QUEUE_DIR (from agent/run_jobs) for new job JSON files.
+        - Polls the job queue via agent.run_jobs.load_next_pending_job.
         - For each job:
-            * Loads job
             * Runs it with _process_single_job
         - Loops forever so Render worker can stay alive.
     """
-    if RunJob is None or load_job_from_path is None:
+    if RunJob is None or load_next_pending_job is None:
         print("Queue mode requested but agent/run_jobs.py is not available.")
         sys.stdout.flush()
         return
@@ -938,54 +935,14 @@ def run_job_queue_worker() -> None:
     _configure_tavily_from_env()
     agent, config = init_agent_from_config()
 
-    try:
-        QUEUE_DIR.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-
-    queue_roots: List[Path] = [QUEUE_DIR]
-
-    print("Queue worker watching this folder for jobs:")
-    for root in queue_roots:
-        print(f" - {root.resolve()}")
-    sys.stdout.flush()
-
     while True:
-        jobs: List[Path] = []
-        for root in queue_roots:
-            if root.exists():
-                jobs.extend(sorted(root.glob("*.json")))
-
-        if not jobs:
+        job = load_next_pending_job()
+        if job is None:
             _heartbeat(agent, label="queue_idle")
             time.sleep(5.0)
             continue
 
-        print(f"Found {len(jobs)} job file(s) in queue folder.")
-        sys.stdout.flush()
-
-        for path in jobs:
-            try:
-                job = load_job_from_path(path)
-            except Exception as e:
-                print(f"Failed to load job file {path}: {e}")
-                traceback.print_exc()
-                try:
-                    bad_id = path.stem
-                    ep = error_log_path(bad_id)
-                    ep.parent.mkdir(parents=True, exist_ok=True)
-                    with ep.open("w", encoding="utf8") as f:
-                        f.write(f"Job file could not be parsed: {e}")
-                except Exception:
-                    pass
-                try:
-                    path.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                continue
-
-            _process_single_job(agent, config, job)
-
+        _process_single_job(agent, config, job)
         time.sleep(1.0)
 
 
@@ -2108,8 +2065,8 @@ def main() -> None:
 
     Mode selection:
     - WORKER_QUEUE_MODE=1 (default) -> file-based queue worker using agent/run_jobs.
-        * If agent/run_jobs.py is missing or fails to import, we automatically
-          fall back to the classic engines so the worker still runs.
+      If agent/run_jobs.py is missing or fails to import, queue mode logs an error
+      and returns instead of silently falling back.
     - WORKER_QUEUE_MODE=0 -> classic behavior:
         - WORKER_META=1          -> run meta controller (Option C, finite-only)
         - WORKER_META=0 and WORKER_MODE=swarm or WORKER_SWARM=1 -> classic swarm engine (finite-only)
@@ -2120,16 +2077,17 @@ def main() -> None:
 
     queue_mode = _env_bool("WORKER_QUEUE_MODE", default=True)
 
-    if queue_mode and RunJob is not None and load_job_from_path is not None:
+    if queue_mode:
+        if RunJob is None or load_next_pending_job is None:
+            print(
+                "Queue mode was requested (WORKER_QUEUE_MODE=1), "
+                "but agent/run_jobs.py is missing or failed to import. "
+                "Queue worker cannot start."
+            )
+            sys.stdout.flush()
+            return
         run_job_queue_worker()
         return
-    elif queue_mode:
-        print(
-            "Queue mode was requested (WORKER_QUEUE_MODE=1), "
-            "but agent/run_jobs.py is missing or failed to import. "
-            "Falling back to classic engines."
-        )
-        sys.stdout.flush()
 
     _configure_tavily_from_env()
     agent, config = init_agent_from_config()
