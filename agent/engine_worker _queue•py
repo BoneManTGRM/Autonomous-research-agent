@@ -1,0 +1,155 @@
+# agent/engine_worker_queue.py
+
+"""
+Queue-only background worker for the Autonomous Research Agent.
+
+This module is a *dedicated* file-based queue worker:
+
+    - Watches the file-based job queue (runs/pending and legacy runs/queue)
+    - Executes jobs using CoreAgent via engine_worker.run_job_queue_worker()
+    - Writes results to runs/finished and error logs to runs/error
+
+It is intentionally "maxed out" for production use:
+
+    - Clear startup banner with environment + path info
+    - Helpful error logging if the core engine cannot be imported
+    - Graceful handling of KeyboardInterrupt and fatal errors
+    - Explicit indication of which queue folder is being watched
+    - Exit codes chosen so Render / orchestrators can detect failure
+
+Typical usage on Render
+-----------------------
+
+Use this as a dedicated worker service:
+
+    startCommand: python -m agent.engine_worker_queue
+
+You do NOT need WORKER_QUEUE_MODE here — this worker *always* runs
+in queue mode by directly calling `run_job_queue_worker()`.
+
+Environment variables that still matter (indirectly via engine_worker)
+---------------------------------------------------------------------
+
+The underlying engine still honors:
+
+    WORKER_TAVILY_KEY      -> propagated to TAVILY_API_KEY
+    WORKER_GOAL            -> default goal if job config has no "goal"
+    WORKER_DOMAIN          -> default domain if job config has no "domain"
+    WORKER_SOURCES         -> web,pubmed,semantic,pdf,biomarkers,sandbox
+    WORKER_WEB, WORKER_PDF, etc -> fine-grained source toggles
+    WORKER_MEMORY_FILE     -> override MemoryStore file for this worker
+    CONFIG_PATH_DEFAULT    -> (inside agent.engine_worker) if you change it
+
+The Streamlit UI should create jobs using agent.run_jobs.create_job(...).
+Those jobs will be picked up automatically by this worker.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import traceback
+from pathlib import Path
+
+
+def _print_banner() -> None:
+    """Print a nice startup banner with basic environment info."""
+    cwd = Path.cwd()
+    py = sys.version.split()[0]
+
+    print("")
+    print("========================================================")
+    print("  Autonomous Research Agent - Queue Worker (Dedicated)")
+    print("========================================================")
+    print(f"Python version : {py}")
+    print(f"Working dir    : {cwd}")
+    print(f"Process PID    : {os.getpid()}")
+    print("This worker runs *only* the file-based job queue engine.")
+    print("========================================================")
+    sys.stdout.flush()
+
+
+def _print_queue_info(base_dir: Path, queue_dir: Path) -> None:
+    """Log which folders are expected for the queue + results."""
+    print("")
+    print("Queue / run layout:")
+    print(f"  BASE_DIR     : {base_dir.resolve()}")
+    print(f"  queue (read) : {queue_dir.resolve()}")
+    print(f"  pending dir  : { (base_dir / 'pending').resolve() }")
+    print(f"  active dir   : { (base_dir / 'active').resolve() }")
+    print(f"  finished dir : { (base_dir / 'finished').resolve() }")
+    print(f"  error dir    : { (base_dir / 'error').resolve() }")
+    print("")
+    print("The UI should be creating jobs via agent.run_jobs.create_job(...).")
+    print("This worker will poll the queue folder(s) and execute those jobs.")
+    print("")
+    sys.stdout.flush()
+
+
+def main() -> None:
+    """
+    Entry point that runs the queue worker forever.
+
+    This will:
+        - Import run_job_queue_worker and queue paths from agent.engine_worker
+        - Print a startup banner with queue layout
+        - Run the queue loop until interrupted or a fatal error occurs
+    """
+    _print_banner()
+
+    try:
+        # Import lazily inside main so that import errors are clearly logged
+        from agent.engine_worker import (  # type: ignore[import]
+            run_job_queue_worker,
+            BASE_DIR,
+            QUEUE_DIR,
+        )
+    except Exception:
+        print("ERROR: Failed to import from agent.engine_worker.", file=sys.stderr)
+        print(
+            "Make sure agent/engine_worker.py exists and can be imported, "
+            "and that it defines run_job_queue_worker, BASE_DIR, and QUEUE_DIR.",
+            file=sys.stderr,
+        )
+        traceback.print_exc()
+        sys.stderr.flush()
+        # Non-zero exit so Render / orchestrators know this worker failed.
+        sys.exit(1)
+
+    # Print queue layout info to help debugging in production
+    try:
+        base_dir = Path(BASE_DIR)  # type: ignore[arg-type]
+    except Exception:
+        base_dir = Path("runs")
+
+    try:
+        queue_dir = Path(QUEUE_DIR)  # type: ignore[arg-type]
+    except Exception:
+        queue_dir = base_dir / "pending"
+
+    _print_queue_info(base_dir, queue_dir)
+
+    print("Starting queue loop (run_job_queue_worker)...")
+    sys.stdout.flush()
+
+    try:
+        # This call blocks forever, polling the file-based queue and processing jobs.
+        run_job_queue_worker()  # type: ignore[call-arg]
+    except KeyboardInterrupt:
+        print("")
+        print("Queue worker interrupted by user or environment (KeyboardInterrupt).")
+        print("Shutting down gracefully.")
+        sys.stdout.flush()
+        # Clean exit so orchestrators see a normal stop.
+        sys.exit(0)
+    except Exception:
+        print("")
+        print("FATAL: Unhandled exception in queue worker:")
+        traceback.print_exc()
+        sys.stdout.flush()
+        # Non-zero exit so the process manager can restart or alert.
+        sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
