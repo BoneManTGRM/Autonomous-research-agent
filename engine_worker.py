@@ -81,7 +81,10 @@ except Exception:
     progress_path = None  # type: ignore[assignment]
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
-BASE_DIR = Path("runs")
+
+# Base folder for runs for worker logs and queue fallbacks.
+# This must match agent.run_jobs BASE_DIR which also respects ARA_RUNS_DIR.
+BASE_DIR = Path(os.environ.get("ARA_RUNS_DIR", "runs"))
 
 
 # ---------------------------------------------------------------------------
