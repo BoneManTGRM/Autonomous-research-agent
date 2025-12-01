@@ -223,7 +223,7 @@ MAX_SWARM_AGENTS: int = 32
 # Limit points in charts so the frontend does not hit RangeError on very long runs.
 MAX_POINTS_FOR_CHARTS: int = 1000
 
-# Where optional legacy background worker control_state is stored
+# Where optional background worker control_state is stored
 # (useful only if you run a timed/background worker in parallel).
 CONTROL_STATE_PATH = Path("logs/control_state.json")
 
@@ -248,7 +248,7 @@ def ensure_directories() -> None:
 
 
 def load_control_state() -> Dict[str, Any]:
-    """Load the shared control state used by an optional background worker (legacy)."""
+    """Load the shared control state used by an optional background worker."""
     ensure_directories()
     if not CONTROL_STATE_PATH.exists():
         return {}
@@ -263,7 +263,7 @@ def load_control_state() -> Dict[str, Any]:
 
 
 def save_control_state(state: Dict[str, Any]) -> None:
-    """Persist the shared control state for an optional background worker (legacy)."""
+    """Persist the shared control state for an optional background worker."""
     ensure_directories()
     try:
         with CONTROL_STATE_PATH.open("w", encoding="utf-8") as f:
@@ -1661,10 +1661,10 @@ def main() -> None:
                     st.markdown("---")
 
     # ------------------------------
-    # Engine control panel (legacy background worker control_state)
+    # Engine control panel (background worker control_state)
     # ------------------------------
     st.markdown("---")
-    st.subheader("Engine control panel (optional legacy background worker)")
+    st.subheader("Engine control panel (optional background worker)")
 
     control_state = load_control_state()
     current_status = control_state.get("status", "idle")
