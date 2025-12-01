@@ -999,12 +999,52 @@ def run_job_queue_worker() -> None:
     _configure_tavily_from_env()
     agent, config = init_agent_from_config()
 
+    # Debug: show which directory this worker is actually watching
+    pending_dir = BASE_DIR / "pending"
+    print(f"[Queue] Watching pending dir: {pending_dir.resolve()}")
+    sys.stdout.flush()
+
+    idle_loops = 0
+
     while True:
-        job = load_next_pending_job()
+        # Debug: list any pending files the worker can see
+        try:
+            if pending_dir.exists():
+                pending_files = sorted(pending_dir.glob("*.json"))
+                if pending_files:
+                    print(
+                        f"[Queue] Pending .json files visible to worker: "
+                        f"{[p.name for p in pending_files]}"
+                    )
+                else:
+                    print("[Queue] No pending .json files visible to worker.")
+            else:
+                print(f"[Queue] Pending dir does not exist: {pending_dir.resolve()}")
+        except Exception as e:
+            print(f"[Queue] Error listing pending dir: {e}")
+
+        sys.stdout.flush()
+
+        try:
+            job = load_next_pending_job()
+        except Exception as e:
+            print(f"[Queue] load_next_pending_job() raised an exception: {e}")
+            print(traceback.format_exc())
+            sys.stdout.flush()
+            _heartbeat(agent, label="queue_error")
+            time.sleep(5.0)
+            continue
+
         if job is None:
+            idle_loops += 1
+            print("[Queue] No runnable job returned by load_next_pending_job().")
+            sys.stdout.flush()
             _heartbeat(agent, label="queue_idle")
             time.sleep(5.0)
             continue
+
+        print(f"[Queue] Loaded job from queue: {getattr(job, 'run_id', 'unknown')}")
+        sys.stdout.flush()
 
         _process_single_job(agent, config, job)
         time.sleep(1.0)
