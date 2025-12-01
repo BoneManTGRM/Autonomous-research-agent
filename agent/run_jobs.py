@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 # Base folder for all runs
 BASE_DIR = Path("runs")
 
-# New job layout used by the engine worker:
+# Job layout used by the engine worker:
 #   - runs/pending/   : file based queue of pending jobs (canonical queue)
 #   - runs/active/    : in progress metadata and optional progress JSON
 #   - runs/finished/  : final result JSON (one file per run_id)
@@ -27,8 +27,8 @@ ERROR_DIR = BASE_DIR / "error"
 # QUEUE_DIR now points at the canonical pending folder.
 QUEUE_DIR = PENDING_DIR
 
-# Optional legacy "queue" folder support (for older jobs only - read and compat).
-# Old workers that still watch runs/queue directly will look here.
+# Optional "queue" folder support (older jobs may still live here).
+# Workers that watch runs/queue directly will look here.
 LEGACY_QUEUE_DIR = BASE_DIR / "queue"
 
 # Make sure directories exist at import time
@@ -51,7 +51,7 @@ class RunJob:
 
     STATUS NOTES:
 
-        - "queued" is the legacy and engine friendly name.
+        - "queued" is the canonical queue status used by engines.
         - "pending" is treated as an alias for "queued".
         - "running" is treated as an alias for "active".
 
@@ -60,7 +60,7 @@ class RunJob:
 
     run_id: str
     config: Dict[str, Any]
-    status: str = "queued"  # keep legacy value so existing engine loops that check == "queued" work
+    status: str = "queued"  # keep "queued" so engine loops that check == "queued" work
     created_at: float = time.time()
     updated_at: float = time.time()
     meta: Optional[Dict[str, Any]] = None
@@ -124,8 +124,8 @@ def _job_path_for_status(run_id: str, status: str) -> Path:
 
     Supported statuses:
         - "queued"   (canonical queue status)
-        - "pending"  (alias for queued, for newer code)
-        - "running"  (alias for active, for older engines)
+        - "pending"  (alias for queued)
+        - "running"  (alias for active)
         - "active"
         - "finished"
         - "error"
@@ -177,7 +177,7 @@ def create_job(
     job = RunJob(
         run_id=run_id,
         config=config,
-        status="queued",  # use "queued" so old engine loops pick it up
+        status="queued",
         created_at=time.time(),
         updated_at=time.time(),
         meta=meta or {},
@@ -186,12 +186,12 @@ def create_job(
     # Save into the canonical pending/queue folder
     job.save_to(PENDING_DIR)
 
-    # Shadow copy to legacy queue folder for maximal backward compatibility.
-    # Old workers that still watch runs/queue directly will see this.
+    # Shadow copy to queue folder for maximal compatibility.
+    # Workers that still watch runs/queue directly will see this.
     try:
         job.save_to(LEGACY_QUEUE_DIR)
     except Exception:
-        # Legacy compatibility should never crash job creation.
+        # Compatibility should never crash job creation.
         pass
 
     return run_id
@@ -227,7 +227,7 @@ def move_job(run_id: str, from_status: str, to_status: str) -> Tuple[Optional[Ru
     """
     src_path = _job_path_for_status(run_id, from_status)
     if not src_path.exists():
-        # Try legacy queue dir as a backup for from_status == queued or pending
+        # Try queue dir as a backup for from_status == queued or pending
         if from_status.lower() in ("queued", "pending"):
             legacy_path = LEGACY_QUEUE_DIR / f"{run_id}.json"
             if not legacy_path.exists():
@@ -252,7 +252,7 @@ def move_job(run_id: str, from_status: str, to_status: str) -> Tuple[Optional[Ru
 
     # Remove old file(s) and save new one
     src_path.unlink(missing_ok=True)
-    # Also remove from legacy queue if it exists (prevent duplicates)
+    # Also remove from queue folder if it exists (prevent duplicates)
     legacy_src = LEGACY_QUEUE_DIR / f"{run_id}.json"
     legacy_src.unlink(missing_ok=True)
     job.save_to(dst_path.parent)
@@ -286,13 +286,13 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
             job.updated_at = time.time()
             dst_path = _job_path_for_status(run_id, norm_new)
             src_path.unlink(missing_ok=True)
-            # remove any stale legacy file in queue dir
+            # remove any stale file in queue dir
             legacy_src = LEGACY_QUEUE_DIR / f"{run_id}.json"
             legacy_src.unlink(missing_ok=True)
             job.save_to(dst_path.parent)
             return job
 
-    # Also check legacy queue dir if not found by status loop above
+    # Also check queue dir if not found by status loop above
     legacy_path = LEGACY_QUEUE_DIR / f"{run_id}.json"
     if legacy_path.exists():
         job = load_job(legacy_path)
@@ -322,7 +322,7 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
     NOTE:
         This function does not filter based on the internal job.status string,
         it simply reads all *.json files from the appropriate folder(s).
-        That means old jobs with status "queued" or "pending" in runs/pending
+        That means jobs with status "queued" or "pending" in runs/pending
         or runs/queue are all visible to the engine and the UI.
     """
     jobs_by_id: Dict[str, RunJob] = {}
@@ -344,13 +344,13 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
                 jobs_by_id[job.run_id] = job
 
     if status is None:
-        # Search all status folders plus legacy queue
+        # Search all status folders plus queue dir
         for folder in [PENDING_DIR, LEGACY_QUEUE_DIR, ACTIVE_DIR, FINISHED_DIR, ERROR_DIR]:
             collect(folder)
     else:
         norm = status.lower()
         if norm in ("pending", "queued"):
-            # queue or pending jobs from both canonical and legacy folders
+            # queue or pending jobs from both canonical and queue folders
             collect(PENDING_DIR)
             collect(LEGACY_QUEUE_DIR)
         elif norm in ("running", "active"):
@@ -372,21 +372,6 @@ def get_next_queued_job() -> Optional[RunJob]:
 
     Returns the oldest queued job (by created_at) from the queue folder(s),
     or None if there are no queued jobs.
-
-    Typical engine usage pattern:
-
-        while True:
-            job = get_next_queued_job()
-            if job is None:
-                time.sleep(2)
-                continue
-
-            update_job_status(job.run_id, "active")
-            try:
-                ... run engine ...
-                update_job_status(job.run_id, "finished")
-            except Exception:
-                update_job_status(job.run_id, "error")
     """
     queued = list_jobs(status="queued", limit=1000)
     if not queued:
@@ -433,10 +418,9 @@ def result_path(run_id: str) -> Path:
     """
     Path where the worker should write final result JSON for a run.
 
-    IMPORTANT:
-        This returns runs/finished/{run_id}.json to match the Streamlit
-        UI, which expects finished results in that location and with that
-        naming convention.
+    This returns runs/finished/{run_id}.json to match the Streamlit
+    UI, which expects finished results in that location and with that
+    naming convention.
 
     Recommended schema (example):
         {
@@ -461,3 +445,46 @@ def error_log_path(run_id: str) -> Path:
     Path where the worker can write an error message or traceback.
     """
     return ERROR_DIR / f"{run_id}_error.txt"
+
+
+# ---------------------------------------------------------------------------
+# Engine-worker specific helpers (used by engine_worker.py)
+# ---------------------------------------------------------------------------
+
+def load_next_pending_job() -> Optional[RunJob]:
+    """
+    Engine worker entry point: claim and return the next queued job,
+    already moved to ACTIVE status.
+    """
+    return claim_next_job()
+
+
+def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
+    """
+    Write final result JSON for a job and mark it finished.
+
+    Used by engine_worker queue mode.
+    """
+    rp = result_path(job.run_id)
+    rp.parent.mkdir(parents=True, exist_ok=True)
+    with rp.open("w", encoding="utf8") as f:
+        json.dump(result_obj, f, indent=2)
+
+    update_job_status(job.run_id, "finished")
+
+
+def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
+    """
+    Write error information for a job and mark it as error.
+
+    error_info can be a string or a dict.
+    """
+    ep = error_log_path(job.run_id)
+    ep.parent.mkdir(parents=True, exist_ok=True)
+    with ep.open("w", encoding="utf8") as f:
+        if isinstance(error_info, str):
+            f.write(error_info)
+        else:
+            json.dump(error_info, f, indent=2)
+
+    update_job_status(job.run_id, "error")
