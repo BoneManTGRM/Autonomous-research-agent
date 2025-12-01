@@ -7,8 +7,8 @@ Background Worker or separate service.
 Key ideas:
 - Uses the same CoreAgent and MemoryStore as the Streamlit UI.
 - Can run in three styles:
-    1) Classic single agent continuous mode (now finite-only)
-    2) Classic swarm continuous mode (now finite-only)
+    1) Single agent engine mode (finite-only)
+    2) Swarm engine mode (finite-only)
     3) Meta-controller mode ("Option C") that plans multiple phases:
        - exploration
        - stabilization
@@ -53,7 +53,7 @@ import yaml
 
 from agent.core_agent import CoreAgent
 from agent.memory_store import MemoryStore
-from agent.presets import PRESETS, get_preset  # PRESETS for backward compat defaults
+from agent.presets import PRESETS, get_preset  # PRESETS for domain defaults
 from agent.rye_metrics import build_run_diagnostics
 
 # Optional tools registry for web browser and sandbox detection
@@ -851,7 +851,6 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             if save_job_result is not None:
                 save_job_result(job, result_obj)
             else:
-                # Best effort fallback
                 out_dir = BASE_DIR / "finished"
                 out_dir.mkdir(parents=True, exist_ok=True)
                 rp = out_dir / f"{job.run_id}.json"
@@ -922,7 +921,7 @@ def run_job_queue_worker() -> None:
         - Polls the job queue via agent.run_jobs.load_next_pending_job.
         - For each job:
             * Runs it with _process_single_job
-        - Loops forever so Render worker can stay alive.
+        - Loops continuously so Render worker can stay alive.
     """
     if RunJob is None or load_next_pending_job is None:
         print("Queue mode requested but agent/run_jobs.py is not available.")
@@ -947,7 +946,7 @@ def run_job_queue_worker() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Simple classic engines (single and swarm)
+# Single and swarm engines
 # ---------------------------------------------------------------------------
 
 
@@ -1062,7 +1061,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         stop_rye=stop_rye,
         max_minutes=max_minutes,
         run_id=run_id,
-        experiment_mode="classic_single",
+        experiment_mode="single_engine",
         extra={"experiment_fingerprint": experiment_fingerprint},
     )
     _heartbeat(agent, label="worker_single_start", run_id=run_id)
@@ -1078,7 +1077,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         stop_rye=stop_rye,
         max_minutes=max_minutes,
         run_id=run_id,
-        experiment_mode="classic_single",
+        experiment_mode="single_engine",
         extra={"experiment_fingerprint": experiment_fingerprint},
     )
 
@@ -1159,7 +1158,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         stop_rye=stop_rye,
         max_minutes=max_minutes,
         run_id=run_id,
-        experiment_mode="classic_single",
+        experiment_mode="single_engine",
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "final_diagnostics": diag,
@@ -1291,7 +1290,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         stop_rye=stop_rye,
         max_minutes=max_minutes,
         run_id=run_id,
-        experiment_mode="classic_swarm",
+        experiment_mode="swarm_engine",
         extra={"experiment_fingerprint": experiment_fingerprint},
     )
     _heartbeat(agent, label="worker_swarm_start", run_id=run_id)
@@ -1307,7 +1306,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         stop_rye=stop_rye,
         max_minutes=max_minutes,
         run_id=run_id,
-        experiment_mode="classic_swarm",
+        experiment_mode="swarm_engine",
         extra={"experiment_fingerprint": experiment_fingerprint},
     )
 
@@ -1461,7 +1460,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         stop_rye=stop_rye,
         max_minutes=max_minutes,
         run_id=run_id,
-        experiment_mode="classic_swarm",
+        experiment_mode="swarm_engine",
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "final_diagnostics": diag,
@@ -1677,7 +1676,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     - WORKER_META_MAX_SEGMENTS (max number of segments, default 6)
     - WORKER_RUNTIME_PROFILE (hint for phase profiles only)
     - WORKER_MODE / WORKER_SWARM (preferred mode: single vs swarm)
-    - WORKER_SOURCES etc as in classic engines
+    - WORKER_SOURCES etc as in single and swarm engines
     """
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
@@ -2066,11 +2065,11 @@ def main() -> None:
     Mode selection:
     - WORKER_QUEUE_MODE=1 (default) -> file-based queue worker using agent/run_jobs.
       If agent/run_jobs.py is missing or fails to import, queue mode logs an error
-      and returns instead of silently falling back.
-    - WORKER_QUEUE_MODE=0 -> classic behavior:
+      and returns; the queue worker cannot start.
+    - WORKER_QUEUE_MODE=0 -> direct engine behavior:
         - WORKER_META=1          -> run meta controller (Option C, finite-only)
-        - WORKER_META=0 and WORKER_MODE=swarm or WORKER_SWARM=1 -> classic swarm engine (finite-only)
-        - otherwise             -> classic single agent engine (finite-only)
+        - WORKER_META=0 and WORKER_MODE=swarm or WORKER_SWARM=1 -> swarm engine (finite-only)
+        - otherwise             -> single agent engine (finite-only)
     """
     print("Starting Autonomous Research Agent background engine (finite-only mode)...")
     sys.stdout.flush()
