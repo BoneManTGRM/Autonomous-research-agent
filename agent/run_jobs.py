@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # Base folder for all runs
 # Use ARA_RUNS_DIR if set so UI and worker can share the same disk
-BASE_DIR = Path(os.environ.get("ARA_RUNS_DIR", "runs"))
+BASE_DIR = Path(os.environ.get("ARA_RUNS_DIR", "runs")).resolve()
 
 # Job layout used by the engine worker:
 #   - runs/pending/   : file based queue of pending jobs (canonical queue)
@@ -188,7 +188,7 @@ def create_job(
         meta=meta or {},
     )
 
-    # Save into the canonical pending or queue folder
+    # Save into the canonical pending folder
     job.save_to(PENDING_DIR)
 
     # Shadow copy to queue folder for maximal compatibility.
