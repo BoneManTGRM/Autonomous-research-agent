@@ -204,7 +204,7 @@ except ModuleNotFoundError as e:
 CONFIG_PATH_DEFAULT = str(REPO_ROOT / "config" / "settings.yaml")
 
 # Rough estimate for cycles per hour in continuous mode.
-# Used historically; now only advisory metadata for the worker.
+# Used historically; now only advisory metadata handed to the worker.
 CYCLES_PER_HOUR_ESTIMATE = 120
 
 # Swarm roles: base archetypes for mini agents
@@ -223,7 +223,8 @@ MAX_SWARM_AGENTS: int = 32
 # Limit points in charts so the frontend does not hit RangeError on very long runs.
 MAX_POINTS_FOR_CHARTS: int = 1000
 
-# Where legacy background worker control_state is stored (still view only / control only)
+# Where optional legacy background worker control_state is stored
+# (useful only if you run a timed/background worker in parallel).
 CONTROL_STATE_PATH = Path("logs/control_state.json")
 
 
@@ -247,7 +248,7 @@ def ensure_directories() -> None:
 
 
 def load_control_state() -> Dict[str, Any]:
-    """Load the shared control state used by the background worker (legacy)."""
+    """Load the shared control state used by an optional background worker (legacy)."""
     ensure_directories()
     if not CONTROL_STATE_PATH.exists():
         return {}
@@ -262,7 +263,7 @@ def load_control_state() -> Dict[str, Any]:
 
 
 def save_control_state(state: Dict[str, Any]) -> None:
-    """Persist the shared control state for the background worker (legacy)."""
+    """Persist the shared control state for an optional background worker (legacy)."""
     ensure_directories()
     try:
         with CONTROL_STATE_PATH.open("w", encoding="utf-8") as f:
@@ -1458,7 +1459,7 @@ def main() -> None:
         max_value=200,
         value=3,
         step=1,
-        help="Used when Run mode is Manual. Timed modes are disabled in this build.",
+        help="Used when Run mode is Manual. There are no timed presets in this build.",
     )
 
     run_button = st.button("Queue run request")
@@ -1663,14 +1664,14 @@ def main() -> None:
     # Engine control panel (legacy background worker control_state)
     # ------------------------------
     st.markdown("---")
-    st.subheader("Engine control panel (for background worker)")
+    st.subheader("Engine control panel (optional legacy background worker)")
 
     control_state = load_control_state()
     current_status = control_state.get("status", "idle")
     st.write(f"Current engine status: **{current_status}**")
 
     # Run time progress based on control_state
-    st.markdown("#### Run time progress")
+    st.markdown("#### Run time progress (if your worker uses time budgets)")
 
     max_minutes_cfg = control_state.get("max_minutes")
     ts_str = control_state.get("timestamp_utc")
@@ -1693,7 +1694,10 @@ def main() -> None:
             progress_fraction = None
 
     if max_minutes_cfg is None:
-        st.write("This worker configured run has no fixed time budget (Forever mode).")
+        st.write(
+            "No fixed time budget recorded in control_state. "
+            "If you run only finite jobs via the queue, this panel is informational only."
+        )
     else:
         col_rt1, col_rt2, col_rt3 = st.columns(3)
         with col_rt1:
@@ -1719,7 +1723,10 @@ def main() -> None:
         with st.expander("Raw control state"):
             st.code(json.dumps(control_state, indent=2), language="json")
     else:
-        st.write("No control state file yet. The worker may not be configured via control_state.json.")
+        st.write(
+            "No control state file yet. If you only use the finite file-based queue, "
+            "you can ignore this section."
+        )
 
     col_start, col_pause, col_stop = st.columns(3)
 
@@ -2589,7 +2596,7 @@ def main() -> None:
                 st.graphviz_chart(dot)
 
     # ------------------------------
-    # Run diagnostics (continuous mode support from MemoryStore)
+    # Run diagnostics (state from MemoryStore)
     # ------------------------------
     st.markdown("---")
     st.subheader("Run diagnostics")
@@ -2611,7 +2618,8 @@ def main() -> None:
                 if st.button("Clear saved run state", key="clear_run_state_btn"):
                     memory.clear_run_state()  # type: ignore[call-arg]
                     st.success(
-                        "Saved run state cleared. It will be rebuilt on the next continuous run by the worker."
+                        "Saved run state cleared. It will be rebuilt on the next run "
+                        "by your engine worker."
                     )
             else:
                 st.info("MemoryStore.clear_run_state not available in this build.")
