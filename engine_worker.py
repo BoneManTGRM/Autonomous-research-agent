@@ -602,7 +602,7 @@ def _write_job_progress(
     Best-effort progress writer for queue jobs.
 
     Writes runs/active/{run_id}_progress.json using run_jobs.progress_path
-    so the Streamlit UI can show basic status, even if we don't have
+    so the Streamlit UI can show basic status, even if we do not have
     per-cycle callbacks.
     """
     if progress_path is None:
@@ -1800,13 +1800,9 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     stop_rye_env = _env_float("WORKER_STOP_RYE")
     resume = _env_bool("WORKER_RESUME", default=True)
     watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
-    forever_env = _env_bool("WORKER_FOREVER", default=False)
 
     if total_budget_minutes is None:
-        if forever_env:
-            total_budget_minutes = 24 * 60.0
-        else:
-            total_budget_minutes = float(preset_cfg.get("runtime_minutes", 60.0))
+        total_budget_minutes = float(preset_cfg.get("runtime_minutes", 60.0))
 
     if total_budget_minutes <= 0:
         total_budget_minutes = 60.0
