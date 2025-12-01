@@ -14,20 +14,21 @@ BASE_DIR = Path("runs")
 
 # New job layout used by the engine worker:
 #   - runs/pending/   : file based queue of pending jobs (canonical queue)
-#   - runs/active/    : in progress metadata + optional progress JSON
+#   - runs/active/    : in progress metadata and optional progress JSON
 #   - runs/finished/  : final result JSON (one file per run_id)
-#   - runs/error/     : failed job metadata + optional traceback
+#   - runs/error/     : failed job metadata and optional traceback
 PENDING_DIR = BASE_DIR / "pending"
 ACTIVE_DIR = BASE_DIR / "active"
 FINISHED_DIR = BASE_DIR / "finished"
 ERROR_DIR = BASE_DIR / "error"
 
-# Backwards compatible alias for old name "queue"
-# Many engine scripts import QUEUE_DIR from this module, so this keeps them working.
-# QUEUE_DIR now points at the new canonical pending folder.
+# Backwards compatible alias for old name "queue".
+# Many engine scripts import QUEUE_DIR from this module.
+# QUEUE_DIR now points at the canonical pending folder.
 QUEUE_DIR = PENDING_DIR
 
-# Optional legacy "queue" folder support (for older jobs only - read/compat)
+# Optional legacy "queue" folder support (for older jobs only - read and compat).
+# Old workers that still watch runs/queue directly will look here.
 LEGACY_QUEUE_DIR = BASE_DIR / "queue"
 
 # Make sure directories exist at import time
@@ -164,7 +165,7 @@ def create_job(
 
     Args:
         config: Arbitrary configuration dict for the engine worker.
-        meta:   Optional metadata for UI / logging (domain, label, etc).
+        meta:   Optional metadata for UI or logging (domain, label, etc).
         run_id: Optional externally generated ID. If omitted, uuid4 is used.
 
     Returns:
@@ -185,11 +186,14 @@ def create_job(
     # Save into the canonical pending/queue folder
     job.save_to(PENDING_DIR)
 
-    # NOTE:
-    # We no longer create NEW jobs in LEGACY_QUEUE_DIR.
-    # LEGACY_QUEUE_DIR is kept read-only for old jobs created by older versions.
-    # Engine workers still read from it for compatibility, but all new writes
-    # are to runs/pending/.
+    # Shadow copy to legacy queue folder for maximal backward compatibility.
+    # Old workers that still watch runs/queue directly will see this.
+    try:
+        job.save_to(LEGACY_QUEUE_DIR)
+    except Exception:
+        # Legacy compatibility should never crash job creation.
+        pass
+
     return run_id
 
 
@@ -223,7 +227,7 @@ def move_job(run_id: str, from_status: str, to_status: str) -> Tuple[Optional[Ru
     """
     src_path = _job_path_for_status(run_id, from_status)
     if not src_path.exists():
-        # Try legacy queue dir as a backup for from_status == queued/pending
+        # Try legacy queue dir as a backup for from_status == queued or pending
         if from_status.lower() in ("queued", "pending"):
             legacy_path = LEGACY_QUEUE_DIR / f"{run_id}.json"
             if not legacy_path.exists():
@@ -316,25 +320,28 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
         error       - jobs in runs/error
 
     NOTE:
-        This function does NOT filter based on the internal job.status string,
+        This function does not filter based on the internal job.status string,
         it simply reads all *.json files from the appropriate folder(s).
         That means old jobs with status "queued" or "pending" in runs/pending
         or runs/queue are all visible to the engine and the UI.
     """
-    jobs: List[RunJob] = []
+    jobs_by_id: Dict[str, RunJob] = {}
 
     def collect(folder: Path) -> None:
         if not folder.exists():
             return
         for path in sorted(folder.glob("*.json")):
+            # skip progress and non metadata files
+            if path.name.endswith("_progress.json"):
+                continue
             try:
-                # skip progress and non-metadata files
-                if path.name.endswith("_progress.json"):
-                    continue
                 job = load_job(path)
-                jobs.append(job)
             except Exception:
                 continue
+
+            existing = jobs_by_id.get(job.run_id)
+            if existing is None or job.created_at > existing.created_at:
+                jobs_by_id[job.run_id] = job
 
     if status is None:
         # Search all status folders plus legacy queue
@@ -343,7 +350,7 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
     else:
         norm = status.lower()
         if norm in ("pending", "queued"):
-            # queue/pending jobs from both canonical and legacy folders
+            # queue or pending jobs from both canonical and legacy folders
             collect(PENDING_DIR)
             collect(LEGACY_QUEUE_DIR)
         elif norm in ("running", "active"):
@@ -353,6 +360,7 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
         elif norm == "error":
             collect(ERROR_DIR)
 
+    jobs: List[RunJob] = list(jobs_by_id.values())
     # Sort by created_at descending
     jobs.sort(key=lambda j: j.created_at, reverse=True)
     return jobs[:limit]
@@ -392,7 +400,7 @@ def claim_next_job() -> Optional[RunJob]:
     Atomically claim the next queued job by marking it active.
 
     Engine workers can call this to get the next job and immediately
-    move it to the active folder so that other workers dont pick it up.
+    move it to the active folder so that other workers do not pick it up.
 
     Returns:
         RunJob or None if there is no queued job.
