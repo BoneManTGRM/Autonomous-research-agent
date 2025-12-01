@@ -20,7 +20,7 @@ Finite-only mode:
   * Single agent: bounded by WORKER_MAX_CYCLES and/or WORKER_MAX_MINUTES
   * Swarm: bounded by WORKER_MAX_ROUNDS and/or WORKER_MAX_MINUTES
   * Meta controller: bounded by WORKER_MAX_MINUTES or derived budget
-- Runtime profiles are treated as *hints* for internal tuning only, not as
+- Runtime profiles are treated as hints for internal tuning only, not as
   permission to run forever.
 
 NEW:
@@ -91,7 +91,7 @@ CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
 
 # ---------------------------------------------------------------------------
-# Config + environment helpers
+# Config and environment helpers
 # ---------------------------------------------------------------------------
 
 
@@ -165,8 +165,8 @@ def detect_tools() -> Dict[str, bool]:
         "browser",
         "web",
         "internet",
-        "tavily_search",       # standard Tavily tool name
-        "extreme_web_search",  # your Option C wrapper, if present
+        "tavily_search",
+        "extreme_web_search",
     }
     sandbox_keys = {"sandbox", "code_sandbox", "python_sandbox", "exec_sandbox"}
 
@@ -206,7 +206,6 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
     5. Final clamp based on TOOL_REGISTRY detection: if sandbox tool is not
        present, sandbox is forced to False.
     """
-    # Base defaults
     defaults: Dict[str, bool] = {
         "web": True,
         "pubmed": True,
@@ -232,7 +231,6 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
     else:
         sc = defaults.copy()
 
-    # Per source env overrides (optional)
     def _override_bool(key: str, env_name: str) -> None:
         raw = os.getenv(env_name)
         if raw is not None:
@@ -245,13 +243,10 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
     _override_bool("biomarkers", "WORKER_BIOMARKERS")
     _override_bool("sandbox", "WORKER_SANDBOX")
 
-    # Final clamp based on TOOL_REGISTRY capabilities
     flags = detect_tools()
     if not flags["sandbox"]:
         sc["sandbox"] = False
 
-    # Web clamp is softer: if web tool is not present but Tavily key exists,
-    # the CoreAgent can still use Tavily directly.
     if not flags["web"]:
         if not os.getenv("TAVILY_API_KEY"):
             sc["web"] = False
@@ -269,8 +264,10 @@ def init_agent_from_config() -> Tuple[CoreAgent, Dict[str, Any]]:
     ensure_directories()
     config = load_settings(CONFIG_PATH_DEFAULT)
 
-    # Allow overriding memory file and config path via env for flexible deployments
-    memory_file = os.getenv("WORKER_MEMORY_FILE", config.get("memory_file", "logs/sessions/default_memory.json"))
+    memory_file = os.getenv(
+        "WORKER_MEMORY_FILE",
+        config.get("memory_file", "logs/sessions/default_memory.json"),
+    )
     memory_path = Path(memory_file)
     memory_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -295,7 +292,6 @@ def build_goal_and_domain() -> Tuple[str, str]:
     """
     config = load_settings(CONFIG_PATH_DEFAULT)
 
-    # Goal
     env_goal = os.getenv("WORKER_GOAL")
     if env_goal:
         goal = env_goal
@@ -315,7 +311,6 @@ def build_goal_and_domain() -> Tuple[str, str]:
                 "Long run autonomous research on reparodynamics, RYE, TGRM, and related stability frameworks.",
             )
 
-    # Domain
     env_domain = os.getenv("WORKER_DOMAIN")
     if env_domain:
         domain = env_domain
@@ -362,7 +357,6 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
             else:
                 ms.heartbeat(label=label)
     except Exception:
-        # Heartbeat must never crash the worker
         return
 
 
@@ -470,7 +464,6 @@ def _log_run_manifest(
     try:
         ms.log_run_manifest(run_id, manifest)
     except Exception:
-        # Manifest logging must not crash the worker
         return
 
 
@@ -636,7 +629,10 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     domain = str(job.config.get("domain", base_domain))
 
     preset_cfg = get_preset(domain)
-    runtime_profile = job.config.get("runtime_profile", preset_cfg.get("default_runtime_profile"))
+    runtime_profile = job.config.get(
+        "runtime_profile",
+        preset_cfg.get("default_runtime_profile"),
+    )
 
     mode = str(job.config.get("mode", job.config.get("engine_mode", "single"))).lower()
     role = str(job.config.get("role", "agent"))
@@ -651,14 +647,12 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             except Exception:
                 roles_list = ["agent"]
 
-    # Explicit cycle and round flags
     max_cycles_explicit = "max_cycles" in job.config or "cycles" in job.config
     max_rounds_explicit = "max_rounds" in job.config or "rounds" in job.config
 
     max_cycles = int(job.config.get("max_cycles", job.config.get("cycles", 10_000_000)))
     max_rounds = int(job.config.get("max_rounds", max_cycles))
 
-    # Time guard: only used when there is no explicit cycles or rounds limit
     raw_max_minutes = job.config.get("max_minutes")
     if (mode == "single" and max_cycles_explicit) or (mode == "swarm" and max_rounds_explicit):
         max_minutes: Optional[float] = None
@@ -720,7 +714,10 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     print(f"Roles (swarm): {roles_list if roles_list is not None else 'auto'}")
     print(f"Max cycles (single): {max_cycles} (explicit: {max_cycles_explicit})")
     print(f"Max rounds (swarm): {max_rounds} (explicit: {max_rounds_explicit})")
-    print(f"Max minutes guard: {max_minutes if max_minutes is not None else 'None (cycles/rounds driven)'}")
+    print(
+        "Max minutes guard: "
+        f"{max_minutes if max_minutes is not None else 'None (cycles/rounds driven)'}"
+    )
     print(f"Stop RYE: {stop_rye if stop_rye is not None else 'None'}")
     print(f"Runtime profile: {runtime_profile or 'None'}")
     print(f"Resume: {resume}")
@@ -842,7 +839,6 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         except Exception:
             print("Manifest logging failed for job, see logs for details.")
 
-        # Write result JSON for the UI to read
         result_obj: Dict[str, Any] = {
             "run_id": job.run_id,
             "mode": mode,
@@ -942,7 +938,6 @@ def run_job_queue_worker() -> None:
     _configure_tavily_from_env()
     agent, config = init_agent_from_config()
 
-    # Make sure the queue directory exists so we don't silently idle forever
     try:
         QUEUE_DIR.mkdir(parents=True, exist_ok=True)
     except Exception:
@@ -1028,7 +1023,6 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     resume = _env_bool("WORKER_RESUME", default=True)
     watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
 
-    # NEW: explicit finite cycles control
     max_cycles_env = os.getenv("WORKER_MAX_CYCLES")
     if max_cycles_env is not None:
         try:
@@ -1038,10 +1032,8 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     else:
         max_cycles = 10_000_000
 
-    # Finite-only mode: forever is always False
     forever = False
 
-    # Domain aware source controls: preset defaults feed into config unless YAML overrides them
     config_for_sources = dict(config)
     if "default_source_controls" not in config_for_sources:
         sc_preset = preset_cfg.get("source_controls")
@@ -1081,10 +1073,19 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Role: {role}")
     print(f"Run id: {run_id}")
     print(f"Runtime profile (env override): {runtime_profile_env or 'None'}")
-    print(f"Runtime profile (effective, hint only): {runtime_profile or 'None (engine default)'}")
-    print(f"Max minutes (explicit): {max_minutes if max_minutes is not None else 'None (cycles-only guard)'}")
+    print(
+        "Runtime profile (effective, hint only): "
+        f"{runtime_profile or 'None (engine default)'}"
+    )
+    print(
+        "Max minutes (explicit): "
+        f"{max_minutes if max_minutes is not None else 'None (cycles-only guard)'}"
+    )
     print(f"Max cycles: {max_cycles}")
-    print(f"Stop RYE threshold (explicit): {stop_rye if stop_rye is not None else 'None (preset/profile)'}")
+    print(
+        "Stop RYE threshold (explicit): "
+        f"{stop_rye if stop_rye is not None else 'None (preset/profile)'}"
+    )
     print(f"Forever mode (disabled in finite-only): {forever}")
     print(f"Resume from checkpoint: {resume}")
     print(f"Watchdog interval (min): {watchdog_minutes}")
@@ -1241,7 +1242,6 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     resume = _env_bool("WORKER_RESUME", default=True)
     watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
 
-    # NEW: explicit finite rounds control
     max_rounds_env = os.getenv("WORKER_MAX_ROUNDS")
     if max_rounds_env is not None:
         try:
@@ -1251,14 +1251,12 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     else:
         max_rounds = 10_000_000
 
-    # New: shift based scheduling for swarm
     shift_minutes = _env_float("WORKER_SHIFT_MINUTES")
     repeat_shifts = _env_bool("WORKER_REPEAT_SHIFTS", default=False)
 
     if roles_list is None:
         roles_list = agent.get_agent_roles()
 
-    # Finite-only mode: forever is always False
     forever = False
 
     config_for_sources = dict(config)
@@ -1302,10 +1300,19 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Roles: {roles_list}")
     print(f"Run id: {run_id}")
     print(f"Runtime profile (env override): {runtime_profile_env or 'None'}")
-    print(f"Runtime profile (effective, hint only): {runtime_profile or 'None (engine default)'}")
-    print(f"Max minutes (explicit): {max_minutes if max_minutes is not None else 'None (rounds-only guard)'}")
+    print(
+        "Runtime profile (effective, hint only): "
+        f"{runtime_profile or 'None (engine default)'}"
+    )
+    print(
+        "Max minutes (explicit): "
+        f"{max_minutes if max_minutes is not None else 'None (rounds-only guard)'}"
+    )
     print(f"Max rounds: {max_rounds}")
-    print(f"Stop RYE threshold (explicit): {stop_rye if stop_rye is not None else 'None (preset/profile)'}")
+    print(
+        "Stop RYE threshold (explicit): "
+        f"{stop_rye if stop_rye is not None else 'None (preset/profile)'}"
+    )
     print(f"Forever mode (disabled in finite-only): {forever}")
     print(f"Resume from checkpoint: {resume}")
     print(f"Watchdog interval (min): {watchdog_minutes}")
@@ -1347,11 +1354,9 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         extra={"experiment_fingerprint": experiment_fingerprint},
     )
 
-    # New: support back to back swarm shifts
     summaries_all: List[Dict[str, Any]] = []
 
     if not repeat_shifts or shift_minutes is None or shift_minutes <= 0:
-        # Classic behavior: one big run_swarm_continuous call (finite)
         summaries_all = agent.run_swarm_continuous(
             goal=goal,
             max_rounds=max_rounds,
@@ -1368,12 +1373,10 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             runtime_profile=runtime_profile,
         )
     else:
-        # Shift mode: run repeated blocks of shift_minutes (still finite by rounds/minutes)
         total_elapsed = 0.0
         shift_index = 0
 
         while True:
-            # Compute minutes for this shift
             if max_minutes is not None:
                 remaining = max_minutes - total_elapsed
                 if remaining <= 0:
@@ -1383,7 +1386,10 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 this_shift_minutes = shift_minutes
 
             shift_index += 1
-            print(f"--- Swarm shift {shift_index} starting, budget {this_shift_minutes:.2f} minutes ---")
+            print(
+                f"--- Swarm shift {shift_index} starting, "
+                f"budget {this_shift_minutes:.2f} minutes ---"
+            )
             sys.stdout.flush()
 
             shift_summaries = agent.run_swarm_continuous(
@@ -1423,23 +1429,21 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             )
             sys.stdout.flush()
 
-            # Stop if we hit total max_minutes
             if max_minutes is not None and total_elapsed >= max_minutes:
                 break
 
-            # If repeat_shifts is disabled, stop after one shift
             if not repeat_shifts:
                 break
-
-            # If repeat_shifts is True and max_minutes is None, loop until external stop
-            # but still finite by max_rounds inside each call.
 
     summaries = summaries_all
 
     _heartbeat(agent, label="worker_swarm_finished", run_id=run_id)
 
     print("=== Swarm run finished cleanly (finite) ===")
-    print(f"Total summaries produced across all roles and rounds: {len(summaries)}")
+    print(
+        "Total summaries produced across all roles and rounds: "
+        f"{len(summaries)}"
+    )
     diag: Dict[str, Any] = {}
     try:
         diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
@@ -1664,7 +1668,7 @@ def _adjust_phase_from_stats(
         - If RYE is very low or trending down, shorten the next segment and lower stop_rye.
         - If RYE is healthy or trending up, keep or extend the next segment and raise stop_rye a bit.
     """
-    _ = stats  # placeholder for future use
+    _ = stats
     base_target = float(phase_cfg.get("target_minutes", 20.0))
     min_minutes = float(phase_cfg.get("min_minutes", 5.0))
     max_minutes = float(phase_cfg.get("max_minutes", base_target))
@@ -1737,9 +1741,6 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
     forever_env = _env_bool("WORKER_FOREVER", default=False)
 
-    # Finite-only: macro budget does not come from timed presets anymore.
-    # If WORKER_MAX_MINUTES is not set, fall back to preset config.
-    # If WORKER_FOREVER is set, interpret it as a large but finite budget.
     if total_budget_minutes is None:
         if forever_env:
             total_budget_minutes = 24 * 60.0
@@ -1749,7 +1750,6 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     if total_budget_minutes <= 0:
         total_budget_minutes = 60.0
 
-    # Domain aware source controls here as well
     config_for_sources = dict(config)
     if "default_source_controls" not in config_for_sources:
         sc_preset = preset_cfg.get("source_controls")
@@ -1783,7 +1783,10 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         env_keys=env_keys_for_fingerprint,
     )
 
-    print("=== Autonomous Research Engine - Meta Controller Mode (Option C, Finite Only) ===")
+    print(
+        "=== Autonomous Research Engine - Meta Controller Mode "
+        "(Option C, Finite Only) ==="
+    )
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
     print(f"Run id: {run_id}")
@@ -1791,7 +1794,10 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Total macro budget (minutes): {total_budget_minutes}")
     print(f"Max meta segments: {meta_max_segments_int}")
     print(f"Runtime profile hint (env): {runtime_profile_env or 'none'}")
-    print(f"Explicit stop RYE (env): {stop_rye_env if stop_rye_env is not None else 'None'}")
+    print(
+        "Explicit stop RYE (env): "
+        f"{stop_rye_env if stop_rye_env is not None else 'None'}"
+    )
     print(f"Resume from checkpoint: {resume}")
     print(f"Watchdog interval (min): {watchdog_minutes}")
     print(f"Source controls: {source_controls}")
@@ -1850,7 +1856,10 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     for seg_index in range(meta_max_segments_int):
         time_left = total_budget_minutes - total_elapsed
         if time_left <= 1.0:
-            print(f"[Meta] Time almost exhausted, stopping before segment {seg_index + 1}.")
+            print(
+                f"[Meta] Time almost exhausted, "
+                f"stopping before segment {seg_index + 1}."
+            )
             break
 
         if seg_index < len(meta_plan["phases"]):
@@ -1882,9 +1891,18 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         print(f"[Meta] Phase: {phase_name}")
         print(f"[Meta] Mode: {phase_mode}")
         print(f"[Meta] Segment minutes (requested): {effective_minutes:.2f}")
-        print(f"[Meta] Time left after this segment (approx): {time_left - effective_minutes:.2f}")
-        print(f"[Meta] Segment stop RYE (auto/explicit): {effective_stop_rye if effective_stop_rye is not None else 'None'}")
-        print(f"[Meta] Phase runtime profile: {phase_profile or 'preset default'}")
+        print(
+            "[Meta] Time left after this segment (approx): "
+            f"{time_left - effective_minutes:.2f}"
+        )
+        print(
+            "[Meta] Segment stop RYE (auto/explicit): "
+            f"{effective_stop_rye if effective_stop_rye is not None else 'None'}"
+        )
+        print(
+            f"[Meta] Phase runtime profile: "
+            f"{phase_profile or 'preset default'}"
+        )
         sys.stdout.flush()
 
         if phase_mode == "swarm":
@@ -1958,7 +1976,10 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         print(f"        stability: {seg_stats['stability']}")
         print(f"        momentum: {seg_stats['momentum']}")
         print(f"        smoothed recent RYE: {recent_avg_rye}")
-        print(f"        total elapsed minutes: {total_elapsed:.2f} / {total_budget_minutes:.2f}")
+        print(
+            "        total elapsed minutes: "
+            f"{total_elapsed:.2f} / {total_budget_minutes:.2f}"
+        )
         sys.stdout.flush()
 
         _log_milestone(
@@ -1968,8 +1989,8 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             domain=domain,
             label=f"meta_segment_{seg_index + 1}",
             description=(
-                f"Phase {phase_name} ({phase_mode}) finished with avg RYE {seg_stats['avg_rye']} "
-                f"and stability {seg_stats['stability']}."
+                f"Phase {phase_name} ({phase_mode}) finished with avg RYE "
+                f"{seg_stats['avg_rye']} and stability {seg_stats['stability']}."
             ),
             level="info",
             extra={
@@ -1983,7 +2004,11 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
         _heartbeat(agent, label="worker_meta_segment", run_id=run_id)
 
-        if recent_avg_rye is not None and recent_avg_rye < 0.01 and total_elapsed > total_budget_minutes * 0.6:
+        if (
+            recent_avg_rye is not None
+            and recent_avg_rye < 0.01
+            and total_elapsed > total_budget_minutes * 0.6
+        ):
             print("[Meta] RYE collapsed and most of the budget is used. Stopping early.")
             break
 
@@ -1996,10 +2021,12 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Segments executed: {total_segments}")
     print(f"Total summaries across segments: {total_summaries}")
     print(f"Final smoothed recent RYE: {recent_avg_rye}")
-    print(f"Total elapsed minutes (approx): {total_elapsed:.2f} / {total_budget_minutes:.2f}")
+    print(
+        "Total elapsed minutes (approx): "
+        f"{total_elapsed:.2f} / {total_budget_minutes:.2f}"
+    )
     sys.stdout.flush()
 
-    # Build a combined history for manifest level diagnostics
     combined_history: List[Dict[str, Any]] = []
     for seg in segments_run:
         combined_history.extend(seg.get("summaries", []))
@@ -2093,12 +2120,10 @@ def main() -> None:
 
     queue_mode = _env_bool("WORKER_QUEUE_MODE", default=True)
 
-    # Only use queue worker if the run_jobs module imported correctly
     if queue_mode and RunJob is not None and load_job_from_path is not None:
         run_job_queue_worker()
         return
     elif queue_mode:
-        # Helpful log so you can see why queue runs are not being picked up
         print(
             "Queue mode was requested (WORKER_QUEUE_MODE=1), "
             "but agent/run_jobs.py is missing or failed to import. "
