@@ -786,9 +786,7 @@ def compute_msil_profile(
         return None
 
     return None
-
-
-# -------------------------------------------------------------------
+    # -------------------------------------------------------------------
 # Advanced log and snapshot helpers
 # -------------------------------------------------------------------
 def _load_json_file(path: Path) -> Optional[Any]:
