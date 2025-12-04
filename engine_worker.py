@@ -36,6 +36,12 @@ You can start it with commands like:
 
 On Render:
     startCommand: python engine_worker.py
+
+Hard safety caps:
+- All requested cycles / rounds / minutes are clamped to hard maximums:
+    WORKER_HARD_MAX_CYCLES   (default 1,000,000)
+    WORKER_HARD_MAX_ROUNDS   (default same as HARD_MAX_CYCLES)
+    WORKER_HARD_MAX_MINUTES  (default 1,440 minutes = 24 hours)
 """
 
 from __future__ import annotations
@@ -85,6 +91,72 @@ CONFIG_PATH_DEFAULT = "config/settings.yaml"
 # Base folder for runs for worker logs and queue fallbacks.
 # This must match agent.run_jobs BASE_DIR which also respects ARA_RUNS_DIR.
 BASE_DIR = Path(os.environ.get("ARA_RUNS_DIR", "runs"))
+
+# ---------------------------------------------------------------------------
+# Hard safety caps (finite-only guard rails)
+# ---------------------------------------------------------------------------
+
+def _parse_int_env(name: str, default: int) -> int:
+    val = os.getenv(name)
+    if not val:
+        return default
+    try:
+        v = int(val)
+        if v <= 0:
+            return default
+        return v
+    except Exception:
+        return default
+
+
+def _parse_float_env(name: str, default: float) -> float:
+    val = os.getenv(name)
+    if not val:
+        return default
+    try:
+        v = float(val)
+        if v <= 0:
+            return default
+        return v
+    except Exception:
+        return default
+
+
+HARD_MAX_CYCLES: int = _parse_int_env("WORKER_HARD_MAX_CYCLES", 1_000_000)
+HARD_MAX_ROUNDS: int = _parse_int_env("WORKER_HARD_MAX_ROUNDS", HARD_MAX_CYCLES)
+HARD_MAX_MINUTES: float = _parse_float_env("WORKER_HARD_MAX_MINUTES", 1440.0)
+
+
+def _clamp_int(value: int, hard_max: int, label: str) -> int:
+    if value > hard_max:
+        print(
+            f"[Safety] {label} requested {value} exceeds hard max {hard_max}. "
+            f"Clamping to {hard_max}."
+        )
+        sys.stdout.flush()
+        return hard_max
+    if value <= 0:
+        print(f"[Safety] {label} requested {value} is non-positive. Using 1.")
+        sys.stdout.flush()
+        return 1
+    return value
+
+
+def _clamp_minutes(value: Optional[float], label: str) -> Optional[float]:
+    if value is None:
+        return None
+    if value > HARD_MAX_MINUTES:
+        print(
+            f"[Safety] {label} minutes {value} exceeds hard max {HARD_MAX_MINUTES}. "
+            f"Clamping to {HARD_MAX_MINUTES}."
+        )
+        sys.stdout.flush()
+        return HARD_MAX_MINUTES
+    if value <= 0:
+        print(f"[Safety] {label} minutes {value} is non-positive. Ignoring.")
+        sys.stdout.flush()
+        return None
+    return value
 
 
 # ---------------------------------------------------------------------------
@@ -679,8 +751,11 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     max_cycles_explicit = "max_cycles" in cfg or "cycles" in cfg
     max_rounds_explicit = "max_rounds" in cfg or "rounds" in cfg
 
-    max_cycles = int(cfg.get("max_cycles", cfg.get("cycles", 10_000_000)))
-    max_rounds = int(cfg.get("max_rounds", max_cycles))
+    requested_cycles = int(cfg.get("max_cycles", cfg.get("cycles", HARD_MAX_CYCLES)))
+    requested_rounds = int(cfg.get("max_rounds", requested_cycles))
+
+    max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "max_cycles")
+    max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
 
     raw_max_minutes = cfg.get("max_minutes")
     if (mode == "single" and max_cycles_explicit) or (mode == "swarm" and max_rounds_explicit):
@@ -693,6 +768,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 max_minutes = None
         else:
             max_minutes = None
+
+    max_minutes = _clamp_minutes(max_minutes, "job.max_minutes")
 
     stop_rye = cfg.get("stop_rye")
     if stop_rye is not None:
@@ -743,10 +820,10 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     print(f"Domain: {domain}")
     print(f"Role (single): {role}")
     print(f"Roles (swarm): {roles_list if roles_list is not None else 'auto'}")
-    print(f"Max cycles (single): {max_cycles} (explicit: {max_cycles_explicit})")
-    print(f"Max rounds (swarm): {max_rounds} (explicit: {max_rounds_explicit})")
+    print(f"Max cycles (single, clamped): {max_cycles} (explicit: {max_cycles_explicit})")
+    print(f"Max rounds (swarm, clamped): {max_rounds} (explicit: {max_rounds_explicit})")
     print(
-        "Max minutes guard: "
+        "Max minutes guard (clamped): "
         f"{max_minutes if max_minutes is not None else 'None (cycles/rounds driven)'}"
     )
     print(f"Stop RYE: {stop_rye if stop_rye is not None else 'None'}")
@@ -1077,7 +1154,9 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
 
-    max_minutes = _env_float("WORKER_MAX_MINUTES")
+    max_minutes_env = _env_float("WORKER_MAX_MINUTES")
+    max_minutes = _clamp_minutes(max_minutes_env, "single.max_minutes")
+
     stop_rye = _env_float("WORKER_STOP_RYE")
 
     runtime_profile_env = os.getenv("WORKER_RUNTIME_PROFILE")
@@ -1090,12 +1169,13 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     max_cycles_env = os.getenv("WORKER_MAX_CYCLES")
     if max_cycles_env is not None:
         try:
-            max_cycles = int(max_cycles_env)
+            requested_cycles = int(max_cycles_env)
         except Exception:
-            max_cycles = 10_000_000
+            requested_cycles = HARD_MAX_CYCLES
     else:
-        max_cycles = 10_000_000
+        requested_cycles = HARD_MAX_CYCLES
 
+    max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "single.max_cycles")
     forever = False
 
     config_for_sources = dict(config)
@@ -1142,10 +1222,10 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         f"{runtime_profile or 'None (engine default)'}"
     )
     print(
-        "Max minutes (explicit): "
+        "Max minutes (explicit, clamped): "
         f"{max_minutes if max_minutes is not None else 'None (cycles-only guard)'}"
     )
-    print(f"Max cycles: {max_cycles}")
+    print(f"Max cycles (clamped): {max_cycles}")
     print(
         "Stop RYE threshold (explicit): "
         f"{stop_rye if stop_rye is not None else 'None (preset/profile)'}"
@@ -1296,7 +1376,9 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
 
-    max_minutes = _env_float("WORKER_MAX_MINUTES")
+    max_minutes_env = _env_float("WORKER_MAX_MINUTES")
+    max_minutes = _clamp_minutes(max_minutes_env, "swarm.max_minutes")
+
     stop_rye = _env_float("WORKER_STOP_RYE")
 
     runtime_profile_env = os.getenv("WORKER_RUNTIME_PROFILE")
@@ -1309,13 +1391,16 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     max_rounds_env = os.getenv("WORKER_MAX_ROUNDS")
     if max_rounds_env is not None:
         try:
-            max_rounds = int(max_rounds_env)
+            requested_rounds = int(max_rounds_env)
         except Exception:
-            max_rounds = 10_000_000
+            requested_rounds = HARD_MAX_ROUNDS
     else:
-        max_rounds = 10_000_000
+        requested_rounds = HARD_MAX_ROUNDS
 
-    shift_minutes = _env_float("WORKER_SHIFT_MINUTES")
+    max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "swarm.max_rounds")
+
+    shift_minutes_env = _env_float("WORKER_SHIFT_MINUTES")
+    shift_minutes = _clamp_minutes(shift_minutes_env, "swarm.shift_minutes")
     repeat_shifts = _env_bool("WORKER_REPEAT_SHIFTS", default=False)
 
     if roles_list is None:
@@ -1369,10 +1454,10 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         f"{runtime_profile or 'None (engine default)'}"
     )
     print(
-        "Max minutes (explicit): "
+        "Max minutes (explicit, clamped): "
         f"{max_minutes if max_minutes is not None else 'None (rounds-only guard)'}"
     )
-    print(f"Max rounds: {max_rounds}")
+    print(f"Max rounds (clamped): {max_rounds}")
     print(
         "Stop RYE threshold (explicit): "
         f"{stop_rye if stop_rye is not None else 'None (preset/profile)'}"
@@ -1382,7 +1467,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Watchdog interval (min): {watchdog_minutes}")
     print(f"Source controls: {source_controls}")
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
-    print(f"Shift minutes: {shift_minutes if shift_minutes is not None else 'None'}")
+    print(f"Shift minutes (clamped): {shift_minutes if shift_minutes is not None else 'None'}")
     print(f"Repeat shifts: {repeat_shifts}")
     print(f"Experiment fingerprint: {experiment_fingerprint}")
     sys.stdout.flush()
@@ -1655,6 +1740,9 @@ def _initial_meta_plan(
     if total_budget_minutes is None or total_budget_minutes <= 0:
         total_budget_minutes = 60.0
 
+    # Apply hard clamp for macro budget
+    total_budget_minutes = _clamp_minutes(total_budget_minutes, "meta.total_budget") or 60.0
+
     explore_min = max(5.0, total_budget_minutes * 0.4)
     stabilize_min = max(5.0, total_budget_minutes * 0.4)
     refine_min = max(5.0, total_budget_minutes * 0.2)
@@ -1735,7 +1823,7 @@ def _adjust_phase_from_stats(
     _ = stats
     base_target = float(phase_cfg.get("target_minutes", 20.0))
     min_minutes = float(phase_cfg.get("min_minutes", 5.0))
-    max_minutes = float(phase_cfg.get("max_minutes", base_target))
+    max_minutes_phase = float(phase_cfg.get("max_minutes", base_target))
     base_stop_rye = phase_cfg.get("base_stop_rye")
     effective_stop_rye: Optional[float] = None
 
@@ -1753,13 +1841,15 @@ def _adjust_phase_from_stats(
             effective_minutes = base_target
             effective_stop_rye = (base_stop_rye or 0.05) * 1.1
         else:
-            effective_minutes = min(max_minutes, base_target * 1.2)
+            effective_minutes = min(max_minutes_phase, base_target * 1.2)
             effective_stop_rye = (base_stop_rye or 0.08) * 1.25
 
     if effective_minutes < min_minutes:
         effective_minutes = min_minutes
-    if effective_minutes > max_minutes:
-        effective_minutes = max_minutes
+    if effective_minutes > max_minutes_phase:
+        effective_minutes = max_minutes_phase
+
+    effective_minutes = _clamp_minutes(effective_minutes, "meta.segment") or min_minutes
 
     return effective_minutes, effective_stop_rye
 
@@ -1789,7 +1879,13 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
 
-    total_budget_minutes = _env_float("WORKER_MAX_MINUTES")
+    total_budget_minutes_env = _env_float("WORKER_MAX_MINUTES")
+    if total_budget_minutes_env is None:
+        total_budget_minutes_env = float(preset_cfg.get("runtime_minutes", 60.0))
+    total_budget_minutes = _clamp_minutes(total_budget_minutes_env, "meta.total_budget")
+    if total_budget_minutes is None:
+        total_budget_minutes = 60.0
+
     meta_max_segments = _env_float("WORKER_META_MAX_SEGMENTS")
     if meta_max_segments is None or meta_max_segments <= 0:
         meta_max_segments = 6.0
@@ -1803,12 +1899,6 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     stop_rye_env = _env_float("WORKER_STOP_RYE")
     resume = _env_bool("WORKER_RESUME", default=True)
     watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
-
-    if total_budget_minutes is None:
-        total_budget_minutes = float(preset_cfg.get("runtime_minutes", 60.0))
-
-    if total_budget_minutes <= 0:
-        total_budget_minutes = 60.0
 
     config_for_sources = dict(config)
     if "default_source_controls" not in config_for_sources:
@@ -1851,7 +1941,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Domain: {domain}")
     print(f"Run id: {run_id}")
     print(f"Preferred mode: {preferred_mode}")
-    print(f"Total macro budget (minutes): {total_budget_minutes}")
+    print(f"Total macro budget (minutes, clamped): {total_budget_minutes}")
     print(f"Max meta segments: {meta_max_segments_int}")
     print(f"Runtime profile hint (env): {runtime_profile_env or 'none'}")
     print(
@@ -1943,6 +2033,8 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         if effective_minutes > time_left:
             effective_minutes = time_left
 
+        effective_minutes = _clamp_minutes(effective_minutes, "meta.segment") or time_left
+
         if stop_rye_env is not None:
             effective_stop_rye = stop_rye_env
 
@@ -1950,7 +2042,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         print(f"[Meta] Starting segment {seg_index + 1} / {meta_max_segments_int}")
         print(f"[Meta] Phase: {phase_name}")
         print(f"[Meta] Mode: {phase_mode}")
-        print(f"[Meta] Segment minutes (requested): {effective_minutes:.2f}")
+        print(f"[Meta] Segment minutes (requested, clamped): {effective_minutes:.2f}")
         print(
             "[Meta] Time left after this segment (approx): "
             f"{time_left - effective_minutes:.2f}"
@@ -1968,7 +2060,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         if phase_mode == "swarm":
             segment_summaries = agent.run_swarm_continuous(
                 goal=goal,
-                max_rounds=10_000_000,
+                max_rounds=HARD_MAX_ROUNDS,
                 stop_rye=effective_stop_rye,
                 roles=roles_for_swarm,
                 source_controls=source_controls,
@@ -1984,7 +2076,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         else:
             segment_summaries = agent.run_continuous(
                 goal=goal,
-                max_cycles=10_000_000,
+                max_cycles=HARD_MAX_CYCLES,
                 stop_rye=effective_stop_rye,
                 role=os.getenv("WORKER_ROLE", "agent"),
                 source_controls=source_controls,
@@ -2176,6 +2268,11 @@ def main() -> None:
         - otherwise             -> single agent engine (finite-only)
     """
     print("Starting Autonomous Research Agent background engine (finite-only mode)...")
+    print(
+        f"[Safety] HARD_MAX_CYCLES={HARD_MAX_CYCLES}, "
+        f"HARD_MAX_ROUNDS={HARD_MAX_ROUNDS}, "
+        f"HARD_MAX_MINUTES={HARD_MAX_MINUTES}"
+    )
     sys.stdout.flush()
 
     queue_mode = _env_bool("WORKER_QUEUE_MODE", default=True)
