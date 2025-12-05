@@ -662,6 +662,332 @@ def _run_post_run_intelligence(
 
 
 # ---------------------------------------------------------------------------
+# Direct single-job API for engine_worker_queue.py / tests
+# ---------------------------------------------------------------------------
+
+
+def run_engine_job(job: Any) -> Dict[str, Any]:
+    """
+    Execute a single engine job and return a result dict.
+
+    This is a pure "one-shot" API:
+      - It does NOT use the file-based queue helpers.
+      - It does NOT write result JSON to disk.
+      - It returns a structured result that Streamlit / queue wrappers can save.
+
+    `job` may be:
+      - A dict with keys: "run_id", "config", optional "meta"
+      - An object with .run_id, .config, optional .meta attributes (e.g. RunJob)
+    """
+    _configure_tavily_from_env()
+    agent, base_config = init_agent_from_config()
+
+    # Normalize job payload
+    if isinstance(job, dict):
+        cfg: Dict[str, Any] = dict(job.get("config") or {})
+        run_id = str(job.get("run_id") or cfg.get("run_id") or f"job-{int(time.time())}")
+        job_meta = job.get("meta")
+    else:
+        cfg = dict(getattr(job, "config", {}) or {})
+        run_id = str(getattr(job, "run_id", f"job-{int(time.time())}"))
+        job_meta = getattr(job, "meta", None)
+
+    base_goal, base_domain = build_goal_and_domain()
+
+    goal = str(cfg.get("goal", base_goal))
+    domain = str(cfg.get("domain", base_domain))
+
+    preset_cfg = get_preset(domain)
+    runtime_profile = cfg.get(
+        "runtime_profile",
+        preset_cfg.get("default_runtime_profile"),
+    )
+
+    mode = str(cfg.get("mode", cfg.get("engine_mode", "single"))).lower()
+    role = str(cfg.get("role", "agent"))
+    roles_list: Optional[List[str]] = None
+    if mode == "swarm":
+        raw_roles = cfg.get("roles")
+        if isinstance(raw_roles, (list, tuple)):
+            roles_list = [str(r) for r in raw_roles]
+        else:
+            try:
+                roles_list = agent.get_agent_roles()
+            except Exception:
+                roles_list = ["agent"]
+
+    max_cycles_explicit = "max_cycles" in cfg or "cycles" in cfg
+    max_rounds_explicit = "max_rounds" in cfg or "rounds" in cfg
+
+    requested_cycles = int(cfg.get("max_cycles", cfg.get("cycles", HARD_MAX_CYCLES)))
+    requested_rounds = int(cfg.get("max_rounds", requested_cycles))
+
+    max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "max_cycles")
+    max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
+
+    raw_max_minutes = cfg.get("max_minutes")
+    if (mode == "single" and max_cycles_explicit) or (mode == "swarm" and max_rounds_explicit):
+        max_minutes: Optional[float] = None
+    else:
+        if raw_max_minutes is not None:
+            try:
+                max_minutes = float(raw_max_minutes)
+            except Exception:
+                max_minutes = None
+        else:
+            max_minutes = None
+
+    max_minutes = _clamp_minutes(max_minutes, "job.max_minutes")
+
+    stop_rye = cfg.get("stop_rye")
+    if stop_rye is not None:
+        try:
+            stop_rye = float(stop_rye)
+        except Exception:
+            stop_rye = None
+
+    resume = bool(cfg.get("resume", True))
+    watchdog_minutes = float(cfg.get("watchdog_minutes", 5.0))
+
+    cfg_for_sources = dict(base_config)
+    if "default_source_controls" not in cfg_for_sources:
+        sc_preset = preset_cfg.get("source_controls")
+        if isinstance(sc_preset, dict):
+            cfg_for_sources["default_source_controls"] = sc_preset
+
+    source_controls = _build_source_controls(cfg_for_sources)
+    if isinstance(cfg.get("source_controls"), dict):
+        override_sc = cfg["source_controls"]
+        for k, v in override_sc.items():
+            source_controls[str(k)] = bool(v)
+
+    tool_flags = detect_tools()
+
+    env_keys_for_fingerprint = [
+        "WORKER_QUEUE_MODE",
+        "WORKER_DOMAIN",
+        "WORKER_GOAL",
+    ]
+    experiment_fingerprint = _build_experiment_fingerprint(
+        goal=goal,
+        domain=domain,
+        mode=f"direct_{mode}",
+        runtime_profile=runtime_profile,
+        source_controls=source_controls,
+        roles=roles_list if mode == "swarm" else [role],
+        env_keys=env_keys_for_fingerprint,
+    )
+
+    print("")
+    print("=== Direct engine job ===")
+    print(f"Run id: {run_id}")
+    print(f"Mode: {mode}")
+    print(f"Goal: {goal}")
+    print(f"Domain: {domain}")
+    print(f"Role (single): {role}")
+    print(f"Roles (swarm): {roles_list if roles_list is not None else 'auto'}")
+    print(f"Max cycles (single, clamped): {max_cycles} (explicit: {max_cycles_explicit})")
+    print(f"Max rounds (swarm, clamped): {max_rounds} (explicit: {max_rounds_explicit})")
+    print(
+        "Max minutes guard (clamped): "
+        f"{max_minutes if max_minutes is not None else 'None (cycles/rounds driven)'}"
+    )
+    print(f"Stop RYE: {stop_rye if stop_rye is not None else 'None'}")
+    print(f"Runtime profile: {runtime_profile or 'None'}")
+    print(f"Resume: {resume}")
+    print(f"Watchdog minutes: {watchdog_minutes}")
+    print(f"Source controls: {source_controls}")
+    print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
+    print(f"Experiment fingerprint: {experiment_fingerprint}")
+    sys.stdout.flush()
+
+    _update_worker_state(
+        agent,
+        status="running_job",
+        mode=mode,
+        goal=goal,
+        domain=domain,
+        roles=roles_list if mode == "swarm" else [role],
+        runtime_profile=runtime_profile,
+        stop_rye=stop_rye,
+        max_minutes=max_minutes,
+        run_id=run_id,
+        experiment_mode="direct_job",
+        extra={
+            "experiment_fingerprint": experiment_fingerprint,
+            "job_meta": job_meta,
+        },
+    )
+    _heartbeat(agent, label="direct_job_start", run_id=run_id)
+
+    summaries: List[Dict[str, Any]] = []
+
+    try:
+        if mode == "swarm":
+            if roles_list is None:
+                try:
+                    roles_list = agent.get_agent_roles()
+                except Exception:
+                    roles_list = ["agent"]
+
+            summaries = agent.run_swarm_continuous(
+                goal=goal,
+                max_rounds=max_rounds,
+                stop_rye=stop_rye,
+                roles=roles_list,
+                source_controls=source_controls,
+                pdf_bytes=None,
+                biomarker_snapshot=None,
+                domain=domain,
+                max_minutes=max_minutes,
+                forever=False,
+                resume_from_checkpoint=resume,
+                watchdog_interval_minutes=watchdog_minutes,
+                runtime_profile=runtime_profile,
+            )
+        else:
+            summaries = agent.run_continuous(
+                goal=goal,
+                max_cycles=max_cycles,
+                stop_rye=stop_rye,
+                role=role,
+                source_controls=source_controls,
+                pdf_bytes=None,
+                biomarker_snapshot=None,
+                domain=domain,
+                max_minutes=max_minutes,
+                forever=False,
+                resume_from_checkpoint=resume,
+                watchdog_interval_minutes=watchdog_minutes,
+                runtime_profile=runtime_profile,
+            )
+
+        _heartbeat(agent, label="direct_job_finished", run_id=run_id)
+
+        print(f"=== Direct job {run_id} finished cleanly ===")
+        print(f"Total summaries: {len(summaries)}")
+
+        diag: Dict[str, Any] = {}
+        try:
+            diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
+            print(f"RYE avg: {diag.get('rye_avg')}")
+            print(f"RYE median: {diag.get('rye_median')}")
+            print(f"RYE last: {diag.get('rye_last')}")
+            print(f"Stability index: {diag.get('stability_index')}")
+            print(f"Recovery momentum: {diag.get('recovery_momentum')}")
+        except Exception:
+            print("Diagnostics computation failed for direct job, see logs for details.")
+
+        intelligence_info = _run_post_run_intelligence(
+            agent,
+            mode=mode,
+            goal=goal,
+            domain=domain,
+            run_id=run_id,
+            history=summaries,
+        )
+
+        extra_manifest: Dict[str, Any] = {
+            "engine": f"direct_{mode}",
+            "experiment_fingerprint": experiment_fingerprint,
+            "job_meta": job_meta,
+        }
+        if diag:
+            extra_manifest["diagnostics_snapshot"] = diag
+        if intelligence_info:
+            extra_manifest["intelligence"] = intelligence_info
+
+        try:
+            _log_run_manifest(
+                agent,
+                run_id,
+                mode=mode,
+                domain=domain,
+                goal=goal,
+                runtime_profile=runtime_profile,
+                stop_rye=stop_rye,
+                max_minutes=max_minutes,
+                summaries=summaries,
+                extra=extra_manifest,
+            )
+        except Exception:
+            print("Manifest logging failed for direct job, see logs for details.")
+
+        result_obj: Dict[str, Any] = {
+            "status": "ok",
+            "run_id": run_id,
+            "mode": mode,
+            "goal": goal,
+            "domain": domain,
+            "runtime_profile": runtime_profile,
+            "max_minutes": max_minutes,
+            "max_cycles": max_cycles if mode == "single" else None,
+            "max_rounds": max_rounds if mode == "swarm" else None,
+            "stop_rye": stop_rye,
+            "summaries": summaries,
+            "diagnostics": diag,
+            "intelligence": intelligence_info,
+            "experiment_fingerprint": experiment_fingerprint,
+            "job_meta": job_meta,
+        }
+
+        _update_worker_state(
+            agent,
+            status="idle",
+            mode=mode,
+            goal=goal,
+            domain=domain,
+            roles=roles_list if mode == "swarm" else [role],
+            runtime_profile=runtime_profile,
+            stop_rye=stop_rye,
+            max_minutes=max_minutes,
+            run_id=run_id,
+            experiment_mode="direct_job",
+            extra={
+                "experiment_fingerprint": experiment_fingerprint,
+                "final_diagnostics": diag,
+                "intelligence": intelligence_info if intelligence_info else None,
+            },
+        )
+
+        return result_obj
+
+    except Exception as e:
+        print(f"Fatal error while running direct job {run_id}: {e}")
+        tb = traceback.format_exc()
+        print(tb)
+        sys.stdout.flush()
+
+        _update_worker_state(
+            agent,
+            status="error",
+            mode=mode,
+            goal=goal,
+            domain=domain,
+            roles=roles_list if mode == "swarm" else [role],
+            runtime_profile=runtime_profile,
+            stop_rye=stop_rye,
+            max_minutes=max_minutes,
+            run_id=run_id,
+            experiment_mode="direct_job",
+            extra={
+                "experiment_fingerprint": experiment_fingerprint,
+                "error_message": str(e),
+            },
+        )
+
+        return {
+            "status": "error",
+            "run_id": run_id,
+            "mode": mode,
+            "goal": goal,
+            "domain": domain,
+            "error": str(e),
+            "traceback": tb,
+        }
+
+
+# ---------------------------------------------------------------------------
 # Queue mode: process jobs from agent/run_jobs
 # ---------------------------------------------------------------------------
 
