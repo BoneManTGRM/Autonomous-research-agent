@@ -47,6 +47,7 @@ import json
 import os
 import re
 import sys
+import glob
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime
@@ -1619,6 +1620,22 @@ def main() -> None:
 
     with col_runs_right:
         st.markdown("#### Queued runs")
+
+        # Clear queue button (file based jobs under ARA_RUNS_DIR/pending)
+        pending_dir = os.path.join(os.getenv("ARA_RUNS_DIR", "/mnt/ara_runs"), "pending")
+        if st.button("🧹 Clear job queue", key="clear_queue_btn"):
+            pattern = os.path.join(pending_dir, "*.json")
+            removed = 0
+            for fp in glob.glob(pattern):
+                try:
+                    os.remove(fp)
+                    removed += 1
+                except Exception:
+                    # Ignore deletion errors and continue
+                    pass
+            st.success(f"Cleared {removed} queued job file(s) from {pending_dir}.")
+            st.rerun()
+
         if not pending_jobs:
             st.info("No queued runs. Use the form above to queue one.")
         else:
