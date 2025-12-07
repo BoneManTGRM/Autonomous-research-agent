@@ -83,9 +83,9 @@ class RunJob:
 
         # Ensure required fields exist; raise a clear error if not.
         required = {"run_id", "config"}
-        missing_required = [k for k in filtered if k in required and filtered[k] is None]
+        missing_required: List[str] = []
         for req in required:
-            if req not in filtered:
+            if req not in data or data.get(req) is None:
                 missing_required.append(req)
         if missing_required:
             raise ValueError(f"RunJob.from_dict missing required fields: {missing_required}")
@@ -106,6 +106,10 @@ class RunJob:
             filtered["updated_at"] = now
         if "meta" not in filtered:
             filtered["meta"] = None
+
+        # Make sure required fields from original data are present
+        filtered["run_id"] = str(data["run_id"])
+        filtered["config"] = dict(data["config"])
 
         return cls(**filtered)
 
