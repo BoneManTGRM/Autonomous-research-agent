@@ -22,7 +22,6 @@ knowing that the queue wiring is correct.
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from typing import Any, Dict
@@ -42,6 +41,37 @@ from agent.run_jobs import (
 
 POLL_INTERVAL_SECONDS = 2.0
 
+
+# -------------------------------------------------------------------
+# Small helpers to handle both RunJob objects and dicts
+# -------------------------------------------------------------------
+def _get_run_id(job: Any) -> str:
+    """Return run/job id for either RunJob object or dict."""
+    rid = getattr(job, "run_id", None)
+    if rid is None and isinstance(job, dict):
+        rid = job.get("run_id") or job.get("job_id")
+    return str(rid or "unknown")
+
+
+def _get_status(job: Any) -> str:
+    status = getattr(job, "status", None)
+    if status is None and isinstance(job, dict):
+        status = job.get("status")
+    return str(status or "unknown")
+
+
+def _get_config(job: Any) -> Dict[str, Any]:
+    cfg = getattr(job, "config", None)
+    if isinstance(job, dict):
+        cfg = job.get("config", cfg)
+    if not isinstance(cfg, dict):
+        cfg = {}
+    return cfg
+
+
+# -------------------------------------------------------------------
+# Startup debug info
+# -------------------------------------------------------------------
 def debug_print_startup() -> None:
     print("=== ENGINE WORKER DEBUG START ===")
     print("ARA_RUNS_DIR env:", os.environ.get("ARA_RUNS_DIR", "(not set)"))
@@ -55,11 +85,17 @@ def debug_print_startup() -> None:
         queued = list_run_jobs(status="queued")
     except TypeError:
         queued = list_run_jobs()  # type: ignore[call-arg]
+    except Exception as e:
+        print("Error calling list_run_jobs at startup:", repr(e))
+        queued = []
 
-    print("Queued jobs at startup:", [j.run_id for j in queued])
+    print("Queued jobs at startup:", [_get_run_id(j) for j in queued])
     print("=================================")
 
 
+# -------------------------------------------------------------------
+# Fake engine
+# -------------------------------------------------------------------
 def fake_engine_run(config: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extremely simple stand in for the real engine.
@@ -75,7 +111,7 @@ def fake_engine_run(config: Dict[str, Any]) -> Dict[str, Any]:
         "status": "finished",
         "summary": f"[DEBUG ENGINE] Fake run for goal: {goal}",
         "key_findings": [
-            f"Ran in debug mode; no real TGRM cycles executed.",
+            "Ran in debug mode; no real TGRM cycles executed.",
             f"Domain: {domain}, mode: {mode}, total_cycles: {total_cycles}",
         ],
         "cycles": [],
@@ -88,31 +124,45 @@ def fake_engine_run(config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# -------------------------------------------------------------------
+# Main loop
+# -------------------------------------------------------------------
 def main_loop() -> None:
     debug_print_startup()
 
     while True:
         # Poll queue
-        job = load_next_pending_job()
+        try:
+            job = load_next_pending_job()
+        except Exception as e:
+            print("[ENGINE DEBUG] ERROR calling load_next_pending_job:", repr(e))
+            time.sleep(POLL_INTERVAL_SECONDS)
+            continue
+
         if job is None:
             time.sleep(POLL_INTERVAL_SECONDS)
             continue
 
-        print(f"[ENGINE DEBUG] Picked job {job.run_id}, status={job.status}")
-        print(f"  goal: {job.config.get('goal')}")
-        print(f"  mode: {job.config.get('mode')} domain: {job.config.get('domain')}")
+        run_id = _get_run_id(job)
+        status = _get_status(job)
+        config = _get_config(job)
+
+        print(f"[ENGINE DEBUG] Picked job {run_id}, status={status}")
+        print(f"  goal : {config.get('goal')}")
+        print(f"  mode : {config.get('mode')}")
+        print(f"  domain: {config.get('domain')}")
 
         try:
-            result_obj = fake_engine_run(job.config)
+            result_obj = fake_engine_run(config)
             save_job_result(job, result_obj)
-            rp = result_path(job.run_id)
-            print(f"[ENGINE DEBUG] Finished job {job.run_id}, wrote result to {rp}")
+            rp = result_path(run_id)
+            print(f"[ENGINE DEBUG] Finished job {run_id}, wrote result to {rp}")
         except Exception as e:
-            print(f"[ENGINE DEBUG] ERROR processing job {job.run_id}: {e}")
+            print(f"[ENGINE DEBUG] ERROR processing job {run_id}: {repr(e)}")
             try:
                 mark_job_error(job, {"error": str(e)})
             except Exception as inner:
-                print(f"[ENGINE DEBUG] ERROR marking job as error: {inner}")
+                print(f"[ENGINE DEBUG] ERROR marking job as error: {repr(inner)}")
 
         # Small pause to avoid log spam if loop is very fast
         time.sleep(0.5)
