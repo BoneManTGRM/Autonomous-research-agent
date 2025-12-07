@@ -2640,4 +2640,26 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Guard so the worker only runs when explicitly enabled.
+    # This lets you safely use a combined start command in a web service:
+    #   bash -c "python engine_worker.py & streamlit run app_streamlit.py ..."
+    #
+    # Behavior:
+    #   - WORKER_MODE unset / "off" / "0" / "disabled" -> exit immediately.
+    #   - WORKER_MODE="queue" -> force queue mode and run main().
+    #   - Any other non-empty WORKER_MODE -> run main() (single/swarm/meta
+    #     selection still uses WORKER_QUEUE_MODE, WORKER_META, etc).
+    worker_mode = os.getenv("WORKER_MODE", "").strip().lower()
+
+    if worker_mode in {"", "off", "disabled", "0", "none"}:
+        print(
+            f"[engine_worker] WORKER_MODE not enabled (got: {worker_mode!r}). "
+            "Exiting so Streamlit (or another process) can bind the web port."
+        )
+        sys.stdout.flush()
+        sys.exit(0)
+
+    if worker_mode == "queue":
+        os.environ["WORKER_QUEUE_MODE"] = "1"
+
     main()
