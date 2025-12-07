@@ -1405,6 +1405,31 @@ def run_job_queue_worker() -> None:
     _configure_tavily_from_env()
     agent, config = init_agent_from_config()
 
+    # Extra debug so you can validate path alignment with Streamlit and run_jobs
+    ara_runs_env = os.getenv("ARA_RUNS_DIR")
+    print(f"[Queue] ARA_RUNS_DIR env: {ara_runs_env!r}")
+    try:
+        print(f"[Queue] BASE_DIR (engine_worker): {BASE_DIR.resolve()}")
+    except Exception:
+        print(f"[Queue] BASE_DIR (engine_worker): {BASE_DIR}")
+    try:
+        import agent.run_jobs as run_jobs_mod  # type: ignore[import]
+        rj_base = getattr(run_jobs_mod, "BASE_DIR", None)
+        rj_pending = getattr(run_jobs_mod, "PENDING_DIR", None)
+        if rj_base is not None:
+            try:
+                print(f"[Queue] run_jobs.BASE_DIR: {rj_base.resolve()}")
+            except Exception:
+                print(f"[Queue] run_jobs.BASE_DIR: {rj_base}")
+        if rj_pending is not None:
+            try:
+                print(f"[Queue] run_jobs.PENDING_DIR: {rj_pending.resolve()}")
+            except Exception:
+                print(f"[Queue] run_jobs.PENDING_DIR: {rj_pending}")
+    except Exception:
+        print("[Queue] Could not import agent.run_jobs for extra debug info.")
+    sys.stdout.flush()
+
     # Debug: show which directory this worker is actually watching
     pending_dir = BASE_DIR / "pending"
     print(f"[Queue] Watching pending dir: {pending_dir.resolve()}")
