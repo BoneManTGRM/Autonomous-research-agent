@@ -14,9 +14,10 @@ echo "APP_ROOT     = $APP_ROOT"
 echo "ARA_RUNS_DIR = $ARA_RUNS_DIR"
 
 # -------------------------------------------------------------------
-# Create required queue folders
+# Reset and create required queue folders
 # -------------------------------------------------------------------
-echo "Ensuring run directories exist..."
+echo "Resetting run directories..."
+rm -rf "$ARA_RUNS_DIR"
 mkdir -p "$ARA_RUNS_DIR/pending"
 mkdir -p "$ARA_RUNS_DIR/active"
 mkdir -p "$ARA_RUNS_DIR/finished"
@@ -38,7 +39,7 @@ WORKER_PID=$!
 echo "Engine worker started with PID $WORKER_PID"
 
 # -------------------------------------------------------------------
-# STREAMLIT UI (foreground — keeps service alive)
+# STREAMLIT UI (foreground, keeps service alive)
 # -------------------------------------------------------------------
 echo "Starting Streamlit UI..."
 exec streamlit run app_streamlit.py \
