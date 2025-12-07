@@ -92,6 +92,18 @@ CONFIG_PATH_DEFAULT = "config/settings.yaml"
 # This must match agent.run_jobs BASE_DIR which also respects ARA_RUNS_DIR.
 BASE_DIR = Path(os.environ.get("ARA_RUNS_DIR", "runs"))
 
+# If agent.run_jobs defines its own BASE_DIR, prefer that so the worker,
+# Streamlit app, and queue layer are guaranteed to point at the same place.
+try:
+    import agent.run_jobs as _run_jobs_mod  # type: ignore[import]
+
+    _rj_base_dir = getattr(_run_jobs_mod, "BASE_DIR", None)
+    if _rj_base_dir is not None:
+        BASE_DIR = _rj_base_dir  # type: ignore[assignment]
+except Exception:
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Hard safety caps (finite-only guard rails)
 # ---------------------------------------------------------------------------
@@ -2645,7 +2657,9 @@ def main() -> None:
 
     use_swarm = _env_bool("WORKER_SWARM", default=False)
     mode = os.getenv("WORKER_MODE", "single").strip().lower()
-    use_meta = _env_bool("WORKER_META", default=True)
+    # IMPORTANT: meta mode is now OFF by default. You must explicitly set
+    # WORKER_META=1 to enable the Option C meta-controller.
+    use_meta = _env_bool("WORKER_META", default=False)
 
     try:
         if use_meta:
