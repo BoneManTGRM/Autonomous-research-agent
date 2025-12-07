@@ -244,6 +244,19 @@ def ensure_directories() -> None:
     sessions_path.mkdir(exist_ok=True)
 
 
+def get_runs_root() -> str:
+    """Return the root directory used for ARA run jobs.
+
+    This mirrors run_jobs.py semantics:
+    - Prefer ARA_RUNS_DIR env var (set on Render for both worker and Streamlit)
+    - Fall back to <repo_root>/runs for local dev
+    """
+    root = os.getenv("ARA_RUNS_DIR")
+    if root:
+        return root
+    return str(REPO_ROOT / "runs")
+
+
 @st.cache_resource
 def init_memory_store(config_path: str = CONFIG_PATH_DEFAULT) -> MemoryStore:
     """Create a single MemoryStore instance for the Streamlit app (read only)."""
@@ -787,7 +800,9 @@ def compute_msil_profile(
         return None
 
     return None
-    # -------------------------------------------------------------------
+
+
+# -------------------------------------------------------------------
 # Advanced log and snapshot helpers
 # -------------------------------------------------------------------
 def _load_json_file(path: Path) -> Optional[Any]:
@@ -1621,8 +1636,11 @@ def main() -> None:
     with col_runs_right:
         st.markdown("#### Queued runs")
 
+        runs_root = get_runs_root()
+        pending_dir = os.path.join(runs_root, "pending")
+        st.caption(f"Queue directory: `{pending_dir}`")
+
         # Clear queue button (file based jobs under ARA_RUNS_DIR/pending)
-        pending_dir = os.path.join(os.getenv("ARA_RUNS_DIR", "/mnt/ara_runs"), "pending")
         if st.button("🧹 Clear job queue", key="clear_queue_btn"):
             pattern = os.path.join(pending_dir, "*.json")
             removed = 0
