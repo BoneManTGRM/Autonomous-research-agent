@@ -1,39 +1,37 @@
 services:
+  # ---------------------------------------------------------
+  # STREAMLIT WEB UI SERVICE
+  # ---------------------------------------------------------
   - type: web
     name: reparodynamics-autonomous-agent
     env: python
-
-    # Plan: change "starter" to "free" if you want the free tier
     plan: starter
 
-    # Where your code lives in the repo (root = ".")
     rootDir: .
 
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
+      chmod +x start.sh
 
-    startCommand: >
-      streamlit run app_streamlit.py
-      --server.port $PORT
-      --server.address 0.0.0.0
+    startCommand: ./start.sh
 
-    # Auto-deploy when you push to GitHub
     autoDeploy: true
-
-    # Basic health check so Render knows the app is alive
     healthCheckPath: /
 
-    # Shared disk for logs, memory, checkpoints, and control_state.json
+    # Shared disk for queue + results
     disk:
-      name: agent-logs
-      mountPath: /opt/render/project/src/logs
+      name: ara-runs
+      mountPath: /opt/render/project/src/runs
       sizeGB: 1
 
-    # Environment variables (you set the actual values in Render dashboard)
     envVars:
       - key: PYTHON_VERSION
         value: 3.11
+
+      # Shared correct queue path for Streamlit
+      - key: ARA_RUNS_DIR
+        value: /opt/render/project/src/runs
 
       - key: OPENAI_API_KEY
         sync: false
@@ -41,11 +39,13 @@ services:
       - key: TAVILY_API_KEY
         sync: false
 
+
+  # ---------------------------------------------------------
+  # ENGINE WORKER SERVICE (reads from queue, runs jobs)
+  # ---------------------------------------------------------
   - type: worker
     name: reparodynamics-autonomous-agent-worker
     env: python
-
-    # Plan: upgrade this if you want long, heavy 90 day or Forever runs
     plan: starter
 
     rootDir: .
@@ -54,23 +54,26 @@ services:
       pip install --upgrade pip
       pip install -r requirements.txt
 
-    # Background engine worker that reads logs/control_state.json
-    # and runs continuous TGRM loops for 1 week, 1 month, 90 days, and Forever
-    startCommand: >
-      python engine_worker.py
+    startCommand: python engine_worker.py
 
     autoDeploy: true
 
-    # Share the same disk as the web service so history, checkpoints,
-    # watchdog, and control_state.json are visible to both
+    # Shared disk for EXACT SAME run folders
     disk:
-      name: agent-logs
-      mountPath: /opt/render/project/src/logs
+      name: ara-runs
+      mountPath: /opt/render/project/src/runs
       sizeGB: 1
 
     envVars:
       - key: PYTHON_VERSION
         value: 3.11
+
+      # Worker must see the same queue path
+      - key: ARA_RUNS_DIR
+        value: /opt/render/project/src/runs
+
+      - key: WORKER_QUEUE_MODE
+        value: "1"
 
       - key: OPENAI_API_KEY
         sync: false
