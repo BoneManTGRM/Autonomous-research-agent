@@ -728,11 +728,37 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             except Exception:
                 roles_list = ["agent"]
 
-    max_cycles_explicit = "max_cycles" in cfg or "cycles" in cfg
-    max_rounds_explicit = "max_rounds" in cfg or "rounds" in cfg
+    # ------------------------------------------------------------------
+    # Safe extraction of cycles / rounds (never int(None))
+    # ------------------------------------------------------------------
+    max_cycles_explicit = (
+        ("max_cycles" in cfg and cfg.get("max_cycles") is not None)
+        or ("cycles" in cfg and cfg.get("cycles") is not None)
+    )
+    max_rounds_explicit = (
+        ("max_rounds" in cfg and cfg.get("max_rounds") is not None)
+        or ("rounds" in cfg and cfg.get("rounds") is not None)
+    )
 
-    requested_cycles = int(cfg.get("max_cycles", cfg.get("cycles", HARD_MAX_CYCLES)))
-    requested_rounds = int(cfg.get("max_rounds", requested_cycles))
+    raw_cycles = cfg.get("max_cycles")
+    if raw_cycles is None:
+        raw_cycles = cfg.get("cycles")
+    if raw_cycles is None:
+        raw_cycles = HARD_MAX_CYCLES
+    try:
+        requested_cycles = int(raw_cycles)
+    except Exception:
+        requested_cycles = HARD_MAX_CYCLES
+
+    raw_rounds = cfg.get("max_rounds")
+    if raw_rounds is None:
+        raw_rounds = cfg.get("rounds")
+    if raw_rounds is None:
+        raw_rounds = requested_cycles
+    try:
+        requested_rounds = int(raw_rounds)
+    except Exception:
+        requested_rounds = requested_cycles
 
     max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "max_cycles")
     max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
@@ -1086,11 +1112,37 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             except Exception:
                 roles_list = ["agent"]
 
-    max_cycles_explicit = "max_cycles" in cfg or "cycles" in cfg
-    max_rounds_explicit = "max_rounds" in cfg or "rounds" in cfg
+    # ------------------------------------------------------------------
+    # Safe extraction of cycles / rounds for queue jobs
+    # ------------------------------------------------------------------
+    max_cycles_explicit = (
+        ("max_cycles" in cfg and cfg.get("max_cycles") is not None)
+        or ("cycles" in cfg and cfg.get("cycles") is not None)
+    )
+    max_rounds_explicit = (
+        ("max_rounds" in cfg and cfg.get("max_rounds") is not None)
+        or ("rounds" in cfg and cfg.get("rounds") is not None)
+    )
 
-    requested_cycles = int(cfg.get("max_cycles", cfg.get("cycles", HARD_MAX_CYCLES)))
-    requested_rounds = int(cfg.get("max_rounds", requested_cycles))
+    raw_cycles = cfg.get("max_cycles")
+    if raw_cycles is None:
+        raw_cycles = cfg.get("cycles")
+    if raw_cycles is None:
+        raw_cycles = HARD_MAX_CYCLES
+    try:
+        requested_cycles = int(raw_cycles)
+    except Exception:
+        requested_cycles = HARD_MAX_CYCLES
+
+    raw_rounds = cfg.get("max_rounds")
+    if raw_rounds is None:
+        raw_rounds = cfg.get("rounds")
+    if raw_rounds is None:
+        raw_rounds = requested_cycles
+    try:
+        requested_rounds = int(raw_rounds)
+    except Exception:
+        requested_rounds = requested_cycles
 
     max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "max_cycles")
     max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
