@@ -68,6 +68,9 @@ if str(REPO_ROOT) not in sys.path:
 # These will be filled from run_jobs imports when available
 RUNS_BASE_DIR: Optional[Path] = None
 RUNS_PENDING_DIR: Optional[Path] = None
+RUNS_ACTIVE_DIR: Optional[Path] = None
+RUNS_FINISHED_DIR: Optional[Path] = None
+RUNS_ERROR_DIR: Optional[Path] = None
 
 # -------------------------------------------------------------------
 # Imports: prefer package layout agent.*, guarded flat fallback
@@ -137,6 +140,9 @@ try:
             result_path,
             BASE_DIR as RUNS_BASE_DIR,
             PENDING_DIR as RUNS_PENDING_DIR,
+            ACTIVE_DIR as RUNS_ACTIVE_DIR,
+            FINISHED_DIR as RUNS_FINISHED_DIR,
+            ERROR_DIR as RUNS_ERROR_DIR,
         )
     except Exception:
         create_job = None  # type: ignore[assignment]
@@ -144,6 +150,9 @@ try:
         result_path = None  # type: ignore[assignment]
         RUNS_BASE_DIR = None
         RUNS_PENDING_DIR = None
+        RUNS_ACTIVE_DIR = None
+        RUNS_FINISHED_DIR = None
+        RUNS_ERROR_DIR = None
 
 except ModuleNotFoundError as e:
     # If the agent package itself is missing, allow flat layout fallback.
@@ -212,6 +221,9 @@ except ModuleNotFoundError as e:
             result_path,
             BASE_DIR as RUNS_BASE_DIR,
             PENDING_DIR as RUNS_PENDING_DIR,
+            ACTIVE_DIR as RUNS_ACTIVE_DIR,
+            FINISHED_DIR as RUNS_FINISHED_DIR,
+            ERROR_DIR as RUNS_ERROR_DIR,
         )
     except Exception:
         create_job = None  # type: ignore[assignment]
@@ -219,6 +231,9 @@ except ModuleNotFoundError as e:
         result_path = None  # type: ignore[assignment]
         RUNS_BASE_DIR = None
         RUNS_PENDING_DIR = None
+        RUNS_ACTIVE_DIR = None
+        RUNS_FINISHED_DIR = None
+        RUNS_ERROR_DIR = None
 
 
 # Use absolute path for default config relative to repo root
@@ -1068,7 +1083,7 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
         if d_id not in domain_ids.values():
             safe_d2_label = _clean_label_text(f"Domain: {d}")
             nodes.append(f'{d_id} [label="{safe_d2_label}", shape=box]')
-        if r_id not in role_ids.values():
+        if r_id not in domain_ids.values():
             safe_r2_label = _clean_label_text(f"Role: {r}")
             nodes.append(f'{r_id} [label="{safe_r2_label}", shape=ellipse]')
         edges.append(f"{d_id} -> {hyp_id}")
@@ -1607,6 +1622,26 @@ def main() -> None:
     st.markdown("---")
     st.subheader("Runs and job queue")
 
+    # Debug view of what the UI actually sees on disk for the queue
+    runs_root = get_runs_root()
+    st.caption(f"DEBUG runs root: `{runs_root}`")
+
+    def _debug_list_dir(label: str, specific: Optional[Path]) -> None:
+        if isinstance(specific, Path):
+            base = specific
+        else:
+            base = Path(runs_root) / label
+        try:
+            items = sorted(p.name for p in base.glob("*.json"))
+        except Exception as e:
+            items = [f"error: {e}"]
+        st.text(f"DEBUG {label}: {items}")
+
+    _debug_list_dir("pending", RUNS_PENDING_DIR)
+    _debug_list_dir("active", RUNS_ACTIVE_DIR)
+    _debug_list_dir("finished", RUNS_FINISHED_DIR)
+    _debug_list_dir("error", RUNS_ERROR_DIR)
+
     if list_run_jobs is not None:
         try:
             finished_jobs = list_run_jobs(status="finished")
@@ -1848,7 +1883,7 @@ def main() -> None:
                 st.metric("Run tier", tier_label or "n/a")
 
             st.caption(
-                "Breakthrough signals are heuristic scores on a 0–1 scale derived from RYE and stability trends, "
+                "Breakthrough signals are heuristic scores on a 0 to 1 scale derived from RYE and stability trends, "
                 "not calibrated real world probabilities."
             )
 
