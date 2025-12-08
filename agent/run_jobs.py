@@ -10,8 +10,13 @@ from dataclasses import dataclass, asdict, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Base folder for all runs
-# Use ARA_RUNS_DIR if set so UI and worker can share the same disk
+# Base folder for all runs.
+# IMPORTANT:
+#   On Render your start command sets:
+#       export ARA_RUNS_DIR="/opt/render/project/src/runs"
+#   so BASE_DIR will resolve to that exact shared folder for BOTH:
+#       - engine_worker.py
+#       - app_streamlit.py
 BASE_DIR = Path(os.environ.get("ARA_RUNS_DIR", "runs")).resolve()
 
 # Job layout used by the engine worker:
@@ -36,6 +41,23 @@ LEGACY_QUEUE_DIR = BASE_DIR / "queue"
 # Make sure directories exist at import time
 for folder in [BASE_DIR, PENDING_DIR, ACTIVE_DIR, FINISHED_DIR, ERROR_DIR, LEGACY_QUEUE_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
+
+
+# Optional helper you can call from Streamlit to debug the layout
+def debug_print_layout() -> None:
+    """
+    Print the resolved BASE_DIR and subfolders.
+
+    Call this once from app_streamlit.py if you want to confirm that the UI
+    and the worker really point at the same physical directories.
+    """
+    print("[run_jobs] ARA_RUNS_DIR env:", os.environ.get("ARA_RUNS_DIR"))
+    print("[run_jobs] BASE_DIR:", BASE_DIR)
+    print("[run_jobs] PENDING_DIR:", PENDING_DIR)
+    print("[run_jobs] ACTIVE_DIR:", ACTIVE_DIR)
+    print("[run_jobs] FINISHED_DIR:", FINISHED_DIR)
+    print("[run_jobs] ERROR_DIR:", ERROR_DIR)
+    print("[run_jobs] LEGACY_QUEUE_DIR:", LEGACY_QUEUE_DIR)
 
 
 @dataclass
