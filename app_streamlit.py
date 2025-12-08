@@ -65,6 +65,10 @@ if not (REPO_ROOT / "agent").is_dir() and (_THIS_FILE_DIR.parent / "agent").is_d
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+# These will be filled from run_jobs imports when available
+RUNS_BASE_DIR: Optional[Path] = None
+RUNS_PENDING_DIR: Optional[Path] = None
+
 # -------------------------------------------------------------------
 # Imports: prefer package layout agent.*, guarded flat fallback
 # -------------------------------------------------------------------
@@ -125,13 +129,21 @@ try:
     except Exception:  # pragma: no cover
         TOOL_REGISTRY = {}  # type: ignore[assignment]
 
-    # Job queue abstraction
+    # Job queue abstraction: import paths from run_jobs so UI and worker share the exact same directories
     try:
-        from agent.run_jobs import create_job, list_jobs as list_run_jobs, result_path
+        from agent.run_jobs import (
+            create_job,
+            list_jobs as list_run_jobs,
+            result_path,
+            BASE_DIR as RUNS_BASE_DIR,
+            PENDING_DIR as RUNS_PENDING_DIR,
+        )
     except Exception:
         create_job = None  # type: ignore[assignment]
         list_run_jobs = None  # type: ignore[assignment]
         result_path = None  # type: ignore[assignment]
+        RUNS_BASE_DIR = None
+        RUNS_PENDING_DIR = None
 
 except ModuleNotFoundError as e:
     # If the agent package itself is missing, allow flat layout fallback.
@@ -192,13 +204,21 @@ except ModuleNotFoundError as e:
     except Exception:  # pragma: no cover
         TOOL_REGISTRY = {}  # type: ignore[assignment]
 
-    # Flat layout run_jobs fallback
+    # Flat layout run_jobs fallback (also import paths)
     try:
-        from run_jobs import create_job, list_jobs as list_run_jobs, result_path  # type: ignore[no-redef]
+        from run_jobs import (  # type: ignore[no-redef]
+            create_job,
+            list_jobs as list_run_jobs,
+            result_path,
+            BASE_DIR as RUNS_BASE_DIR,
+            PENDING_DIR as RUNS_PENDING_DIR,
+        )
     except Exception:
         create_job = None  # type: ignore[assignment]
         list_run_jobs = None  # type: ignore[assignment]
         result_path = None  # type: ignore[assignment]
+        RUNS_BASE_DIR = None
+        RUNS_PENDING_DIR = None
 
 
 # Use absolute path for default config relative to repo root
@@ -247,10 +267,11 @@ def ensure_directories() -> None:
 def get_runs_root() -> str:
     """Return the root directory used for ARA run jobs.
 
-    This mirrors run_jobs.py semantics:
-    - Prefer ARA_RUNS_DIR env var (set on Render for both worker and Streamlit)
-    - Fall back to <repo_root>/runs for local dev
+    Primary source is run_jobs.BASE_DIR so that UI and worker are always in sync.
+    If that is not available, fall back to ARA_RUNS_DIR or <repo_root>/runs.
     """
+    if isinstance(RUNS_BASE_DIR, Path):
+        return str(RUNS_BASE_DIR)
     root = os.getenv("ARA_RUNS_DIR")
     if root:
         return root
@@ -1567,39 +1588,18 @@ def main() -> None:
                 },
             }
 
-            # The create_job call is the main abstraction for job registration
+            # Single source of truth: register job through run_jobs.create_job.
+            # This writes the JSON into PENDING_DIR (and legacy queue) using the same BASE_DIR as the worker.
             run_id = create_job(config=run_config, meta=meta)
 
-            # NEW: also write a file based pending job directly into the queue folder
-            try:
-                runs_root = get_runs_root()
-                pending_dir = os.path.join(runs_root, "pending")
-                os.makedirs(pending_dir, exist_ok=True)
-
-                job_header: Dict[str, Any] = {
-                    "run_id": run_id,
-                    "job_id": run_id,
-                    "status": "queued",
-                    "created_at": datetime.utcnow().timestamp(),
-                    "config": run_config,
-                    "meta": meta,
-                }
-
-                job_path = os.path.join(pending_dir, f"{run_id}.json")
-                with open(job_path, "w", encoding="utf-8") as f:
-                    json.dump(job_header, f, indent=2)
-
-                st.caption(f"Job file written to pending queue: `{job_path}`")
-            except Exception as e:
-                st.warning(
-                    f"Run `{run_id}` registered, but writing the pending job file failed: {e}"
-                )
-
             st.success(f"Run request queued with run id `{run_id}`.")
-            st.info(
-                "Your engine worker should watch the queue via pending JSON files under "
-                "ARA_RUNS_DIR/pending and write results via run_jobs.result_path(run_id) when done."
-            )
+            if RUNS_PENDING_DIR is not None:
+                st.caption(f"Pending job written to `{RUNS_PENDING_DIR / (str(run_id) + '.json')}`")
+            else:
+                st.caption(
+                    "Job was queued via run_jobs.create_job. "
+                    "The engine worker should watch ARA_RUNS_DIR/pending for new jobs."
+                )
 
     # ------------------------------
     # Runs and job queue (queued / finished via run_jobs.py)
@@ -1661,8 +1661,13 @@ def main() -> None:
     with col_runs_right:
         st.markdown("#### Queued runs")
 
-        runs_root = get_runs_root()
-        pending_dir = os.path.join(runs_root, "pending")
+        # Show the canonical pending directory used by run_jobs
+        if isinstance(RUNS_PENDING_DIR, Path):
+            pending_dir = str(RUNS_PENDING_DIR)
+        else:
+            runs_root = get_runs_root()
+            pending_dir = os.path.join(runs_root, "pending")
+
         st.caption(f"Queue directory: `{pending_dir}`")
 
         # Clear queue button (file based jobs under ARA_RUNS_DIR/pending)
@@ -1719,9 +1724,6 @@ def main() -> None:
                 "Multi agent insight graph",
             ]
         )
-
-        # ... (rest of your history / tabs / reports code unchanged)
-        # I kept all of that exactly as you had it, down to the final report buttons.
 
         # ----------------- Cycle history tab -----------------
         with tab_history:
