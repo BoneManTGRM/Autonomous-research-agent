@@ -1523,11 +1523,21 @@ def main() -> None:
                         "base64": None,
                     }
 
+            # Decide mode for RunManager (needs to be known before runtime_hints and run_config)
+            if enable_swarm and swarm_size > 1:
+                mode = "swarm"
+            elif multi_agent:
+                mode = "two_stage"
+            else:
+                mode = "single"
+
             # Runtime hints for the worker (finite only, advisory)
+            # For swarm, the worker will respect max_rounds; for single or two_stage, max_cycles.
             runtime_hints: Dict[str, Any] = {
                 "run_mode": "finite_manual",
                 "manual_cycles": int(cycles),
-                "max_cycles": int(cycles),
+                "max_cycles": int(cycles) if mode != "swarm" else None,
+                "max_rounds": int(cycles) if mode == "swarm" else None,
                 "stop_rye_threshold": stop_rye_threshold,
                 "cycles_per_hour_estimate": CYCLES_PER_HOUR_ESTIMATE,
             }
@@ -1560,20 +1570,17 @@ def main() -> None:
                         "curriculum_profile": longevity_defaults.get("curriculum_profile"),
                     }
 
-            # Decide mode for RunManager
-            if enable_swarm and swarm_config.get("swarm_size", 1) > 1:
-                mode = "swarm"
-            elif multi_agent:
-                mode = "two_stage"
-            else:
-                mode = "single"
-
             # Core run configuration that engine_worker can map to RunConfig
+            # Explicit finite guards:
+            # - For single and two_stage, max_cycles limits the run.
+            # - For swarm, max_rounds limits the run, while max_cycles_per_agent is in swarm_config.
             run_config: Dict[str, Any] = {
                 "goal": goal_clean,
                 "domain": domain_tag,
                 "mode": mode,
                 "total_cycles": int(cycles),
+                "max_cycles": int(cycles) if mode != "swarm" else None,
+                "max_rounds": int(cycles) if mode == "swarm" else None,
                 "max_seconds": None,
                 "rye_stop_threshold": stop_rye_threshold,
                 "equilibrium_stop_label": None,
@@ -1596,6 +1603,7 @@ def main() -> None:
                 "preset_key": selected_key,
                 "preset_label": preset.get("label", selected_label),
                 "domain": domain_tag,
+                "mode": mode,
                 "tavily_enabled": bool(status["has_key"]),
                 "ui_metadata": {
                     "requested_from": "streamlit",
@@ -1871,14 +1879,14 @@ def main() -> None:
                 )
             with ls_cols[1]:
                 if isinstance(bp_prob, (int, float)):
-                    st.metric("Breakthrough signal (near term, 0–1)", f"{bp_prob:.3f}")
+                    st.metric("Breakthrough signal (near term, 0-1)", f"{bp_prob:.3f}")
                 else:
-                    st.metric("Breakthrough signal (near term, 0–1)", "n/a")
+                    st.metric("Breakthrough signal (near term, 0-1)", "n/a")
             with ls_cols[2]:
                 if isinstance(bp90_prob, (int, float)):
-                    st.metric("Breakthrough signal 90d (0–1)", f"{bp90_prob:.3f}")
+                    st.metric("Breakthrough signal 90d (0-1)", f"{bp90_prob:.3f}")
                 else:
-                    st.metric("Breakthrough signal 90d (0–1)", "n/a")
+                    st.metric("Breakthrough signal 90d (0-1)", "n/a")
             with ls_cols[3]:
                 st.metric("Run tier", tier_label or "n/a")
 
