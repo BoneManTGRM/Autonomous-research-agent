@@ -6,7 +6,7 @@ import json
 import time
 import uuid
 import os
-from dataclasses import dataclass, asdict, fields
+from dataclasses import dataclass, asdict, fields, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -85,8 +85,8 @@ class RunJob:
     run_id: str
     config: Dict[str, Any]
     status: str = "queued"  # keep "queued" so engine loops that check == "queued" work
-    created_at: float = time.time()
-    updated_at: float = time.time()
+    created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
     meta: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -114,7 +114,7 @@ class RunJob:
 
         # Fill in optional fields if missing
         now = time.time()
-        status = str(filtered.get("status") or "queued").lower()
+        status = str(filtered.get("status") or data.get("status") or "queued").lower()
         if status in ("pending", "queued"):
             filtered["status"] = "queued"
         elif status in ("running", "active"):
@@ -123,11 +123,11 @@ class RunJob:
             filtered["status"] = "queued"
 
         if "created_at" not in filtered:
-            filtered["created_at"] = now
+            filtered["created_at"] = float(data.get("created_at", now))
         if "updated_at" not in filtered:
-            filtered["updated_at"] = now
+            filtered["updated_at"] = float(data.get("updated_at", now))
         if "meta" not in filtered:
-            filtered["meta"] = None
+            filtered["meta"] = data.get("meta", None)
 
         # Make sure required fields from original data are present
         filtered["run_id"] = str(data["run_id"])
