@@ -1567,13 +1567,38 @@ def main() -> None:
                 },
             }
 
-            # The create_job call is the only thing that touches the queue
-            # Engine worker should watch list_jobs(status="queued") and pick these up.
+            # The create_job call is the main abstraction for job registration
             run_id = create_job(config=run_config, meta=meta)
+
+            # NEW: also write a file based pending job directly into the queue folder
+            try:
+                runs_root = get_runs_root()
+                pending_dir = os.path.join(runs_root, "pending")
+                os.makedirs(pending_dir, exist_ok=True)
+
+                job_header: Dict[str, Any] = {
+                    "run_id": run_id,
+                    "job_id": run_id,
+                    "status": "queued",
+                    "created_at": datetime.utcnow().timestamp(),
+                    "config": run_config,
+                    "meta": meta,
+                }
+
+                job_path = os.path.join(pending_dir, f"{run_id}.json")
+                with open(job_path, "w", encoding="utf-8") as f:
+                    json.dump(job_header, f, indent=2)
+
+                st.caption(f"Job file written to pending queue: `{job_path}`")
+            except Exception as e:
+                st.warning(
+                    f"Run `{run_id}` registered, but writing the pending job file failed: {e}"
+                )
+
             st.success(f"Run request queued with run id `{run_id}`.")
             st.info(
-                "Your engine worker should watch the queue via run_jobs.list_jobs(status='queued') "
-                "and write results via run_jobs.result_path(run_id) when done."
+                "Your engine worker should watch the queue via pending JSON files under "
+                "ARA_RUNS_DIR/pending and write results via run_jobs.result_path(run_id) when done."
             )
 
     # ------------------------------
@@ -1694,6 +1719,9 @@ def main() -> None:
                 "Multi agent insight graph",
             ]
         )
+
+        # ... (rest of your history / tabs / reports code unchanged)
+        # I kept all of that exactly as you had it, down to the final report buttons.
 
         # ----------------- Cycle history tab -----------------
         with tab_history:
