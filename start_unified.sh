@@ -19,7 +19,8 @@ mkdir -p \
   "$ARA_RUNS_DIR/pending" \
   "$ARA_RUNS_DIR/active" \
   "$ARA_RUNS_DIR/finished" \
-  "$ARA_RUNS_DIR/error"
+  "$ARA_RUNS_DIR/error" \
+  "$ARA_RUNS_DIR/queue"
 
 ls -R "$ARA_RUNS_DIR" || true
 
@@ -33,11 +34,9 @@ export WORKER_MODE="queue"
 export WORKER_QUEUE_MODE="1"
 
 echo "Starting engine worker in queue mode..."
-python engine_worker.py > worker.log 2>&1 &
+python engine_worker.py &
 
 echo "Engine worker PID: $!"
-echo "Tailing last lines of worker.log:"
-tail -n 20 worker.log || true
 
 # -------------------------------------------------------------------
 # Start Streamlit UI in foreground
