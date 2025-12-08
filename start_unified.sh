@@ -4,6 +4,15 @@ set -euo pipefail
 echo "=== ARA Unified Service Start ==="
 
 # -------------------------------------------------------------------
+# Always run from the project root so agent.* imports work
+# -------------------------------------------------------------------
+# Render normally uses /opt/render/project/src as the working dir,
+# but we force it to be safe both locally and on Render.
+cd /opt/render/project/src 2>/dev/null || cd "$(dirname "$0")"
+
+echo "Current working directory: $(pwd)"
+
+# -------------------------------------------------------------------
 # Shared run directory
 # Honor existing ARA_RUNS_DIR if Render or you set it, otherwise default
 # -------------------------------------------------------------------
@@ -29,14 +38,14 @@ ls -R "$ARA_RUNS_DIR" || true
 # -------------------------------------------------------------------
 export PYTHONUNBUFFERED=1
 
-# Force queue mode engine
+# Force queue mode engine so engine_worker runs run_job_queue_worker
 export WORKER_MODE="queue"
 export WORKER_QUEUE_MODE="1"
 
 echo "Starting engine worker in queue mode..."
 python engine_worker.py &
-
-echo "Engine worker PID: $!"
+WORKER_PID=$!
+echo "Engine worker PID: $WORKER_PID"
 
 # -------------------------------------------------------------------
 # Start Streamlit UI in foreground
