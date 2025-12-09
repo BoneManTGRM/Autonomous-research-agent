@@ -16,12 +16,14 @@ REPO_ROOT = _THIS_FILE_DIR.parent
 
 # Base folder for all runs.
 # IMPORTANT:
-#   On Render your start command sets:
+#   On Render your start command sets something like:
 #       export ARA_RUNS_DIR="/opt/render/project/src/runs"
 #   so BASE_DIR will resolve to that exact shared folder for BOTH:
 #       - engine_worker.py
 #       - app_streamlit.py
-_env_runs = os.getenv("ARA_RUNS_DIR")
+_env_runs_raw = os.getenv("ARA_RUNS_DIR")
+_env_runs = _env_runs_raw.strip() if isinstance(_env_runs_raw, str) else None
+
 if _env_runs:
     BASE_DIR = Path(_env_runs).resolve()
 else:
@@ -59,7 +61,9 @@ def debug_print_layout() -> None:
     Call this once from app_streamlit.py if you want to confirm that the UI
     and the worker really point at the same physical directories.
     """
-    print("[run_jobs] ARA_RUNS_DIR env:", os.environ.get("ARA_RUNS_DIR"))
+    env_val = os.environ.get("ARA_RUNS_DIR")
+    print("[run_jobs] ARA_RUNS_DIR env (raw):", repr(env_val))
+    print("[run_jobs] ARA_RUNS_DIR env (stripped):", repr(_env_runs))
     print("[run_jobs] BASE_DIR:", BASE_DIR)
     print("[run_jobs] PENDING_DIR:", PENDING_DIR)
     print("[run_jobs] ACTIVE_DIR:", ACTIVE_DIR)
