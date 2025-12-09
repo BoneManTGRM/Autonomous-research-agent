@@ -10,6 +10,10 @@ from dataclasses import dataclass, asdict, fields, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Resolve repository root so the default runs directory is stable
+_THIS_FILE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = _THIS_FILE_DIR.parent
+
 # Base folder for all runs.
 # IMPORTANT:
 #   On Render your start command sets:
@@ -17,7 +21,11 @@ from typing import Any, Dict, List, Optional, Tuple
 #   so BASE_DIR will resolve to that exact shared folder for BOTH:
 #       - engine_worker.py
 #       - app_streamlit.py
-BASE_DIR = Path(os.environ.get("ARA_RUNS_DIR", "runs")).resolve()
+_env_runs = os.getenv("ARA_RUNS_DIR")
+if _env_runs:
+    BASE_DIR = Path(_env_runs).resolve()
+else:
+    BASE_DIR = (REPO_ROOT / "runs").resolve()
 
 # Job layout used by the engine worker:
 #   - runs/pending/   : file based queue of pending jobs (canonical queue)
@@ -484,8 +492,8 @@ def error_log_path(run_id: str) -> Path:
 
 def load_next_pending_job() -> Optional[RunJob]:
     """
-    Engine worker entry point: claim and return the next queued job,
-    already moved to ACTIVE status.
+    Engine worker entry point for queue mode:
+    claim and return the next queued job, already moved to ACTIVE status.
     """
     return claim_next_job()
 
