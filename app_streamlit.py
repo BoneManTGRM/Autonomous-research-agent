@@ -411,11 +411,11 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
                     text = h.get("text", "")
                     conf = h.get("confidence")
                     if conf is not None:
-                        st.write(f"• {text} (confidence ~ {conf})")
+                        st.write(f"â¢ {text} (confidence ~ {conf})")
                     else:
-                        st.write(f"• {text}")
+                        st.write(f"â¢ {text}")
                 else:
-                    st.write(f"• {h}")
+                    st.write(f"â¢ {h}")
 
     # Citations
     if cycle_summary.get("citations"):
@@ -579,7 +579,7 @@ def render_job_summary(job: Any) -> None:
     cols[2].markdown(f"Status: `{status}`")
     cols[3].markdown(f"Domain: `{str(domain).title()}`")
 
-    st.caption(f"Mode: {mode} • Created at: {created_at}")
+    st.caption(f"Mode: {mode} â¢ Created at: {created_at}")
 
 
 def render_result_details(result: Dict[str, Any]) -> None:
@@ -1789,7 +1789,7 @@ def main() -> None:
         st.caption(f"Queue directory: `{pending_dir}`")
 
         # Clear queue button (file based jobs under ARA_RUNS_DIR/pending)
-        if st.button("🧹 Clear job queue", key="clear_queue_btn"):
+        if st.button("ð§¹ Clear job queue", key="clear_queue_btn"):
             pattern = os.path.join(pending_dir, "*.json")
             removed = 0
             for fp in glob.glob(pattern):
