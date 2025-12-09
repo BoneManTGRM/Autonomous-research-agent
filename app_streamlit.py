@@ -54,6 +54,7 @@ from datetime import datetime
 
 import streamlit as st
 import yaml
+import pandas as pd
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -2111,6 +2112,8 @@ def main() -> None:
             if not citations:
                 st.info("No citations recorded yet in cycle history.")
             else:
+                # Build a DataFrame for easier manipulation
+                citations_df = pd.DataFrame(citations)
                 total_cites = len(citations)
                 unique_sources = sorted({c["source"] for c in citations if c.get("source")})
                 domains_c = sorted({c["domain"] for c in citations})
@@ -2143,44 +2146,110 @@ def main() -> None:
                     key="citations_source_filter",
                 )
 
-                filtered_cites: List[Dict[str, Any]] = []
-                for c in citations:
-                    d = c["domain"]
-                    r = c["role"]
-                    s = c["source"]
-                    if citations_domain_filter and d not in citations_domain_filter:
-                        continue
-                    if citations_role_filter and r not in citations_role_filter:
-                        continue
-                    if citations_source_filter and s not in citations_source_filter:
-                        continue
-                    filtered_cites.append(c)
+                # Add a search box for filtering citations by text
+                search_query = st.text_input(
+                    "Search citations (title/snippet)",
+                    value="",
+                    key="citations_search",
+                )
 
-                st.write(f"Showing {len(filtered_cites)} citations after filters.")
+                # Group-by selector: None, cycle, or source
+                group_by_option = st.selectbox(
+                    "Group citations by",
+                    options=["None", "Cycle", "Source"],
+                    index=0,
+                    key="citations_group_by",
+                )
 
-                view_rows_c: List[Dict[str, Any]] = []
-                for c in filtered_cites:
-                    title = c["title"] or ""
-                    snippet = c["snippet"] or ""
-                    if len(title) > 80:
-                        title = title[:80] + "..."
-                    if len(snippet) > 120:
-                        snippet = snippet[:120] + "..."
-                    view_rows_c.append(
-                        {
-                            "cycle": c["cycle"],
-                            "role": c["role"],
-                            "domain": c["domain"],
-                            "source": c["source"],
-                            "title": title,
-                            "snippet": snippet,
-                            "url": c["url"],
-                            "timestamp": c["timestamp"],
-                        }
+                # Apply filters based on domain, role, source
+                filtered_df = citations_df[
+                    citations_df["domain"].isin(citations_domain_filter)
+                    & citations_df["role"].isin(citations_role_filter)
+                    & citations_df["source"].isin(citations_source_filter)
+                ]
+
+                # Apply search filter if provided
+                if search_query:
+                    search_lower = search_query.lower()
+                    filtered_df = filtered_df[
+                        filtered_df["title"].str.lower().str.contains(search_lower, na=False)
+                        | filtered_df["snippet"].str.lower().str.contains(search_lower, na=False)
+                    ]
+
+                # Show grouping if selected
+                if group_by_option == "Cycle":
+                    group_counts = (
+                        filtered_df.groupby("cycle")
+                        .size()
+                        .reset_index(name="citation_count")
+                        .sort_values("cycle")
                     )
+                    st.write("Citations grouped by cycle:")
+                    st.dataframe(group_counts, use_container_width=True)
+                elif group_by_option == "Source":
+                    group_counts = (
+                        filtered_df.groupby("source")
+                        .size()
+                        .reset_index(name="citation_count")
+                        .sort_values("citation_count", ascending=False)
+                    )
+                    st.write("Citations grouped by source:")
+                    st.dataframe(group_counts, use_container_width=True)
+                else:
+                    # Prepare data for table view
+                    view_rows_c: List[Dict[str, Any]] = []
+                    for _, c in filtered_df.iterrows():
+                        title = c["title"] or ""
+                        snippet = c["snippet"] or ""
+                        if len(title) > 80:
+                            title = title[:80] + "..."
+                        if len(snippet) > 120:
+                            snippet = snippet[:120] + "..."
+                        view_rows_c.append(
+                            {
+                                "cycle": c["cycle"],
+                                "role": c["role"],
+                                "domain": c["domain"],
+                                "source": c["source"],
+                                "title": title,
+                                "snippet": snippet,
+                                "url": c["url"],
+                                "timestamp": c["timestamp"],
+                            }
+                        )
+                    st.write(f"Showing {len(view_rows_c)} citations after filters.")
+                    st.dataframe(view_rows_c, use_container_width=True)
 
-                st.dataframe(view_rows_c, use_container_width=True)
+                    # Add a selectbox to display full citation details
+                    if view_rows_c:
+                        selected_index = st.selectbox(
+                            "Select a citation to view details",
+                            options=list(range(len(view_rows_c))),
+                            format_func=lambda i: f"{view_rows_c[i]['source']} - {view_rows_c[i]['title'][:50]}",
+                            key="citations_select",
+                        )
+                        selected_citation = filtered_df.iloc[selected_index]
+                        with st.expander("Citation details", expanded=False):
+                            st.write(f"**Cycle:** {selected_citation['cycle']}")
+                            st.write(f"**Role:** {selected_citation['role']}")
+                            st.write(f"**Domain:** {selected_citation['domain']}")
+                            st.write(f"**Source:** {selected_citation['source']}")
+                            st.write(f"**Title:** {selected_citation['title']}")
+                            st.write(f"**URL:** {selected_citation['url']}")
+                            st.write(f"**Timestamp:** {selected_citation['timestamp']}")
+                            st.write(f"**Snippet:** {selected_citation['snippet']}")
 
+                    # Provide a download button for CSV export
+                    if not filtered_df.empty:
+                        csv_data = filtered_df.to_csv(index=False)
+                        st.download_button(
+                            "Download citations as CSV",
+                            data=csv_data,
+                            file_name="citations_export.csv",
+                            mime="text/csv",
+                        )
+
+                # raw citations JSON remains available under expander
                 with st.expander("Raw citations JSON"):
                     st.code(json.dumps(citations, indent=2), language="json")
 
