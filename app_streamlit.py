@@ -365,18 +365,18 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
     role = cycle_summary.get("role", "agent")
     domain = cycle_summary.get("domain") or "general"
     st.markdown(
-        f"### Cycle {cycle_summary['cycle'] + 1} "
+        f"### Cycle {cycle_summary.get('cycle', 0) + 1} "
         f"(role: {role}, domain: {domain})"
     )
 
     # Metrics
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("delta_R", cycle_summary.get("delta_R", 0.0))
+        st.metric("delta_R", cycle_summary.get("delta_R", cycle_summary.get("delta_r", 0.0)))
     with col2:
-        st.metric("Energy E", cycle_summary.get("energy_E", 0.0))
+        st.metric("Energy E", cycle_summary.get("energy_E", cycle_summary.get("energy", 0.0)))
     with col3:
-        st.metric("RYE", round(cycle_summary.get("RYE", 0.0), 3))
+        st.metric("RYE", round(cycle_summary.get("RYE", cycle_summary.get("rye", 0.0)), 3))
 
     # Issues
     issues_before = cycle_summary.get("issues_before", [])
@@ -421,6 +421,9 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
     if cycle_summary.get("citations"):
         with st.expander("Citations for this cycle"):
             for c in cycle_summary["citations"]:
+                if not isinstance(c, dict):
+                    st.write(f"- {c}")
+                    continue
                 src = c.get("source", "")
                 title = c.get("title", "")
                 url = c.get("url", "")
@@ -582,52 +585,93 @@ def render_job_summary(job: Any) -> None:
 def render_result_details(result: Dict[str, Any]) -> None:
     """Safe read-only result viewer for a finished job.
 
-    Assumes worker writes JSON with fields such as:
-    - summary or human_summary: str
-    - key_findings or discoveries: list[str]
-    - cycles: list[dict] with delta_r, energy, rye, etc.
-    - rye_metrics or rye: dict with aggregates
-    - sources or citations: list[dict] with title/url/snippet
-    Adjust this to match your worker schema.
+    Handles both flat and nested schemas such as:
+    - result["summary"], result["cycles"], result["citations"]
+    - result["result"]["summary"], result["result"]["cycle_history"], etc.
+    Also attempts to surface citations and discovery candidates even when
+    they are only present inside per cycle entries.
     """
+    # Some workers nest the payload under "result"
+    payload = result.get("result")
+    if isinstance(payload, dict):
+        base = payload
+    else:
+        base = result
+
     st.markdown("### Run summary")
 
-    summary = result.get("summary") or result.get("human_summary")
+    summary = (
+        base.get("summary")
+        or base.get("human_summary")
+        or base.get("run_summary")
+    )
     if summary:
         st.write(summary)
     else:
         st.info("No summary was provided by the engine.")
 
-    key_findings = result.get("key_findings") or result.get("discoveries")
+    # Discoveries or key findings at run level
+    key_findings = (
+        base.get("key_findings")
+        or base.get("discoveries")
+        or base.get("discovery_candidates")
+    )
     if isinstance(key_findings, list) and key_findings:
-        st.markdown("#### Key findings")
+        st.markdown("#### Key findings and discovery candidates")
         for item in key_findings:
-            st.markdown(f"- {item}")
+            if isinstance(item, dict):
+                txt = item.get("text") or item.get("summary") or item.get("title") or str(
+                    item
+                )
+            else:
+                txt = str(item)
+            st.markdown(f"- {txt}")
 
-    rye_metrics = result.get("rye_metrics") or result.get("rye")
+    # RYE metrics at run level
+    rye_metrics = (
+        base.get("rye_metrics")
+        or base.get("rye")
+        or base.get("run_rye_metrics")
+        or base.get("metrics")
+    )
     if isinstance(rye_metrics, dict):
         st.markdown("#### RYE metrics")
         cols = st.columns(3)
-        avg_rye = rye_metrics.get("avg_rye")
-        if avg_rye is not None:
+        avg_rye = rye_metrics.get("avg_rye") or rye_metrics.get("rye_avg")
+        if isinstance(avg_rye, (int, float)):
             cols[0].metric("Average RYE", f"{avg_rye:.4f}")
         trend = rye_metrics.get("trend_slope")
-        if trend is not None:
+        if isinstance(trend, (int, float)):
             cols[1].metric("RYE trend slope", f"{trend:.4f}")
         stability = rye_metrics.get("stability_index")
-        if stability is not None:
+        if isinstance(stability, (int, float)):
             cols[2].metric("Stability index", f"{stability:.3f}")
 
-    cycles = result.get("cycles")
-    if isinstance(cycles, list) and cycles:
+    # Try to normalize cycle history from various possible keys
+    cycles: Optional[List[Dict[str, Any]]] = None
+    for key in (
+        "cycles",
+        "cycle_history",
+        "history",
+        "tgrm_history",
+        "run_history",
+        "per_cycle",
+    ):
+        val = base.get(key)
+        if isinstance(val, list) and val:
+            cycles = [c for c in val if isinstance(c, dict)]
+            if cycles:
+                break
+
+    if cycles:
         st.markdown("#### Cycle timeline")
+
         cycle_numbers: List[Any] = []
         delta_r_values: List[Any] = []
         energy_values: List[Any] = []
         rye_values: List[Any] = []
 
         for idx, c in enumerate(cycles):
-            # Cycle index
             c_num = c.get("cycle")
             if c_num is None:
                 c_num = c.get("cycle_index")
@@ -635,19 +679,16 @@ def render_result_details(result: Dict[str, Any]) -> None:
                 c_num = idx + 1
             cycle_numbers.append(c_num)
 
-            # delta_R
             d_val = c.get("delta_r")
             if d_val is None:
                 d_val = c.get("delta_R")
             delta_r_values.append(d_val)
 
-            # energy
             e_val = c.get("energy")
             if e_val is None:
                 e_val = c.get("energy_E")
             energy_values.append(e_val)
 
-            # RYE
             r_val = c.get("rye")
             if r_val is None:
                 r_val = c.get("RYE")
@@ -664,19 +705,53 @@ def render_result_details(result: Dict[str, Any]) -> None:
         if len(chart_data) > 1:
             st.line_chart(chart_data)
 
-    sources = result.get("sources") or result.get("citations")
+        # Detailed per cycle summaries
+        with st.expander("Per cycle details"):
+            for c in cycles:
+                render_cycle_summary(c)
+
+    # Sources and citations at run level or flattened from cycles
+    sources = (
+        base.get("sources")
+        or base.get("citations")
+        or base.get("source_list")
+    )
+
+    flattened_citations: List[Dict[str, Any]] = []
+    if not sources and cycles:
+        # Reuse the helper that flattens citations from cycle history
+        flattened_citations = extract_citations_from_history(cycles)
+        if flattened_citations:
+            sources = flattened_citations
+
     if isinstance(sources, list) and sources:
         st.markdown("#### Sources and citations")
         for s in sources:
+            if not isinstance(s, dict):
+                st.markdown(f"- {s}")
+                continue
             title = s.get("title", "Source")
             url = s.get("url") or s.get("link")
             snippet = s.get("snippet") or s.get("summary") or ""
+            provider = s.get("source") or s.get("provider") or ""
+            line = ""
+            if provider:
+                line += f"[{provider}] "
             if url:
-                st.markdown(f"- [{title}]({url})  \n  {snippet}")
+                line += f"[{title}]({url})"
             else:
-                st.markdown(f"- {title}  \n  {snippet}")
+                line += title
+            if snippet:
+                line += f"  \n  {snippet}"
+            st.markdown(f"- {line}")
 
-    debug = result.get("debug") or result.get("diagnostics")
+    # Optional debug/diagnostics view
+    debug = (
+        base.get("debug")
+        or base.get("diagnostics")
+        or result.get("debug")
+        or result.get("diagnostics")
+    )
     if debug:
         with st.expander("Diagnostics and debug"):
             st.json(debug)
