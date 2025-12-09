@@ -925,6 +925,28 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             history=summaries,
         )
 
+        # Normalize cycles for UI: index + cycle_index always present
+        normalized_cycles: List[Dict[str, Any]] = []
+        for i, entry in enumerate(summaries):
+            if isinstance(entry, dict):
+                c = dict(entry)
+            else:
+                c = {"raw": entry}
+            c.setdefault("index", i + 1)
+            c.setdefault("cycle_index", i)
+            normalized_cycles.append(c)
+
+        # Build a simple overall summary string if possible
+        overall_summary: Optional[str] = None
+        for c in normalized_cycles:
+            for key in ("summary", "brief", "title", "description"):
+                val = c.get(key)
+                if isinstance(val, str) and val.strip():
+                    overall_summary = val.strip()
+                    break
+            if overall_summary:
+                break
+
         extra_manifest: Dict[str, Any] = {
             "engine": f"direct_{mode}",
             "experiment_fingerprint": experiment_fingerprint,
@@ -945,7 +967,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 runtime_profile=runtime_profile,
                 stop_rye=stop_rye,
                 max_minutes=max_minutes,
-                summaries=summaries,
+                summaries=normalized_cycles,
                 extra=extra_manifest,
             )
         except Exception:
@@ -962,12 +984,15 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "max_cycles": max_cycles if mode == "single" else None,
             "max_rounds": max_rounds if mode == "swarm" else None,
             "stop_rye": stop_rye,
-            "summaries": summaries,
+            "summaries": normalized_cycles,
+            "cycles": normalized_cycles,
             "diagnostics": diag,
             "intelligence": intelligence_info,
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
         }
+        if overall_summary:
+            result_obj["summary"] = overall_summary
 
         _update_worker_state(
             agent,
@@ -1387,6 +1412,30 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             history=summaries,
         )
 
+        # ------------------------------------------------------------------
+        # Normalize cycles so the UI always sees cycles + summaries lists
+        # with index / cycle_index and an overall summary string.
+        # ------------------------------------------------------------------
+        normalized_cycles: List[Dict[str, Any]] = []
+        for i, entry in enumerate(summaries):
+            if isinstance(entry, dict):
+                c = dict(entry)
+            else:
+                c = {"raw": entry}
+            c.setdefault("index", i + 1)
+            c.setdefault("cycle_index", i)
+            normalized_cycles.append(c)
+
+        overall_summary: Optional[str] = None
+        for c in normalized_cycles:
+            for key in ("summary", "brief", "title", "description"):
+                val = c.get(key)
+                if isinstance(val, str) and val.strip():
+                    overall_summary = val.strip()
+                    break
+            if overall_summary:
+                break
+
         extra_manifest: Dict[str, Any] = {
             "engine": f"queue_{mode}",
             "experiment_fingerprint": experiment_fingerprint,
@@ -1407,7 +1456,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 runtime_profile=runtime_profile,
                 stop_rye=stop_rye,
                 max_minutes=max_minutes,
-                summaries=summaries,
+                summaries=normalized_cycles,
                 extra=extra_manifest,
             )
         except Exception:
@@ -1419,10 +1468,28 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         if isinstance(full_result, dict):
             # Ensure both "cycles" and "summaries" keys are present for the UI.
             fr = dict(full_result)
-            if "cycles" not in fr and "summaries" in fr:
-                fr.setdefault("cycles", fr.get("summaries"))
-            if "summaries" not in fr and "cycles" in fr:
-                fr.setdefault("summaries", fr.get("cycles"))
+
+            # Prefer whatever the agent returned, but fall back to our normalized list.
+            cycles_src = fr.get("cycles") or fr.get("summaries") or normalized_cycles
+            if not isinstance(cycles_src, list):
+                cycles_src = normalized_cycles
+
+            norm_fr_cycles: List[Dict[str, Any]] = []
+            for i, entry in enumerate(cycles_src):
+                if isinstance(entry, dict):
+                    c = dict(entry)
+                else:
+                    c = {"raw": entry}
+                c.setdefault("index", i + 1)
+                c.setdefault("cycle_index", i)
+                norm_fr_cycles.append(c)
+
+            fr["cycles"] = norm_fr_cycles
+            fr.setdefault("summaries", norm_fr_cycles)
+
+            # Add overall summary if missing.
+            if "summary" not in fr and overall_summary:
+                fr["summary"] = overall_summary
 
             result_obj: Dict[str, Any] = {
                 "job_id": job.run_id,
@@ -1445,13 +1512,15 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "max_cycles": max_cycles if mode == "single" else None,
                 "max_rounds": max_rounds if mode == "swarm" else None,
                 "stop_rye": stop_rye,
-                "summaries": summaries,
-                "cycles": summaries,
+                "summaries": normalized_cycles,
+                "cycles": normalized_cycles,
                 "diagnostics": diag,
                 "intelligence": intelligence_info,
                 "experiment_fingerprint": experiment_fingerprint,
                 "job_meta": job_meta,
             }
+            if overall_summary:
+                result_obj["summary"] = overall_summary
 
         try:
             if save_job_result is not None:
@@ -1624,9 +1693,7 @@ def run_job_queue_worker() -> None:
 
         _process_single_job(agent, config, job)
         time.sleep(1.0)
-
-
-# ---------------------------------------------------------------------------
+        # ---------------------------------------------------------------------------
 # Single and swarm engines
 # ---------------------------------------------------------------------------
 
