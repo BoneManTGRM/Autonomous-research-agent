@@ -1087,6 +1087,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     the worker ignores max_minutes so the job runs until the specified
     cycles or rounds complete (or stop_rye triggers).
     """
+    start_ts = time.time()
+
     base_goal, base_domain = build_goal_and_domain()
     cfg = job.config or {}
 
@@ -1254,46 +1256,102 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     )
 
     summaries: List[Dict[str, Any]] = []
+    full_result: Optional[Dict[str, Any]] = None
 
     try:
-        if mode == "swarm":
-            if roles_list is None:
-                try:
-                    roles_list = agent.get_agent_roles()
-                except Exception:
-                    roles_list = ["agent"]
+        # Prefer a structured run_goal path if the agent exposes it.
+        if hasattr(agent, "run_goal"):
+            print("[Queue] Using CoreAgent.run_goal for structured result bundle.")
+            sys.stdout.flush()
 
-            summaries = agent.run_swarm_continuous(
-                goal=goal,
-                max_rounds=max_rounds,
-                stop_rye=stop_rye,
-                roles=roles_list,
-                source_controls=source_controls,
-                pdf_bytes=None,
-                biomarker_snapshot=None,
-                domain=domain,
-                max_minutes=max_minutes,
-                forever=False,
-                resume_from_checkpoint=resume,
-                watchdog_interval_minutes=watchdog_minutes,
-                runtime_profile=runtime_profile,
-            )
-        else:
-            summaries = agent.run_continuous(
-                goal=goal,
-                max_cycles=max_cycles,
-                stop_rye=stop_rye,
-                role=role,
-                source_controls=source_controls,
-                pdf_bytes=None,
-                biomarker_snapshot=None,
-                domain=domain,
-                max_minutes=max_minutes,
-                forever=False,
-                resume_from_checkpoint=resume,
-                watchdog_interval_minutes=watchdog_minutes,
-                runtime_profile=runtime_profile,
-            )
+            def _progress_cb(update: Dict[str, Any]) -> None:
+                # Pass through to progress file so UI can live-refresh.
+                current = update.get("current_cycle")
+                total_local = update.get("total_cycles")
+                note = update.get("notes", "")
+                _write_job_progress(
+                    job.run_id,
+                    status=str(update.get("status", "active")),
+                    note=str(note),
+                    current=int(current) if isinstance(current, (int, float)) else None,
+                    total=int(total_local) if isinstance(total_local, (int, float)) else None,
+                )
+
+            goal_config: Dict[str, Any] = {
+                **cfg,
+                "mode": mode,
+                "domain": domain,
+                "runtime_profile": runtime_profile,
+                "max_minutes": max_minutes,
+                "max_cycles": max_cycles,
+                "max_rounds": max_rounds,
+                "stop_rye": stop_rye,
+                "source_controls": source_controls,
+            }
+            if mode == "swarm":
+                goal_config["roles"] = roles_list
+            else:
+                goal_config["role"] = role
+
+            try:
+                full_result = agent.run_goal(
+                    goal=goal,
+                    config=goal_config,
+                    progress_callback=_progress_cb,
+                )
+            except TypeError:
+                # Fallback if run_goal doesn't accept progress_callback
+                full_result = agent.run_goal(goal=goal, config=goal_config)  # type: ignore[arg-type]
+
+            if isinstance(full_result, dict):
+                cycles_from_result = (
+                    full_result.get("cycles")
+                    or full_result.get("summaries")
+                    or []
+                )
+                if isinstance(cycles_from_result, list):
+                    summaries = cycles_from_result  # for diagnostics below
+
+        # If no run_goal or it failed, fall back to legacy continuous engines.
+        if not summaries and full_result is None:
+            if mode == "swarm":
+                if roles_list is None:
+                    try:
+                        roles_list = agent.get_agent_roles()
+                    except Exception:
+                        roles_list = ["agent"]
+
+                summaries = agent.run_swarm_continuous(
+                    goal=goal,
+                    max_rounds=max_rounds,
+                    stop_rye=stop_rye,
+                    roles=roles_list,
+                    source_controls=source_controls,
+                    pdf_bytes=None,
+                    biomarker_snapshot=None,
+                    domain=domain,
+                    max_minutes=max_minutes,
+                    forever=False,
+                    resume_from_checkpoint=resume,
+                    watchdog_interval_minutes=watchdog_minutes,
+                    runtime_profile=runtime_profile,
+                )
+            else:
+                summaries = agent.run_continuous(
+                    goal=goal,
+                    max_cycles=max_cycles,
+                    stop_rye=stop_rye,
+                    role=role,
+                    source_controls=source_controls,
+                    pdf_bytes=None,
+                    biomarker_snapshot=None,
+                    domain=domain,
+                    max_minutes=max_minutes,
+                    forever=False,
+                    resume_from_checkpoint=resume,
+                    watchdog_interval_minutes=watchdog_minutes,
+                    runtime_profile=runtime_profile,
+                )
 
         _heartbeat(agent, label="queue_job_finished", run_id=job.run_id)
 
@@ -1355,22 +1413,45 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         except Exception:
             print("Manifest logging failed for job, see logs for details.")
 
-        result_obj: Dict[str, Any] = {
-            "run_id": job.run_id,
-            "mode": mode,
-            "goal": goal,
-            "domain": domain,
-            "runtime_profile": runtime_profile,
-            "max_minutes": max_minutes,
-            "max_cycles": max_cycles if mode == "single" else None,
-            "max_rounds": max_rounds if mode == "swarm" else None,
-            "stop_rye": stop_rye,
-            "summaries": summaries,
-            "diagnostics": diag,
-            "intelligence": intelligence_info,
-            "experiment_fingerprint": experiment_fingerprint,
-            "job_meta": job_meta,
-        }
+        completed_ts = time.time()
+
+        # Build final result bundle.
+        if isinstance(full_result, dict):
+            # Ensure both "cycles" and "summaries" keys are present for the UI.
+            fr = dict(full_result)
+            if "cycles" not in fr and "summaries" in fr:
+                fr.setdefault("cycles", fr.get("summaries"))
+            if "summaries" not in fr and "cycles" in fr:
+                fr.setdefault("summaries", fr.get("cycles"))
+
+            result_obj: Dict[str, Any] = {
+                "job_id": job.run_id,
+                "status": fr.get("status", "finished"),
+                "created_at": job.created_at,
+                "completed_at": completed_ts,
+                "elapsed_seconds": completed_ts - start_ts,
+                "meta": job_meta or {},
+            }
+            result_obj.update(fr)
+        else:
+            # Legacy minimal shape, but still expose cycles alias.
+            result_obj = {
+                "run_id": job.run_id,
+                "mode": mode,
+                "goal": goal,
+                "domain": domain,
+                "runtime_profile": runtime_profile,
+                "max_minutes": max_minutes,
+                "max_cycles": max_cycles if mode == "single" else None,
+                "max_rounds": max_rounds if mode == "swarm" else None,
+                "stop_rye": stop_rye,
+                "summaries": summaries,
+                "cycles": summaries,
+                "diagnostics": diag,
+                "intelligence": intelligence_info,
+                "experiment_fingerprint": experiment_fingerprint,
+                "job_meta": job_meta,
+            }
 
         try:
             if save_job_result is not None:
