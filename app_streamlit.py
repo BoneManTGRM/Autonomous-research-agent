@@ -585,6 +585,133 @@ def render_job_summary(job: Any) -> None:
     st.caption(f"Mode: {mode} • Created at: {created_at}")
 
 
+# -------------------------------------------------------------------
+# Run-result → cycle-history helpers (used for citation table fallback)
+# -------------------------------------------------------------------
+def _extract_cycles_from_run_result(
+    run_result: Dict[str, Any],
+    run_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Normalize cycles from a finished run result into history-style entries.
+
+    This is used as a fallback when MemoryStore.get_cycle_history() is empty,
+    so the History / Citations panels can still populate directly from
+    finished run JSON files written by the engine worker.
+    """
+    if not isinstance(run_result, dict):
+        return []
+
+    payload = run_result.get("result")
+    if isinstance(payload, dict):
+        base = payload
+    else:
+        base = run_result
+
+    cfg = run_result.get("config") if isinstance(run_result.get("config"), dict) else {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    goal = base.get("goal") or cfg.get("goal")
+    domain = base.get("domain") or cfg.get("domain") or "general"
+    default_role = base.get("role") or "agent"
+
+    # Find the first key that looks like cycle history
+    cycles_raw: Optional[List[Dict[str, Any]]] = None
+    for key in ("cycles", "cycle_history", "history", "tgrm_history", "run_history", "per_cycle"):
+        val = base.get(key)
+        if isinstance(val, list) and val:
+            cycles_raw = [c for c in val if isinstance(c, dict)]
+            if cycles_raw:
+                break
+
+    if not cycles_raw:
+        return []
+
+    cycles_out: List[Dict[str, Any]] = []
+    for idx, c in enumerate(cycles_raw):
+        c2: Dict[str, Any] = dict(c)
+
+        # Normalize cycle number
+        if c2.get("cycle") is None and c2.get("cycle_index") is not None:
+            c2["cycle"] = c2.get("cycle_index")
+        if c2.get("cycle") is None:
+            c2["cycle"] = idx + 1
+
+        # Domain / role / goal fallbacks
+        if not c2.get("domain"):
+            c2["domain"] = domain
+        if not c2.get("role"):
+            c2["role"] = default_role
+        if goal is not None and "goal" not in c2:
+            c2["goal"] = goal
+
+        # Timestamp fallback
+        if "timestamp" not in c2:
+            ts = base.get("timestamp") or run_result.get("timestamp")
+            if isinstance(ts, str):
+                c2["timestamp"] = ts
+
+        # Attach run id if we have it
+        if run_id is not None and "run_id" not in c2:
+            c2["run_id"] = run_id
+
+        cycles_out.append(c2)
+
+    return cycles_out
+
+
+def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
+    """Rebuild a synthetic history from finished run JSON files.
+
+    This is a *fallback* for History / Citations when MemoryStore has no
+    cycle history (for example when the queue-mode worker only writes
+    per-run result JSON and does not stream cycles into MemoryStore).
+    """
+    if list_run_jobs is None:
+        return []
+
+    try:
+        jobs = list_run_jobs(status="finished")
+    except TypeError:
+        # Old signature list_jobs() with no arguments
+        try:
+            jobs = list_run_jobs()  # type: ignore[call-arg]
+        except Exception:
+            jobs = []
+    except Exception:
+        jobs = []
+
+    if not jobs:
+        return []
+
+    # Only look at the most recent N jobs to keep things light
+    jobs_slice = jobs[-limit_runs:]
+
+    history: List[Dict[str, Any]] = []
+    for job in jobs_slice:
+        run_id = _get_job_id(job)
+        result = load_job_result(run_id)
+        if not isinstance(result, dict):
+            continue
+        cycles = _extract_cycles_from_run_result(result, run_id=run_id)
+        history.extend(cycles)
+
+    if not history:
+        return []
+
+    # Sort by timestamp (if present) then by cycle
+    def _sort_key(e: Dict[str, Any]):
+        ts = e.get("timestamp")
+        if isinstance(ts, str):
+            sort_ts = ts
+        else:
+            sort_ts = ""
+        return sort_ts, int(e.get("cycle") or 0)
+
+    history.sort(key=_sort_key)
+    return history
+
+
 def render_result_details(result: Dict[str, Any]) -> None:
     """Safe read-only result viewer for a finished job.
 
@@ -1324,7 +1451,7 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
     )
 
     return "\n".join(lines)
-  # -------------------------------------------------------------------
+    # -------------------------------------------------------------------
 # Main UI
 # -------------------------------------------------------------------
 def main() -> None:
@@ -1819,10 +1946,16 @@ def main() -> None:
     st.subheader("History and advanced analysis")
 
     get_cycle_history = getattr(memory, "get_cycle_history", None)
+    history: List[Dict[str, Any]] = []
     if callable(get_cycle_history):
-        history = get_cycle_history()
-    else:
-        history = []
+        try:
+            history = get_cycle_history() or []
+        except Exception:
+            history = []
+
+    # NEW: fallback to finished run results if MemoryStore has no cycles.
+    if not history:
+        history = load_history_from_finished_runs()
 
     if not history:
         st.write("No cycles yet.")
@@ -2923,4 +3056,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()  
+    main()
