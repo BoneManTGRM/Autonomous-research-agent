@@ -1790,7 +1790,7 @@ def main() -> None:
         st.caption(f"Queue directory: `{pending_dir}`")
 
         # Clear queue button (file based jobs under ARA_RUNS_DIR/pending)
-        if st.button("ð§¹ Clear job queue", key="clear_queue_btn"):
+        if st.button("\U0001F9F9 Clear job queue", key="clear_queue_btn"):
             pattern = os.path.join(pending_dir, "*.json")
             removed = 0
             for fp in glob.glob(pattern):
@@ -2103,8 +2103,7 @@ def main() -> None:
 
             with st.expander("Raw diagnostics JSON"):
                 st.code(json.dumps(diagnostics, indent=2), language="json")
-
-        # ----------------- Citations tab -----------------
+                        # ----------------- Citations tab -----------------
         with tab_citations:
             st.markdown("### Source citation viewer")
 
@@ -2112,12 +2111,33 @@ def main() -> None:
             if not citations:
                 st.info("No citations recorded yet in cycle history.")
             else:
-                # Build a DataFrame for easier manipulation
                 citations_df = pd.DataFrame(citations)
-                total_cites = len(citations)
-                unique_sources = sorted({c["source"] for c in citations if c.get("source")})
-                domains_c = sorted({c["domain"] for c in citations})
-                roles_c = sorted({c["role"] for c in citations})
+
+                # Ensure required columns exist so the table never breaks
+                expected_cols = [
+                    "cycle",
+                    "role",
+                    "domain",
+                    "source",
+                    "title",
+                    "snippet",
+                    "url",
+                    "timestamp",
+                ]
+                for col in expected_cols:
+                    if col not in citations_df.columns:
+                        citations_df[col] = None
+
+                total_cites = len(citations_df)
+                unique_sources = sorted(
+                    {s for s in citations_df["source"].dropna().astype(str).unique() if s}
+                )
+                domains_c = sorted(
+                    {str(d) for d in citations_df["domain"].dropna().astype(str).unique()}
+                )
+                roles_c = sorted(
+                    {str(r) for r in citations_df["role"].dropna().astype(str).unique()}
+                )
 
                 col_c1, col_c2, col_c3 = st.columns(3)
                 with col_c1:
@@ -2146,7 +2166,7 @@ def main() -> None:
                     key="citations_source_filter",
                 )
 
-                # Add a search box for filtering citations by text
+                # Search box for filtering citations by text
                 search_query = st.text_input(
                     "Search citations (title/snippet)",
                     value="",
@@ -2163,17 +2183,17 @@ def main() -> None:
 
                 # Apply filters based on domain, role, source
                 filtered_df = citations_df[
-                    citations_df["domain"].isin(citations_domain_filter)
-                    & citations_df["role"].isin(citations_role_filter)
-                    & citations_df["source"].isin(citations_source_filter)
-                ]
+                    citations_df["domain"].astype(str).isin(citations_domain_filter)
+                    & citations_df["role"].astype(str).isin(citations_role_filter)
+                    & citations_df["source"].astype(str).isin(citations_source_filter)
+                ].copy()
 
                 # Apply search filter if provided
                 if search_query:
                     search_lower = search_query.lower()
                     filtered_df = filtered_df[
-                        filtered_df["title"].str.lower().str.contains(search_lower, na=False)
-                        | filtered_df["snippet"].str.lower().str.contains(search_lower, na=False)
+                        filtered_df["title"].astype(str).str.lower().str.contains(search_lower, na=False)
+                        | filtered_df["snippet"].astype(str).str.lower().str.contains(search_lower, na=False)
                     ]
 
                 # Show grouping if selected
@@ -2186,6 +2206,7 @@ def main() -> None:
                     )
                     st.write("Citations grouped by cycle:")
                     st.dataframe(group_counts, use_container_width=True)
+
                 elif group_by_option == "Source":
                     group_counts = (
                         filtered_df.groupby("source")
@@ -2195,40 +2216,48 @@ def main() -> None:
                     )
                     st.write("Citations grouped by source:")
                     st.dataframe(group_counts, use_container_width=True)
+
                 else:
-                    # Prepare data for table view
-                    view_rows_c: List[Dict[str, Any]] = []
-                    for _, c in filtered_df.iterrows():
-                        title = c["title"] or ""
-                        snippet = c["snippet"] or ""
-                        if len(title) > 80:
-                            title = title[:80] + "..."
-                        if len(snippet) > 120:
-                            snippet = snippet[:120] + "..."
-                        view_rows_c.append(
-                            {
-                                "cycle": c["cycle"],
-                                "role": c["role"],
-                                "domain": c["domain"],
-                                "source": c["source"],
-                                "title": title,
-                                "snippet": snippet,
-                                "url": c["url"],
-                                "timestamp": c["timestamp"],
-                            }
-                        )
-                    st.write(f"Showing {len(view_rows_c)} citations after filters.")
-                    st.dataframe(view_rows_c, use_container_width=True)
+                    # Flat table view
+                    display_df = filtered_df.copy().reset_index(drop=True)
+                    display_df["title_short"] = (
+                        display_df["title"].fillna("").astype(str).str.slice(0, 80)
+                    )
+                    display_df["snippet_short"] = (
+                        display_df["snippet"].fillna("").astype(str).str.slice(0, 120)
+                    )
+
+                    view_df = display_df[
+                        [
+                            "cycle",
+                            "role",
+                            "domain",
+                            "source",
+                            "title_short",
+                            "snippet_short",
+                            "url",
+                            "timestamp",
+                        ]
+                    ].rename(
+                        columns={
+                            "title_short": "title",
+                            "snippet_short": "snippet",
+                        }
+                    )
+
+                    st.write(f"Showing {len(view_df)} citations after filters.")
+                    st.dataframe(view_df, use_container_width=True)
 
                     # Add a selectbox to display full citation details
-                    if view_rows_c:
+                    if not view_df.empty:
                         selected_index = st.selectbox(
                             "Select a citation to view details",
-                            options=list(range(len(view_rows_c))),
-                            format_func=lambda i: f"{view_rows_c[i]['source']} - {view_rows_c[i]['title'][:50]}",
+                            options=list(range(len(view_df))),
+                            format_func=lambda i: f"{view_df.iloc[i]['source']} - {str(view_df.iloc[i]['title'])[:50]}",
                             key="citations_select",
                         )
-                        selected_citation = filtered_df.iloc[selected_index]
+
+                        selected_citation = display_df.iloc[selected_index]
                         with st.expander("Citation details", expanded=False):
                             st.write(f"**Cycle:** {selected_citation['cycle']}")
                             st.write(f"**Role:** {selected_citation['role']}")
@@ -2249,7 +2278,7 @@ def main() -> None:
                             mime="text/csv",
                         )
 
-                # raw citations JSON remains available under expander
+                # Raw citations JSON
                 with st.expander("Raw citations JSON"):
                     st.code(json.dumps(citations, indent=2), language="json")
 
