@@ -1090,9 +1090,7 @@ def _write_job_progress(
     except Exception:
         # Progress should never crash the worker
         return
-
-
-def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJob) -> None:
+        def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJob) -> None:
     """
     Execute a single RunJob from the file based queue.
 
@@ -1522,8 +1520,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "experiment_fingerprint": experiment_fingerprint,
                 "job_meta": job_meta,
             }
-            if overall_summary:
-                result_obj["summary"] = overall_summary
+        if overall_summary:
+            result_obj["summary"] = overall_summary
 
         try:
             if save_job_result is not None:
@@ -1598,7 +1596,9 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "error_message": str(e),
             },
         )
-        def run_job_queue_worker() -> None:
+
+
+def run_job_queue_worker() -> None:
     """
     Main loop for queue mode.
 
