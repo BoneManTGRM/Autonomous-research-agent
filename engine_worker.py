@@ -103,6 +103,9 @@ try:
 except Exception:
     pass
 
+# NOTE: BASE_DIR is now always derived from agent.run_jobs.BASE_DIR when available,
+# so engine_worker, Streamlit, and the queue see the same runs directory tree.
+
 
 # ---------------------------------------------------------------------------
 # Hard safety caps (finite-only guard rails)
@@ -1325,7 +1328,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                     progress_callback=_progress_cb,
                 )
             except TypeError:
-                # Fallback if run_goal doesn't accept progress_callback
+                # Fallback if run_goal does not accept progress_callback
                 full_result = agent.run_goal(goal=goal, config=goal_config)  # type: ignore[arg-type]
 
             if isinstance(full_result, dict):
@@ -1595,9 +1598,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "error_message": str(e),
             },
         )
-
-
-def run_job_queue_worker() -> None:
+        def run_job_queue_worker() -> None:
     """
     Main loop for queue mode.
 
@@ -1693,7 +1694,9 @@ def run_job_queue_worker() -> None:
 
         _process_single_job(agent, config, job)
         time.sleep(1.0)
-        # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
 # Single and swarm engines
 # ---------------------------------------------------------------------------
 
@@ -2836,6 +2839,12 @@ def main() -> None:
         f"HARD_MAX_ROUNDS={HARD_MAX_ROUNDS}, "
         f"HARD_MAX_MINUTES={HARD_MAX_MINUTES}"
     )
+    # Extra debug: show effective runs directory for this worker instance
+    print(f"[engine_worker] ARA_RUNS_DIR env: {os.getenv('ARA_RUNS_DIR')!r}")
+    try:
+        print(f"[engine_worker] BASE_DIR (effective): {BASE_DIR.resolve()}")
+    except Exception:
+        print(f"[engine_worker] BASE_DIR (effective): {BASE_DIR}")
     sys.stdout.flush()
 
     queue_mode = _env_bool("WORKER_QUEUE_MODE", default=True)
