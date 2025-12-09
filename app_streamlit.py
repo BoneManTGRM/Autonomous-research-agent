@@ -1,4 +1,6 @@
-"""Enhanced Streamlit interface for the Autonomous Research Agent.
+# -*- coding: utf-8 -*-
+"""
+Enhanced Streamlit interface for the Autonomous Research Agent.
 
 Features:
 - Finite mode only with manual cycle budgets (no timed presets in this build)
@@ -412,11 +414,11 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
                     text = h.get("text", "")
                     conf = h.get("confidence")
                     if conf is not None:
-                        st.write(f"â¢ {text} (confidence ~ {conf})")
+                        st.write(f"• {text} (confidence ~ {conf})")
                     else:
-                        st.write(f"â¢ {text}")
+                        st.write(f"• {text}")
                 else:
-                    st.write(f"â¢ {h}")
+                    st.write(f"• {h}")
 
     # Citations
     if cycle_summary.get("citations"):
@@ -580,7 +582,7 @@ def render_job_summary(job: Any) -> None:
     cols[2].markdown(f"Status: `{status}`")
     cols[3].markdown(f"Domain: `{str(domain).title()}`")
 
-    st.caption(f"Mode: {mode} â¢ Created at: {created_at}")
+    st.caption(f"Mode: {mode} • Created at: {created_at}")
 
 
 def render_result_details(result: Dict[str, Any]) -> None:
@@ -1322,9 +1324,7 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
     )
 
     return "\n".join(lines)
-
-
-# -------------------------------------------------------------------
+  # -------------------------------------------------------------------
 # Main UI
 # -------------------------------------------------------------------
 def main() -> None:
@@ -1790,7 +1790,7 @@ def main() -> None:
         st.caption(f"Queue directory: `{pending_dir}`")
 
         # Clear queue button (file based jobs under ARA_RUNS_DIR/pending)
-        if st.button("\U0001F9F9 Clear job queue", key="clear_queue_btn"):
+        if st.button("🧹 Clear job queue", key="clear_queue_btn"):
             pattern = os.path.join(pending_dir, "*.json")
             removed = 0
             for fp in glob.glob(pattern):
@@ -2103,7 +2103,8 @@ def main() -> None:
 
             with st.expander("Raw diagnostics JSON"):
                 st.code(json.dumps(diagnostics, indent=2), language="json")
-                        # ----------------- Citations tab -----------------
+
+        # ----------------- Citations tab -----------------
         with tab_citations:
             st.markdown("### Source citation viewer")
 
@@ -2553,13 +2554,15 @@ def main() -> None:
                 filtered_h.sort(key=_score, reverse=True)
                 view_rows = []
                 for h in filtered_h:
+                    text = h["text"]
+                    text_short = text[:120] + ("..." if len(text) > 120 else "")
                     view_rows.append(
                         {
                             "cycle": h["cycle"],
                             "role": h["role"],
                             "domain": h["domain"],
                             "confidence": h["confidence"],
-                            "text": h["text"][:120] + ("..." if len(h["text"]) > 120 else ""),
+                            "text": text_short,
                             "timestamp": h["timestamp"],
                         }
                     )
@@ -2920,4 +2923,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main()  
