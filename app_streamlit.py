@@ -1,3 +1,5 @@
+# PART 1/2
+
 # -*- coding: utf-8 -*-
 """
 Enhanced Streamlit interface for the Autonomous Research Agent.
@@ -1451,7 +1453,9 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
     )
 
     return "\n".join(lines)
-    # -------------------------------------------------------------------
+    # PART 2/2
+
+# -------------------------------------------------------------------
 # Main UI
 # -------------------------------------------------------------------
 def main() -> None:
@@ -1854,14 +1858,25 @@ def main() -> None:
     _debug_list_dir("error", RUNS_ERROR_DIR)
 
     if list_run_jobs is not None:
+        # Finished jobs
         try:
             finished_jobs = list_run_jobs(status="finished")
         except TypeError:
             # Fallback if signature is list_jobs() without args
             finished_jobs = list_run_jobs()  # type: ignore[call-arg]
+        except Exception:
+            finished_jobs = []
+
+        # Pending / queued jobs (support both status names)
+        pending_jobs: List[Any] = []
         try:
             pending_jobs = list_run_jobs(status="queued")
+            if not pending_jobs:
+                pending_jobs = list_run_jobs(status="pending")
         except TypeError:
+            # Old signature, no status support
+            pending_jobs = []
+        except Exception:
             pending_jobs = []
     else:
         finished_jobs = []
@@ -1953,7 +1968,7 @@ def main() -> None:
         except Exception:
             history = []
 
-    # NEW: fallback to finished run results if MemoryStore has no cycles.
+    # Fallback to finished run results if MemoryStore has no cycles
     if not history:
         history = load_history_from_finished_runs()
 
@@ -2520,16 +2535,10 @@ def main() -> None:
 
                 # Timeline view of equilibrium RYE across snapshots
                 rye_series = []
-                ts_series = []
                 for s in snapshots:
                     eq = equilibrium_from_snapshot(s["data"])
                     if eq["rye_avg"] is not None:
                         rye_series.append(eq["rye_avg"])
-                        ts = s["timestamp"]
-                        if isinstance(ts, datetime):
-                            ts_series.append(ts.isoformat(timespec="seconds"))
-                        else:
-                            ts_series.append(s["name"])
                 if rye_series:
                     st.markdown("#### Snapshot RYE timeline")
                     timeline_data = {"RYE avg": rye_series}
