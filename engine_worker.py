@@ -1429,7 +1429,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             c.setdefault("index", i + 1)
             c.setdefault("cycle_index", i)
             normalized_cycles.append(c)
-               overall_summary: Optional[str] = None
+
+        overall_summary: Optional[str] = None
         for c in normalized_cycles:
             for key in ("summary", "brief", "title", "description"):
                 val = c.get(key)
@@ -1438,8 +1439,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                     break
             if overall_summary:
                 break
-
-        extra_manifest: Dict[str, Any] = {
+                 extra_manifest: Dict[str, Any] = {
             "engine": f"queue_{mode}",
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
@@ -2913,4 +2913,4 @@ if __name__ == "__main__":
     if effective_mode == "queue":
         os.environ["WORKER_QUEUE_MODE"] = "1"
 
-    main()     
+    main()       
