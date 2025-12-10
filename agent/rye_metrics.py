@@ -34,6 +34,33 @@ import statistics
 
 
 # ---------------------------------------------------------------------------
+# Tier configuration constants for tuning
+# ---------------------------------------------------------------------------
+
+MIN_CYCLES_FOR_TIERING: int = 4
+
+# Run level Tier 2 thresholds
+TIER2_MIN_AVG_RYE: float = 0.2
+TIER2_MIN_STABILITY: float = 0.4
+
+# Run level Tier 3 thresholds
+TIER3_MIN_AVG_RYE: float = 0.4
+TIER3_MIN_STABILITY: float = 0.6
+TIER3_MIN_TREND: float = 0.0
+TIER3_MIN_MID_PERCENTILE: float = 0.2
+TIER3_MIN_BREAKTHROUGH_PROB: float = 0.30
+
+# Per cycle Tier thresholds
+CYCLE_TIER1_MIN_RYE: float = 0.0
+CYCLE_TIER2_MIN_RYE: float = 0.3
+CYCLE_TIER2_MIN_DELTA_R: float = 1.0
+CYCLE_TIER3_MIN_RYE: float = 0.6
+CYCLE_TIER3_MIN_DELTA_R: float = 2.0
+CYCLE_TIER3_MIN_NOVELTY: float = 0.4
+CYCLE_TIER3_MIN_COHERENCE: float = 0.4
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -1231,7 +1258,7 @@ def classify_run_tier(
     tier = "Tier 0"
     reason = "insufficient_data"
 
-    if count < 4:
+    if count < MIN_CYCLES_FOR_TIERING:
         tier = "Tier 0"
         reason = "too_few_cycles"
     elif stab < 0.2 and avg <= 0.0:
@@ -1240,10 +1267,18 @@ def classify_run_tier(
     elif avg > 0.0 and stab >= 0.2:
         tier = "Tier 1"
         reason = "positive_rye_basic_stability"
-    if avg > 0.2 and stab >= 0.4 and trend >= 0.0 and mid_p > 0.0:
+
+    if (
+        count >= MIN_CYCLES_FOR_TIERING
+        and avg > TIER2_MIN_AVG_RYE
+        and stab >= TIER2_MIN_STABILITY
+        and trend >= 0.0
+        and mid_p > 0.0
+    ):
         tier = "Tier 2"
         reason = "self_repairing_long_run_candidate"
-    if avg > 0.4 and stab >= 0.6 and trend > 0.0 and mid_p > 0.2 and bp >= 0.30:
+
+    if is_tier3_run_candidate(diagnostics, breakthrough_prob=bp):
         tier = "Tier 3"
         reason = "high_stability_positive_trend_breakthrough_zone"
 
@@ -1259,6 +1294,43 @@ def classify_run_tier(
             "breakthrough_probability": bp,
         },
     }
+
+
+def is_tier3_run_candidate(
+    diagnostics: Dict[str, Any],
+    *,
+    breakthrough_prob: Optional[float] = None,
+) -> bool:
+    """
+    Convenience helper for Tier 3 hunts.
+
+    Returns True when the run appears to be in a Tier 3 zone according to
+    current heuristic thresholds.
+    """
+    count = diagnostics.get("count") or 0
+    if count < MIN_CYCLES_FOR_TIERING:
+        return False
+
+    stab = diagnostics.get("stability_index") or 0.0
+    avg = diagnostics.get("rye_avg") or 0.0
+    trend = diagnostics.get("trend_slope") or 0.0
+    mid_p = diagnostics.get("mid_percentile") or 0.0
+
+    if breakthrough_prob is None:
+        bp = estimate_breakthrough_probability(diagnostics).get("probability") or 0.0
+    else:
+        bp = breakthrough_prob
+
+    if (
+        avg > TIER3_MIN_AVG_RYE
+        and stab >= TIER3_MIN_STABILITY
+        and trend > TIER3_MIN_TREND
+        and mid_p > TIER3_MIN_MID_PERCENTILE
+        and bp >= TIER3_MIN_BREAKTHROUGH_PROB
+    ):
+        return True
+
+    return False
 
 
 # Critical Failure Early Warning Score
@@ -1356,6 +1428,78 @@ def breakthrough_likelihood_90d(
         "horizon_hours": horizon_hours,
         "hours_run_so_far": hours_run_so_far,
     }
+
+
+# Per cycle tier classifier
+
+def classify_cycle_tier(
+    summary: Dict[str, Any],
+) -> Dict[str, Any]:
+    """
+    Classify a single cycle into a tier based on its RYE and extra signals.
+
+    Expected fields in summary (from build_cycle_rye_summary and extra_signals):
+        - RYE
+        - delta_r
+        - domain (optional)
+        - novelty_score (optional, from extra_signals)
+        - coherence_gain (optional, from extra_signals)
+
+    Tiers:
+        Tier 0: non productive or negative cycle
+        Tier 1: basic positive repair
+        Tier 2: strong repair with good yield
+        Tier 3: candidate for high value discovery
+    """
+    rye = _safe_float(summary.get("RYE")) or 0.0
+    delta_r = _safe_float(summary.get("delta_r")) or 0.0
+    novelty = _safe_float(summary.get("novelty_score")) or 0.0
+    coherence = _safe_float(summary.get("coherence_gain")) or 0.0
+
+    tier = "Tier 0"
+    reason = "non_productive_or_negative_cycle"
+
+    if rye <= CYCLE_TIER1_MIN_RYE or delta_r <= 0.0:
+        tier = "Tier 0"
+        reason = "non_positive_rye_or_delta_r"
+    elif rye > CYCLE_TIER1_MIN_RYE and delta_r > 0.0:
+        tier = "Tier 1"
+        reason = "basic_positive_repair"
+
+    if rye > CYCLE_TIER2_MIN_RYE and delta_r >= CYCLE_TIER2_MIN_DELTA_R:
+        tier = "Tier 2"
+        reason = "strong_repair_good_yield"
+
+    if (
+        rye > CYCLE_TIER3_MIN_RYE
+        and delta_r >= CYCLE_TIER3_MIN_DELTA_R
+        and novelty >= CYCLE_TIER3_MIN_NOVELTY
+        and coherence >= CYCLE_TIER3_MIN_COHERENCE
+    ):
+        tier = "Tier 3"
+        reason = "high_value_discovery_candidate"
+
+    return {
+        "tier": tier,
+        "reason": reason,
+        "metrics": {
+            "RYE": rye,
+            "delta_r": delta_r,
+            "novelty_score": novelty,
+            "coherence_gain": coherence,
+        },
+    }
+
+
+def is_tier3_cycle_candidate(summary: Dict[str, Any]) -> bool:
+    """
+    Convenience helper for Tier 3 hunts at cycle level.
+
+    Returns True when a single cycle looks like a Tier 3 candidate
+    according to current per cycle thresholds.
+    """
+    info = classify_cycle_tier(summary)
+    return info.get("tier") == "Tier 3"
 
 
 # Option C master bundle for a run
