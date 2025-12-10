@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .core_agent import CoreAgent
+from . import rye_metrics as rm
 
 
 RunProgressCallback = Callable[[Dict[str, Any]], None]
@@ -118,6 +119,9 @@ class RunConfig:
     runtime_hints: Dict[str, Any] = field(default_factory=dict)
     extra: Dict[str, Any] = field(default_factory=dict)
 
+    # High level intent for the run, e.g. "standard", "tier3_hunt".
+    objective_mode: Optional[str] = None
+
     # ------------------------------------------------------------------
     # Helper: construct RunConfig from a job.config dict
     # ------------------------------------------------------------------
@@ -203,6 +207,9 @@ class RunConfig:
         notes = cfg.get("notes")
         seed = cfg.get("seed")
 
+        # Objective mode for high level intent (e.g. "tier3_hunt")
+        objective_mode = cfg.get("objective_mode") or cfg.get("experiment_mode")
+
         rc = cls(
             goal=goal,
             mode=mode,
@@ -221,26 +228,34 @@ class RunConfig:
             seed=seed,
             notes=notes,
             runtime_hints=runtime_hints,
-            extra={k: v for k, v in cfg.items() if k not in {
-                "goal",
-                "domain",
-                "mode",
-                "total_cycles",
-                "max_seconds",
-                "rye_stop_threshold",
-                "equilibrium_stop_label",
-                "min_cycles_before_stop",
-                "source_controls",
-                "stage_config",
-                "swarm",
-                "swarm_config",
-                "longevity_config",
-                "run_id",
-                "seed",
-                "notes",
-                "runtime_profile",
-                "runtime_hints",
-            }},
+            extra={
+                k: v
+                for k, v in cfg.items()
+                if k
+                not in {
+                    "goal",
+                    "domain",
+                    "mode",
+                    "total_cycles",
+                    "max_seconds",
+                    "rye_stop_threshold",
+                    "equilibrium_stop_label",
+                    "min_cycles_before_stop",
+                    "source_controls",
+                    "stage_config",
+                    "swarm",
+                    "swarm_config",
+                    "longevity_config",
+                    "run_id",
+                    "seed",
+                    "notes",
+                    "runtime_profile",
+                    "runtime_hints",
+                    "objective_mode",
+                    "experiment_mode",
+                }
+            },
+            objective_mode=objective_mode,
         )
         return rc
 
@@ -285,6 +300,10 @@ class RunManager:
         # Optional: pass runtime_profile through for logging or tuning
         if run_config.runtime_profile:
             cfg.setdefault("runtime_profile", run_config.runtime_profile)
+
+        # Optional: pass objective_mode as a hint
+        if run_config.objective_mode:
+            cfg.setdefault("objective_mode", run_config.objective_mode)
 
         return CoreAgent(
             memory_store=self.memory_store,
@@ -336,6 +355,8 @@ class RunManager:
         summary["notes"] = run_config.notes
         if run_config.runtime_profile:
             summary["runtime_profile"] = run_config.runtime_profile
+        if run_config.objective_mode:
+            summary["objective_mode"] = run_config.objective_mode
 
         # Attach the configured time budget and deadline
         summary.setdefault("time_limit_seconds", run_config.max_seconds)
@@ -347,6 +368,9 @@ class RunManager:
 
         # Make sure stop_reason is always present
         summary.setdefault("stop_reason", "completed")
+
+        # New: add Tier 3 / RYE diagnostics using short_view history
+        self._attach_rye_diagnostics(run_config, summary)
 
         # New: push a run manifest into MemoryStore if supported
         self._log_run_manifest_if_available(run_config, summary)
@@ -897,6 +921,59 @@ class RunManager:
         return summary
 
     # ------------------------------------------------------------------
+    # RYE / Tier 3 diagnostics attachment
+    # ------------------------------------------------------------------
+    def _attach_rye_diagnostics(
+        self,
+        run_config: RunConfig,
+        summary: Dict[str, Any],
+    ) -> None:
+        """Attach RYE diagnostics and Tier information to the summary.
+
+        Uses the per cycle short_view history to build an Option C style
+        signature and Tier classification suitable for Tier 3 hunts.
+        """
+        cycles = summary.get("cycles") or []
+        if not isinstance(cycles, list) or not cycles:
+            return
+
+        history: List[Dict[str, Any]] = []
+        for c in cycles:
+            if not isinstance(c, dict):
+                continue
+            sv = c.get("short_view")
+            if isinstance(sv, dict) and "RYE" in sv:
+                history.append(sv)
+
+        if not history:
+            return
+
+        # We do not know hours_run_so_far at this point for this helper, so we
+        # pass None. The 90d likelihood will still be computed heuristically.
+        option_c = rm.build_option_c_signature(
+            history,
+            domain=run_config.domain,
+            hours_run_so_far=None,
+            window=10,
+        )
+
+        summary["option_c_signature"] = option_c
+
+        diagnostics = option_c.get("diagnostics") or {}
+        run_tier = option_c.get("run_tier") or {}
+
+        summary["rye_diagnostics"] = diagnostics
+        summary["run_tier"] = run_tier
+        summary["autonomy_safety_envelope"] = option_c.get("autonomy_safety_envelope")
+        summary["early_failure_warning"] = option_c.get("early_failure_warning")
+        summary["breakthrough_probability"] = option_c.get("breakthrough_probability")
+        summary["breakthrough_likelihood_90d"] = option_c.get("breakthrough_likelihood_90d")
+
+        # Tier 3 candidate flag for quick filtering in UI / worker
+        tier_label = run_tier.get("tier")
+        summary["tier3_candidate"] = tier_label == "Tier 3"
+
+    # ------------------------------------------------------------------
     # New helper for manifest logging
     # ------------------------------------------------------------------
     def _log_run_manifest_if_available(
@@ -910,6 +987,9 @@ class RunManager:
             return
 
         learning = summary.get("learning_speed") or {}
+        run_tier = summary.get("run_tier") or {}
+        diagnostics = summary.get("rye_diagnostics") or {}
+
         manifest: Dict[str, Any] = {
             "run_id": summary.get("run_id", run_config.run_id),
             "mode": summary.get("mode", run_config.mode),
@@ -922,6 +1002,17 @@ class RunManager:
             "num_cycles": learning.get("num_cycles"),
             "rye_avg": learning.get("avg_rye"),
             "rye_best": learning.get("best_rye"),
+            "tier": run_tier.get("tier"),
+            "tier_reason": run_tier.get("reason"),
+            "stability_index": diagnostics.get("stability_index"),
+            "trend_slope": diagnostics.get("trend_slope"),
+            "breakthrough_probability": (
+                (summary.get("breakthrough_probability") or {}).get("probability")
+                if isinstance(summary.get("breakthrough_probability"), dict)
+                else None
+            ),
+            "tier3_candidate": summary.get("tier3_candidate"),
+            "objective_mode": run_config.objective_mode,
         }
 
         try:
