@@ -111,6 +111,7 @@ except Exception:
 # Hard safety caps (finite-only guard rails)
 # ---------------------------------------------------------------------------
 
+
 def _parse_int_env(name: str, default: int) -> int:
     val = os.getenv(name)
     if not val:
@@ -1558,6 +1559,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         print(f"Fatal error while running job {job.run_id}: {e}")
         tb = traceback.format_exc()
         print(tb)
+        sys.stdout.flush()
 
         # Progress -> error
         _write_job_progress(
