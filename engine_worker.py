@@ -1245,7 +1245,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     print(f"Max rounds (swarm, clamped): {max_rounds} (explicit: {max_rounds_explicit})")
     print(
         "Max minutes guard (clamped): "
-        f"{max_minutes if max_minutes is not None else 'None (cycles/rounds driven)'}"
+        f"{max_minutes if max_minutes is not None else 'None (rounds driven)'}"
     )
     print(f"Stop RYE: {stop_rye if stop_rye is not None else 'None'}")
     print(f"Runtime profile: {runtime_profile or 'None'}")
@@ -1439,7 +1439,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                     break
             if overall_summary:
                 break
-                 extra_manifest: Dict[str, Any] = {
+
+        extra_manifest: Dict[str, Any] = {
             "engine": f"queue_{mode}",
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
@@ -1599,9 +1600,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "error_message": str(e),
             },
         )
-
-
-def run_job_queue_worker() -> None:
+        def run_job_queue_worker() -> None:
     """
     Main loop for queue mode.
 
@@ -2913,4 +2912,4 @@ if __name__ == "__main__":
     if effective_mode == "queue":
         os.environ["WORKER_QUEUE_MODE"] = "1"
 
-    main()       
+    main()
