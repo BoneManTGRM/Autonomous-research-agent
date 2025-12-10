@@ -1600,7 +1600,9 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "error_message": str(e),
             },
         )
-       def run_job_queue_worker() -> None:
+
+
+def run_job_queue_worker() -> None:
     """
     Main loop for queue mode.
 
@@ -2912,4 +2914,4 @@ if __name__ == "__main__":
     if effective_mode == "queue":
         os.environ["WORKER_QUEUE_MODE"] = "1"
 
-    main() 
+    main()
