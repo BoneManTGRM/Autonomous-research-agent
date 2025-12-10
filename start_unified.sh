@@ -6,8 +6,8 @@ echo "=== ARA Unified Service Start ==="
 # -------------------------------------------------------------------
 # Always run from the project root so agent.* imports work
 # -------------------------------------------------------------------
-# Render normally uses /opt/render/project/src as the working dir,
-# but we force it to be safe both locally and on Render.
+# Render normally uses /opt/render/project/src as the working dir.
+# We try that first, then fall back to the script directory.
 cd /opt/render/project/src 2>/dev/null || cd "$(dirname "$0")"
 
 echo "Current working directory: $(pwd)"
@@ -42,6 +42,22 @@ export PYTHONUNBUFFERED=1
 export WORKER_MODE="queue"
 export WORKER_QUEUE_MODE="1"
 
+echo "Python binary: $(which python || echo 'python not found')"
+
+# Optional sanity check: what does agent.run_jobs think BASE_DIR is
+python - << 'EOF' || echo "Warning: sanity check failed"
+import os
+try:
+    from agent import run_jobs
+    print("Sanity check: run_jobs.BASE_DIR =", run_jobs.BASE_DIR)
+    print("Sanity check: ARA_RUNS_DIR env  =", os.getenv("ARA_RUNS_DIR"))
+except Exception as e:
+    print("Sanity check: could not import agent.run_jobs:", e)
+EOF
+
+# -------------------------------------------------------------------
+# Start engine worker in background
+# -------------------------------------------------------------------
 echo "Starting engine worker in queue mode..."
 python engine_worker.py &
 WORKER_PID=$!
@@ -49,7 +65,7 @@ echo "Engine worker PID: $WORKER_PID"
 
 # -------------------------------------------------------------------
 # Start Streamlit UI in foreground
-# Render provides $PORT, but default to 8501 if missing
+# Render provides \$PORT, but default to 8501 if missing
 # -------------------------------------------------------------------
 PORT="${PORT:-8501}"
 echo "Starting Streamlit UI on port $PORT"
