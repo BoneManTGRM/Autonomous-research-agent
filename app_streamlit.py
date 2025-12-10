@@ -1,5 +1,3 @@
-# PART 1/2
-
 # -*- coding: utf-8 -*-
 """
 Enhanced Streamlit interface for the Autonomous Research Agent.
@@ -1453,8 +1451,6 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
     )
 
     return "\n".join(lines)
-    # PART 2/2
-
 # -------------------------------------------------------------------
 # Main UI
 # -------------------------------------------------------------------
