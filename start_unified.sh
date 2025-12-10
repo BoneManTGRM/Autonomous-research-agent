@@ -31,7 +31,21 @@ mkdir -p \
   "$ARA_RUNS_DIR/error" \
   "$ARA_RUNS_DIR/queue"
 
-ls -R "$ARA_RUNS_DIR" || true
+echo "[start_unified] Run directory tree:"
+for d in \
+  "$ARA_RUNS_DIR" \
+  "$ARA_RUNS_DIR/active" \
+  "$ARA_RUNS_DIR/finished" \
+  "$ARA_RUNS_DIR/pending" \
+  "$ARA_RUNS_DIR/queue" \
+  "$ARA_RUNS_DIR/error"
+do
+  if [ -d "$d" ]; then
+    echo " - dir: $d"
+  else
+    echo " - missing_dir: $d"
+  fi
+done
 
 # -------------------------------------------------------------------
 # Environment for worker
@@ -65,7 +79,7 @@ echo "Engine worker PID: $WORKER_PID"
 
 # -------------------------------------------------------------------
 # Start Streamlit UI in foreground
-# Render provides \$PORT, but default to 8501 if missing
+# Render provides $PORT, but default to 8501 if missing
 # -------------------------------------------------------------------
 PORT="${PORT:-8501}"
 echo "Starting Streamlit UI on port $PORT"
