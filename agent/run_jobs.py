@@ -16,11 +16,12 @@ REPO_ROOT = _THIS_FILE_DIR.parent
 
 # Base folder for all runs.
 # IMPORTANT:
-#   On Render your start command sets something like:
-#       export ARA_RUNS_DIR="/opt/render/project/src/runs"
-#   so BASE_DIR will resolve to that exact shared folder for BOTH:
+#   On Render your start command (or environment) should set:
+#       ARA_RUNS_DIR="/opt/render/project/src/runs"
+#   so BASE_DIR will resolve to that exact shared folder for ALL of:
 #       - engine_worker.py
-#       - app_streamlit.py
+#       - app_streamlit.py (or streamlit_app.py)
+#       - this run_jobs.py queue layer
 _env_runs_raw = os.getenv("ARA_RUNS_DIR")
 _env_runs = _env_runs_raw.strip() if isinstance(_env_runs_raw, str) else None
 
@@ -40,7 +41,7 @@ FINISHED_DIR = BASE_DIR / "finished"
 ERROR_DIR = BASE_DIR / "error"
 
 # Backwards compatible alias for old name "queue".
-# Many engine scripts import QUEUE_DIR from this module.
+# Many legacy scripts import QUEUE_DIR from this module.
 # QUEUE_DIR now points at the canonical pending folder.
 QUEUE_DIR = PENDING_DIR
 
@@ -62,9 +63,14 @@ def debug_print_layout() -> None:
     and the worker really point at the same physical directories.
     """
     env_val = os.environ.get("ARA_RUNS_DIR")
+    try:
+        base_resolved = BASE_DIR.resolve()
+    except Exception:
+        base_resolved = BASE_DIR
+
     print("[run_jobs] ARA_RUNS_DIR env (raw):", repr(env_val))
     print("[run_jobs] ARA_RUNS_DIR env (stripped):", repr(_env_runs))
-    print("[run_jobs] BASE_DIR:", BASE_DIR)
+    print("[run_jobs] BASE_DIR:", base_resolved)
     print("[run_jobs] PENDING_DIR:", PENDING_DIR)
     print("[run_jobs] ACTIVE_DIR:", ACTIVE_DIR)
     print("[run_jobs] FINISHED_DIR:", FINISHED_DIR)
@@ -85,8 +91,7 @@ class RunJob:
         updated_at  - unix timestamp when job was last updated
         meta        - optional metadata for UI (user prompt, domain, etc)
 
-    STATUS NOTES:
-
+    STATUS NOTES (normalized):
         - "queued" is the canonical queue status used by engines.
         - "pending" is treated as an alias for "queued".
         - "running" is treated as an alias for "active".
@@ -404,7 +409,7 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
             collect(ERROR_DIR)
 
     jobs: List[RunJob] = list(jobs_by_id.values())
-    # Sort by created_at descending
+    # Sort by created_at descending (newest first)
     jobs.sort(key=lambda j: j.created_at, reverse=True)
     return jobs[:limit]
 
@@ -415,11 +420,15 @@ def get_next_queued_job() -> Optional[RunJob]:
 
     Returns the oldest queued job (by created_at) from the queue folder(s),
     or None if there are no queued jobs.
+
+    Implementation detail:
+        list_jobs(status="queued") returns newest first, so for FIFO we take
+        the last element (oldest created_at).
     """
     queued = list_jobs(status="queued", limit=1000)
     if not queued:
         return None
-    # list_jobs returns newest first; for FIFO we take the last
+    # list_jobs returns newest first; for FIFO we take the last (oldest)
     return queued[-1]
 
 
@@ -508,6 +517,10 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
 
     Used by engine_worker queue mode.
     """
+    # Ensure job_id is present in the result for UI convenience
+    if "job_id" not in result_obj:
+        result_obj["job_id"] = job.run_id
+
     rp = result_path(job.run_id)
     rp.parent.mkdir(parents=True, exist_ok=True)
     with rp.open("w", encoding="utf8") as f:
