@@ -223,6 +223,22 @@ def debug_print_layout() -> None:
     sys.stdout.flush()
 
 
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    """
+    Write JSON atomically so workers do not see partially written files.
+    """
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tmp_path.open("w", encoding="utf8") as f:
+        json.dump(payload, f, indent=2)
+        f.flush()
+        try:
+            os.fsync(f.fileno())
+        except Exception:
+            pass
+    os.replace(tmp_path, path)
+
+
 @dataclass
 class RunJob:
     """
@@ -313,8 +329,7 @@ class RunJob:
         if filename is None:
             filename = f"{self.run_id}.json"
         path = folder / filename
-        with path.open("w", encoding="utf8") as f:
-            json.dump(self.to_dict(), f, indent=2)
+        _atomic_write_json(path, self.to_dict())
         return path
 
 
@@ -392,6 +407,13 @@ def create_job(
         job.save_to(LEGACY_QUEUE_DIR)
     except Exception:
         # Compatibility should never crash job creation.
+        pass
+
+    print("[run_jobs] Created job", run_id, "status=queued", "BASE_DIR:", BASE_DIR)
+    try:
+        import sys
+        sys.stdout.flush()
+    except Exception:
         pass
 
     return run_id
@@ -668,9 +690,7 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
         result_obj["job_id"] = job.run_id
 
     rp = result_path(job.run_id)
-    rp.parent.mkdir(parents=True, exist_ok=True)
-    with rp.open("w", encoding="utf8") as f:
-        json.dump(result_obj, f, indent=2)
+    _atomic_write_json(rp, result_obj)
 
     # Update job metadata status and move it into runs/finished/{run_id}_job.json
     update_job_status(job.run_id, "finished")
