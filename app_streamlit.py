@@ -1451,29 +1451,11 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
     )
 
     return "\n".join(lines)
-
-
-# -------------------------------------------------------------------
-# Finished-run fallbacks for citations and discoveries
-# -------------------------------------------------------------------
 def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
-    """Fallback: build a citations list from finished run JSON files.
-
-    This looks at both per-cycle citations (via cycle history) and
-    run-level citations / sources / source_list fields so the Citations
-    tab still populates even when MemoryStore has no per-cycle history.
-    """
-    citations: List[Dict[str, Any]] = []
-
-    # First try to reuse the cycle-history fallback
-    history = load_history_from_finished_runs(limit_runs=limit_runs)
-    if history:
-        citations.extend(extract_citations_from_history(history))
-
+    """Extract citations from finished run JSONs as a fallback for the citation viewer."""
     if list_run_jobs is None:
-        return citations
+        return []
 
-    # Also scan run-level citations in finished results
     try:
         jobs = list_run_jobs(status="finished")
     except TypeError:
@@ -1485,9 +1467,12 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
         jobs = []
 
     if not jobs:
-        return citations
+        return []
 
     jobs_slice = jobs[-limit_runs:]
+
+    all_history: List[Dict[str, Any]] = []
+    top_level_citations: List[Dict[str, Any]] = []
 
     for job in jobs_slice:
         run_id = _get_job_id(job)
@@ -1501,64 +1486,47 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
         else:
             base = result
 
-        cfg = result.get("config") if isinstance(result.get("config"), dict) else {}
-        if not isinstance(cfg, dict):
-            cfg = {}
+        # Per cycle entries (with citations) routed through the history flattener
+        cycles = _extract_cycles_from_run_result(result, run_id=run_id)
+        all_history.extend(cycles)
 
-        domain = base.get("domain") or cfg.get("domain") or "general"
-        role = base.get("role") or "agent"
-        ts = base.get("timestamp") or result.get("timestamp")
-
-        run_level_sources = (
+        # Run level citations / sources
+        cites = (
             base.get("citations")
             or base.get("sources")
             or base.get("source_list")
+            or []
         )
-        if not isinstance(run_level_sources, list):
-            continue
-
-        for s in run_level_sources:
-            if not isinstance(s, dict):
-                # allow simple strings as a basic citation row
-                citations.append(
+        if isinstance(cites, list):
+            for c in cites:
+                if not isinstance(c, dict):
+                    continue
+                source = c.get("source") or c.get("provider") or ""
+                title = c.get("title") or ""
+                url = c.get("url") or c.get("link") or ""
+                snippet = c.get("snippet") or c.get("summary") or ""
+                top_level_citations.append(
                     {
                         "cycle": None,
-                        "role": role,
-                        "domain": domain,
-                        "timestamp": ts,
-                        "source": "",
-                        "title": str(s),
-                        "url": "",
-                        "snippet": "",
+                        "role": c.get("role") or "run",
+                        "domain": c.get("domain") or base.get("domain") or "general",
+                        "timestamp": base.get("timestamp") or result.get("timestamp"),
+                        "source": source,
+                        "title": title,
+                        "url": url,
+                        "snippet": snippet,
                     }
                 )
-                continue
-            source = s.get("source") or s.get("provider") or ""
-            title = s.get("title") or ""
-            url = s.get("url") or s.get("link") or ""
-            snippet = s.get("snippet") or s.get("summary") or ""
-            citations.append(
-                {
-                    "cycle": None,
-                    "role": role,
-                    "domain": domain,
-                    "timestamp": ts,
-                    "source": source,
-                    "title": title,
-                    "url": url,
-                    "snippet": snippet,
-                }
-            )
 
-    return citations
+    flattened = extract_citations_from_history(all_history)
+    flattened.extend(top_level_citations)
+    return flattened
 
 
 def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
-    """Fallback: infer discovery entries directly from finished run JSON files."""
-    discoveries: List[Dict[str, Any]] = []
-
+    """Extract discovery entries from finished run JSONs as a fallback for the discovery tab."""
     if list_run_jobs is None:
-        return discoveries
+        return []
 
     try:
         jobs = list_run_jobs(status="finished")
@@ -1571,9 +1539,11 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
         jobs = []
 
     if not jobs:
-        return discoveries
+        return []
 
     jobs_slice = jobs[-limit_runs:]
+
+    discoveries: List[Dict[str, Any]] = []
 
     for job in jobs_slice:
         run_id = _get_job_id(job)
@@ -1587,85 +1557,85 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
         else:
             base = result
 
-        cfg = result.get("config") if isinstance(result.get("config"), dict) else {}
-        if not isinstance(cfg, dict):
-            cfg = {}
-
-        domain = base.get("domain") or cfg.get("domain") or "general"
-        ts = base.get("timestamp") or result.get("timestamp")
-
-        raw_disc = (
+        candidates = (
             base.get("discoveries")
             or base.get("discovery_candidates")
-            or base.get("key_findings")
+            or base.get("discovery_log")
+            or []
         )
-        if not isinstance(raw_disc, list):
+        if not isinstance(candidates, list):
             continue
 
-        for item in raw_disc:
-            if isinstance(item, dict):
-                d = dict(item)
-            else:
-                d = {"summary": str(item)}
-            d.setdefault("domain", domain)
-            if ts is not None and "timestamp" not in d:
-                d["timestamp"] = ts
-            d.setdefault("run_id", run_id)
-            discoveries.append(d)
+        for d in candidates:
+            if not isinstance(d, dict):
+                continue
+            d2 = dict(d)
+            if "run_id" not in d2:
+                d2["run_id"] = run_id
+            if "domain" not in d2:
+                d2["domain"] = base.get("domain", "general")
+            discoveries.append(d2)
 
     return discoveries
 
 
 # -------------------------------------------------------------------
-# Main UI
+# Main Streamlit app
 # -------------------------------------------------------------------
 def main() -> None:
-    st.title("Autonomous Research Agent")
-    st.caption(
-        "Reparodynamics, RYE, and TGRM powered research loop "
-        "(UI only queues jobs and reads results; all cycles run in a separate worker)."
+    st.set_page_config(
+        page_title="Autonomous Research Agent",
+        page_icon="🧪",
+        layout="wide",
     )
 
+    st.title("Autonomous Research Agent (finite queue mode)")
+    st.caption(
+        "This UI only queues finite runs into a file based job queue. "
+        "A separate engine worker process picks up jobs and runs TGRM cycles."
+    )
+
+    # Shared MemoryStore (read only from UI perspective)
     memory = init_memory_store()
 
-    # -----------------------------
-    # Sidebar settings
-    # -----------------------------
-    st.sidebar.header("Run settings")
+    # Sidebar: Tavily key input (per user, not hard wired)
+    st.sidebar.title("Run configuration")
 
-    # Tavily key input (per user)
     st.sidebar.subheader("Tavily API key")
-    existing_key = st.session_state.get("tavily_key", "")
-    tavily_key_input = st.sidebar.text_input(
-        "Enter your Tavily key",
-        value=existing_key,
+    current_tavily = st.session_state.get("tavily_key", "")
+    tavily_input = st.sidebar.text_input(
+        "Tavily API key",
+        value=current_tavily or "",
         type="password",
         help=(
-            "Each user should paste their own Tavily API key here. "
-            "If left empty, the agent will use stubbed (offline) web results."
+            "Optional per user Tavily key. If provided, the worker can perform real web searches. "
+            "If left empty, the system will fall back to stubbed search results."
         ),
     )
-    if tavily_key_input:
-        st.session_state["tavily_key"] = tavily_key_input
-        os.environ["TAVILY_API_KEY"] = tavily_key_input
-    else:
-        st.session_state["tavily_key"] = ""
-        os.environ.pop("TAVILY_API_KEY", None)
+    if tavily_input != current_tavily:
+        st.session_state["tavily_key"] = tavily_input
 
-    # Preset selector (General, Longevity, Math, etc.)
-    preset_keys = list(PRESETS.keys())
-    preset_labels = [PRESETS[k]["label"] for k in preset_keys]
+    # Sidebar: preset selection
+    st.sidebar.subheader("Domain preset")
 
-    default_preset_index = 0
-    if "general" in preset_keys:
-        default_preset_index = preset_keys.index("general")
+    # Preserve insertion order of PRESETS but show labels
+    preset_keys: List[str] = list(PRESETS.keys())
+    preset_labels: List[str] = [
+        PRESETS[k].get("label", k) for k in preset_keys
+    ]
 
+    if not preset_labels:
+        st.sidebar.error("No presets defined in presets.py")
+        return
+
+    default_index = 0
     selected_label = st.sidebar.selectbox(
-        "Domain preset",
+        "Select preset",
         options=preset_labels,
-        index=default_preset_index,
-        help="Choose a domain preset. You can still edit all settings below.",
+        index=default_index,
+        help="Choose a domain preset (for example General, Longevity, Math).",
     )
+
     selected_key = preset_keys[preset_labels.index(selected_label)]
     preset = get_preset(selected_key)
     domain_tag = preset.get("domain", selected_key)
@@ -3240,4 +3210,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    main()    
