@@ -33,7 +33,7 @@ else:
 # Job layout used by the engine worker:
 #   - runs/pending/   : file based queue of pending jobs (canonical queue)
 #   - runs/active/    : in progress metadata and optional progress JSON
-#   - runs/finished/  : final result JSON (one file per run_id)
+#   - runs/finished/  : final result JSON and finished job metadata
 #   - runs/error/     : failed job metadata and optional traceback
 PENDING_DIR = BASE_DIR / "pending"
 ACTIVE_DIR = BASE_DIR / "active"
@@ -177,19 +177,28 @@ def _job_path_for_status(run_id: str, status: str) -> Path:
         - "active"
         - "finished"
         - "error"
+
+    Important:
+        For finished jobs we store metadata separately from the result JSON.
+        Metadata: runs/finished/{run_id}_job.json
+        Result:   runs/finished/{run_id}.json
     """
     norm = status.lower()
     if norm in ("queued", "pending"):
         base = PENDING_DIR
+        filename = f"{run_id}.json"
     elif norm in ("running", "active"):
         base = ACTIVE_DIR
+        filename = f"{run_id}.json"
     elif norm == "finished":
         base = FINISHED_DIR
+        filename = f"{run_id}_job.json"
     elif norm == "error":
         base = ERROR_DIR
+        filename = f"{run_id}.json"
     else:
         raise ValueError(f"Unknown job status: {status}")
-    return base / f"{run_id}.json"
+    return base / filename
 
 
 def create_job(
@@ -259,7 +268,12 @@ def load_job_by_id(run_id: str) -> Optional[RunJob]:
     Try to load a job by id from any status folder.
     Returns None if not found.
     """
-    for folder in [PENDING_DIR, LEGACY_QUEUE_DIR, ACTIVE_DIR, FINISHED_DIR, ERROR_DIR]:
+    # Finished metadata uses "_job.json"
+    finished_meta = FINISHED_DIR / f"{run_id}_job.json"
+    if finished_meta.exists():
+        return load_job(finished_meta)
+
+    for folder in [PENDING_DIR, LEGACY_QUEUE_DIR, ACTIVE_DIR, ERROR_DIR]:
         path = folder / f"{run_id}.json"
         if path.exists():
             return load_job(path)
@@ -326,6 +340,18 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
     elif norm_new in ("running", "active"):
         norm_new = "active"
 
+    # First check finished metadata path for this id
+    finished_meta = FINISHED_DIR / f"{run_id}_job.json"
+    if finished_meta.exists() and norm_new == "finished":
+        job = load_job(finished_meta)
+        job.status = "finished"
+        job.updated_at = time.time()
+        dst_path = _job_path_for_status(run_id, "finished")
+        finished_meta.unlink(missing_ok=True)
+        job.save_to(dst_path.parent)
+        return job
+
+    # Check other status folders
     for status in ["queued", "pending", "running", "active", "finished", "error"]:
         src_path = _job_path_for_status(run_id, status)
         if src_path.exists():
@@ -364,21 +390,27 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
         pending     - alias for queued
         running     - alias for active
         active      - jobs in runs/active
-        finished    - jobs in runs/finished
+        finished    - jobs in runs/finished (metadata files only)
         error       - jobs in runs/error
 
     NOTE:
         This function does not filter based on the internal job.status string,
-        it simply reads all *.json files from the appropriate folder(s).
-        That means jobs with status "queued" or "pending" in runs/pending
-        or runs/queue are all visible to the engine and the UI.
+        it simply reads appropriate metadata files from the correct folder(s).
+        Result JSON files in runs/finished are ignored so they do not collide
+        with the job metadata schema.
     """
     jobs_by_id: Dict[str, RunJob] = {}
 
-    def collect(folder: Path) -> None:
+    def collect(folder: Path, finished: bool = False) -> None:
         if not folder.exists():
             return
-        for path in sorted(folder.glob("*.json")):
+
+        if finished:
+            pattern = "*_job.json"  # only metadata files
+        else:
+            pattern = "*.json"
+
+        for path in sorted(folder.glob(pattern)):
             # skip progress and non metadata files
             if path.name.endswith("_progress.json"):
                 continue
@@ -393,8 +425,11 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
 
     if status is None:
         # Search all status folders plus queue dir
-        for folder in [PENDING_DIR, LEGACY_QUEUE_DIR, ACTIVE_DIR, FINISHED_DIR, ERROR_DIR]:
-            collect(folder)
+        collect(PENDING_DIR)
+        collect(LEGACY_QUEUE_DIR)
+        collect(ACTIVE_DIR)
+        collect(FINISHED_DIR, finished=True)
+        collect(ERROR_DIR)
     else:
         norm = status.lower()
         if norm in ("pending", "queued"):
@@ -404,7 +439,7 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
         elif norm in ("running", "active"):
             collect(ACTIVE_DIR)
         elif norm == "finished":
-            collect(FINISHED_DIR)
+            collect(FINISHED_DIR, finished=True)
         elif norm == "error":
             collect(ERROR_DIR)
 
@@ -470,11 +505,13 @@ def result_path(run_id: str) -> Path:
     """
     Path where the worker should write final result JSON for a run.
 
-    This returns runs/finished/{run_id}.json to match the Streamlit
-    UI, which expects finished results in that location and with that
-    naming convention.
+    This returns runs/finished/{run_id}.json.
 
-    Recommended schema (example):
+    Finished jobs now have two files:
+        - runs/finished/{run_id}_job.json   (job metadata, used by list_jobs)
+        - runs/finished/{run_id}.json       (final result payload, used by UI)
+
+    Recommended result schema (example):
         {
             "job_id": "...",
             "status": "finished",
@@ -526,6 +563,7 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
     with rp.open("w", encoding="utf8") as f:
         json.dump(result_obj, f, indent=2)
 
+    # Update job metadata status and move it into runs/finished/{run_id}_job.json
     update_job_status(job.run_id, "finished")
 
 
