@@ -1565,6 +1565,7 @@ class CoreAgent:
             run_id=effective_run_id,
             experiment_mode=experiment_mode,
         )
+
         summary = result.get("summary", {})
 
         state["last_update_ts"] = time.time()
@@ -1650,16 +1651,22 @@ class CoreAgent:
                 experiment_mode=experiment_mode,
             )
         except TypeError:
-            # Backwards compatible call for older TGRMLoop implementations
-            result = self.tgrm_loop.run_cycle(
-                goal=goal,
-                cycle_index=cycle_index,
-                role=role,
-                source_controls=effective_source_controls,
-                pdf_bytes=effective_pdf_bytes,
-                biomarker_snapshot=biomarker_snapshot,
-                domain=domain,
-            )
+            # Backward compatibility for older TGRMLoop signatures
+            try:
+                result = self.tgrm_loop.run_cycle(
+                    goal=goal,
+                    cycle_index=cycle_index,
+                    role=role,
+                    source_controls=effective_source_controls,
+                    pdf_bytes=effective_pdf_bytes,
+                    biomarker_snapshot=biomarker_snapshot,
+                    domain=domain,
+                )
+            except TypeError:
+                try:
+                    result = self.tgrm_loop.run_cycle(goal, cycle_index, role)
+                except TypeError:
+                    result = self.tgrm_loop.run_cycle(goal, cycle_index)
 
         # Normalize into a {"summary": ...} dict so callers and memory store agree
         if isinstance(result, dict) and "summary" in result:
@@ -1689,6 +1696,27 @@ class CoreAgent:
             if goal:
                 summary.setdefault("goal", goal)
 
+            # Attach tool stats if present on the raw result
+            tool_stats = result.get("tool_stats")
+            if tool_stats is not None and "tool_stats" not in summary:
+                summary["tool_stats"] = tool_stats
+
+            # Attach citations if enabled
+            if self.citations_enabled:
+                citations = result.get("citations")
+                if isinstance(citations, list):
+                    summary.setdefault("citations", citations)
+
+            # Discovery hooks (RYE spikes, hypotheses, etc.)
+            self._handle_post_cycle_discovery(
+                summary,
+                cycle_index=cycle_index,
+                role=role,
+                domain=domain,
+                run_id=run_id,
+                experiment_mode=experiment_mode,
+            )
+
             # Persist cycle summary into MemoryStore if supported
             try:
                 if hasattr(self.memory_store, "log_cycle_summary"):
@@ -1704,55 +1732,6 @@ class CoreAgent:
             except Exception:
                 # Logging failures should never break the main loop
                 pass
-
-        return result
-                except TypeError:
-            # Backward compatibility
-            try:
-                result = self.tgrm_loop.run_cycle(
-                    goal=goal,
-                    cycle_index=cycle_index,
-                    role=role,
-                    source_controls=effective_source_controls,
-                    pdf_bytes=effective_pdf_bytes,
-                    biomarker_snapshot=biomarker_snapshot,
-                    domain=domain,
-                )
-            except TypeError:
-                try:
-                    result = self.tgrm_loop.run_cycle(goal, cycle_index, role)
-                except TypeError:
-                    result = self.tgrm_loop.run_cycle(goal, cycle_index)
-
-        summary = result.get("summary", {})
-
-        if isinstance(summary, dict):
-            if run_id is not None:
-                summary.setdefault("run_id", run_id)
-            if experiment_mode is not None:
-                summary.setdefault("experiment_mode", experiment_mode)
-            if domain is not None:
-                summary.setdefault("domain", domain)
-            summary.setdefault("role", role)
-            summary.setdefault("cycle_index", cycle_index)
-
-            tool_stats = result.get("tool_stats")
-            if tool_stats is not None and "tool_stats" not in summary:
-                summary["tool_stats"] = tool_stats
-
-            if self.citations_enabled:
-                citations = result.get("citations")
-                if isinstance(citations, list):
-                    summary.setdefault("citations", citations)
-
-            self._handle_post_cycle_discovery(
-                summary,
-                cycle_index=cycle_index,
-                role=role,
-                domain=domain,
-                run_id=run_id,
-                experiment_mode=experiment_mode,
-            )
 
         return result
 
