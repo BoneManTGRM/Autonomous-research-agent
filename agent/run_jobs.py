@@ -582,3 +582,24 @@ def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
             json.dump(error_info, f, indent=2)
 
     update_job_status(job.run_id, "error")
+
+
+# ---------------------------------------------------------------------------
+# Optional helpers for UI / debugging
+# ---------------------------------------------------------------------------
+
+def load_job_result(run_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Convenience helper: load the final result JSON for a finished job.
+
+    Returns:
+        dict with result payload, or None if the result file does not exist.
+    """
+    rp = result_path(run_id)
+    if not rp.exists():
+        return None
+    try:
+        with rp.open("r", encoding="utf8") as f:
+            return json.load(f)
+    except Exception:
+        return None
