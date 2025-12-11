@@ -1,6 +1,6 @@
 """Memory storage for the autonomous research agent.
 
-This module provides a JSON-based persistent storage layer. It stores:
+This module provides a JSON based persistent storage layer. It stores:
 - notes
 - hypotheses
 - citations
@@ -15,7 +15,7 @@ This module provides a JSON-based persistent storage layer. It stores:
 - tool_events (per tool usage events)
 - milestones (key run milestones)
 - hypothesis_evolution (how ideas are merged, split, or pruned)
-- option_c_diagnostics (deep AGI-style diagnostics for frontier runs)
+- option_c_diagnostics (deep AGI style diagnostics for frontier runs)
 - swarm_contracts (specialization contracts for swarm roles)
 - learning_burst (burst learning state for the TGRM loop)
 - benchmarks (ARC, math, longevity test batteries, etc.)
@@ -66,7 +66,7 @@ except Exception:  # pragma: no cover
 # ----------------------------------------------------------------------
 MEMORY_SCHEMA_VERSION = 4
 
-# Hard but generous caps for 24-90 day or long runs
+# Hard but generous caps for 24 to 90 day or long runs
 # These mirror the events and discoveries bounding you already had.
 # They are global caps; older items are dropped first.
 MAX_NOTES = 50_000
@@ -114,7 +114,7 @@ class MemoryStore:
         - "hypothesis_evolution": evolution of ideas over time
         - "option_c_diagnostics": deep diagnostics for Option C frontier runs
         - "swarm_contracts":     specialization contracts for swarm roles
-        - "benchmarks":          benchmark/task results such as ARC, math suites
+        - "benchmarks":          benchmark and task results such as ARC, math suites
         - "source_index":        optional index for mapping entities to citations
 
     In memory (non persistent) vector memory may also be attached to
@@ -141,11 +141,58 @@ class MemoryStore:
         - benchmarks give a persistent trace of test performance (ARC, math, etc.)
     """
 
-    def __init__(self, memory_file: str) -> None:
-        self.memory_file = memory_file
+    def __init__(
+        self,
+        memory_file: Optional[str] = None,
+        *,
+        base_dir: Optional[str] = None,
+        filename: str = "memory.json",
+    ) -> None:
+        """Create a MemoryStore.
 
-        # Ensure the directory exists (support plain filenames like "memory.json")
-        dirpath = os.path.dirname(os.path.abspath(self.memory_file))
+        New unified behavior for ARA:
+
+        - If base_dir is given, it is used as the root for the memory file.
+        - Otherwise ARA_RUNS_DIR from the environment is used if present.
+        - If neither is set, a local "runs" directory under the current
+          working directory is used as a fallback.
+        - If memory_file is None, the file "<base_dir>/<filename>" is used.
+        - If memory_file is an existing directory, the file
+          "<memory_file>/<filename>" is used.
+        - If memory_file is a relative path, it is resolved under base_dir.
+        """
+        # Resolve base_dir
+        if base_dir is None:
+            env_dir = os.environ.get("ARA_RUNS_DIR")
+            if env_dir:
+                base_dir = env_dir
+            else:
+                # If caller passed an explicit path to a file, prefer its directory
+                if memory_file and not os.path.isdir(memory_file) and os.path.splitext(memory_file)[1]:
+                    base_dir = os.path.dirname(os.path.abspath(memory_file)) or os.getcwd()
+                else:
+                    base_dir = os.path.join(os.getcwd(), "runs")
+
+        self.base_dir = os.path.abspath(base_dir)
+
+        # Resolve memory_file path
+        if memory_file is None:
+            memory_path = os.path.join(self.base_dir, filename)
+        else:
+            if os.path.isdir(memory_file):
+                # Treat it as a directory, drop the file inside
+                memory_path = os.path.join(memory_file, filename)
+            else:
+                # If relative path, place it under base_dir so worker and UI agree
+                if not os.path.isabs(memory_file):
+                    memory_path = os.path.join(self.base_dir, memory_file)
+                else:
+                    memory_path = memory_file
+
+        self.memory_file = os.path.abspath(memory_path)
+
+        # Ensure the directory exists (supports plain filenames like "memory.json")
+        dirpath = os.path.dirname(self.memory_file)
         if dirpath and not os.path.exists(dirpath):
             os.makedirs(dirpath, exist_ok=True)
 
@@ -188,6 +235,13 @@ class MemoryStore:
                 self.vector_memory = None
         else:
             self.vector_memory = None
+
+    # ------------------------------------------------------------------
+    # Small helpers
+    # ------------------------------------------------------------------
+    def get_base_dir(self) -> str:
+        """Return the resolved base directory for this MemoryStore."""
+        return self.base_dir
 
     # ------------------------------------------------------------------
     # Internal JSON persistence
@@ -367,6 +421,8 @@ class MemoryStore:
             "schema_version": int(self._data.get("schema_version", MEMORY_SCHEMA_VERSION)),
             "file_path": os.path.abspath(self.memory_file),
             "file_size_bytes": None,
+            "base_dir": self.base_dir,
+            "env_ARA_RUNS_DIR": os.environ.get("ARA_RUNS_DIR"),
         }
         try:
             info["file_size_bytes"] = os.path.getsize(self.memory_file)
@@ -761,7 +817,7 @@ class MemoryStore:
         return [h for h in hyps if h.get("goal") == goal]
 
     # ------------------------------------------------------------------
-    # Hypothesis evolution (merge/split/mutate tracking)
+    # Hypothesis evolution (merge, split, mutate tracking)
     # ------------------------------------------------------------------
     def add_hypothesis_evolution(self, goal: str, evolution: Dict[str, Any]) -> None:
         """Track evolution of hypotheses for a goal (merge, split, mutate, prune)."""
@@ -1832,7 +1888,7 @@ class MemoryStore:
     # Option C diagnostics (deep telemetry for frontier runs)
     # ------------------------------------------------------------------
     def log_option_c_diagnostics(self, run_id: str, diagnostics: Dict[str, Any]) -> None:
-        """Log advanced diagnostics for AGI-style Option C runs."""
+        """Log advanced diagnostics for AGI style Option C runs."""
         entry = {
             "timestamp": _utc_now_iso(),
             "run_id": run_id,
@@ -1852,7 +1908,7 @@ class MemoryStore:
         return [d for d in arr if d.get("run_id") == run_id]
 
     # ------------------------------------------------------------------
-    # Swarm contracts (per role negotiation / specialization)
+    # Swarm contracts (per role negotiation and specialization)
     # ------------------------------------------------------------------
     def log_swarm_contract(self, run_id: str, role: str, contract: Dict[str, Any]) -> None:
         """Record a swarm contract for a specific logical role."""
@@ -2486,7 +2542,7 @@ class MemoryStore:
         return {}
 
     def get_goal_summary(self, goal: str) -> Dict[str, Any]:
-        """Return a compact, UI-ready summary for a single goal."""
+        """Return a compact, UI ready summary for a single goal."""
         summary: Dict[str, Any] = {
             "goal": goal,
             "index": {},
