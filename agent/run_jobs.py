@@ -297,15 +297,22 @@ class RunJob:
 
         return cls(**filtered)
 
-    def save_to(self, folder: Path) -> Path:
+    def save_to(self, folder: Path, filename: Optional[str] = None) -> Path:
         """
-        Save the job JSON inside the given folder using run_id as filename.
+        Save the job JSON inside the given folder.
 
         This writes only the job metadata (config, status, meta, timestamps).
         The engine worker should write the final result into result_path(run_id).
+
+        filename:
+            Optional override for the file name. When not provided it defaults
+            to "{run_id}.json". For finished metadata this lets us use
+            "{run_id}_job.json".
         """
         self.updated_at = time.time()
-        path = folder / f"{self.run_id}.json"
+        if filename is None:
+            filename = f"{self.run_id}.json"
+        path = folder / filename
         with path.open("w", encoding="utf8") as f:
             json.dump(self.to_dict(), f, indent=2)
         return path
@@ -453,7 +460,7 @@ def move_job(run_id: str, from_status: str, to_status: str) -> Tuple[Optional[Ru
     # Also remove from queue folder if it exists (prevent duplicates)
     legacy_src = LEGACY_QUEUE_DIR / f"{run_id}.json"
     legacy_src.unlink(missing_ok=True)
-    job.save_to(dst_path.parent)
+    job.save_to(dst_path.parent, filename=dst_path.name)
     return job, dst_path
 
 
@@ -478,7 +485,7 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
         job.updated_at = time.time()
         dst_path = _job_path_for_status(run_id, "finished")
         finished_meta.unlink(missing_ok=True)
-        job.save_to(dst_path.parent)
+        job.save_to(dst_path.parent, filename=dst_path.name)
         return job
 
     # Check other status folders
@@ -493,7 +500,7 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
             # remove any stale file in queue dir
             legacy_src = LEGACY_QUEUE_DIR / f"{run_id}.json"
             legacy_src.unlink(missing_ok=True)
-            job.save_to(dst_path.parent)
+            job.save_to(dst_path.parent, filename=dst_path.name)
             return job
 
     # Also check queue dir if not found by status loop above
@@ -504,7 +511,7 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
         job.updated_at = time.time()
         legacy_path.unlink(missing_ok=True)
         dst_path = _job_path_for_status(run_id, norm_new)
-        job.save_to(dst_path.parent)
+        job.save_to(dst_path.parent, filename=dst_path.name)
         return job
 
     return None
