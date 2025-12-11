@@ -1650,6 +1650,63 @@ class CoreAgent:
                 experiment_mode=experiment_mode,
             )
         except TypeError:
+            # Backwards compatible call for older TGRMLoop implementations
+            result = self.tgrm_loop.run_cycle(
+                goal=goal,
+                cycle_index=cycle_index,
+                role=role,
+                source_controls=effective_source_controls,
+                pdf_bytes=effective_pdf_bytes,
+                biomarker_snapshot=biomarker_snapshot,
+                domain=domain,
+            )
+
+        # Normalize into a {"summary": ...} dict so callers and memory store agree
+        if isinstance(result, dict) and "summary" in result:
+            summary = result.get("summary") or {}
+            if not isinstance(summary, dict):
+                summary = {"raw_summary": summary}
+                result["summary"] = summary
+        else:
+            # Treat bare dict as summary, wrap it
+            if isinstance(result, dict):
+                summary = dict(result)
+            else:
+                summary = {"raw_result": result}
+            result = {"summary": summary}
+
+        # Enrich summary with core metadata so MemoryStore and UI have stable fields
+        if isinstance(summary, dict):
+            if "cycle_index" not in summary:
+                summary["cycle_index"] = cycle_index
+            summary.setdefault("role", role)
+            if domain is not None:
+                summary.setdefault("domain", domain)
+            if run_id is not None:
+                summary.setdefault("run_id", run_id)
+            if experiment_mode is not None:
+                summary.setdefault("experiment_mode", experiment_mode)
+            if goal:
+                summary.setdefault("goal", goal)
+
+            # Persist cycle summary into MemoryStore if supported
+            try:
+                if hasattr(self.memory_store, "log_cycle_summary"):
+                    try:
+                        # Newer signature: (cycle_index, summary)
+                        self.memory_store.log_cycle_summary(cycle_index, summary)  # type: ignore[attr-defined]
+                    except TypeError:
+                        # Older signature: (summary)
+                        self.memory_store.log_cycle_summary(summary)  # type: ignore[attr-defined]
+                elif hasattr(self.memory_store, "append_cycle_log"):
+                    # Generic append helper some stores may implement
+                    self.memory_store.append_cycle_log(summary)  # type: ignore[attr-defined]
+            except Exception:
+                # Logging failures should never break the main loop
+                pass
+
+        return result
+                except TypeError:
             # Backward compatibility
             try:
                 result = self.tgrm_loop.run_cycle(
@@ -1786,7 +1843,7 @@ class CoreAgent:
         )
 
     # ------------------------------------------------------------------
-    # Single-agent continuous mode
+    # Single-agent continuous mode (finite-only)
     # ------------------------------------------------------------------
     def run_continuous(
         self,
@@ -1806,15 +1863,26 @@ class CoreAgent:
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run multiple TGRM cycles in a row (continuous mode) for a single role."""
+        """Run multiple TGRM cycles in a row (continuous mode) for a single role.
+
+        Note:
+            This method enforces finite-only semantics. Even if callers
+            pass forever=True or select a 'forever' runtime_profile, the
+            run will still be bounded by max_cycles and/or max_minutes
+            (plus an internal failsafe).
+        """
         summaries: List[Dict[str, Any]] = []
         recent_rye: List[float] = []
 
         effective_run_id = run_id or self._generate_run_id()
 
+        # Global failsafe on cycles
         max_cycles_failsafe = int(CONTINUOUS_MODE_DEFAULTS.get("max_cycles_failsafe", 10_000_000))
         if max_cycles > max_cycles_failsafe:
             max_cycles = max_cycles_failsafe
+
+        # Hard override: no true forever runs at CoreAgent level
+        forever = False
 
         effective_domain = domain or "general"
         preset_cfg = get_preset(effective_domain)
@@ -1823,6 +1891,7 @@ class CoreAgent:
         if watchdog_interval_minutes == 5.0:
             watchdog_interval_minutes = default_watchdog
 
+        # Auto-learn runtime profile and stop_rye from history
         if runtime_profile is None and self.config.get("auto_learn_from_memory", True):
             try:
                 learned = self.learn_from_memory(domain=effective_domain)
@@ -1836,6 +1905,7 @@ class CoreAgent:
             except Exception:
                 pass
 
+        # Use preset defaults for accelerated / ultra modes
         if runtime_profile is None and self.speed_mode in {"accelerated", "ultra"}:
             default_profile = preset_cfg.get("default_runtime_profile")
             if isinstance(default_profile, str):
@@ -1852,6 +1922,7 @@ class CoreAgent:
             est_cycles = profile_cfg.get("estimated_cycles")
             profile_stop_rye = profile_cfg.get("rye_stop_threshold")
 
+            # Convert runtime_profile into a bounded time window
             if max_minutes is None:
                 if runtime_profile == "1_hour":
                     max_minutes = 60.0
@@ -1862,7 +1933,10 @@ class CoreAgent:
                 elif runtime_profile == "90_days":
                     max_minutes = 90 * 24 * 60.0
                 elif runtime_profile == "forever":
-                    forever = True
+                    # Treat "forever" as a long but still finite hint
+                    # If no explicit max_minutes, we simply leave it None
+                    # and rely on cycle caps and failsafe.
+                    pass
 
             if isinstance(est_cycles, (int, float)) and max_cycles <= 100:
                 try:
@@ -1873,11 +1947,7 @@ class CoreAgent:
             if stop_rye is None and isinstance(profile_stop_rye, (int, float)):
                 stop_rye = float(profile_stop_rye)
 
-        if stop_rye is None:
-            preset_stop = preset_cfg.get("default_rye_stop_threshold")
-            if isinstance(preset_stop, (int, float)):
-                stop_rye = float(preset_stop)
-
+        # Fallback mapping from cycles to time budget in finite-only mode
         if max_minutes is None:
             if max_cycles == 120:
                 max_minutes = 60.0
@@ -1889,9 +1959,10 @@ class CoreAgent:
                 max_minutes = 1440.0
                 max_cycles = 1_000_000
             elif max_cycles >= max_cycles_failsafe:
-                forever = True
+                # Clamp to failsafe but do not enable forever
                 max_cycles = max_cycles_failsafe
 
+        # Checkpoint resume (finite-only)
         checkpoint = None
         if resume_from_checkpoint and self.auto_resume_enabled:
             checkpoint = self._load_checkpoint()
@@ -1923,7 +1994,7 @@ class CoreAgent:
             experiment_mode = "breakthrough"
 
         while True:
-            if not forever and i >= max_cycles:
+            if i >= max_cycles:
                 stop_reason = "cycle_cap"
                 break
 
@@ -1953,7 +2024,7 @@ class CoreAgent:
                     "elapsed_minutes": elapsed_min,
                     "remaining_minutes": remaining_minutes,
                     "stop_rye": stop_rye,
-                    "forever": forever,
+                    "forever": False,
                     "cycle_history_length": len(history),
                     "local_cycle_index": i,
                     "recent_rye": recent_rye[-10:],
@@ -2069,7 +2140,7 @@ class CoreAgent:
         return summaries
 
     # ------------------------------------------------------------------
-    # Swarm aware continuous mode (multi-agent rounds)
+    # Swarm aware continuous mode (multi-agent rounds, finite-only)
     # ------------------------------------------------------------------
     def run_swarm_continuous(
         self,
@@ -2089,13 +2160,22 @@ class CoreAgent:
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run continuous multi-agent swarm rounds."""
+        """Run continuous multi-agent swarm rounds.
+
+        Note:
+            This method enforces finite-only semantics. Even if callers
+            pass forever=True or select a 'forever' runtime_profile, the
+            run will still be bounded by max_rounds and/or max_minutes.
+        """
         all_summaries: List[Dict[str, Any]] = []
         recent_round_rye: List[float] = []
 
         effective_run_id = run_id or self._generate_run_id()
         effective_domain = domain or "general"
         preset_cfg = get_preset(effective_domain)
+
+        # Hard override: no true forever runs at CoreAgent level
+        forever = False
 
         if roles is None:
             roles_seq: Sequence[str] = self.agent_roles
@@ -2149,6 +2229,7 @@ class CoreAgent:
             est_cycles = profile_cfg.get("estimated_cycles")
             profile_stop_rye = profile_cfg.get("rye_stop_threshold")
 
+            # Convert runtime_profile into bounded rounds/time
             if isinstance(est_cycles, (int, float)) and max_rounds <= 50:
                 try:
                     per_round = max(1, len(roles_list) or 1)
@@ -2167,7 +2248,9 @@ class CoreAgent:
                 elif runtime_profile == "90_days":
                     max_minutes = 90 * 24 * 60.0
                 elif runtime_profile == "forever":
-                    forever = True
+                    # Treat "forever" as a long but still finite hint.
+                    # We leave max_minutes unchanged and rely on max_rounds.
+                    pass
 
             if stop_rye is None and isinstance(profile_stop_rye, (int, float)):
                 stop_rye = float(profile_stop_rye)
@@ -2206,7 +2289,7 @@ class CoreAgent:
             experiment_mode = "breakthrough"
 
         while True:
-            if not forever and round_idx >= max_rounds:
+            if round_idx >= max_rounds:
                 stop_reason = "round_cap"
                 break
 
@@ -2236,7 +2319,7 @@ class CoreAgent:
                     "elapsed_minutes": elapsed_min,
                     "remaining_minutes": remaining_minutes,
                     "stop_rye": stop_rye,
-                    "forever": forever,
+                    "forever": False,
                     "cycle_history_length": len(history),
                     "local_round_index": round_idx,
                     "recent_round_rye": recent_round_rye[-10:],
