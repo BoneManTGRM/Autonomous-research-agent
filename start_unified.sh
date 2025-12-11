@@ -25,11 +25,13 @@ fi
 
 echo "Preparing run directories under $ARA_RUNS_DIR"
 mkdir -p \
+  "$ARA_RUNS_DIR" \
   "$ARA_RUNS_DIR/pending" \
   "$ARA_RUNS_DIR/active" \
   "$ARA_RUNS_DIR/finished" \
   "$ARA_RUNS_DIR/error" \
-  "$ARA_RUNS_DIR/queue"
+  "$ARA_RUNS_DIR/queue" \
+  "$ARA_RUNS_DIR/memory"
 
 echo "[start_unified] Run directory tree:"
 for d in \
@@ -38,7 +40,8 @@ for d in \
   "$ARA_RUNS_DIR/finished" \
   "$ARA_RUNS_DIR/pending" \
   "$ARA_RUNS_DIR/queue" \
-  "$ARA_RUNS_DIR/error"
+  "$ARA_RUNS_DIR/error" \
+  "$ARA_RUNS_DIR/memory"
 do
   if [ -d "$d" ]; then
     echo " - dir: $d"
