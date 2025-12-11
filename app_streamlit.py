@@ -375,11 +375,20 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
     # Metrics
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric("delta_R", cycle_summary.get("delta_R", cycle_summary.get("delta_r", 0.0)))
+        st.metric(
+            "delta_R",
+            cycle_summary.get("delta_R", cycle_summary.get("delta_r", 0.0)),
+        )
     with col2:
-        st.metric("Energy E", cycle_summary.get("energy_E", cycle_summary.get("energy", 0.0)))
+        st.metric(
+            "Energy E",
+            cycle_summary.get("energy_E", cycle_summary.get("energy", 0.0)),
+        )
     with col3:
-        st.metric("RYE", round(cycle_summary.get("RYE", cycle_summary.get("rye", 0.0)), 3))
+        st.metric(
+            "RYE",
+            round(cycle_summary.get("RYE", cycle_summary.get("rye", 0.0)), 3),
+        )
 
     # Issues
     issues_before = cycle_summary.get("issues_before", [])
@@ -1451,6 +1460,8 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
     )
 
     return "\n".join(lines)
+
+
 def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
     """Extract citations from finished run JSONs as a fallback for the citation viewer."""
     if list_run_jobs is None:
@@ -1577,82 +1588,115 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
             discoveries.append(d2)
 
     return discoveries
-
-
-# -------------------------------------------------------------------
+    # -------------------------------------------------------------------
 # Main Streamlit app
 # -------------------------------------------------------------------
 def main() -> None:
     st.set_page_config(
-        page_title="Autonomous Research Agent",
+        page_title="Autonomous Research Agent (Finite queue mode)",
         page_icon="🧪",
         layout="wide",
     )
 
-    st.title("Autonomous Research Agent (finite queue mode)")
+    st.title("Autonomous Research Agent")
     st.caption(
-        "This UI only queues finite runs into a file based job queue. "
-        "A separate engine worker process picks up jobs and runs TGRM cycles."
+        "Finite mode only • Queue based runs • Engine worker processes jobs from ARA_RUNS_DIR/pending.\n"
+        "This UI never runs TGRM loops directly. It only queues jobs and visualizes finished artifacts."
     )
 
-    # Shared MemoryStore (read only from UI perspective)
+    # Shared MemoryStore instance for diagnostics and history
     memory = init_memory_store()
 
-    # Sidebar: Tavily key input (per user, not hard wired)
+    # Sidebar layout
     st.sidebar.title("Run configuration")
 
-    st.sidebar.subheader("Tavily API key")
-    current_tavily = st.session_state.get("tavily_key", "")
-    tavily_input = st.sidebar.text_input(
+    # Optional Tavily key input (per user, not stored on disk)
+    st.sidebar.subheader("Tavily API key (optional)")
+    current_key = st.session_state.get("tavily_key", "")
+    new_key = st.sidebar.text_input(
         "Tavily API key",
-        value=current_tavily or "",
         type="password",
-        help=(
-            "Optional per user Tavily key. If provided, the worker can perform real web searches. "
-            "If left empty, the system will fall back to stubbed search results."
-        ),
+        value=current_key or "",
+        help="Optional. If provided, allows real web search through Tavily in the engine worker.",
     )
-    if tavily_input != current_tavily:
-        st.session_state["tavily_key"] = tavily_input
+    if new_key and new_key != current_key:
+        st.session_state["tavily_key"] = new_key
 
-    # Sidebar: preset selection
-    st.sidebar.subheader("Domain preset")
+    # Preset and domain selection
+    st.sidebar.subheader("Preset and domain")
 
-    # Preserve insertion order of PRESETS but show labels
-    preset_keys: List[str] = list(PRESETS.keys())
-    preset_labels: List[str] = [
-        PRESETS[k].get("label", k) for k in preset_keys
-    ]
+    if not PRESETS:
+        st.sidebar.warning("No presets are defined. Using a basic default configuration.")
+        preset = {
+            "label": "Default",
+            "domain": "general",
+            "default_goal": (
+                "Explore Reparodynamics, define RYE and TGRM, and compare with related frameworks."
+            ),
+        }
+        selected_label = "Default"
+        selected_key = "default"
+    else:
+        preset_labels = list(PRESETS.keys())
+        # For safety, selected_key and selected_label are the same in this mapping
+        selected_label = st.sidebar.selectbox(
+            "Select preset",
+            options=preset_labels,
+            index=0,
+            help="Choose a domain oriented preset for this run.",
+        )
+        selected_key = selected_label
+        # PRESETS may be a dict of dicts, get_preset can add extra defaults
+        try:
+            preset = get_preset(selected_key)  # type: ignore[arg-type]
+        except Exception:
+            preset = PRESETS.get(selected_key, {})
 
-    if not preset_labels:
-        st.sidebar.error("No presets defined in presets.py")
-        return
+        if not isinstance(preset, dict):
+            preset = {}
 
-    default_index = 0
-    selected_label = st.sidebar.selectbox(
-        "Select preset",
-        options=preset_labels,
-        index=default_index,
-        help="Choose a domain preset (for example General, Longevity, Math).",
+    # Domain tag used in run_config and longevity detection
+    domain_tag = (
+        preset.get("domain")
+        or preset.get("domain_tag")
+        or preset.get("domain_key")
+        or "general"
     )
 
-    selected_key = preset_keys[preset_labels.index(selected_label)]
-    preset = get_preset(selected_key)
-    domain_tag = preset.get("domain", selected_key)
+    st.sidebar.caption(f"Active domain: **{str(domain_tag).title()}**")
 
-    # Runtime profile info from presets if configured
-    st.sidebar.subheader("Runtime profile")
-    default_runtime_profile = preset.get("default_runtime_profile")
-    if default_runtime_profile:
-        rp_cfg = RUNTIME_PROFILES.get(default_runtime_profile, {})
-        rp_label = rp_cfg.get("label", default_runtime_profile)
-        rp_desc = rp_cfg.get("description", "")
-        rp_est_cycles = rp_cfg.get("estimated_cycles")
-        st.sidebar.write(f"Preset profile: **{rp_label}**")
-        if rp_est_cycles is not None:
-            st.sidebar.caption(f"Estimated cycles target: {rp_est_cycles}")
-        if rp_desc:
-            st.sidebar.caption(rp_desc)
+    # Runtime profile view (finite only, advisory)
+    st.sidebar.subheader("Runtime profile (advisory, finite only)")
+
+    runtime_profile = None
+    runtime_profile_key = preset.get("runtime_profile") or preset.get("runtime_profile_key")
+    if runtime_profile_key and isinstance(RUNTIME_PROFILES, dict):
+        runtime_profile = RUNTIME_PROFILES.get(runtime_profile_key)
+
+    if isinstance(runtime_profile, dict):
+        label = runtime_profile.get("label") or runtime_profile_key
+        description = runtime_profile.get("description") or runtime_profile.get("desc")
+        max_minutes = runtime_profile.get("max_minutes")
+        max_cycles = runtime_profile.get("max_cycles")
+
+        lines = []
+        if label:
+            lines.append(f"Profile: **{label}**")
+        if description:
+            lines.append(str(description))
+        if max_minutes is not None or max_cycles is not None:
+            caps = []
+            if max_minutes is not None:
+                caps.append(f"~{max_minutes} minutes")
+            if max_cycles is not None:
+                caps.append(f"~{max_cycles} cycles")
+            if caps:
+                lines.append("Approx caps: " + ", ".join(caps))
+        lines.append(
+            "In this UI, the **cycle input below** is the hard limit. "
+            "The profile is only a hint to the engine worker for internal tuning."
+        )
+        st.sidebar.caption("\n\n".join(lines))
     else:
         st.sidebar.caption(
             "This preset has no runtime profile configured. "
@@ -2141,7 +2185,7 @@ def main() -> None:
                     }
                 )
 
-            st.dataframe(rows, use_container_width=True)
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
             st.markdown("### Efficiency Charts")
 
@@ -2645,7 +2689,7 @@ def main() -> None:
 
                 if filtered:
                     st.write(f"Showing {len(filtered)} discoveries after filters.")
-                    st.dataframe(filtered, use_container_width=True)
+                    st.dataframe(pd.DataFrame(filtered), use_container_width=True)
                 else:
                     st.info("No discoveries matched the current filters.")
 
@@ -2848,7 +2892,7 @@ def main() -> None:
                             "timestamp": h["timestamp"],
                         }
                     )
-                st.dataframe(view_rows, use_container_width=True)
+                st.dataframe(pd.DataFrame(view_rows), use_container_width=True)
 
                 hypo_md = ["# Hypotheses\n"]
                 for h in filtered_h:
@@ -3005,7 +3049,7 @@ def main() -> None:
                             + ("..." if hyp and len(hyp) > 120 else ""),
                         }
                     )
-                st.dataframe(view_rows_v, use_container_width=True)
+                st.dataframe(pd.DataFrame(view_rows_v), use_container_width=True)
 
                 with st.expander("Raw verification log JSON"):
                     st.code(json.dumps(verifications, indent=2), language="json")
@@ -3210,4 +3254,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()    
+    main()
