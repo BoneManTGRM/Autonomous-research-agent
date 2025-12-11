@@ -10,7 +10,7 @@ echo "=== ARA Unified Service Start ==="
 # We try that first, then fall back to the script directory.
 cd /opt/render/project/src 2>/dev/null || cd "$(dirname "$0")"
 
-echo "Current working directory: $(pwd)"
+echo "[start_unified] Current working directory: $(pwd)"
 
 # -------------------------------------------------------------------
 # Shared run directory
@@ -18,12 +18,12 @@ echo "Current working directory: $(pwd)"
 # -------------------------------------------------------------------
 if [ -z "${ARA_RUNS_DIR:-}" ]; then
   export ARA_RUNS_DIR="/opt/render/project/src/runs"
-  echo "ARA_RUNS_DIR not set, defaulting to $ARA_RUNS_DIR"
+  echo "[start_unified] ARA_RUNS_DIR not set, defaulting to $ARA_RUNS_DIR"
 else
-  echo "ARA_RUNS_DIR already set to $ARA_RUNS_DIR"
+  echo "[start_unified] ARA_RUNS_DIR already set to $ARA_RUNS_DIR"
 fi
 
-echo "Preparing run directories under $ARA_RUNS_DIR"
+echo "[start_unified] Preparing run directories under $ARA_RUNS_DIR"
 mkdir -p \
   "$ARA_RUNS_DIR" \
   "$ARA_RUNS_DIR/pending" \
@@ -44,9 +44,9 @@ for d in \
   "$ARA_RUNS_DIR/memory"
 do
   if [ -d "$d" ]; then
-    echo " - dir: $d"
+    echo "  dir: $d"
   else
-    echo " - missing_dir: $d"
+    echo "  missing_dir: $d"
   fi
 done
 
@@ -55,37 +55,48 @@ done
 # -------------------------------------------------------------------
 export PYTHONUNBUFFERED=1
 
-# Force queue mode engine so engine_worker runs run_job_queue_worker
+# Force queue mode engine so engine_worker runs the queue worker
 export WORKER_MODE="queue"
 export WORKER_QUEUE_MODE="1"
 
-echo "Python binary: $(which python || echo 'python not found')"
+echo "[start_unified] Python binary: $(which python || echo 'python not found')"
 
 # Optional sanity check: what does agent.run_jobs think BASE_DIR is
-python - << 'EOF' || echo "Warning: sanity check failed"
+python - << 'EOF' || echo "[start_unified] Warning: sanity check failed"
 import os
 try:
     from agent import run_jobs
-    print("Sanity check: run_jobs.BASE_DIR =", run_jobs.BASE_DIR)
-    print("Sanity check: ARA_RUNS_DIR env  =", os.getenv("ARA_RUNS_DIR"))
+    print("[start_unified] Sanity check: run_jobs.BASE_DIR =", run_jobs.BASE_DIR)
+    print("[start_unified] Sanity check: ARA_RUNS_DIR env  =", os.getenv("ARA_RUNS_DIR"))
 except Exception as e:
-    print("Sanity check: could not import agent.run_jobs:", e)
+    print("[start_unified] Sanity check: could not import agent.run_jobs:", e)
 EOF
+
+# -------------------------------------------------------------------
+# Cleanup trap so worker is killed when container exits
+# -------------------------------------------------------------------
+cleanup() {
+  if [ "${WORKER_PID-}" != "" ]; then
+    echo "[start_unified] Stopping engine worker PID $WORKER_PID"
+    kill "$WORKER_PID" 2>/dev/null || true
+  fi
+}
+trap cleanup EXIT INT TERM
 
 # -------------------------------------------------------------------
 # Start engine worker in background
 # -------------------------------------------------------------------
-echo "Starting engine worker in queue mode..."
+echo "[start_unified] Starting engine worker in queue mode..."
 python engine_worker.py &
 WORKER_PID=$!
-echo "Engine worker PID: $WORKER_PID"
+echo "[start_unified] Engine worker PID: $WORKER_PID"
 
 # -------------------------------------------------------------------
 # Start Streamlit UI in foreground
-# Render provides $PORT, but default to 8501 if missing
+# Render provides \$PORT, but default to 8501 if missing
 # -------------------------------------------------------------------
 PORT="${PORT:-8501}"
-echo "Starting Streamlit UI on port $PORT"
+echo "[start_unified] Starting Streamlit UI on port $PORT"
 
 exec streamlit run app_streamlit.py \
   --server.port "$PORT" \
