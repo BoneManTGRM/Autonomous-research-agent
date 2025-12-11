@@ -689,6 +689,18 @@ class RunManager:
                     stage=stage,
                 )
 
+                # Tag swarm cycles with agent_id and swarm_profile so
+                # MemoryStore and diagnostics can distinguish agents and runs.
+                agent_id = f"agent_{agent_idx}"
+                swarm_profile = {
+                    "swarm_size": swarm_cfg.swarm_size,
+                    "agent_index": agent_idx,
+                    "role": role,
+                    "total_agents": swarm_cfg.swarm_size,
+                }
+                cycle_kwargs["agent_id"] = agent_id
+                cycle_kwargs["swarm_profile"] = swarm_profile
+
                 result = self._run_cycle_with_optional_timeout(
                     agent=agent,
                     cycle_kwargs=cycle_kwargs,
@@ -858,6 +870,9 @@ class RunManager:
             "pdf_bytes": None,
             "biomarker_snapshot": None,
             "domain": run_config.domain,
+            # Critical for job recording: tag cycles with run_id so
+            # TGRM loop logs can associate them to the correct run/job.
+            "run_id": run_config.run_id,
         }
 
         if stage is not None:
