@@ -936,12 +936,18 @@ def compute_tool_rye(
 # RYE Volatility Signature (local self-diagnosis)
 
 def rye_volatility_signature(
-    history: List[Dict[str, Any]],
+    history_or_diagnostics: Any,
     *,
     window: int = 20,
+    domain: Optional[str] = None,
+    **kwargs: Any,
 ) -> Dict[str, Optional[float]]:
     """
     Local volatility signature of RYE over a recent window.
+
+    Accepts either:
+        - full history (list of dicts or numeric RYE values)
+        - diagnostics dict produced by build_run_diagnostics
 
     Returns:
         {
@@ -954,10 +960,54 @@ def rye_volatility_signature(
     volatility_score:
         ~1.0 -> very stable
         ~0.0 -> highly volatile
-
-    Accepts either full history or bare RYE lists.
     """
-    vals = _extract_rye_series(history)
+    # Prefer explicit history kwarg if provided
+    if "history" in kwargs and kwargs["history"] is not None:
+        data = kwargs["history"]
+    else:
+        data = history_or_diagnostics
+
+    # Diagnostics mode: approximate volatility from percentiles and averages
+    if isinstance(data, dict):
+        diag = data
+        low = _safe_float(diag.get("low_percentile"))
+        high = _safe_float(diag.get("high_percentile"))
+        mid = _safe_float(diag.get("mid_percentile"))
+        avg = _safe_float(diag.get("rye_avg"))
+
+        if low is None or high is None:
+            return {
+                "std": None,
+                "range": None,
+                "cv": None,
+                "volatility_score": None,
+            }
+
+        r = high - low
+        # Simple heuristic: treat range as about four standard deviations
+        std = r / 4.0 if r is not None else None
+
+        center = avg if avg is not None else mid
+        if center is None or center == 0 or std is None:
+            cv = None
+        else:
+            cv = abs(std / center)
+
+        if cv is None:
+            volatility_score = None
+        else:
+            raw = 1.0 / (1.0 + cv)
+            volatility_score = max(0.0, min(raw, 1.0))
+
+        return {
+            "std": std,
+            "range": r,
+            "cv": cv,
+            "volatility_score": volatility_score,
+        }
+
+    # History mode: original series based implementation
+    vals = _extract_rye_series(data if isinstance(data, list) else [])
     if len(vals) == 0 or window <= 1:
         return {
             "std": None,
@@ -1003,22 +1053,66 @@ def rye_volatility_signature(
 # RYE Equilibrium Detector
 
 def detect_rye_equilibrium(
-    history: List[Dict[str, Any]],
+    history_or_diagnostics: Any,
     *,
     window: int = 30,
     slope_tolerance: float = 0.01,
+    **kwargs: Any,
 ) -> Dict[str, Optional[Any]]:
     """
-    Detects whether the system appears to be in a RYE equilibrium zone.
+    Detect whether the system appears to be in a RYE equilibrium zone.
+
+    Accepts either:
+        - full history (list)
+        - diagnostics dict produced by build_run_diagnostics
 
     Conditions (heuristic):
         - enough recent points
         - regression slope magnitude below slope_tolerance
         - volatility is not excessive
-
-    Accepts either full history or bare RYE lists.
     """
-    vals = _extract_rye_series(history)
+    # Prefer explicit history kwarg if provided
+    if "history" in kwargs and kwargs["history"] is not None:
+        data = kwargs["history"]
+    else:
+        data = history_or_diagnostics
+
+    # Diagnostics mode: use trend_slope and volatility_signature
+    if isinstance(data, dict):
+        diag = data
+        slope = _safe_float(diag.get("trend_slope"))
+        vol_sig = rye_volatility_signature(diag)
+        vol_score = vol_sig.get("volatility_score")
+
+        count = diag.get("count")
+        window_size = int(count) if isinstance(count, int) else None
+
+        if slope is None:
+            return {
+                "in_equilibrium": False,
+                "reason": "no_slope",
+                "window_size": window_size,
+                "local_slope": None,
+                "local_volatility_score": vol_score,
+            }
+
+        if vol_score is None:
+            in_eq = abs(slope) <= slope_tolerance
+        else:
+            in_eq = (abs(slope) <= slope_tolerance) and (vol_score >= 0.4)
+
+        reason = "equilibrium" if in_eq else "non_equilibrium"
+
+        return {
+            "in_equilibrium": in_eq,
+            "reason": reason,
+            "window_size": window_size,
+            "local_slope": slope,
+            "local_volatility_score": vol_score,
+        }
+
+    # History mode: original series based implementation
+    vals = _extract_rye_series(data if isinstance(data, list) else [])
     n = len(vals)
     if n < window:
         return {
@@ -1062,10 +1156,18 @@ def detect_rye_equilibrium(
 # TGRM Harmonic Index (proxy)
 
 def tgrm_harmonic_index(
-    history: List[Dict[str, Any]],
+    history_or_diagnostics: Any,
+    *,
+    window: int = 10,
+    domain: Optional[str] = None,
+    **kwargs: Any,
 ) -> Optional[float]:
     """
     Proxy for TGRM harmonic resonance.
+
+    Accepts either:
+        - full history (list)
+        - diagnostics dict produced by build_run_diagnostics
 
     Approximated via:
         - stability_index
@@ -1073,11 +1175,33 @@ def tgrm_harmonic_index(
 
     Returns:
         float in [0, 1] or None
-
-    Works with either full history or bare RYE lists.
     """
-    stab = stability_index(history)
-    rec = recovery_momentum(history)
+    # Prefer explicit history kwarg if provided
+    if "history" in kwargs and kwargs["history"] is not None:
+        data = kwargs["history"]
+    else:
+        data = history_or_diagnostics
+
+    # Diagnostics mode: read stability_index and recovery_momentum directly
+    if isinstance(data, dict):
+        diag = data
+        stab = _safe_float(diag.get("stability_index"))
+        rec = _safe_float(diag.get("recovery_momentum"))
+
+        if stab is None and rec is None:
+            return None
+
+        stab_norm = stab if stab is not None else 0.0
+        rec_raw = rec if rec is not None else 0.0
+        rec_norm = min(max(rec_raw / 5.0, 0.0), 1.0)
+
+        idx = 0.6 * stab_norm + 0.4 * rec_norm
+        return max(0.0, min(idx, 1.0))
+
+    # History mode: use history based stability and momentum
+    hist = data if isinstance(data, list) else []
+    stab = stability_index(hist)
+    rec = recovery_momentum(hist)
 
     if stab is None and rec is None:
         return None
@@ -1098,7 +1222,7 @@ def estimate_breakthrough_probability(
     horizon_hours: Optional[int] = None,
 ) -> Dict[str, Optional[Any]]:
     """
-    Estimate a *heuristic* probability-like score that this run configuration
+    Estimate a heuristic probability-like score that this run configuration
     could yield a meaningful breakthrough within a given horizon.
 
     Important:
@@ -1714,7 +1838,7 @@ def build_msil_ready_snapshot(
     hours_run_so_far: Optional[float] = None,
     window: int = 10,
     max_points: int = 500,
-) -> Dict[str, Any]:
+) -> Dict[str, Any]]:
     """
     Optional high level helper for msil.py and IQ style probes.
 
