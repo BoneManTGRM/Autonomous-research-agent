@@ -13,14 +13,14 @@ TGRM loop (implemented in TGRMLoop):
     - Detect : find gaps, TODOs, unanswered questions or contradictions
     - Repair : perform targeted actions (web, PubMed, PDFs, biomarkers,
                browser tools, code sandbox, and data pipelines)
-    - Verify : re-test, compute delta_R and RYE, and log the cycle
+    - Verify : re test, compute delta_R and RYE, and log the cycle
 
 RYE (Repair Yield per Energy):
     For each cycle, TGRMLoop computes delta_R / E (improvement divided
-    by effort). CoreAgent orchestrates cycles, multi-agent runs, and
+    by effort). CoreAgent orchestrates cycles, multi agent runs, and
     continuous modes while the TGRM loop integrates tool usage into E.
 
-MSIL v2 hooks (dual-track inference):
+MSIL v2 hooks (dual track inference):
     CoreAgent supports a configurable `msil_mode` and `msil_track_mode`
     that can be passed into upgraded TGRM loops:
         - msil_mode: "v1" or "v2"
@@ -28,12 +28,12 @@ MSIL v2 hooks (dual-track inference):
     If an MSIL controller is available, CoreAgent will attach it as
     `self.msil_controller` and expose advisory helpers.
 
-TGRM v3 hooks (multi-goal self-repair):
+TGRM v3 hooks (multi goal self repair):
     CoreAgent exposes `run_multi_goal_cycle` and
     `run_multi_goal_training_burst` which call
     `TGRMLoop.run_multi_goal_cycle(...)` when available, and otherwise
     fall back to running goals one by one. This sets the stage for
-    true multi-hypothesis repair in the loop.
+    true multi hypothesis repair in the loop.
 
 Stability Kernel:
     If a StabilityKernel implementation is available, CoreAgent
@@ -66,7 +66,7 @@ Protocol Synthesizer:
     validated hypotheses and RYE diagnostics into candidate protocols
     and supplement stacks.
 
-Meta-Agent for self tuning:
+Meta Agent for self tuning:
     If a MetaAgent is available, CoreAgent attaches it as
     `self.meta_agent` and exposes `run_meta_tuning(...)` that produces
     advisory suggestions for prompts, roles, swarm shape, and thresholds
@@ -82,7 +82,7 @@ Memory partition v2:
     `configure_tiers(...)`, CoreAgent configures tier labels and exposes
     `get_memory_partition_status()` for quick tier counts.
 
-True long-horizon run modes:
+True long horizon run modes:
     On top of `run_continuous` and `run_swarm_continuous`, CoreAgent
     exposes:
         - run_long_horizon_single(...)
@@ -103,12 +103,12 @@ Integrated trading mode:
     which are domain "trading" runs coupled with any trading specific
     logic in the TradingEngine while still using TGRM and RYE.
 
-Multi-agent extension:
+Multi agent extension:
     CoreAgent can orchestrate multiple logical agent roles
     (researcher, critic, planner, synthesizer, explorer, plus up to
     a total of 32 agents) over the same MemoryStore. This makes it
     possible to run:
-        - one cycle per role (multi-agent round), or
+        - one cycle per role (multi agent round), or
         - long continuous runs where each "round" consists of many roles.
 
     The maximum number of logical agents is capped at 32 for safety,
@@ -134,7 +134,7 @@ Runtime profiles:
 
     When a runtime_profile is selected, CoreAgent will:
         - adjust max_minutes and max_cycles for continuous runs
-        - auto-apply a stop_rye threshold where appropriate
+        - auto apply a stop_rye threshold where appropriate
 
 Domain presets and experiment modes:
     CoreAgent also uses domain presets (via presets.get_preset) to:
@@ -168,7 +168,7 @@ Learning from memory history:
         - diagnostics snapshot for the UI
 
     This learning is optional, conservative, and backward compatible:
-        - If rye_metrics is unavailable, the feature is a no-op.
+        - If rye_metrics is unavailable, the feature is a no op.
         - If config["auto_learn_from_memory"] is False, it is disabled.
 
 Ultra speed profiles:
@@ -290,11 +290,11 @@ from .verification_engine import VerificationEngine
 
 
 class CoreAgent:
-    """High-level controller for the autonomous research agent.
+    """High level controller for the autonomous research agent.
 
-    This class wires UI or CLI controls (multi-agent, continuous mode,
+    This class wires UI or CLI controls (multi agent, continuous mode,
     source preferences, PDF uploads, swarm roles, advanced upgrades)
-    into the lower-level TGRMLoop which performs the actual reparodynamic
+    into the lower level TGRMLoop which performs the actual reparodynamic
     TGRM cycles and RYE computation.
 
     It also owns a tools layer that TGRMLoop can use for:
@@ -394,7 +394,7 @@ class CoreAgent:
                 # Preferred simple signature
                 msil_instance = MSILController(config=self.config)
             except TypeError:
-                # Fallback for MetaSkillIntelligenceLayer-style constructor
+                # Fallback for MetaSkillIntelligenceLayer style constructor
                 try:
                     msil_instance = MSILController(
                         memory_store=self.memory_store,
@@ -435,7 +435,7 @@ class CoreAgent:
         self.auto_resume_enabled: bool = bool(self.config.get("auto_resume_enabled", True))
 
         # ------------------------------------------------------------------
-        # Multi-agent configuration (up to 32 logical agents)
+        # Multi agent configuration (up to 32 logical agents)
         # ------------------------------------------------------------------
         self.max_agents: int = int(self.config.get("max_agents", 32))
         if self.max_agents < 1:
@@ -590,7 +590,7 @@ class CoreAgent:
         self.learned_from_memory: Dict[str, Any] = {}
 
         # ------------------------------------------------------------------
-        # Agent-level training configuration
+        # Agent level training configuration
         # ------------------------------------------------------------------
         self.learning_enabled: bool = bool(self.config.get("learning_enabled", True))
         self.min_training_history: int = int(self.config.get("min_training_history", 50))
@@ -1175,7 +1175,7 @@ class CoreAgent:
         return status
 
     # ------------------------------------------------------------------
-    # Multi-agent utilities
+    # Multi agent utilities
     # ------------------------------------------------------------------
     def get_agent_roles(self) -> List[str]:
         """Return the configured logical agent roles (capped at max_agents)."""
@@ -1736,7 +1736,7 @@ class CoreAgent:
         return result
 
     # ------------------------------------------------------------------
-    # Multi-goal hooks for TGRM v3
+    # Multi goal hooks for TGRM v3
     # ------------------------------------------------------------------
     def run_multi_goal_cycle(
         self,
@@ -1750,7 +1750,7 @@ class CoreAgent:
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Run a multi-goal cycle if TGRMLoop supports it, otherwise degrade."""
+        """Run a multi goal cycle if TGRMLoop supports it, otherwise degrade."""
         goals_list = [g for g in goals if str(g).strip()]
         if not goals_list:
             return self.run_cycle(
@@ -1822,7 +1822,7 @@ class CoreAgent:
         )
 
     # ------------------------------------------------------------------
-    # Single-agent continuous mode (finite-only)
+    # Single agent continuous mode (finite only)
     # ------------------------------------------------------------------
     def run_continuous(
         self,
@@ -1845,10 +1845,10 @@ class CoreAgent:
         """Run multiple TGRM cycles in a row (continuous mode) for a single role.
 
         Note:
-            This method enforces finite-only semantics. Even if callers
-            pass forever=True or select a 'forever' runtime_profile, the
-            run will still be bounded by max_cycles and/or max_minutes
-            (plus an internal failsafe).
+            This method enforces finite only semantics. Even if callers
+            pass forever=True or select a "forever" runtime_profile, the
+            run will still be bounded by max_cycles and or max_minutes
+            plus an internal failsafe.
         """
         summaries: List[Dict[str, Any]] = []
         recent_rye: List[float] = []
@@ -1870,7 +1870,7 @@ class CoreAgent:
         if watchdog_interval_minutes == 5.0:
             watchdog_interval_minutes = default_watchdog
 
-        # Auto-learn runtime profile and stop_rye from history
+        # Auto learn runtime profile and stop_rye from history
         if runtime_profile is None and self.config.get("auto_learn_from_memory", True):
             try:
                 learned = self.learn_from_memory(domain=effective_domain)
@@ -1884,7 +1884,7 @@ class CoreAgent:
             except Exception:
                 pass
 
-        # Use preset defaults for accelerated / ultra modes
+        # Use preset defaults for accelerated or ultra modes
         if runtime_profile is None and self.speed_mode in {"accelerated", "ultra"}:
             default_profile = preset_cfg.get("default_runtime_profile")
             if isinstance(default_profile, str):
@@ -1926,7 +1926,7 @@ class CoreAgent:
             if stop_rye is None and isinstance(profile_stop_rye, (int, float)):
                 stop_rye = float(profile_stop_rye)
 
-        # Fallback mapping from cycles to time budget in finite-only mode
+        # Fallback mapping from cycles to time budget in finite only mode
         if max_minutes is None:
             if max_cycles == 120:
                 max_minutes = 60.0
@@ -1941,7 +1941,7 @@ class CoreAgent:
                 # Clamp to failsafe but do not enable forever
                 max_cycles = max_cycles_failsafe
 
-        # Checkpoint resume (finite-only)
+        # Checkpoint resume (finite only)
         checkpoint = None
         if resume_from_checkpoint and self.auto_resume_enabled:
             checkpoint = self._load_checkpoint()
@@ -2119,7 +2119,7 @@ class CoreAgent:
         return summaries
 
     # ------------------------------------------------------------------
-    # Swarm aware continuous mode (multi-agent rounds, finite-only)
+    # Swarm aware continuous mode (multi agent rounds, finite only)
     # ------------------------------------------------------------------
     def run_swarm_continuous(
         self,
@@ -2139,12 +2139,12 @@ class CoreAgent:
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run continuous multi-agent swarm rounds.
+        """Run continuous multi agent swarm rounds.
 
         Note:
-            This method enforces finite-only semantics. Even if callers
-            pass forever=True or select a 'forever' runtime_profile, the
-            run will still be bounded by max_rounds and/or max_minutes.
+            This method enforces finite only semantics. Even if callers
+            pass forever=True or select a "forever" runtime_profile, the
+            run will still be bounded by max_rounds and or max_minutes.
         """
         all_summaries: List[Dict[str, Any]] = []
         recent_round_rye: List[float] = []
@@ -2208,7 +2208,7 @@ class CoreAgent:
             est_cycles = profile_cfg.get("estimated_cycles")
             profile_stop_rye = profile_cfg.get("rye_stop_threshold")
 
-            # Convert runtime_profile into bounded rounds/time
+            # Convert runtime_profile into bounded rounds or time
             if isinstance(est_cycles, (int, float)) and max_rounds <= 50:
                 try:
                     per_round = max(1, len(roles_list) or 1)
@@ -2432,7 +2432,7 @@ class CoreAgent:
         return all_summaries
 
     # ------------------------------------------------------------------
-    # Multi-agent round helper
+    # Multi agent round helper
     # ------------------------------------------------------------------
     def run_multi_agent_round(
         self,
@@ -2446,7 +2446,7 @@ class CoreAgent:
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Run one multi-agent round: one cycle per role, sharing MemoryStore."""
+        """Run one multi agent round: one cycle per role, sharing MemoryStore."""
         summaries: List[Dict[str, Any]] = []
         effective_domain = domain or "general"
         effective_run_id = run_id or self._generate_run_id()
@@ -2581,10 +2581,10 @@ class CoreAgent:
             return []
 
     # ------------------------------------------------------------------
-    # Agent-level training and learning helpers
+    # Agent level training and learning helpers
     # ------------------------------------------------------------------
     def get_learning_status(self) -> Dict[str, Any]:
-        """Return a compact view of the agent-level learning state."""
+        """Return a compact view of the agent level learning state."""
         status: Dict[str, Any] = {
             "learning_enabled": self.learning_enabled,
             "min_training_history": self.min_training_history,
@@ -2759,9 +2759,9 @@ class CoreAgent:
         biomarker_snapshot: Optional[Dict[str, Any]] = None,
         experiment_mode: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Training burst that uses multi-goal cycles when available."""
+        """Training burst that uses multi goal cycles when available."""
         if hasattr(self.tgrm_loop, "run_multi_goal_cycle"):
-            # Use multi-goal cycles by orchestrating cycles manually
+            # Use multi goal cycles by orchestrating cycles manually
             if not self.learning_enabled:
                 return []
             effective_domain = domain or "general"
@@ -2835,7 +2835,7 @@ class CoreAgent:
         self,
         domain: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Derive a high-level learning plan from existing history."""
+        """Derive a high level learning plan from existing history."""
         plan: Dict[str, Any] = {
             "domain": domain or "general",
             "learning_enabled": self.learning_enabled,
