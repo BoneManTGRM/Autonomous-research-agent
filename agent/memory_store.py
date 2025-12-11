@@ -879,6 +879,13 @@ class MemoryStore:
             return list(entries)
         return [e for e in entries if e.get("goal") == goal]
 
+    def get_citations_for_run(self, run_id: str) -> List[Dict[str, Any]]:
+        """Retrieve citations associated with a specific run_id."""
+        entries = self._data.get("citations", [])
+        if not isinstance(entries, list):
+            return []
+        return [e for e in entries if isinstance(e, dict) and e.get("run_id") == run_id]
+
     # ------------------------------------------------------------------
     # Biomarkers (placeholder for anti aging or lab data)
     # ------------------------------------------------------------------
@@ -1063,6 +1070,29 @@ class MemoryStore:
         # Take most recent limit and reverse so oldest is first
         window = list(reversed(history_sorted[:limit]))
         return window
+
+    def get_cycles_for_run(
+        self,
+        run_id: str,
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return cycles associated with a specific run_id.
+
+        Results are sorted by timestamp from newest to oldest.
+        If limit is provided, truncate to that many entries.
+        """
+        history = self._data.get("cycles", [])
+        if not isinstance(history, list):
+            return []
+        filtered = [c for c in history if isinstance(c, dict) and c.get("run_id") == run_id]
+        filtered_sorted = sorted(
+            filtered,
+            key=lambda c: c.get("timestamp", ""),
+            reverse=True,
+        )
+        if limit is not None and limit >= 0:
+            return filtered_sorted[:limit]
+        return filtered_sorted
 
     def get_recent_cycles(
         self,
