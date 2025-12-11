@@ -10,6 +10,93 @@ from dataclasses import dataclass, asdict, fields, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+"""
+Developer note: run_jobs.py health check and queue behavior
+
+Short version:
+    run_jobs.py is structurally correct and is not the reason the cycles
+    table is empty in the UI. It is wired correctly to ARA_RUNS_DIR and
+    to the runs layout created in start_unified.sh.
+
+What is verified here:
+
+1. BASE_DIR and folders
+
+    ARA_RUNS_DIR is respected and used as the base runs directory:
+
+        _env_runs_raw = os.getenv("ARA_RUNS_DIR")
+        _env_runs = _env_runs_raw.strip() if isinstance(_env_runs_raw, str) else None
+
+        if _env_runs:
+            BASE_DIR = Path(_env_runs).resolve()
+        else:
+            BASE_DIR = (REPO_ROOT / "runs").resolve()
+
+    Subfolders:
+
+        PENDING_DIR  = BASE_DIR / "pending"
+        ACTIVE_DIR   = BASE_DIR / "active"
+        FINISHED_DIR = BASE_DIR / "finished"
+        ERROR_DIR    = BASE_DIR / "error"
+        QUEUE_DIR    = PENDING_DIR
+        LEGACY_QUEUE_DIR = BASE_DIR / "queue"
+
+    All are created at import time. This matches start_unified.sh, which sets
+    ARA_RUNS_DIR="/opt/render/project/src/runs", so the queue layout is
+    consistent across:
+
+        - start_unified.sh
+        - agent/run_jobs.py
+        - engine_worker.py (when it imports this module)
+
+2. Job lifecycle and queue behavior
+
+    The key functions for engine workers are:
+
+        - create_job:
+            writes metadata JSON into runs/pending and a shadow copy into runs/queue
+
+        - get_next_queued_job:
+            returns the oldest queued job using list_jobs(status="queued")
+
+        - claim_next_job:
+            marks the next queued job as active and moves it into runs/active
+
+        - load_next_pending_job:
+            wrapper around claim_next_job for workers
+
+        - save_job_result:
+            writes final result JSON to runs/finished/{run_id}.json
+            and moves metadata to runs/finished/{run_id}_job.json
+
+    This is the expected behavior for queue mode.
+
+3. What actually drives the cycles table in the UI
+
+    The cycles / citations / discoveries table in Streamlit depends on:
+
+        1) engine_worker.py
+            - uses agent.run_jobs to pick up jobs and write finished results
+            - calls CoreAgent.run_continuous or run_swarm_continuous so
+              MemoryStore.log_cycle_summary is called for each cycle
+            - passes through run_metadata and summaries into result_obj
+
+        2) memory_store.py
+            - stores cycle summaries on disk under a path rooted at ARA_RUNS_DIR
+            - implements get_cycle_history() to read them back
+
+        3) app_streamlit.py
+            - instantiates MemoryStore with the same base path as the worker
+            - calls memory_store.get_cycle_history()
+            - renders that history as the cycles/citations/discoveries table
+
+Bottom line:
+    If queue folders exist and jobs move from pending to active to finished,
+    then run_jobs.py is working as intended. If the UI table is still empty,
+    focus fixes on engine_worker.py, memory_store.py, and the table renderer
+    in app_streamlit.py, not on this queue layer.
+"""
+
 # Public exports (useful for type checkers and explicit imports)
 __all__ = [
     "BASE_DIR",
