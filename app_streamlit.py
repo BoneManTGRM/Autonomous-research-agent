@@ -672,15 +672,14 @@ def _extract_cycles_from_run_result(
 def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
     """Rebuild a synthetic history from finished run JSON files.
 
-    This is a *fallback* for History / Citations when MemoryStore has no
-    cycle history (for example when the queue-mode worker only writes
-    per-run result JSON and does not stream cycles into MemoryStore).
+    This is a fallback for History / Citations when MemoryStore has no
+    cycle history (for example when the queue mode worker only writes
+    per run result JSON and does not stream cycles into MemoryStore).
     """
     if list_run_jobs is not None:
         try:
             jobs = list_run_jobs(status="finished")
         except TypeError:
-            # Old signature list_jobs() with no arguments
             try:
                 jobs = list_run_jobs()  # type: ignore[call-arg]
             except Exception:
@@ -708,7 +707,7 @@ def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]
     if not history:
         return []
 
-    # Sort by timestamp (if present) then by cycle
+    # Sort by timestamp if present then by cycle
     def _sort_key(e: Dict[str, Any]):
         ts = e.get("timestamp")
         if isinstance(ts, str):
@@ -722,7 +721,7 @@ def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]
 
 
 def render_result_details(result: Dict[str, Any]) -> None:
-    """Safe read-only result viewer for a finished job.
+    """Safe read only result viewer for a finished job.
 
     Handles both flat and nested schemas such as:
     - result["summary"], result["cycles"], result["citations"]
@@ -884,7 +883,7 @@ def render_result_details(result: Dict[str, Any]) -> None:
                 line += f"  \n  {snippet}"
             st.markdown(f"- {line}")
 
-    # Optional debug/diagnostics view
+    # Optional debug or diagnostics view
     debug = (
         base.get("debug")
         or base.get("diagnostics")
@@ -1501,7 +1500,7 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
         cycles = _extract_cycles_from_run_result(result, run_id=run_id)
         all_history.extend(cycles)
 
-        # Run level citations / sources
+        # Run level citations or sources
         cites = (
             base.get("citations")
             or base.get("sources")
@@ -1588,7 +1587,9 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
             discoveries.append(d2)
 
     return discoveries
-    # -------------------------------------------------------------------
+
+
+# -------------------------------------------------------------------
 # Main Streamlit app
 # -------------------------------------------------------------------
 def main() -> None:
@@ -1693,7 +1694,7 @@ def main() -> None:
             if caps:
                 lines.append("Approx caps: " + ", ".join(caps))
         lines.append(
-            "In this UI, the **cycle input below** is the hard limit. "
+            "In this UI, the cycle input below is the hard limit. "
             "The profile is only a hint to the engine worker for internal tuning."
         )
         st.sidebar.caption("\n\n".join(lines))
@@ -1954,8 +1955,8 @@ def main() -> None:
 
             # Core run configuration that engine_worker can map to RunConfig
             # Explicit finite guards:
-            # - For single and two_stage, max_cycles limits the run.
-            # - For swarm, max_rounds limits the run, while max_cycles_per_agent is in swarm_config.
+            # For single and two_stage, max_cycles limits the run.
+            # For swarm, max_rounds limits the run, while max_cycles_per_agent is in swarm_config.
             run_config: Dict[str, Any] = {
                 "goal": goal_clean,
                 "domain": domain_tag,
@@ -2007,7 +2008,7 @@ def main() -> None:
                 )
 
     # ------------------------------
-    # Runs and job queue (queued / finished via run_jobs.py)
+    # Runs and job queue (queued or finished via run_jobs.py)
     # ------------------------------
     st.markdown("---")
     st.subheader("Runs and job queue")
@@ -2042,7 +2043,7 @@ def main() -> None:
         except Exception:
             finished_jobs = []
 
-        # Pending / queued jobs (support both status names)
+        # Pending or queued jobs (support both status names)
         pending_jobs: List[Any] = []
         try:
             pending_jobs = list_run_jobs(status="queued")
@@ -2278,14 +2279,14 @@ def main() -> None:
                 )
             with ls_cols[1]:
                 if isinstance(bp_prob, (int, float)):
-                    st.metric("Breakthrough signal (near term, 0-1)", f"{bp_prob:.3f}")
+                    st.metric("Breakthrough signal (near term, 0 to 1)", f"{bp_prob:.3f}")
                 else:
-                    st.metric("Breakthrough signal (near term, 0-1)", "n/a")
+                    st.metric("Breakthrough signal (near term, 0 to 1)", "n/a")
             with ls_cols[2]:
                 if isinstance(bp90_prob, (int, float)):
-                    st.metric("Breakthrough signal 90d (0-1)", f"{bp90_prob:.3f}")
+                    st.metric("Breakthrough signal 90d (0 to 1)", f"{bp90_prob:.3f}")
                 else:
-                    st.metric("Breakthrough signal 90d (0-1)", "n/a")
+                    st.metric("Breakthrough signal 90d (0 to 1)", "n/a")
             with ls_cols[3]:
                 st.metric("Run tier", tier_label or "n/a")
 
@@ -2431,7 +2432,7 @@ def main() -> None:
         with tab_citations:
             st.markdown("### Source citation viewer")
 
-            # First try per-cycle citations from history
+            # First try per cycle citations from history
             citations = extract_citations_from_history(history)
             # Fallback to finished run JSONs if nothing found
             if not citations:
@@ -2497,12 +2498,12 @@ def main() -> None:
 
                 # Search box for filtering citations by text
                 search_query = st.text_input(
-                    "Search citations (title/snippet)",
+                    "Search citations (title or snippet)",
                     value="",
                     key="citations_search",
                 )
 
-                # Group-by selector: None, cycle, or source
+                # Group by selector: None, cycle, or source
                 group_by_option = st.selectbox(
                     "Group citations by",
                     options=["None", "Cycle", "Source"],
@@ -2621,7 +2622,7 @@ def main() -> None:
 
             if not discoveries:
                 st.info(
-                    "No discovery log entries found yet. The worker may not be writing discovery logs or run-level discovery fields."
+                    "No discovery log entries found yet. The worker may not be writing discovery logs or run level discovery fields."
                 )
             else:
                 # High level stats for discoveries
@@ -2787,7 +2788,7 @@ def main() -> None:
                     f"{eq2['equilibrium_fraction']:.3f}" if eq2["equilibrium_fraction"] is not None else "n/a",
                 )
 
-                st.markdown("#### Equilibrium delta (snapshot2 - snapshot1)")
+                st.markdown("#### Equilibrium delta (snapshot2 minus snapshot1)")
 
                 def _delta(a: Optional[float], b: Optional[float]) -> Optional[float]:
                     if a is None or b is None:
