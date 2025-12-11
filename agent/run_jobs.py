@@ -10,14 +10,44 @@ from dataclasses import dataclass, asdict, fields, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Public exports (useful for type checkers and explicit imports)
+__all__ = [
+    "BASE_DIR",
+    "PENDING_DIR",
+    "ACTIVE_DIR",
+    "FINISHED_DIR",
+    "ERROR_DIR",
+    "QUEUE_DIR",
+    "LEGACY_QUEUE_DIR",
+    "RunJob",
+    "debug_print_layout",
+    "create_job",
+    "load_job",
+    "load_job_by_id",
+    "move_job",
+    "update_job_status",
+    "list_jobs",
+    "get_next_queued_job",
+    "claim_next_job",
+    "progress_path",
+    "result_path",
+    "error_log_path",
+    "load_next_pending_job",
+    "save_job_result",
+    "mark_job_error",
+    "load_job_result",
+]
+
 # Resolve repository root so the default runs directory is stable
 _THIS_FILE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = _THIS_FILE_DIR.parent
 
 # Base folder for all runs.
+#
 # IMPORTANT:
 #   On Render your start command (or environment) should set:
 #       ARA_RUNS_DIR="/opt/render/project/src/runs"
+#
 #   so BASE_DIR will resolve to that exact shared folder for ALL of:
 #       - engine_worker.py
 #       - app_streamlit.py (or streamlit_app.py)
@@ -41,7 +71,7 @@ FINISHED_DIR = BASE_DIR / "finished"
 ERROR_DIR = BASE_DIR / "error"
 
 # Backwards compatible alias for old name "queue".
-# Many legacy scripts import QUEUE_DIR from this module.
+# Many older scripts import QUEUE_DIR from this module.
 # QUEUE_DIR now points at the canonical pending folder.
 QUEUE_DIR = PENDING_DIR
 
@@ -76,6 +106,34 @@ def debug_print_layout() -> None:
     print("[run_jobs] FINISHED_DIR:", FINISHED_DIR)
     print("[run_jobs] ERROR_DIR:", ERROR_DIR)
     print("[run_jobs] LEGACY_QUEUE_DIR:", LEGACY_QUEUE_DIR)
+    try:
+        pending_list = sorted(p.name for p in PENDING_DIR.glob("*.json"))
+    except Exception:
+        pending_list = []
+    print("[run_jobs] Pending jobs visible:", pending_list)
+    try:
+        active_list = sorted(p.name for p in ACTIVE_DIR.glob("*.json"))
+    except Exception:
+        active_list = []
+    print("[run_jobs] Active jobs visible:", active_list)
+    try:
+        finished_list = sorted(p.name for p in FINISHED_DIR.glob("*_job.json"))
+    except Exception:
+        finished_list = []
+    print("[run_jobs] Finished job metadata visible:", finished_list)
+    try:
+        error_list = sorted(p.name for p in ERROR_DIR.glob("*.json"))
+    except Exception:
+        error_list = []
+    print("[run_jobs] Error jobs visible:", error_list)
+    try:
+        legacy_list = sorted(p.name for p in LEGACY_QUEUE_DIR.glob("*.json"))
+    except Exception:
+        legacy_list = []
+    print("[run_jobs] Legacy queue jobs visible:", legacy_list)
+    import sys
+
+    sys.stdout.flush()
 
 
 @dataclass
@@ -84,12 +142,12 @@ class RunJob:
     File based representation of a single research run.
 
     Each job has:
-        run_id      - stable identifier used in filenames and UI
-        config      - full configuration dict for RunManager or your engine
-        status      - queued, active, finished, or error
-        created_at  - unix timestamp when job was created
-        updated_at  - unix timestamp when job was last updated
-        meta        - optional metadata for UI (user prompt, domain, etc)
+        run_id      : stable identifier used in filenames and UI
+        config      : full configuration dict for RunManager or your engine
+        status      : queued, active, finished, or error
+        created_at  : unix timestamp when job was created
+        updated_at  : unix timestamp when job was last updated
+        meta        : optional metadata for UI (user prompt, domain, etc)
 
     STATUS NOTES (normalized):
         - "queued" is the canonical queue status used by engines.
@@ -101,7 +159,7 @@ class RunJob:
 
     run_id: str
     config: Dict[str, Any]
-    status: str = "queued"  # keep "queued" so engine loops that check == "queued" work
+    status: str = "queued"
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     meta: Optional[Dict[str, Any]] = None
@@ -219,14 +277,6 @@ def create_job(
             },
             meta={"domain": domain, "created_by": "streamlit_ui"},
         )
-
-    Args:
-        config: Arbitrary configuration dict for the engine worker.
-        meta:   Optional metadata for UI or logging (domain, label, etc).
-        run_id: Optional externally generated ID. If omitted, uuid4 is used.
-
-    Returns:
-        The run_id string.
     """
     if run_id is None:
         run_id = str(uuid.uuid4())
@@ -243,8 +293,7 @@ def create_job(
     # Save into the canonical pending folder
     job.save_to(PENDING_DIR)
 
-    # Shadow copy to queue folder for maximal compatibility.
-    # Workers that still watch runs/queue directly will see this.
+    # Shadow copy to queue folder for compatibility with any older watchers
     try:
         job.save_to(LEGACY_QUEUE_DIR)
     except Exception:
@@ -327,12 +376,6 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
 
     It searches all folders for run_id, then moves it to the requested status.
     Returns the updated job or None if not found.
-
-    new_status can be:
-        - "queued"  or "pending"  -> queue dir, status set to "queued"
-        - "running" or "active"   -> active dir, status set to "active"
-        - "finished"
-        - "error"
     """
     norm_new = new_status.lower()
     if norm_new in ("pending", "queued"):
@@ -385,19 +428,17 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
     List jobs by status for UI or debugging.
 
     status:
-        None        - search all statuses
-        queued      - jobs in runs/pending (canonical queue status)
-        pending     - alias for queued
-        running     - alias for active
-        active      - jobs in runs/active
-        finished    - jobs in runs/finished (metadata files only)
-        error       - jobs in runs/error
+        None        : search all statuses
+        queued      : jobs in runs/pending (canonical queue status)
+        pending     : alias for queued
+        running     : alias for active
+        active      : jobs in runs/active
+        finished    : jobs in runs/finished (metadata files only)
+        error       : jobs in runs/error
 
     NOTE:
         This function does not filter based on the internal job.status string,
-        it simply reads appropriate metadata files from the correct folder(s).
-        Result JSON files in runs/finished are ignored so they do not collide
-        with the job metadata schema.
+        it simply reads metadata files from the correct folder(s).
     """
     jobs_by_id: Dict[str, RunJob] = {}
 
@@ -405,10 +446,7 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
         if not folder.exists():
             return
 
-        if finished:
-            pattern = "*_job.json"  # only metadata files
-        else:
-            pattern = "*.json"
+        pattern = "*_job.json" if finished else "*.json"
 
         for path in sorted(folder.glob(pattern)):
             # skip progress and non metadata files
@@ -424,7 +462,7 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
                 jobs_by_id[job.run_id] = job
 
     if status is None:
-        # Search all status folders plus queue dir
+        # Search all status folders plus legacy queue dir
         collect(PENDING_DIR)
         collect(LEGACY_QUEUE_DIR)
         collect(ACTIVE_DIR)
@@ -433,7 +471,6 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
     else:
         norm = status.lower()
         if norm in ("pending", "queued"):
-            # queue or pending jobs from both canonical and queue folders
             collect(PENDING_DIR)
             collect(LEGACY_QUEUE_DIR)
         elif norm in ("running", "active"):
@@ -453,12 +490,8 @@ def get_next_queued_job() -> Optional[RunJob]:
     """
     Simple helper for engine workers.
 
-    Returns the oldest queued job (by created_at) from the queue folder(s),
+    Returns the oldest queued job (by created_at) from the queue folders,
     or None if there are no queued jobs.
-
-    Implementation detail:
-        list_jobs(status="queued") returns newest first, so for FIFO we take
-        the last element (oldest created_at).
     """
     queued = list_jobs(status="queued", limit=1000)
     if not queued:
@@ -473,9 +506,6 @@ def claim_next_job() -> Optional[RunJob]:
 
     Engine workers can call this to get the next job and immediately
     move it to the active folder so that other workers do not pick it up.
-
-    Returns:
-        RunJob or None if there is no queued job.
     """
     job = get_next_queued_job()
     if job is None:
@@ -510,21 +540,6 @@ def result_path(run_id: str) -> Path:
     Finished jobs now have two files:
         - runs/finished/{run_id}_job.json   (job metadata, used by list_jobs)
         - runs/finished/{run_id}.json       (final result payload, used by UI)
-
-    Recommended result schema (example):
-        {
-            "job_id": "...",
-            "status": "finished",
-            "created_at": "...",
-            "completed_at": "...",
-            "goal": "...",
-            "summary": "...",
-            "key_findings": [...],
-            "cycles": [...],
-            "rye_metrics": {...},
-            "sources": [...],
-            "debug": {...}
-        }
     """
     return FINISHED_DIR / f"{run_id}.json"
 
@@ -585,7 +600,7 @@ def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Optional helpers for UI / debugging
+# Optional helpers for UI and debugging
 # ---------------------------------------------------------------------------
 
 def load_job_result(run_id: str) -> Optional[Dict[str, Any]]:
