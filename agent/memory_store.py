@@ -2928,3 +2928,49 @@ class MemoryStore:
             "best_score": best_score,
             "pass_rate": pass_rate,
         }
+
+    # ------------------------------------------------------------------
+    # Run overview rows for UI tables
+    # ------------------------------------------------------------------
+    def get_run_table_rows(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Return table friendly rows for run overview.
+
+        Each row bundles run_id, goals, counts, basic RYE and timeline
+        so that the UI can build a cycles/citations/discoveries table
+        without extra joins.
+        """
+        manifests = self.list_run_manifests(limit=limit)
+        rows: List[Dict[str, Any]] = []
+
+        for m in manifests:
+            if not isinstance(m, dict):
+                continue
+            run_id = m.get("run_id")
+            if not isinstance(run_id, str) or not run_id:
+                continue
+
+            summary = self.get_run_summary(run_id)
+            counts = summary.get("counts", {}) or {}
+            timeline = summary.get("timeline", {}) or {}
+            rye_basic = summary.get("rye_basic", {}) or {}
+
+            goals = summary.get("goals", []) or []
+            goals_str = ", ".join([g for g in goals if isinstance(g, str)])
+
+            row = {
+                "run_id": run_id,
+                "label": m.get("label") or m.get("name") or run_id,
+                "goals": goals,
+                "goals_str": goals_str,
+                "cycles": int(counts.get("cycles", 0) or 0),
+                "citations": int(counts.get("citations", 0) or 0),
+                "discoveries": int(counts.get("discoveries", 0) or 0),
+                "benchmarks": int(counts.get("benchmarks", 0) or 0),
+                "started_at": timeline.get("started_at"),
+                "finished_at": timeline.get("finished_at"),
+                "avg_rye": rye_basic.get("avg"),
+                "best_rye": rye_basic.get("max"),
+            }
+            rows.append(row)
+
+        return rows
