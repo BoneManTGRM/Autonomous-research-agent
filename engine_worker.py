@@ -678,6 +678,81 @@ def _run_post_run_intelligence(
 
 
 # ---------------------------------------------------------------------------
+# Result normalization helpers for UI
+# ---------------------------------------------------------------------------
+
+
+def _normalize_cycles_for_ui(cycles_list: List[Any]) -> List[Dict[str, Any]]:
+    """
+    Normalize a list of cycle or round summaries so the UI always sees:
+        - index and cycle_index
+        - citations, discoveries, sources as lists
+    """
+    normalized: List[Dict[str, Any]] = []
+    for i, entry in enumerate(cycles_list):
+        if isinstance(entry, dict):
+            c = dict(entry)
+        else:
+            c = {"raw": entry}
+        c.setdefault("index", i + 1)
+        c.setdefault("cycle_index", i)
+        c.setdefault("citations", [])
+        c.setdefault("discoveries", [])
+        c.setdefault("sources", [])
+        normalized.append(c)
+    return normalized
+
+
+def _aggregate_from_cycles(
+    cycles: List[Dict[str, Any]],
+    key: str,
+) -> List[Any]:
+    """
+    Aggregate a list field from cycles, for example citations or discoveries.
+    """
+    out: List[Any] = []
+    for c in cycles:
+        val = c.get(key)
+        if isinstance(val, list):
+            out.extend(val)
+    return out
+
+
+def _attach_top_level_defaults(
+    result_obj: Dict[str, Any],
+    cycles: List[Dict[str, Any]],
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Make sure the top level result always exposes:
+        cycles, summaries, citations, discoveries, sources, rye_metrics.
+    """
+    result_obj.setdefault("cycles", cycles)
+    result_obj.setdefault("summaries", cycles)
+
+    citations = result_obj.get("citations")
+    if not isinstance(citations, list):
+        citations = _aggregate_from_cycles(cycles, "citations")
+    discoveries = result_obj.get("discoveries")
+    if not isinstance(discoveries, list):
+        discoveries = _aggregate_from_cycles(cycles, "discoveries")
+    sources = result_obj.get("sources")
+    if not isinstance(sources, list):
+        sources = _aggregate_from_cycles(cycles, "sources")
+
+    result_obj["citations"] = citations
+    result_obj["discoveries"] = discoveries
+    result_obj["sources"] = sources
+
+    if diagnostics is None:
+        diagnostics = {}
+    result_obj.setdefault("diagnostics", diagnostics)
+    result_obj.setdefault("rye_metrics", diagnostics)
+
+    return result_obj
+
+
+# ---------------------------------------------------------------------------
 # Direct single-job API for engine_worker_queue.py / tests
 # ---------------------------------------------------------------------------
 
@@ -929,16 +1004,8 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             history=summaries,
         )
 
-        # Normalize cycles for UI: index + cycle_index always present
-        normalized_cycles: List[Dict[str, Any]] = []
-        for i, entry in enumerate(summaries):
-            if isinstance(entry, dict):
-                c = dict(entry)
-            else:
-                c = {"raw": entry}
-            c.setdefault("index", i + 1)
-            c.setdefault("cycle_index", i)
-            normalized_cycles.append(c)
+        # Normalize cycles for UI
+        normalized_cycles: List[Dict[str, Any]] = _normalize_cycles_for_ui(summaries)
 
         # Build a simple overall summary string if possible
         overall_summary: Optional[str] = None
@@ -997,6 +1064,9 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         }
         if overall_summary:
             result_obj["summary"] = overall_summary
+
+        # Attach top level defaults including citations / discoveries / sources / rye_metrics
+        result_obj = _attach_top_level_defaults(result_obj, normalized_cycles, diag)
 
         _update_worker_state(
             agent,
@@ -1420,15 +1490,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         # Normalize cycles so the UI always sees cycles + summaries lists
         # with index / cycle_index and an overall summary string.
         # ------------------------------------------------------------------
-        normalized_cycles: List[Dict[str, Any]] = []
-        for i, entry in enumerate(summaries):
-            if isinstance(entry, dict):
-                c = dict(entry)
-            else:
-                c = {"raw": entry}
-            c.setdefault("index", i + 1)
-            c.setdefault("cycle_index", i)
-            normalized_cycles.append(c)
+        normalized_cycles: List[Dict[str, Any]] = _normalize_cycles_for_ui(summaries)
 
         overall_summary: Optional[str] = None
         for c in normalized_cycles:
@@ -1478,15 +1540,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             if not isinstance(cycles_src, list):
                 cycles_src = normalized_cycles
 
-            norm_fr_cycles: List[Dict[str, Any]] = []
-            for i, entry in enumerate(cycles_src):
-                if isinstance(entry, dict):
-                    c = dict(entry)
-                else:
-                    c = {"raw": entry}
-                c.setdefault("index", i + 1)
-                c.setdefault("cycle_index", i)
-                norm_fr_cycles.append(c)
+            norm_fr_cycles: List[Dict[str, Any]] = _normalize_cycles_for_ui(cycles_src)
 
             fr["cycles"] = norm_fr_cycles
             fr.setdefault("summaries", norm_fr_cycles)
@@ -1504,6 +1558,9 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "meta": job_meta or {},
             }
             result_obj.update(fr)
+
+            # Attach top level defaults for the structured full_result case
+            result_obj = _attach_top_level_defaults(result_obj, norm_fr_cycles, diag)
         else:
             # Legacy minimal shape, but still expose cycles alias.
             result_obj = {
@@ -1523,6 +1580,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "experiment_fingerprint": experiment_fingerprint,
                 "job_meta": job_meta,
             }
+            result_obj = _attach_top_level_defaults(result_obj, normalized_cycles, diag)
+
         if overall_summary:
             result_obj["summary"] = overall_summary
 
