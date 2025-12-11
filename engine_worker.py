@@ -933,6 +933,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
+            "job_config": cfg,
         },
     )
     _heartbeat(agent, label="direct_job_start", run_id=run_id)
@@ -1022,6 +1023,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "engine": f"direct_{mode}",
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
+            "job_config": cfg,
         }
         if diag:
             extra_manifest["diagnostics_snapshot"] = diag
@@ -1061,6 +1063,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "intelligence": intelligence_info,
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
+            "job_config": cfg,
         }
         if overall_summary:
             result_obj["summary"] = overall_summary
@@ -1084,6 +1087,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 "experiment_fingerprint": experiment_fingerprint,
                 "final_diagnostics": diag,
                 "intelligence": intelligence_info if intelligence_info else None,
+                "job_config": cfg,
             },
         )
 
@@ -1094,6 +1098,38 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         tb = traceback.format_exc()
         print(tb)
         sys.stdout.flush()
+
+        error_payload: Dict[str, Any] = {
+            "error": str(e),
+            "traceback": tb,
+            "run_id": run_id,
+            "goal": goal,
+            "domain": domain,
+            "mode": mode,
+            "runtime_profile": runtime_profile,
+            "stop_rye": stop_rye,
+            "max_minutes": max_minutes,
+            "max_cycles": max_cycles if mode == "single" else None,
+            "max_rounds": max_rounds if mode == "swarm" else None,
+            "job_meta": job_meta,
+            "job_config": cfg,
+            "experiment_fingerprint": experiment_fingerprint,
+        }
+
+        try:
+            # Log a milestone so the UI can see prompt and error context
+            _log_milestone(
+                agent,
+                run_id=run_id,
+                goal=goal,
+                domain=domain,
+                label="direct_job_error",
+                description=f"Direct job failed with error: {e}",
+                level="error",
+                extra=error_payload,
+            )
+        except Exception:
+            pass
 
         _update_worker_state(
             agent,
@@ -1107,10 +1143,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             max_minutes=max_minutes,
             run_id=run_id,
             experiment_mode="direct_job",
-            extra={
-                "experiment_fingerprint": experiment_fingerprint,
-                "error_message": str(e),
-            },
+            extra=error_payload,
         )
 
         return {
@@ -1121,6 +1154,8 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "domain": domain,
             "error": str(e),
             "traceback": tb,
+            "job_config": cfg,
+            "job_meta": job_meta,
         }
 
 
@@ -1341,6 +1376,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
+            "job_config": cfg,
         },
     )
     _heartbeat(agent, label="queue_job_start", run_id=job.run_id)
@@ -1506,6 +1542,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             "engine": f"queue_{mode}",
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
+            "job_config": cfg,
         }
         if diag:
             extra_manifest["diagnostics_snapshot"] = diag
@@ -1556,6 +1593,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "completed_at": completed_ts,
                 "elapsed_seconds": completed_ts - start_ts,
                 "meta": job_meta or {},
+                "job_config": cfg,
             }
             result_obj.update(fr)
 
@@ -1579,6 +1617,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "intelligence": intelligence_info,
                 "experiment_fingerprint": experiment_fingerprint,
                 "job_meta": job_meta,
+                "job_config": cfg,
             }
             result_obj = _attach_top_level_defaults(result_obj, normalized_cycles, diag)
 
@@ -1613,8 +1652,10 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "experiment_fingerprint": experiment_fingerprint,
                 "final_diagnostics": diag,
                 "intelligence": intelligence_info if intelligence_info else None,
+                "job_config": cfg,
             },
         )
+
     except Exception as e:
         print(f"Fatal error while running job {job.run_id}: {e}")
         tb = traceback.format_exc()
@@ -1630,15 +1671,47 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             total=max_rounds if mode == "swarm" else max_cycles,
         )
 
+        error_payload: Dict[str, Any] = {
+            "error": str(e),
+            "traceback": tb,
+            "run_id": job.run_id,
+            "goal": goal,
+            "domain": domain,
+            "mode": mode,
+            "runtime_profile": runtime_profile,
+            "stop_rye": stop_rye,
+            "max_minutes": max_minutes,
+            "max_cycles": max_cycles if mode == "single" else None,
+            "max_rounds": max_rounds if mode == "swarm" else None,
+            "job_meta": job_meta,
+            "job_config": cfg,
+            "experiment_fingerprint": experiment_fingerprint,
+        }
+
         try:
             if mark_job_error is not None:
-                mark_job_error(job, {"error": str(e), "traceback": tb})
+                # Save full context including prompt and config into error record
+                mark_job_error(job, error_payload)
             else:
                 err_dir = BASE_DIR / "error"
                 err_dir.mkdir(parents=True, exist_ok=True)
-                ep = err_dir / f"{job.run_id}.txt"
+                ep = err_dir / f"{job.run_id}.json"
                 with ep.open("w", encoding="utf8") as f:
-                    f.write(tb)
+                    json.dump(error_payload, f, indent=2)
+        except Exception:
+            pass
+
+        try:
+            _log_milestone(
+                agent,
+                run_id=job.run_id,
+                goal=goal,
+                domain=domain,
+                label="queue_job_error",
+                description=f"Queue job failed with error: {e}",
+                level="error",
+                extra=error_payload,
+            )
         except Exception:
             pass
 
@@ -1654,10 +1727,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             max_minutes=max_minutes,
             run_id=job.run_id,
             experiment_mode="queue_worker",
-            extra={
-                "experiment_fingerprint": experiment_fingerprint,
-                "error_message": str(e),
-            },
+            extra=error_payload,
         )
 
 
