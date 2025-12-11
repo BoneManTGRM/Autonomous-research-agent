@@ -411,6 +411,47 @@ class MemoryStore:
         }
         self._save()
 
+    def prune_all(self) -> None:
+        """Apply caps to all bounded collections and save.
+
+        Useful after manual edits or schema migrations to bring a large
+        memory file back inside the intended limits without losing
+        the most recent data.
+        """
+        caps = {
+            "notes": MAX_NOTES,
+            "cycles": MAX_CYCLES,
+            "hypotheses": MAX_HYPOTHESES,
+            "citations": MAX_CITATIONS,
+            "biomarkers": MAX_BIOMARKERS,
+            "events": MAX_EVENTS,
+            "discoveries": MAX_DISCOVERIES,
+            "tool_events": MAX_TOOL_EVENTS,
+            "milestones": MAX_MILESTONES,
+            "hypothesis_evolution": MAX_HYPOTHESIS_EVOLUTION,
+            "option_c_diagnostics": MAX_OPTION_C_DIAGNOSTICS,
+            "swarm_contracts": MAX_SWARM_CONTRACTS,
+            "benchmarks": MAX_BENCHMARKS,
+        }
+
+        for key, cap in caps.items():
+            arr = self._data.get(key)
+            if isinstance(arr, list) and len(arr) > cap:
+                self._data[key] = arr[-cap:]
+
+        rm = self._data.get("run_manifests")
+        if isinstance(rm, dict) and len(rm) > MAX_RUN_MANIFESTS:
+            items = sorted(
+                rm.items(),
+                key=lambda kv: str(kv[1].get("logged_at", "")),
+            )
+            excess = len(items) - MAX_RUN_MANIFESTS
+            for k, _v in items[:excess]:
+                rm.pop(k, None)
+            self._data["run_manifests"] = rm
+
+        self._save()
+
     # ------------------------------------------------------------------
     # Internal helpers for goal index
     # ------------------------------------------------------------------
@@ -1597,6 +1638,87 @@ class MemoryStore:
             reverse=True,
         )
         return items_sorted[:limit]
+
+    def get_run_summary(self, run_id: str) -> Dict[str, Any]:
+        """Return a compact summary for a specific run_id.
+
+        This is designed for UI tables and meta controllers that need
+        quick counts and RYE stats for a run without scanning the whole
+        file externally.
+        """
+        cycles = self.get_cycles_for_run(run_id)
+        discoveries = self.get_discoveries_for_run(run_id)
+        citations = self.get_citations_for_run(run_id)
+        benchmarks = self.get_benchmark_results(run_id=run_id)
+
+        timestamps: List[str] = []
+        for c in cycles:
+            ts = c.get("timestamp")
+            if isinstance(ts, str):
+                timestamps.append(ts)
+        started_at = min(timestamps) if timestamps else None
+        finished_at = max(timestamps) if timestamps else None
+
+        rye_values: List[float] = []
+        for c in cycles:
+            v = c.get("RYE")
+            if isinstance(v, (int, float)):
+                rye_values.append(float(v))
+
+        avg_rye: Optional[float] = None
+        min_rye: Optional[float] = None
+        max_rye: Optional[float] = None
+        if rye_values:
+            avg_rye = sum(rye_values) / float(len(rye_values))
+            min_rye = min(rye_values)
+            max_rye = max(rye_values)
+
+        best_cycle: Optional[Dict[str, Any]] = None
+        best_rye_val: Optional[float] = None
+        for c in cycles:
+            v = c.get("RYE")
+            if isinstance(v, (int, float)):
+                v_float = float(v)
+                if best_rye_val is None or v_float > best_rye_val:
+                    best_rye_val = v_float
+                    best_cycle = c
+
+        goals = sorted(
+            {
+                str(c.get("goal"))
+                for c in cycles
+                if isinstance(c.get("goal"), str)
+            }
+        )
+
+        summary: Dict[str, Any] = {
+            "run_id": run_id,
+            "goals": goals,
+            "counts": {
+                "cycles": len(cycles),
+                "discoveries": len(discoveries),
+                "citations": len(citations),
+                "benchmarks": len(benchmarks),
+            },
+            "rye_basic": {
+                "avg": avg_rye,
+                "min": min_rye,
+                "max": max_rye,
+                "count": len(rye_values),
+            },
+            "timeline": {
+                "started_at": started_at,
+                "finished_at": finished_at,
+            },
+            "best_cycle": {
+                "cycle_index": best_cycle.get("cycle") if isinstance(best_cycle, dict) else None,
+                "RYE": best_rye_val,
+                "timestamp": best_cycle.get("timestamp") if isinstance(best_cycle, dict) else None,
+            }
+            if best_cycle is not None
+            else {},
+        }
+        return summary
 
     # ------------------------------------------------------------------
     # Tool events and per tool stats
