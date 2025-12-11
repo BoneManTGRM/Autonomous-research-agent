@@ -99,7 +99,7 @@ from __future__ import annotations
 
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Sequence
 
 from .rye_metrics import compute_delta_r, compute_rye
 
@@ -885,6 +885,9 @@ class TGRMLoop:
         pdf_bytes: Optional[bytes] = None,
         biomarker_snapshot: Optional[Dict[str, Any]] = None,
         domain: Optional[str] = None,
+        msil_mode: str = "v1",
+        msil_track_mode: str = "single",
+        rye_mode: str = "v3",
         stage: str = "idea",
         hallmark: Optional[str] = None,
         subgoal: Optional[str] = None,
@@ -894,6 +897,7 @@ class TGRMLoop:
         agent_id: Optional[str] = None,
         swarm_profile: Optional[Dict[str, Any]] = None,
         deadline_ts: Optional[float] = None,
+        experiment_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run one TGRM cycle for a given research goal.
 
@@ -923,6 +927,12 @@ class TGRMLoop:
             domain:
                 Optional domain tag such as "general", "longevity", or "math".
                 Preserved in the log for future domain specific behavior.
+            msil_mode:
+                Optional tag for the MSIL mode used by higher level agents.
+            msil_track_mode:
+                Optional tag indicating how MSIL tracks this goal.
+            rye_mode:
+                Optional tag indicating which RYE metric family is in use.
             stage:
                 Optional TGRM stage hint for longevity style two stage runs:
                 "idea" or "verify". Defaults to "idea".
@@ -948,6 +958,8 @@ class TGRMLoop:
                 Optional absolute wall-clock deadline (time.time() seconds).
                 If provided, the cycle will avoid starting heavy repair work
                 after this time and mark itself as interrupted if hit.
+            experiment_mode:
+                Optional tag for higher level experiment labeling.
         Returns:
             Dict with:
                 {
@@ -1029,6 +1041,10 @@ class TGRMLoop:
             "subgoal": subgoal,
             "curriculum_state": curriculum_state or {},
             "search_energy": self.search_energy,
+            "msil_mode": msil_mode,
+            "msil_track_mode": msil_track_mode,
+            "rye_mode": rye_mode,
+            "experiment_mode": experiment_mode,
         }
 
         # TEST phase
@@ -1282,6 +1298,10 @@ class TGRMLoop:
                         "role": role,
                         "run_id": run_id,
                         "agent_id": agent_id,
+                        "experiment_mode": experiment_mode,
+                        "msil_mode": msil_mode,
+                        "msil_track_mode": msil_track_mode,
+                        "rye_mode": rye_mode,
                     },
                 )
             except Exception:
@@ -1302,6 +1322,10 @@ class TGRMLoop:
                     citations=citations,
                     cycle_index=cycle_index,
                     run_id=run_id,
+                    experiment_mode=experiment_mode,
+                    msil_mode=msil_mode,
+                    msil_track_mode=msil_track_mode,
+                    rye_mode=rye_mode,
                 )
             except Exception:
                 discovery_snapshot = None
@@ -1335,6 +1359,10 @@ class TGRMLoop:
             "discovery_tier": (discovery_snapshot or {}).get("tier"),
             "interrupted": interrupted,
             "stop_reason": stop_reason,
+            "experiment_mode": experiment_mode,
+            "msil_mode": msil_mode,
+            "msil_track_mode": msil_track_mode,
+            "rye_mode": rye_mode,
         }
 
         # Meta controller friendly signals
@@ -1359,6 +1387,10 @@ class TGRMLoop:
             "interrupted": interrupted,
             "stop_reason": stop_reason,
             "search_energy": self.search_energy,
+            "experiment_mode": experiment_mode,
+            "msil_mode": msil_mode,
+            "msil_track_mode": msil_track_mode,
+            "rye_mode": rye_mode,
         }
 
         # Machine facing log
@@ -1375,6 +1407,10 @@ class TGRMLoop:
             "agent_id": agent_id,
             "tgrm_level": self.tgrm_level,
             "ultra_speed": self.ultra_speed,
+            "msil_mode": msil_mode,
+            "msil_track_mode": msil_track_mode,
+            "rye_mode": rye_mode,
+            "experiment_mode": experiment_mode,
             # Issues before and after
             "issues_before": issue_descriptions,
             "issues_after": issues_after,
@@ -1494,6 +1530,10 @@ class TGRMLoop:
             "swarm_profile": swarm_profile or {},
             "interrupted": interrupted,
             "stop_reason": stop_reason,
+            "experiment_mode": experiment_mode,
+            "msil_mode": msil_mode,
+            "msil_track_mode": msil_track_mode,
+            "rye_mode": rye_mode,
         }
 
         # Expose stats and citations at the top level so CoreAgent and the UI
@@ -2816,3 +2856,126 @@ class TGRMLoop:
             candidates.append(entry)
 
         return candidates
+
+    # ------------------------------------------------------------------
+    # Multi goal helpers (optional but used by CoreAgent when available)
+    # ------------------------------------------------------------------
+    def run_multi_goal_cycle(
+        self,
+        goals: Sequence[str],
+        cycle_index: int,
+        role: str = "agent",
+        source_controls: Optional[Dict[str, bool]] = None,
+        pdf_bytes: Optional[bytes] = None,
+        biomarker_snapshot: Optional[Dict[str, Any]] = None,
+        domain: Optional[str] = None,
+        msil_mode: str = "v1",
+        msil_track_mode: str = "single",
+        rye_mode: str = "v3",
+        run_id: Optional[str] = None,
+        experiment_mode: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Convenience wrapper for running one cycle across multiple goals.
+
+        Default behavior: combine goals into a single composite goal string
+        so older CoreAgent logic still works and all job level metadata gets
+        recorded in one place.
+        """
+        if not goals:
+            composite_goal = ""
+        else:
+            composite_goal = " | ".join(str(g) for g in goals if g)
+
+        result = self.run_cycle(
+            goal=composite_goal,
+            cycle_index=cycle_index,
+            role=role,
+            source_controls=source_controls,
+            pdf_bytes=pdf_bytes,
+            biomarker_snapshot=biomarker_snapshot,
+            domain=domain,
+            msil_mode=msil_mode,
+            msil_track_mode=msil_track_mode,
+            rye_mode=rye_mode,
+            stage="idea",
+            hallmark=None,
+            subgoal=None,
+            replay_buffer=None,
+            curriculum_state=None,
+            run_id=run_id,
+            agent_id=None,
+            swarm_profile=None,
+            deadline_ts=None,
+            experiment_mode=experiment_mode,
+        )
+        result["goals"] = list(goals)
+        return result
+
+    def run_multi_goal_training_burst(
+        self,
+        goals: Sequence[str],
+        total_cycles: int,
+        role: str = "agent",
+        source_controls: Optional[Dict[str, bool]] = None,
+        pdf_bytes: Optional[bytes] = None,
+        biomarker_snapshot: Optional[Dict[str, Any]] = None,
+        domain: Optional[str] = None,
+        msil_mode: str = "v1",
+        msil_track_mode: str = "single",
+        rye_mode: str = "v3",
+        run_id: Optional[str] = None,
+        experiment_mode: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Simple multi goal training burst.
+
+        Rotates across goals, running total_cycles cycles in sequence and
+        returning the list of cycle summaries plus a tiny aggregate view.
+        """
+        goals_list = list(goals) or [""]
+        cycles: List[Dict[str, Any]] = []
+
+        for i in range(total_cycles):
+            goal = goals_list[i % len(goals_list)]
+            res = self.run_cycle(
+                goal=goal,
+                cycle_index=i,
+                role=role,
+                source_controls=source_controls,
+                pdf_bytes=pdf_bytes,
+                biomarker_snapshot=biomarker_snapshot,
+                domain=domain,
+                msil_mode=msil_mode,
+                msil_track_mode=msil_track_mode,
+                rye_mode=rye_mode,
+                stage="idea",
+                hallmark=None,
+                subgoal=None,
+                replay_buffer=None,
+                curriculum_state=None,
+                run_id=run_id,
+                agent_id=None,
+                swarm_profile=None,
+                deadline_ts=None,
+                experiment_mode=experiment_mode,
+            )
+            cycles.append(res["summary"])
+
+        # Tiny aggregate for quick UI or job logs
+        rye_values = [
+            c.get("RYE")
+            for c in cycles
+            if isinstance(c.get("RYE"), (int, float))
+        ]
+        avg_rye = sum(float(v) for v in rye_values) / len(rye_values) if rye_values else None
+
+        return {
+            "goals": goals_list,
+            "total_cycles": total_cycles,
+            "avg_rye": avg_rye,
+            "cycles": cycles,
+            "experiment_mode": experiment_mode,
+            "msil_mode": msil_mode,
+            "msil_track_mode": msil_track_mode,
+            "rye_mode": rye_mode,
+            "run_id": run_id,
+        }
