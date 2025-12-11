@@ -667,18 +667,18 @@ def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]
     cycle history (for example when the queue-mode worker only writes
     per-run result JSON and does not stream cycles into MemoryStore).
     """
-    if list_run_jobs is None:
-        return []
-
-    try:
-        jobs = list_run_jobs(status="finished")
-    except TypeError:
-        # Old signature list_jobs() with no arguments
+    if list_run_jobs is not None:
         try:
-            jobs = list_run_jobs()  # type: ignore[call-arg]
+            jobs = list_run_jobs(status="finished")
+        except TypeError:
+            # Old signature list_jobs() with no arguments
+            try:
+                jobs = list_run_jobs()  # type: ignore[call-arg]
+            except Exception:
+                jobs = []
         except Exception:
             jobs = []
-    except Exception:
+    else:
         jobs = []
 
     if not jobs:
@@ -1451,6 +1451,171 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
     )
 
     return "\n".join(lines)
+
+
+# -------------------------------------------------------------------
+# Finished-run fallbacks for citations and discoveries
+# -------------------------------------------------------------------
+def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
+    """Fallback: build a citations list from finished run JSON files.
+
+    This looks at both per-cycle citations (via cycle history) and
+    run-level citations / sources / source_list fields so the Citations
+    tab still populates even when MemoryStore has no per-cycle history.
+    """
+    citations: List[Dict[str, Any]] = []
+
+    # First try to reuse the cycle-history fallback
+    history = load_history_from_finished_runs(limit_runs=limit_runs)
+    if history:
+        citations.extend(extract_citations_from_history(history))
+
+    if list_run_jobs is None:
+        return citations
+
+    # Also scan run-level citations in finished results
+    try:
+        jobs = list_run_jobs(status="finished")
+    except TypeError:
+        try:
+            jobs = list_run_jobs()  # type: ignore[call-arg]
+        except Exception:
+            jobs = []
+    except Exception:
+        jobs = []
+
+    if not jobs:
+        return citations
+
+    jobs_slice = jobs[-limit_runs:]
+
+    for job in jobs_slice:
+        run_id = _get_job_id(job)
+        result = load_job_result(run_id)
+        if not isinstance(result, dict):
+            continue
+
+        payload = result.get("result")
+        if isinstance(payload, dict):
+            base = payload
+        else:
+            base = result
+
+        cfg = result.get("config") if isinstance(result.get("config"), dict) else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+
+        domain = base.get("domain") or cfg.get("domain") or "general"
+        role = base.get("role") or "agent"
+        ts = base.get("timestamp") or result.get("timestamp")
+
+        run_level_sources = (
+            base.get("citations")
+            or base.get("sources")
+            or base.get("source_list")
+        )
+        if not isinstance(run_level_sources, list):
+            continue
+
+        for s in run_level_sources:
+            if not isinstance(s, dict):
+                # allow simple strings as a basic citation row
+                citations.append(
+                    {
+                        "cycle": None,
+                        "role": role,
+                        "domain": domain,
+                        "timestamp": ts,
+                        "source": "",
+                        "title": str(s),
+                        "url": "",
+                        "snippet": "",
+                    }
+                )
+                continue
+            source = s.get("source") or s.get("provider") or ""
+            title = s.get("title") or ""
+            url = s.get("url") or s.get("link") or ""
+            snippet = s.get("snippet") or s.get("summary") or ""
+            citations.append(
+                {
+                    "cycle": None,
+                    "role": role,
+                    "domain": domain,
+                    "timestamp": ts,
+                    "source": source,
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet,
+                }
+            )
+
+    return citations
+
+
+def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
+    """Fallback: infer discovery entries directly from finished run JSON files."""
+    discoveries: List[Dict[str, Any]] = []
+
+    if list_run_jobs is None:
+        return discoveries
+
+    try:
+        jobs = list_run_jobs(status="finished")
+    except TypeError:
+        try:
+            jobs = list_run_jobs()  # type: ignore[call-arg]
+        except Exception:
+            jobs = []
+    except Exception:
+        jobs = []
+
+    if not jobs:
+        return discoveries
+
+    jobs_slice = jobs[-limit_runs:]
+
+    for job in jobs_slice:
+        run_id = _get_job_id(job)
+        result = load_job_result(run_id)
+        if not isinstance(result, dict):
+            continue
+
+        payload = result.get("result")
+        if isinstance(payload, dict):
+            base = payload
+        else:
+            base = result
+
+        cfg = result.get("config") if isinstance(result.get("config"), dict) else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+
+        domain = base.get("domain") or cfg.get("domain") or "general"
+        ts = base.get("timestamp") or result.get("timestamp")
+
+        raw_disc = (
+            base.get("discoveries")
+            or base.get("discovery_candidates")
+            or base.get("key_findings")
+        )
+        if not isinstance(raw_disc, list):
+            continue
+
+        for item in raw_disc:
+            if isinstance(item, dict):
+                d = dict(item)
+            else:
+                d = {"summary": str(item)}
+            d.setdefault("domain", domain)
+            if ts is not None and "timestamp" not in d:
+                d["timestamp"] = ts
+            d.setdefault("run_id", run_id)
+            discoveries.append(d)
+
+    return discoveries
+
+
 # -------------------------------------------------------------------
 # Main UI
 # -------------------------------------------------------------------
@@ -2252,9 +2417,14 @@ def main() -> None:
         with tab_citations:
             st.markdown("### Source citation viewer")
 
+            # First try per-cycle citations from history
             citations = extract_citations_from_history(history)
+            # Fallback to finished run JSONs if nothing found
             if not citations:
-                st.info("No citations recorded yet in cycle history.")
+                citations = load_citations_from_finished_runs()
+
+            if not citations:
+                st.info("No citations recorded yet in cycle history or finished run artifacts.")
             else:
                 citations_df = pd.DataFrame(citations)
 
@@ -2432,8 +2602,12 @@ def main() -> None:
             st.markdown("### Discovery log")
             discoveries = load_discovery_log()
             if not discoveries:
+                # Fallback: infer from finished run JSONs
+                discoveries = load_discoveries_from_finished_runs()
+
+            if not discoveries:
                 st.info(
-                    "No discovery log found yet. The worker will populate it once discovery logging is enabled."
+                    "No discovery log entries found yet. The worker may not be writing discovery logs or run-level discovery fields."
                 )
             else:
                 # High level stats for discoveries
@@ -2871,6 +3045,9 @@ def main() -> None:
             st.markdown("### Multi agent insight graph")
 
             discoveries_for_graph = load_discovery_log()
+            if not discoveries_for_graph:
+                discoveries_for_graph = load_discoveries_from_finished_runs()
+
             if not history:
                 st.info("No history yet to build a graph.")
             else:
@@ -3047,6 +3224,8 @@ def main() -> None:
 
         if st.button("Breakthrough snapshot report"):
             discoveries = load_discovery_log()
+            if not discoveries:
+                discoveries = load_discoveries_from_finished_runs()
             breakthrough_md = build_breakthrough_report(
                 history_for_reports if history_for_reports else [],
                 discoveries,
