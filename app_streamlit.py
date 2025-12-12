@@ -600,12 +600,17 @@ def render_job_summary(job: Any) -> None:
 def _extract_cycles_from_run_result(
     run_result: Dict[str, Any],
     run_id: Optional[str] = None,
+    default_timestamp: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """Normalize cycles from a finished run result into history-style entries.
 
     This is used as a fallback when MemoryStore.get_cycle_history() is empty,
     so the History / Citations panels can still populate directly from
     finished run JSON files written by the engine worker.
+
+    default_timestamp:
+        A best effort timestamp for the run (for example job.created_at).
+        Used when no per cycle or run level timestamp is present.
     """
     if not isinstance(run_result, dict):
         return []
@@ -623,6 +628,17 @@ def _extract_cycles_from_run_result(
     goal = base.get("goal") or cfg.get("goal")
     domain = base.get("domain") or cfg.get("domain") or "general"
     default_role = base.get("role") or "agent"
+
+    # Normalize a usable default timestamp string up front
+    normalized_default_ts: Optional[str] = None
+    ts_candidate = base.get("timestamp") or run_result.get("timestamp") or default_timestamp
+    if isinstance(ts_candidate, (int, float)):
+        try:
+            normalized_default_ts = datetime.utcfromtimestamp(ts_candidate).isoformat() + "Z"
+        except Exception:
+            normalized_default_ts = None
+    elif isinstance(ts_candidate, str):
+        normalized_default_ts = ts_candidate
 
     # Find the first key that looks like cycle history
     cycles_raw: Optional[List[Dict[str, Any]]] = None
@@ -655,10 +671,16 @@ def _extract_cycles_from_run_result(
             c2["goal"] = goal
 
         # Timestamp fallback
-        if "timestamp" not in c2:
-            ts = base.get("timestamp") or run_result.get("timestamp")
-            if isinstance(ts, str):
-                c2["timestamp"] = ts
+        ts_val = c2.get("timestamp")
+        if ts_val is None or ts_val == "":
+            ts_val = normalized_default_ts
+        if isinstance(ts_val, (int, float)):
+            try:
+                ts_val = datetime.utcfromtimestamp(ts_val).isoformat() + "Z"
+            except Exception:
+                ts_val = None
+        if ts_val is not None:
+            c2["timestamp"] = ts_val
 
         # Attach run id if we have it
         if run_id is not None and "run_id" not in c2:
@@ -698,10 +720,27 @@ def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]
     history: List[Dict[str, Any]] = []
     for job in jobs_slice:
         run_id = _get_job_id(job)
+
+        # Best effort created_at timestamp from the job header
+        created_at_raw = None
+        if hasattr(job, "created_at"):
+            created_at_raw = getattr(job, "created_at", None)
+        elif isinstance(job, dict):
+            created_at_raw = job.get("created_at")
+
+        default_ts = None
+        if isinstance(created_at_raw, (int, float)):
+            try:
+                default_ts = datetime.utcfromtimestamp(created_at_raw).isoformat() + "Z"
+            except Exception:
+                default_ts = None
+        elif isinstance(created_at_raw, str):
+            default_ts = created_at_raw
+
         result = load_job_result(run_id)
         if not isinstance(result, dict):
             continue
-        cycles = _extract_cycles_from_run_result(result, run_id=run_id)
+        cycles = _extract_cycles_from_run_result(result, run_id=run_id, default_timestamp=default_ts)
         history.extend(cycles)
 
     if not history:
@@ -1486,6 +1525,22 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
 
     for job in jobs_slice:
         run_id = _get_job_id(job)
+
+        created_at_raw = None
+        if hasattr(job, "created_at"):
+            created_at_raw = getattr(job, "created_at", None)
+        elif isinstance(job, dict):
+            created_at_raw = job.get("created_at")
+
+        default_ts = None
+        if isinstance(created_at_raw, (int, float)):
+            try:
+                default_ts = datetime.utcfromtimestamp(created_at_raw).isoformat() + "Z"
+            except Exception:
+                default_ts = None
+        elif isinstance(created_at_raw, str):
+            default_ts = created_at_raw
+
         result = load_job_result(run_id)
         if not isinstance(result, dict):
             continue
@@ -1497,7 +1552,7 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
             base = result
 
         # Per cycle entries (with citations) routed through the history flattener
-        cycles = _extract_cycles_from_run_result(result, run_id=run_id)
+        cycles = _extract_cycles_from_run_result(result, run_id=run_id, default_timestamp=default_ts)
         all_history.extend(cycles)
 
         # Run level citations or sources
@@ -1515,12 +1570,20 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
                 title = c.get("title") or ""
                 url = c.get("url") or c.get("link") or ""
                 snippet = c.get("snippet") or c.get("summary") or ""
+
+                ts_val = base.get("timestamp") or result.get("timestamp") or default_ts
+                if isinstance(ts_val, (int, float)):
+                    try:
+                        ts_val = datetime.utcfromtimestamp(ts_val).isoformat() + "Z"
+                    except Exception:
+                        ts_val = None
+
                 top_level_citations.append(
                     {
                         "cycle": None,
                         "role": c.get("role") or "run",
                         "domain": c.get("domain") or base.get("domain") or "general",
-                        "timestamp": base.get("timestamp") or result.get("timestamp"),
+                        "timestamp": ts_val,
                         "source": source,
                         "title": title,
                         "url": url,
@@ -1557,6 +1620,22 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
 
     for job in jobs_slice:
         run_id = _get_job_id(job)
+
+        created_at_raw = None
+        if hasattr(job, "created_at"):
+            created_at_raw = getattr(job, "created_at", None)
+        elif isinstance(job, dict):
+            created_at_raw = job.get("created_at")
+
+        default_ts = None
+        if isinstance(created_at_raw, (int, float)):
+            try:
+                default_ts = datetime.utcfromtimestamp(created_at_raw).isoformat() + "Z"
+            except Exception:
+                default_ts = None
+        elif isinstance(created_at_raw, str):
+            default_ts = created_at_raw
+
         result = load_job_result(run_id)
         if not isinstance(result, dict):
             continue
@@ -1576,6 +1655,13 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
         if not isinstance(candidates, list):
             continue
 
+        ts_val = base.get("timestamp") or result.get("timestamp") or default_ts
+        if isinstance(ts_val, (int, float)):
+            try:
+                ts_val = datetime.utcfromtimestamp(ts_val).isoformat() + "Z"
+            except Exception:
+                ts_val = None
+
         for d in candidates:
             if not isinstance(d, dict):
                 continue
@@ -1584,6 +1670,8 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
                 d2["run_id"] = run_id
             if "domain" not in d2:
                 d2["domain"] = base.get("domain", "general")
+            if "timestamp" not in d2:
+                d2["timestamp"] = ts_val
             discoveries.append(d2)
 
     return discoveries
@@ -3124,10 +3212,21 @@ def main() -> None:
     st.markdown("---")
     st.subheader("Generate report")
 
+    # For reports, prefer MemoryStore history when present, otherwise
+    # fall back to synthetic history rebuilt from finished runs.
+    raw_memory_history: List[Dict[str, Any]] = []
     if callable(getattr(memory, "get_cycle_history", None)):
-        history_for_reports = memory.get_cycle_history()
+        try:
+            raw_memory_history = memory.get_cycle_history() or []
+        except Exception:
+            raw_memory_history = []
+
+    if raw_memory_history:
+        history_for_reports = raw_memory_history
+        used_fallback_history = False
     else:
-        history_for_reports = []
+        history_for_reports = load_history_from_finished_runs()
+        used_fallback_history = bool(history_for_reports)
 
     hours_run_for_reports = (
         compute_run_hours(history_for_reports) if history_for_reports else None
@@ -3140,7 +3239,14 @@ def main() -> None:
 
     with col_rep1:
         if st.button("Full history report"):
-            report_md = generate_report(memory_store=memory, goal=None)
+            if used_fallback_history and history_for_reports:
+                # When MemoryStore has no cycles but finished runs do,
+                # fall back to an outcome style report instead of the
+                # empty "No cycles logged" MemoryStore report.
+                report_md = build_outcome_summary(history_for_reports)
+            else:
+                report_md = generate_report(memory_store=memory, goal=None)
+
             st.markdown(report_md)
             st.download_button(
                 "Download full report (Markdown)",
@@ -3148,7 +3254,8 @@ def main() -> None:
                 file_name="autonomous_research_report.md",
                 mime="text/markdown",
             )
-            # Optional PDF
+            # Optional PDF from MemoryStore only; if it has no cycles this may be empty,
+            # but PDF generation still stays best-effort.
             try:
                 pdf_path = generate_report_pdf(
                     memory_store=memory,
@@ -3170,15 +3277,26 @@ def main() -> None:
                 )
 
         if st.button("Full Option C learning speed report", key="option_c_report_btn"):
-            option_md = build_agent_report(
-                memory_store=memory,
-                goal=None,
-                domain=None,
-                hours_run_so_far=hours_run_for_reports,
-                swarm_stats=None,
-                intelligence_profile=msil_profile_for_reports,
-                biomarker_snapshot=None,
-            )
+            if used_fallback_history and history_for_reports:
+                # When we only have synthetic history, reuse the breakthrough report
+                # as a proxy for a learning speed snapshot.
+                discoveries_for_option = load_discovery_log()
+                if not discoveries_for_option:
+                    discoveries_for_option = load_discoveries_from_finished_runs()
+                option_md = build_breakthrough_report(
+                    history_for_reports,
+                    discoveries_for_option,
+                )
+            else:
+                option_md = build_agent_report(
+                    memory_store=memory,
+                    goal=None,
+                    domain=None,
+                    hours_run_so_far=hours_run_for_reports,
+                    swarm_stats=None,
+                    intelligence_profile=msil_profile_for_reports,
+                    biomarker_snapshot=None,
+                )
             st.markdown(option_md)
             st.download_button(
                 "Download Option C report (Markdown)",
