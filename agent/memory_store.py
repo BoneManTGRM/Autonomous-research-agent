@@ -191,6 +191,11 @@ class MemoryStore:
 
         self.memory_file = os.path.abspath(memory_path)
 
+        # These external JSON files are used by diagnostics panels and
+        # background workers for very fast, low risk status checks.
+        self.run_state_path = os.path.join(self.base_dir, "run_state.json")
+        self.watchdog_path = os.path.join(self.base_dir, "watchdog.json")
+
         # Ensure the directory exists (supports plain filenames like "memory.json")
         dirpath = os.path.dirname(self.memory_file)
         if dirpath and not os.path.exists(dirpath):
@@ -374,6 +379,40 @@ class MemoryStore:
                     os.remove(tmp_path)
             except Exception:
                 pass
+
+    def _write_json_file(self, path: str, payload: Dict[str, Any]) -> None:
+        """Write a small JSON payload to a path using atomic replace."""
+        tmp_path = path + ".tmp"
+        try:
+            dirpath = os.path.dirname(os.path.abspath(path))
+            if dirpath and not os.path.exists(dirpath):
+                os.makedirs(dirpath, exist_ok=True)
+        except Exception:
+            pass
+
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_path, path)
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
+    def _read_json_file(self, path: str) -> Optional[Dict[str, Any]]:
+        """Read a small JSON file and return a dict or None on failure."""
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            return None
+        return None
 
     # Public helper if you ever want to force a flush from outside
     def flush(self) -> None:
@@ -1264,6 +1303,14 @@ class MemoryStore:
             self._data.setdefault("run_state", {})
             self._data["run_state"] = payload
             self._save()
+            # Mirror to dedicated JSON file for diagnostics
+            try:
+                file_payload = dict(self._data.get("run_state") or {})
+                if file_payload:
+                    file_payload.setdefault("schema_version", MEMORY_SCHEMA_VERSION)
+                    self._write_json_file(self.run_state_path, file_payload)
+            except Exception:
+                pass
             return
 
         # Legacy keyword style
@@ -1291,17 +1338,43 @@ class MemoryStore:
         self._data["run_state"] = legacy_state
         self._save()
 
+        # Mirror to dedicated JSON file for diagnostics
+        try:
+            file_payload = dict(self._data.get("run_state") or {})
+            if file_payload:
+                file_payload.setdefault("schema_version", MEMORY_SCHEMA_VERSION)
+                self._write_json_file(self.run_state_path, file_payload)
+        except Exception:
+            pass
+
     def load_run_state(self) -> Optional[Dict[str, Any]]:
-        """Return the last saved run state, if any."""
+        """Return the last saved run state, if any (from memory.json)."""
         state = self._data.get("run_state") or {}
         if not isinstance(state, dict) or not state:
             return None
         return dict(state)
 
+    # New file oriented helpers for engine_worker and Streamlit
+    def write_run_state(self, state: Dict[str, Any]) -> None:
+        """Write run_state to both memory.json and run_state.json."""
+        self.save_run_state(state)
+        # save_run_state already mirrors to run_state_path
+
+    def read_run_state(self) -> Optional[Dict[str, Any]]:
+        """Read run_state from run_state.json, falling back to memory.json."""
+        data = self._read_json_file(self.run_state_path)
+        if isinstance(data, dict) and data:
+            return data
+        return self.load_run_state()
+
     def clear_run_state(self) -> None:
         """Clear saved run state metadata."""
         self._data["run_state"] = {}
         self._save()
+        try:
+            self._write_json_file(self.run_state_path, {})
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Worker state (live status for engine_worker)
@@ -1382,15 +1455,15 @@ class MemoryStore:
         }
         self._save()
 
-    def get_watchdog_info(self, label: str = "continuous_run") -> Dict[str, Any]:
-        """Return watchdog data for a label.
+        # Mirror watchdog dict to a dedicated JSON file
+        try:
+            payload = dict(self._data.get("watchdog") or {})
+            self._write_json_file(self.watchdog_path, payload)
+        except Exception:
+            pass
 
-        The structure contains:
-            - last_beat: ISO timestamp or None
-            - count: how many beats were recorded
-            - seconds_since_last: float or None
-            - run_id: last associated run identifier, if any
-        """
+    def get_watchdog_info(self, label: str = "continuous_run") -> Dict[str, Any]:
+        """Return watchdog data for a label from in memory data."""
         wd = self._data.get("watchdog") or {}
         if not isinstance(wd, dict):
             wd = {}
@@ -1413,6 +1486,34 @@ class MemoryStore:
             "seconds_since_last": seconds_since_last,
             "run_id": run_id,
         }
+
+    # File oriented helpers for watchdog
+    def write_watchdog_heartbeat(self, label: str = "continuous_run", run_id: Optional[str] = None) -> None:
+        """Wrapper so workers can call a named method for heartbeats."""
+        self.heartbeat(label=label, run_id=run_id)
+
+    def read_watchdog_status(self, label: str = "continuous_run") -> Dict[str, Any]:
+        """Read watchdog status from watchdog.json, falling back to memory.json."""
+        data = self._read_json_file(self.watchdog_path)
+        if isinstance(data, dict) and data:
+            entry = data.get(label) or {}
+            last_beat = entry.get("last_beat")
+            count = entry.get("count", 0)
+            run_id = entry.get("run_id")
+            seconds_since_last: Optional[float] = None
+            if isinstance(last_beat, str):
+                try:
+                    dt = datetime.fromisoformat(last_beat.replace("Z", "+00:00"))
+                    seconds_since_last = (datetime.now(timezone.utc) - dt).total_seconds()
+                except Exception:
+                    seconds_since_last = None
+            return {
+                "last_beat": last_beat,
+                "count": count,
+                "seconds_since_last": seconds_since_last,
+                "run_id": run_id,
+            }
+        return self.get_watchdog_info(label=label)
 
     # ------------------------------------------------------------------
     # Events: streaming log for worker and UI
