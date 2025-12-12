@@ -95,6 +95,11 @@ Bottom line:
     then run_jobs.py is working as intended. If the UI table is still empty,
     focus fixes on engine_worker.py, memory_store.py, and the table renderer
     in app_streamlit.py, not on this queue layer.
+
+Update note (atomic claim fix):
+    This version upgrades claim_next_job to be truly atomic and safe for
+    multiple workers by using os.replace to move a pending JSON into active.
+    This prevents double pickup when two workers race on the same queued job.
 """
 
 # Public exports (useful for type checkers and explicit imports)
@@ -237,6 +242,28 @@ def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
         except Exception:
             pass
     os.replace(tmp_path, path)
+
+
+def _safe_unlink(path: Path) -> None:
+    try:
+        path.unlink(missing_ok=True)
+    except Exception:
+        try:
+            if path.exists():
+                path.unlink()
+        except Exception:
+            pass
+
+
+def _normalize_status(status: Any) -> str:
+    s = str(status or "queued").lower()
+    if s in ("pending", "queued"):
+        return "queued"
+    if s in ("running", "active"):
+        return "active"
+    if s in ("finished", "error"):
+        return s
+    return "queued"
 
 
 @dataclass
@@ -478,10 +505,10 @@ def move_job(run_id: str, from_status: str, to_status: str) -> Tuple[Optional[Ru
     dst_path = _job_path_for_status(run_id, job.status)
 
     # Remove old file(s) and save new one
-    src_path.unlink(missing_ok=True)
+    _safe_unlink(src_path)
     # Also remove from queue folder if it exists (prevent duplicates)
     legacy_src = LEGACY_QUEUE_DIR / f"{run_id}.json"
-    legacy_src.unlink(missing_ok=True)
+    _safe_unlink(legacy_src)
     job.save_to(dst_path.parent, filename=dst_path.name)
     return job, dst_path
 
@@ -506,7 +533,7 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
         job.status = "finished"
         job.updated_at = time.time()
         dst_path = _job_path_for_status(run_id, "finished")
-        finished_meta.unlink(missing_ok=True)
+        _safe_unlink(finished_meta)
         job.save_to(dst_path.parent, filename=dst_path.name)
         return job
 
@@ -518,10 +545,10 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
             job.status = norm_new
             job.updated_at = time.time()
             dst_path = _job_path_for_status(run_id, norm_new)
-            src_path.unlink(missing_ok=True)
+            _safe_unlink(src_path)
             # remove any stale file in queue dir
             legacy_src = LEGACY_QUEUE_DIR / f"{run_id}.json"
-            legacy_src.unlink(missing_ok=True)
+            _safe_unlink(legacy_src)
             job.save_to(dst_path.parent, filename=dst_path.name)
             return job
 
@@ -531,7 +558,7 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
         job = load_job(legacy_path)
         job.status = norm_new
         job.updated_at = time.time()
-        legacy_path.unlink(missing_ok=True)
+        _safe_unlink(legacy_path)
         dst_path = _job_path_for_status(run_id, norm_new)
         job.save_to(dst_path.parent, filename=dst_path.name)
         return job
@@ -616,18 +643,80 @@ def get_next_queued_job() -> Optional[RunJob]:
     return queued[-1]
 
 
+def _claim_job_atomic(job: RunJob) -> Optional[RunJob]:
+    """
+    Atomically claim a specific job by moving its metadata file into ACTIVE_DIR.
+
+    This uses os.replace (atomic rename on same filesystem) to avoid races.
+    If another worker claims it first, this returns None.
+    """
+    run_id = job.run_id
+
+    src_pending = PENDING_DIR / f"{run_id}.json"
+    src_legacy = LEGACY_QUEUE_DIR / f"{run_id}.json"
+    dst_active = ACTIVE_DIR / f"{run_id}.json"
+
+    src: Optional[Path] = None
+    if src_pending.exists():
+        src = src_pending
+    elif src_legacy.exists():
+        src = src_legacy
+    else:
+        return None
+
+    try:
+        os.replace(str(src), str(dst_active))
+    except Exception:
+        return None
+
+    # Remove any duplicate shadows
+    _safe_unlink(src_pending)
+    _safe_unlink(src_legacy)
+
+    # Normalize status inside the job file to "active"
+    try:
+        claimed = load_job(dst_active)
+        claimed.status = "active"
+        claimed.updated_at = time.time()
+        _atomic_write_json(dst_active, claimed.to_dict())
+        return claimed
+    except Exception:
+        # Best effort fallback if JSON is malformed
+        try:
+            with dst_active.open("r", encoding="utf8") as f:
+                data = json.load(f)
+            data["status"] = "active"
+            data["updated_at"] = time.time()
+            _atomic_write_json(dst_active, data)
+            return RunJob.from_dict(data)
+        except Exception:
+            return job
+
+
 def claim_next_job() -> Optional[RunJob]:
     """
     Atomically claim the next queued job by marking it active.
 
     Engine workers can call this to get the next job and immediately
     move it to the active folder so that other workers do not pick it up.
+
+    Implementation note:
+        This is upgraded to be atomic for multi worker setups.
+        It iterates oldest first and attempts an os.replace claim.
     """
-    job = get_next_queued_job()
-    if job is None:
+    queued = list_jobs(status="queued", limit=2000)
+    if not queued:
         return None
-    updated = update_job_status(job.run_id, "active")
-    return updated or job
+
+    # Oldest first
+    queued.sort(key=lambda j: j.created_at)
+
+    for job in queued:
+        claimed = _claim_job_atomic(job)
+        if claimed is not None:
+            return claimed
+
+    return None
 
 
 def progress_path(run_id: str) -> Path:
@@ -692,7 +781,23 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
     rp = result_path(job.run_id)
     _atomic_write_json(rp, result_obj)
 
-    # Update job metadata status and move it into runs/finished/{run_id}_job.json
+    # Prefer moving the active metadata into finished metadata
+    active_meta = ACTIVE_DIR / f"{job.run_id}.json"
+    if active_meta.exists():
+        try:
+            j = load_job(active_meta)
+        except Exception:
+            j = job
+        j.status = "finished"
+        j.updated_at = time.time()
+        _safe_unlink(active_meta)
+        j.save_to(FINISHED_DIR, filename=f"{job.run_id}_job.json")
+        # Also remove any lingering legacy queue copy
+        _safe_unlink(LEGACY_QUEUE_DIR / f"{job.run_id}.json")
+        _safe_unlink(PENDING_DIR / f"{job.run_id}.json")
+        return
+
+    # Fallback
     update_job_status(job.run_id, "finished")
 
 
@@ -709,6 +814,21 @@ def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
             f.write(error_info)
         else:
             json.dump(error_info, f, indent=2)
+
+    # Prefer moving the active metadata into error
+    active_meta = ACTIVE_DIR / f"{job.run_id}.json"
+    if active_meta.exists():
+        try:
+            j = load_job(active_meta)
+        except Exception:
+            j = job
+        j.status = "error"
+        j.updated_at = time.time()
+        _safe_unlink(active_meta)
+        j.save_to(ERROR_DIR, filename=f"{job.run_id}.json")
+        _safe_unlink(LEGACY_QUEUE_DIR / f"{job.run_id}.json")
+        _safe_unlink(PENDING_DIR / f"{job.run_id}.json")
+        return
 
     update_job_status(job.run_id, "error")
 
