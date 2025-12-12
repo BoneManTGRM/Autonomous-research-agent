@@ -96,10 +96,14 @@ Bottom line:
     focus fixes on engine_worker.py, memory_store.py, and the table renderer
     in app_streamlit.py, not on this queue layer.
 
-Update note (atomic claim fix):
-    This version upgrades claim_next_job to be truly atomic and safe for
-    multiple workers by using os.replace to move a pending JSON into active.
-    This prevents double pickup when two workers race on the same queued job.
+Update notes:
+    - claim_next_job is upgraded to be atomic and safe for multiple workers
+      by using os.replace to move a pending JSON into active. This prevents
+      double pickup when two workers race on the same queued job.
+    - create_job and RunJob.from_dict now inject the run_id into the config
+      (and common sub-config sections) so the engine and MemoryStore use the
+      exact same run_id that the UI uses when generating reports. This closes
+      the common "job id vs run id vs cycles folder id" divergence.
 """
 
 # Public exports (useful for type checkers and explicit imports)
@@ -113,6 +117,7 @@ __all__ = [
     "LEGACY_QUEUE_DIR",
     "RunJob",
     "debug_print_layout",
+    "_inject_run_id_into_config",
     "create_job",
     "load_job",
     "load_job_by_id",
@@ -266,6 +271,39 @@ def _normalize_status(status: Any) -> str:
     return "queued"
 
 
+def _inject_run_id_into_config(run_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ensure the config passed to the engine carries the same run_id that the
+    queue and UI are using.
+
+    This prevents divergence where the engine internally generates a new
+    run identifier and writes cycles under a different folder/key.
+
+    We keep this very defensive so job creation never crashes.
+    """
+    try:
+        cfg: Dict[str, Any] = dict(config)
+    except Exception:
+        # If config is not a normal mapping, just return it unchanged.
+        return config
+
+    try:
+        # Top level run_id hint
+        cfg.setdefault("run_id", run_id)
+
+        # Common nested sections that may carry their own run_id
+        for key in ("engine", "runtime", "run", "agent", "controller"):
+            sub = cfg.get(key)
+            if isinstance(sub, dict):
+                sub.setdefault("run_id", run_id)
+                cfg[key] = sub
+    except Exception:
+        # Never crash job creation because of config munging
+        return cfg
+
+    return cfg
+
+
 @dataclass
 class RunJob:
     """
@@ -335,8 +373,10 @@ class RunJob:
             filtered["meta"] = data.get("meta", None)
 
         # Make sure required fields from original data are present
-        filtered["run_id"] = str(data["run_id"])
-        filtered["config"] = dict(data["config"])
+        run_id = str(data["run_id"])
+        raw_config = dict(data["config"])
+        filtered["run_id"] = run_id
+        filtered["config"] = _inject_run_id_into_config(run_id, raw_config)
 
         return cls(**filtered)
 
@@ -413,17 +453,31 @@ def create_job(
             },
             meta={"domain": domain, "created_by": "streamlit_ui"},
         )
+
+    Critical invariant:
+        The run_id created here is injected into the config so that the
+        engine and MemoryStore both write cycles and run state under this
+        same identifier. The UI, worker, and reports all agree on run_id.
     """
     if run_id is None:
         run_id = str(uuid.uuid4())
 
+    # Inject run_id into config and common nested sections
+    cfg = _inject_run_id_into_config(run_id, config)
+
+    # Include run_id in meta for UI convenience
+    meta_with_id: Dict[str, Any] = {}
+    if isinstance(meta, dict):
+        meta_with_id.update(meta)
+    meta_with_id.setdefault("run_id", run_id)
+
     job = RunJob(
         run_id=run_id,
-        config=config,
+        config=cfg,
         status="queued",
         created_at=time.time(),
         updated_at=time.time(),
-        meta=meta or {},
+        meta=meta_with_id,
     )
 
     # Save into the canonical pending folder
@@ -774,9 +828,11 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
 
     Used by engine_worker queue mode.
     """
-    # Ensure job_id is present in the result for UI convenience
+    # Ensure identifiers are present in the result for UI convenience
     if "job_id" not in result_obj:
         result_obj["job_id"] = job.run_id
+    if "run_id" not in result_obj:
+        result_obj["run_id"] = job.run_id
 
     rp = result_path(job.run_id)
     _atomic_write_json(rp, result_obj)
