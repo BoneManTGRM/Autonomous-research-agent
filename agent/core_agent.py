@@ -1573,6 +1573,16 @@ class CoreAgent:
         state["cycle_index"] = ci + 1
         state["last_summary"] = summary
 
+        if isinstance(summary, dict):
+            started_ts = summary.get("started_at_ts")
+            completed_ts = summary.get("completed_at_ts")
+            if isinstance(started_ts, (int, float)):
+                state["last_cycle_started_at_ts"] = float(started_ts)
+            if isinstance(completed_ts, (int, float)):
+                state["last_cycle_completed_at_ts"] = float(completed_ts)
+            else:
+                state["last_cycle_completed_at_ts"] = state["last_update_ts"]
+
         rye_val = summary.get("RYE")
         if isinstance(rye_val, (int, float)):
             state["last_rye"] = float(rye_val)
@@ -1624,6 +1634,8 @@ class CoreAgent:
         experiment_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Run a single cycle of research using the TGRM loop."""
+        cycle_started_at_ts = time.time()
+
         effective_source_controls: Dict[str, bool] = {}
         if self.source_controls:
             effective_source_controls.update(self.source_controls)
@@ -1695,6 +1707,11 @@ class CoreAgent:
                 summary.setdefault("experiment_mode", experiment_mode)
             if goal:
                 summary.setdefault("goal", goal)
+
+            summary.setdefault("started_at_ts", cycle_started_at_ts)
+            summary.setdefault("completed_at_ts", time.time())
+            if "timestamp" not in summary:
+                summary["timestamp"] = summary.get("completed_at_ts")
 
             # Attach tool stats if present on the raw result
             tool_stats = result.get("tool_stats")
@@ -1854,6 +1871,7 @@ class CoreAgent:
         recent_rye: List[float] = []
 
         effective_run_id = run_id or self._generate_run_id()
+        run_started_at_ts = time.time()
 
         # Global failsafe on cycles
         max_cycles_failsafe = int(CONTINUOUS_MODE_DEFAULTS.get("max_cycles_failsafe", 10_000_000))
@@ -2065,6 +2083,7 @@ class CoreAgent:
         self._clear_checkpoint()
 
         total_elapsed_min = (time.monotonic() - start_time) / 60.0
+        run_completed_at_ts = time.time()
         run_metadata: Dict[str, Any] = {
             "mode": "single",
             "goal": goal,
@@ -2080,6 +2099,8 @@ class CoreAgent:
             "stop_reason": stop_reason,
             "runtime_profile": runtime_profile,
             "speed_mode": self.speed_mode,
+            "started_at_ts": run_started_at_ts,
+            "completed_at_ts": run_completed_at_ts,
         }
 
         if _rye_metrics_mod is not None:
@@ -2152,6 +2173,7 @@ class CoreAgent:
         effective_run_id = run_id or self._generate_run_id()
         effective_domain = domain or "general"
         preset_cfg = get_preset(effective_domain)
+        run_started_at_ts = time.time()
 
         # Hard override: no true forever runs at CoreAgent level
         forever = False
@@ -2378,6 +2400,7 @@ class CoreAgent:
         self._clear_checkpoint()
 
         total_elapsed_min = (time.monotonic() - start_time) / 60.0
+        run_completed_at_ts = time.time()
         run_metadata: Dict[str, Any] = {
             "mode": "swarm",
             "goal": goal,
@@ -2393,6 +2416,8 @@ class CoreAgent:
             "stop_reason": stop_reason,
             "runtime_profile": runtime_profile,
             "speed_mode": self.speed_mode,
+            "started_at_ts": run_started_at_ts,
+            "completed_at_ts": run_completed_at_ts,
         }
 
         if _rye_metrics_mod is not None:
