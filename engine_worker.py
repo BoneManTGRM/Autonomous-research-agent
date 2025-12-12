@@ -1760,6 +1760,7 @@ def run_job_queue_worker() -> None:
         print(f"[Queue] BASE_DIR (engine_worker): {BASE_DIR.resolve()}")
     except Exception:
         print(f"[Queue] BASE_DIR (engine_worker): {BASE_DIR}")
+    pending_dir = BASE_DIR / "pending"
     try:
         import agent.run_jobs as run_jobs_mod  # type: ignore[import]
         rj_base = getattr(run_jobs_mod, "BASE_DIR", None)
@@ -1774,13 +1775,16 @@ def run_job_queue_worker() -> None:
                 print(f"[Queue] run_jobs.PENDING_DIR: {rj_pending.resolve()}")
             except Exception:
                 print(f"[Queue] run_jobs.PENDING_DIR: {rj_pending}")
+            pending_dir = rj_pending
     except Exception:
         print("[Queue] Could not import agent.run_jobs for extra debug info.")
     sys.stdout.flush()
 
     # Debug: show which directory this worker is actually watching
-    pending_dir = BASE_DIR / "pending"
-    print(f"[Queue] Watching pending dir: {pending_dir.resolve()}")
+    try:
+        print(f"[Queue] Watching pending dir: {pending_dir.resolve()}")
+    except Exception:
+        print(f"[Queue] Watching pending dir: {pending_dir}")
     sys.stdout.flush()
 
     idle_loops = 0
@@ -1798,7 +1802,10 @@ def run_job_queue_worker() -> None:
                 else:
                     print("[Queue] No pending .json files visible to worker.")
             else:
-                print(f"[Queue] Pending dir does not exist: {pending_dir.resolve()}")
+                try:
+                    print(f"[Queue] Pending dir does not exist: {pending_dir.resolve()}")
+                except Exception:
+                    print(f"[Queue] Pending dir does not exist: {pending_dir}")
         except Exception as e:
             print(f"[Queue] Error listing pending dir: {e}")
 
