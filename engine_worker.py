@@ -622,6 +622,70 @@ def _update_worker_state(
         return
 
 
+def _write_cycles_and_run_state(
+    agent: CoreAgent,
+    *,
+    run_id: str,
+    mode: str,
+    goal: str,
+    domain: str,
+    cycles: List[Dict[str, Any]],
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Best effort helper so diagnostics and reports see:
+      - cycle history
+      - run_state snapshot
+    This writes once at run end using the full cycle list.
+    """
+    ms = _get_memory_store(agent)
+    if ms is None:
+        return
+
+    diag_local = diagnostics or {}
+
+    # Cycle history
+    try:
+        if hasattr(ms, "write_cycle_history"):
+            # Preferred: single call with full history
+            ms.write_cycle_history(run_id, cycles)  # type: ignore[arg-type]
+        elif hasattr(ms, "append_cycle_log"):
+            # Fallback: append one by one
+            for idx, c in enumerate(cycles):
+                try:
+                    ms.append_cycle_log(run_id, c, index=idx)  # type: ignore[arg-type]
+                except TypeError:
+                    ms.append_cycle_log(run_id, c)  # type: ignore[arg-type]
+        elif hasattr(ms, "append_cycle_history"):
+            for idx, c in enumerate(cycles):
+                try:
+                    ms.append_cycle_history(run_id, c, index=idx)  # type: ignore[arg-type]
+                except TypeError:
+                    ms.append_cycle_history(run_id, c)  # type: ignore[arg-type]
+    except Exception:
+        # Never break the worker from logging issues
+        pass
+
+    # Run state
+    try:
+        if hasattr(ms, "save_run_state"):
+            state: Dict[str, Any] = {
+                "run_id": run_id,
+                "mode": mode,
+                "goal": goal,
+                "domain": domain,
+                "total_cycles": len(cycles),
+                "diagnostics": diag_local,
+                "last_update_utc": datetime.utcnow().isoformat() + "Z",
+            }
+            try:
+                ms.save_run_state(run_id, state)  # type: ignore[arg-type]
+            except TypeError:
+                ms.save_run_state(run_id=run_id, state=state)  # type: ignore[arg-type]
+    except Exception:
+        pass
+
+
 def _run_post_run_intelligence(
     agent: CoreAgent,
     *,
@@ -996,17 +1060,28 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         except Exception:
             print("Diagnostics computation failed for direct job, see logs for details.")
 
+        # Normalize cycles for UI and diagnostics
+        normalized_cycles: List[Dict[str, Any]] = _normalize_cycles_for_ui(summaries)
+
+        # Write cycle history and run_state snapshots for diagnostics panel
+        _write_cycles_and_run_state(
+            agent,
+            run_id=run_id,
+            mode=mode,
+            goal=goal,
+            domain=domain,
+            cycles=normalized_cycles,
+            diagnostics=diag,
+        )
+
         intelligence_info = _run_post_run_intelligence(
             agent,
             mode=mode,
             goal=goal,
             domain=domain,
             run_id=run_id,
-            history=summaries,
+            history=normalized_cycles,
         )
-
-        # Normalize cycles for UI
-        normalized_cycles: List[Dict[str, Any]] = _normalize_cycles_for_ui(summaries)
 
         # Build a simple overall summary string if possible
         overall_summary: Optional[str] = None
@@ -1513,21 +1588,33 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         except Exception:
             print("Diagnostics computation failed for job, see logs for details.")
 
+        # Normalize cycles so diagnostics and UI always see a consistent list
+        normalized_cycles: List[Dict[str, Any]] = _normalize_cycles_for_ui(summaries)
+
+        # Write cycle history and run_state snapshots for diagnostics panel
+        _write_cycles_and_run_state(
+            agent,
+            run_id=job.run_id,
+            mode=mode,
+            goal=goal,
+            domain=domain,
+            cycles=normalized_cycles,
+            diagnostics=diag,
+        )
+
         intelligence_info = _run_post_run_intelligence(
             agent,
             mode=mode,
             goal=goal,
             domain=domain,
             run_id=job.run_id,
-            history=summaries,
+            history=normalized_cycles,
         )
 
         # ------------------------------------------------------------------
         # Normalize cycles so the UI always sees cycles + summaries lists
         # with index / cycle_index and an overall summary string.
         # ------------------------------------------------------------------
-        normalized_cycles: List[Dict[str, Any]] = _normalize_cycles_for_ui(summaries)
-
         overall_summary: Optional[str] = None
         for c in normalized_cycles:
             for key in ("summary", "brief", "title", "description"):
@@ -2006,6 +2093,17 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     except Exception:
         print("Diagnostics computation failed, see logs for details.")
 
+    # Write cycle history and run_state snapshots for diagnostics panel
+    _write_cycles_and_run_state(
+        agent,
+        run_id=run_id,
+        mode="single",
+        goal=goal,
+        domain=domain,
+        cycles=_normalize_cycles_for_ui(summaries),
+        diagnostics=diag,
+    )
+
     intelligence_info = _run_post_run_intelligence(
         agent,
         mode="single",
@@ -2309,6 +2407,17 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         print(f"Recovery momentum: {diag.get('recovery_momentum')}")
     except Exception:
         print("Diagnostics computation failed, see logs for details.")
+
+    # Write cycle history and run_state snapshots for diagnostics panel
+    _write_cycles_and_run_state(
+        agent,
+        run_id=run_id,
+        mode="swarm",
+        goal=goal,
+        domain=domain,
+        cycles=_normalize_cycles_for_ui(summaries),
+        diagnostics=diag,
+    )
 
     intelligence_info = _run_post_run_intelligence(
         agent,
@@ -2888,6 +2997,17 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     combined_history: List[Dict[str, Any]] = []
     for seg in segments_run:
         combined_history.extend(seg.get("summaries", []))
+
+    # Write aggregated cycle history and run_state snapshots for diagnostics panel
+    _write_cycles_and_run_state(
+        agent,
+        run_id=run_id,
+        mode="meta",
+        goal=goal,
+        domain=domain,
+        cycles=_normalize_cycles_for_ui(combined_history),
+        diagnostics=None,
+    )
 
     intelligence_info = _run_post_run_intelligence(
         agent,
