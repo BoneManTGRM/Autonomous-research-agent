@@ -969,6 +969,10 @@ class TGRMLoop:
                   "citations": list of citation dicts
                 }
         """
+        # Consistent per cycle timestamps (used by MemoryStore, run tables, replay)
+        cycle_started_ts = time.time()
+        cycle_started_iso = datetime.utcfromtimestamp(cycle_started_ts).isoformat() + "Z"
+
         src_ctrl = self._normalise_source_controls(source_controls)
         domain_tag = domain or "general"
 
@@ -1363,6 +1367,9 @@ class TGRMLoop:
             "msil_mode": msil_mode,
             "msil_track_mode": msil_track_mode,
             "rye_mode": rye_mode,
+            "timestamp": cycle_started_iso,
+            "ts_utc": cycle_started_iso,
+            "ts_epoch": cycle_started_ts,
         }
 
         # Meta controller friendly signals
@@ -1391,12 +1398,17 @@ class TGRMLoop:
             "msil_mode": msil_mode,
             "msil_track_mode": msil_track_mode,
             "rye_mode": rye_mode,
+            "timestamp": cycle_started_iso,
+            "ts_utc": cycle_started_iso,
+            "ts_epoch": cycle_started_ts,
         }
 
         # Machine facing log
         cycle_summary: Dict[str, Any] = {
             "cycle": cycle_index,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": cycle_started_iso,
+            "ts_utc": cycle_started_iso,
+            "ts_epoch": cycle_started_ts,
             "goal": goal,
             "role": role,
             "domain": domain_tag,
@@ -1489,6 +1501,9 @@ class TGRMLoop:
         # Human readable summary
         human_summary = {
             "cycle": cycle_index,
+            "timestamp": cycle_started_iso,
+            "ts_utc": cycle_started_iso,
+            "ts_epoch": cycle_started_ts,
             "role": role,
             "domain": domain_tag,
             "stage": stage_tag,
