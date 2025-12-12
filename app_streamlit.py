@@ -3012,8 +3012,7 @@ def main() -> None:
                     hypo_md.append(
                         f"- [{h['domain']}/{h['role']} cycle {h['cycle']}] {h['text']}{conf_txt}"
                     )
-                hypo_md_text = "\n".join(ho
-po_md)
+                hypo_md_text = "\n".join(hypo_md)
                 st.download_button(
                     "Download hypotheses as Markdown",
                     data=hypo_md_text,
