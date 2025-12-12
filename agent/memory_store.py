@@ -2974,3 +2974,7 @@ class MemoryStore:
             rows.append(row)
 
         return rows
+
+    def get_run_overview_rows(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Compatibility alias for get_run_table_rows used by some UIs."""
+        return self.get_run_table_rows(limit=limit)
