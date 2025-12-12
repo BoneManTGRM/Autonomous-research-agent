@@ -32,8 +32,15 @@ from typing import Any, Dict, List, Optional, Tuple
 #
 # If ENABLE_TAVILY is False or the key is missing or tavily is not installed,
 # this module falls back to the offline stub.
-ENABLE_TAVILY = True
-TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+#
+# IMPORTANT SECURITY NOTE:
+#   There is NO hardwired Tavily key in this file.
+#   Keys should ONLY be supplied through environment variables.
+#
+# Enable Tavily by default, but allow turning it off via env:
+#   ENABLE_TAVILY=0  -> disables Tavily
+#   ENABLE_TAVILY=1  -> enables Tavily
+ENABLE_TAVILY = os.getenv("ENABLE_TAVILY", "1").strip().lower() not in ("0", "false", "no", "off")
 
 # Tavily has a hard 400 character query limit.
 # Use a safety margin so the swarm never triggers the error.
@@ -163,8 +170,10 @@ def _compute_learning_context(
 LOG_PATH = Path("logs/web_search_log.json")
 LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-_CACHE: Dict[Tuple[str, int, str, str], WebSearchSummary] = {}
-_CACHE_TIMESTAMPS: Dict[Tuple[str, int, str, str], float] = {}
+# Cache key MUST include inputs that change results, otherwise you can get
+# incorrect stale results when toggles change (time_range, include_raw_content, etc).
+_CACHE: Dict[Tuple[Any, ...], WebSearchSummary] = {}
+_CACHE_TIMESTAMPS: Dict[Tuple[Any, ...], float] = {}
 CACHE_TTL_SECONDS = 600.0
 
 
@@ -196,12 +205,14 @@ def _get_tavily_client() -> Tuple[Optional[Any], Optional[str]]:
     so the system uses the offline stub path.
     """
     if not ENABLE_TAVILY:
-        return None, "Tavily disabled (ENABLE_TAVILY=False)."
+        return None, "Tavily disabled (ENABLE_TAVILY=0)."
 
     if TavilyClient is None:
         return None, "tavily-python not installed."
 
-    api_key = TAVILY_API_KEY
+    # Read the key at call time (NOT import time) so Render env changes
+    # or runtime injection are respected without redeploy.
+    api_key = os.getenv("TAVILY_API_KEY")
     if not api_key:
         return None, "No Tavily API key configured."
 
@@ -378,7 +389,7 @@ def _apply_learning_speed(
 # ---------------------------------------------------------------------
 # Caching helpers
 # ---------------------------------------------------------------------
-def _cache_get(key: Tuple[str, int, str, str]) -> Optional[WebSearchSummary]:
+def _cache_get(key: Tuple[Any, ...]) -> Optional[WebSearchSummary]:
     ts = _CACHE_TIMESTAMPS.get(key)
     if not ts:
         return None
@@ -389,7 +400,7 @@ def _cache_get(key: Tuple[str, int, str, str]) -> Optional[WebSearchSummary]:
     return _CACHE.get(key)
 
 
-def _cache_set(key: Tuple[str, int, str, str], value: WebSearchSummary) -> None:
+def _cache_set(key: Tuple[Any, ...], value: WebSearchSummary) -> None:
     _CACHE[key] = value
     _CACHE_TIMESTAMPS[key] = time.time()
 
@@ -443,7 +454,19 @@ def web_search_tool(
         return asdict(summary)
 
     max_results = max(1, min(max_results, 12))
-    cache_key = (q, max_results, topic, search_depth)
+
+    # Cache key MUST include toggles that change the response.
+    cache_key: Tuple[Any, ...] = (
+        q,
+        max_results,
+        (topic or "general"),
+        (search_depth or "advanced"),
+        time_range,
+        bool(auto_parameters),
+        bool(include_answer),
+        bool(include_raw_content),
+        bool(include_images),
+    )
 
     if truncated:
         _log_event(
@@ -523,6 +546,11 @@ def web_search_tool(
             "max_results": max_results,
             "topic": topic,
             "search_depth": search_depth,
+            "time_range": time_range,
+            "auto_parameters": auto_parameters,
+            "include_answer": include_answer,
+            "include_raw_content": include_raw_content,
+            "include_images": include_images,
             "response_time": summary.response_time,
             "request_id": summary.request_id,
             "num_results": len(summary.results),
