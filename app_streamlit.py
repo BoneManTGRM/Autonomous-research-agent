@@ -1335,7 +1335,7 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
         if d_id not in domain_ids.values():
             safe_d2_label = _clean_label_text(f"Domain: {d}")
             nodes.append(f'{d_id} [label="{safe_d2_label}", shape=box]')
-        if r_id not in domain_ids.values():
+        if r_id not in role_ids.values():
             safe_r2_label = _clean_label_text(f"Role: {r}")
             nodes.append(f'{r_id} [label="{safe_r2_label}", shape=ellipse]')
         edges.append(f"{d_id} -> {hyp_id}")
@@ -2508,13 +2508,22 @@ def main() -> None:
                     "run_tier": tier_info,
                     "msil_profile": msil_profile_full,
                 }
-                st.code(json.dumps(raw_signals, indent=2), language="json")
+                try:
+                    st.code(json.dumps(raw_signals, indent=2), language="json")
+                except TypeError:
+                    st.info("Raw signals contain non JSON serializable objects.")
 
             with st.expander("Raw history JSON"):
-                st.code(json.dumps(history, indent=2), language="json")
+                try:
+                    st.code(json.dumps(history, indent=2), language="json")
+                except TypeError:
+                    st.info("History contains non JSON serializable objects.")
 
             with st.expander("Raw diagnostics JSON"):
-                st.code(json.dumps(diagnostics, indent=2), language="json")
+                try:
+                    st.code(json.dumps(diagnostics, indent=2), language="json")
+                except TypeError:
+                    st.info("Diagnostics contain non JSON serializable objects.")
 
         # ----------------- Citations tab -----------------
         with tab_citations:
@@ -2698,7 +2707,10 @@ def main() -> None:
 
                 # Raw citations JSON
                 with st.expander("Raw citations JSON"):
-                    st.code(json.dumps(citations, indent=2), language="json")
+                    try:
+                        st.code(json.dumps(citations, indent=2), language="json")
+                    except TypeError:
+                        st.info("Citations contain non JSON serializable objects.")
 
         # ----------------- Discovery log tab -----------------
         with tab_discovery:
@@ -2783,7 +2795,10 @@ def main() -> None:
                     st.info("No discoveries matched the current filters.")
 
                 with st.expander("Raw discovery log JSON"):
-                    st.code(json.dumps(discoveries, indent=2), language="json")
+                    try:
+                        st.code(json.dumps(discoveries, indent=2), language="json")
+                    except TypeError:
+                        st.info("Discovery log contains non JSON serializable objects.")
 
         # ----------------- Snapshots and equilibrium tab -----------------
         with tab_snapshots:
@@ -2829,7 +2844,7 @@ def main() -> None:
                     idx2 = st.selectbox(
                         "Select second snapshot to compare",
                         options=list(range(len(snapshots))),
-                        index=min(len(snapshots) - 1, max(1, len(snapshots) - 1)),
+                        index=min(len(snapshots) - 1, max(0, len(snapshots) - 1)),
                         format_func=lambda i: labels[i],
                     )
 
@@ -2905,9 +2920,15 @@ def main() -> None:
                 )
 
                 with st.expander("Raw snapshot 1 JSON"):
-                    st.code(json.dumps(s1["data"], indent=2), language="json")
+                    try:
+                        st.code(json.dumps(s1["data"], indent=2), language="json")
+                    except TypeError:
+                        st.info("Snapshot 1 contains non JSON serializable objects.")
                 with st.expander("Raw snapshot 2 JSON"):
-                    st.code(json.dumps(s2["data"], indent=2), language="json")
+                    try:
+                        st.code(json.dumps(s2["data"], indent=2), language="json")
+                    except TypeError:
+                        st.info("Snapshot 2 contains non JSON serializable objects.")
 
         # ----------------- Hypothesis manager tab -----------------
         with tab_hypo:
@@ -2991,7 +3012,8 @@ def main() -> None:
                     hypo_md.append(
                         f"- [{h['domain']}/{h['role']} cycle {h['cycle']}] {h['text']}{conf_txt}"
                     )
-                hypo_md_text = "\n".join(hypo_md)
+                hypo_md_text = "\n".join(ho
+po_md)
                 st.download_button(
                     "Download hypotheses as Markdown",
                     data=hypo_md_text,
@@ -3141,7 +3163,10 @@ def main() -> None:
                 st.dataframe(pd.DataFrame(view_rows_v), use_container_width=True)
 
                 with st.expander("Raw verification log JSON"):
-                    st.code(json.dumps(verifications, indent=2), language="json")
+                    try:
+                        st.code(json.dumps(verifications, indent=2), language="json")
+                    except TypeError:
+                        st.info("Verification log contains non JSON serializable objects.")
 
         # ----------------- Multi agent insight graph tab -----------------
         with tab_graph:
