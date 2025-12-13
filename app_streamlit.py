@@ -1678,6 +1678,37 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
 
 
 # -------------------------------------------------------------------
+# JSON preview helper to avoid front-end RangeError on huge histories
+# -------------------------------------------------------------------
+def safe_json_preview(
+    obj: Any,
+    max_chars: int = 200_000,
+    max_items: Optional[int] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Convert an object to JSON for display with size limits.
+
+    Returns (json_string_or_none, info_message_or_none).
+    """
+    note_parts: List[str] = []
+
+    if max_items is not None and isinstance(obj, list) and len(obj) > max_items:
+        obj = obj[-max_items:]
+        note_parts.append(f"Showing last {max_items} items from a larger array.")
+
+    try:
+        s = json.dumps(obj, indent=2)
+    except TypeError:
+        return None, "Object contains non JSON serializable entries."
+
+    if len(s) > max_chars:
+        s = s[:max_chars] + "\n... (truncated)"
+        note_parts.append(f"Output truncated to {max_chars} characters for display.")
+
+    note = " ".join(note_parts) if note_parts else None
+    return s, note
+
+
+# -------------------------------------------------------------------
 # Main Streamlit app
 # -------------------------------------------------------------------
 def main() -> None:
@@ -2508,22 +2539,32 @@ def main() -> None:
                     "run_tier": tier_info,
                     "msil_profile": msil_profile_full,
                 }
-                try:
-                    st.code(json.dumps(raw_signals, indent=2), language="json")
-                except TypeError:
-                    st.info("Raw signals contain non JSON serializable objects.")
+                preview, note = safe_json_preview(raw_signals)
+                if preview is not None:
+                    st.code(preview, language="json")
+                    if note:
+                        st.caption(note)
+                else:
+                    st.info(note or "Signals contain non JSON serializable objects.")
 
             with st.expander("Raw history JSON"):
-                try:
-                    st.code(json.dumps(history, indent=2), language="json")
-                except TypeError:
-                    st.info("History contains non JSON serializable objects.")
+                # Limit to avoid RangeError in the browser
+                preview, note = safe_json_preview(history, max_items=MAX_POINTS_FOR_CHARTS)
+                if preview is not None:
+                    st.code(preview, language="json")
+                    if note:
+                        st.caption(note)
+                else:
+                    st.info(note or "History contains non JSON serializable objects.")
 
             with st.expander("Raw diagnostics JSON"):
-                try:
-                    st.code(json.dumps(diagnostics, indent=2), language="json")
-                except TypeError:
-                    st.info("Diagnostics contain non JSON serializable objects.")
+                preview, note = safe_json_preview(diagnostics)
+                if preview is not None:
+                    st.code(preview, language="json")
+                    if note:
+                        st.caption(note)
+                else:
+                    st.info(note or "Diagnostics contain non JSON serializable objects.")
 
         # ----------------- Citations tab -----------------
         with tab_citations:
@@ -2707,10 +2748,13 @@ def main() -> None:
 
                 # Raw citations JSON
                 with st.expander("Raw citations JSON"):
-                    try:
-                        st.code(json.dumps(citations, indent=2), language="json")
-                    except TypeError:
-                        st.info("Citations contain non JSON serializable objects.")
+                    preview, note = safe_json_preview(citations)
+                    if preview is not None:
+                        st.code(preview, language="json")
+                        if note:
+                            st.caption(note)
+                    else:
+                        st.info(note or "Citations contain non JSON serializable objects.")
 
         # ----------------- Discovery log tab -----------------
         with tab_discovery:
@@ -2795,10 +2839,13 @@ def main() -> None:
                     st.info("No discoveries matched the current filters.")
 
                 with st.expander("Raw discovery log JSON"):
-                    try:
-                        st.code(json.dumps(discoveries, indent=2), language="json")
-                    except TypeError:
-                        st.info("Discovery log contains non JSON serializable objects.")
+                    preview, note = safe_json_preview(discoveries)
+                    if preview is not None:
+                        st.code(preview, language="json")
+                        if note:
+                            st.caption(note)
+                    else:
+                        st.info(note or "Discovery log contains non JSON serializable objects.")
 
         # ----------------- Snapshots and equilibrium tab -----------------
         with tab_snapshots:
@@ -2920,15 +2967,21 @@ def main() -> None:
                 )
 
                 with st.expander("Raw snapshot 1 JSON"):
-                    try:
-                        st.code(json.dumps(s1["data"], indent=2), language="json")
-                    except TypeError:
-                        st.info("Snapshot 1 contains non JSON serializable objects.")
+                    preview, note = safe_json_preview(s1["data"])
+                    if preview is not None:
+                        st.code(preview, language="json")
+                        if note:
+                            st.caption(note)
+                    else:
+                        st.info(note or "Snapshot 1 contains non JSON serializable objects.")
                 with st.expander("Raw snapshot 2 JSON"):
-                    try:
-                        st.code(json.dumps(s2["data"], indent=2), language="json")
-                    except TypeError:
-                        st.info("Snapshot 2 contains non JSON serializable objects.")
+                    preview, note = safe_json_preview(s2["data"])
+                    if preview is not None:
+                        st.code(preview, language="json")
+                        if note:
+                            st.caption(note)
+                    else:
+                        st.info(note or "Snapshot 2 contains non JSON serializable objects.")
 
         # ----------------- Hypothesis manager tab -----------------
         with tab_hypo:
@@ -3162,10 +3215,13 @@ def main() -> None:
                 st.dataframe(pd.DataFrame(view_rows_v), use_container_width=True)
 
                 with st.expander("Raw verification log JSON"):
-                    try:
-                        st.code(json.dumps(verifications, indent=2), language="json")
-                    except TypeError:
-                        st.info("Verification log contains non JSON serializable objects.")
+                    preview, note = safe_json_preview(verifications)
+                    if preview is not None:
+                        st.code(preview, language="json")
+                        if note:
+                            st.caption(note)
+                    else:
+                        st.info(note or "Verification log contains non JSON serializable objects.")
 
         # ----------------- Multi agent insight graph tab -----------------
         with tab_graph:
