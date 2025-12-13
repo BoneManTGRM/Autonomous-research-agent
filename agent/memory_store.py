@@ -195,6 +195,7 @@ class MemoryStore:
         # background workers for very fast, low risk status checks.
         self.run_state_path = os.path.join(self.base_dir, "run_state.json")
         self.watchdog_path = os.path.join(self.base_dir, "watchdog.json")
+        self.worker_state_path = os.path.join(self.base_dir, "worker_state.json")
 
         # Ensure the directory exists (supports plain filenames like "memory.json")
         dirpath = os.path.dirname(self.memory_file)
@@ -1405,6 +1406,8 @@ class MemoryStore:
         max_minutes: Optional[float] = None,
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
+        current: Optional[int] = None,
+        total: Optional[int] = None,
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Record live worker status for monitoring and UI.
@@ -1428,6 +1431,8 @@ class MemoryStore:
             "max_minutes": max_minutes,
             "run_id": run_id,
             "experiment_mode": experiment_mode,
+            "current": int(current) if isinstance(current, int) else None,
+            "total": int(total) if isinstance(total, int) else None,
         }
         if extra:
             state["extra"] = extra
@@ -1435,12 +1440,34 @@ class MemoryStore:
         self._data["worker_state"] = state
         self._save()
 
+        # Mirror to dedicated JSON file for fast UI reads
+        try:
+            self._write_json_file(self.worker_state_path, dict(state))
+        except Exception:
+            pass
+
     def get_worker_state(self) -> Optional[Dict[str, Any]]:
-        """Return current worker_state snapshot, if any."""
+        """Return current worker_state snapshot from memory.json."""
         ws = self._data.get("worker_state") or {}
         if not isinstance(ws, dict) or not ws:
             return None
         return dict(ws)
+
+    def read_worker_state(self) -> Optional[Dict[str, Any]]:
+        """Read worker_state from worker_state.json, falling back to memory.json."""
+        data = self._read_json_file(self.worker_state_path)
+        if isinstance(data, dict) and data:
+            return data
+        return self.get_worker_state()
+
+    def clear_worker_state(self) -> None:
+        """Clear worker state in both memory.json and worker_state.json."""
+        self._data["worker_state"] = {}
+        self._save()
+        try:
+            self._write_json_file(self.worker_state_path, {})
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Watchdog heartbeats for long runs
@@ -1602,6 +1629,51 @@ class MemoryStore:
             reverse=True,
         )
         return filtered_sorted[:limit]
+
+    def record_run_heartbeat(
+        self,
+        *,
+        run_id: str,
+        goal: Optional[str] = None,
+        status: str = "running",
+        mode: Optional[str] = None,
+        cycle_index: Optional[int] = None,
+        note: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Convenience helper to log a per run heartbeat event and watchdog beat.
+
+        Designed for engine_worker so each cycle or round can emit:
+            - a streaming event for the UI
+            - a run scoped watchdog label for diagnostics dashboards
+        """
+        payload: Dict[str, Any] = {
+            "run_id": run_id,
+            "status": status,
+            "mode": mode,
+            "cycle_index": cycle_index,
+        }
+        if note is not None:
+            payload["note"] = note
+        if extra:
+            payload.update(extra)
+
+        # Event for UI
+        self.add_event(
+            kind="run_heartbeat",
+            message=f"Run heartbeat status={status}",
+            payload=payload,
+            level="info",
+            goal=goal,
+            run_id=run_id,
+        )
+
+        # Watchdog beat with a run specific label
+        try:
+            label = f"run:{run_id}"
+            self.heartbeat(label=label, run_id=run_id)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Discoveries: cure, treatment, mechanism, etc.
