@@ -1360,6 +1360,19 @@ class MemoryStore:
         self.save_run_state(state)
         # save_run_state already mirrors to run_state_path
 
+    def update_run_state(self, run_id: str, state: Dict[str, Any]) -> None:
+        """Compatibility helper matching older worker expectations.
+
+        Allows calls like update_run_state(run_id, state_dict) while still
+        persisting the latest run_state into both memory.json and
+        run_state.json.
+        """
+        if not isinstance(state, dict):
+            state = {"raw_state": state}
+        payload = dict(state)
+        payload.setdefault("run_id", run_id)
+        self.write_run_state(payload)
+
     def read_run_state(self) -> Optional[Dict[str, Any]]:
         """Read run_state from run_state.json, falling back to memory.json."""
         data = self._read_json_file(self.run_state_path)
@@ -1450,6 +1463,7 @@ class MemoryStore:
             prev_run_id = None
         wd[label] = {
             "last_beat": now,
+            "last_heartbeat_utc": now,  # extra field for diagnostics readers
             "count": count,
             "run_id": run_id or prev_run_id,
         }
@@ -1468,7 +1482,7 @@ class MemoryStore:
         if not isinstance(wd, dict):
             wd = {}
         entry = wd.get(label) or {}
-        last_beat = entry.get("last_beat")
+        last_beat = entry.get("last_beat") or entry.get("last_heartbeat_utc")
         count = entry.get("count", 0)
         run_id = entry.get("run_id")
 
@@ -1497,7 +1511,7 @@ class MemoryStore:
         data = self._read_json_file(self.watchdog_path)
         if isinstance(data, dict) and data:
             entry = data.get(label) or {}
-            last_beat = entry.get("last_beat")
+            last_beat = entry.get("last_beat") or entry.get("last_heartbeat_utc")
             count = entry.get("count", 0)
             run_id = entry.get("run_id")
             seconds_since_last: Optional[float] = None
