@@ -1036,6 +1036,101 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def build_findings_report_from_history(history: List[Dict[str, Any]]) -> str:
+    """Build a findings style report directly from synthetic history.
+
+    Used when MemoryStore has no cycles but finished run JSON files exist.
+    Focuses on interventions, mechanisms, cures, and treatment style items.
+    """
+    if not history:
+        return "# Findings Report\n\nNo cycles found."
+
+    total_cycles = len(history)
+    domains = sorted({str(e.get("domain", "general")) for e in history})
+    roles = sorted({str(e.get("role", "agent")) for e in history})
+
+    # Collect candidate items with loose filters that often mark cure or treatment like content.
+    keywords = ["treatment", "therapy", "intervention", "protocol", "cure", "mechanism"]
+    findings: List[Tuple[float, str, Dict[str, Any]]] = []
+
+    def _score_text(text: str) -> float:
+        text_low = text.lower()
+        score = 0.0
+        for kw in keywords:
+            if kw in text_low:
+                score += 1.0
+        # Prefer shorter, punchier lines
+        if len(text) < 200:
+            score += 0.3
+        return score
+
+    for e in history:
+        base_meta = {
+            "cycle": e.get("cycle"),
+            "role": e.get("role", "agent"),
+            "domain": e.get("domain", "general"),
+            "timestamp": e.get("timestamp"),
+        }
+        for field in ("notes_added", "repairs", "hypotheses"):
+            items = e.get(field) or []
+            for item in items:
+                if isinstance(item, dict):
+                    text = item.get("text") or item.get("summary") or ""
+                else:
+                    text = str(item)
+                text = text.strip()
+                if not text:
+                    continue
+                score = _score_text(text)
+                if score <= 0.0:
+                    # Keep some generic high level things but with low score
+                    if len(text) > 260:
+                        continue
+                meta = dict(base_meta)
+                meta["source_field"] = field
+                findings.append((score, text, meta))
+
+    # Sort by score descending, keep top N
+    findings.sort(key=lambda x: x[0], reverse=True)
+    top_findings = findings[:80]
+
+    lines: List[str] = []
+    lines.append("# Findings Report\n")
+    lines.append("This autonomous report lists candidate cures, treatments, and mechanisms.\n")
+    lines.append("It is a research artifact only and not medical advice.\n")
+    lines.append("## Run context\n")
+    lines.append(f"- Total cycles scanned: {total_cycles}")
+    lines.append(f"- Domains seen: {', '.join(domains) if domains else 'None recorded'}")
+    lines.append(f"- Roles seen: {', '.join(roles) if roles else 'None recorded'}\n")
+
+    if not top_findings:
+        lines.append("No candidate cure or treatment style findings were extracted.\n")
+        return "\n".join(lines)
+
+    lines.append("## Candidate cures, treatments, and mechanisms\n")
+    for score, text, meta in top_findings:
+        cycle = meta.get("cycle")
+        role = meta.get("role", "agent")
+        domain = meta.get("domain", "general")
+        field = meta.get("source_field", "notes")
+        ts = meta.get("timestamp")
+        header_parts = [f"[{domain}/{role}"]
+        if cycle is not None:
+            header_parts.append(f"cycle {cycle}")
+        header = " ".join(header_parts) + f" from {field}]"
+        # Clip text a bit
+        t = text
+        if len(t) > 480:
+            t = t[:480] + "..."
+        if ts:
+            lines.append(f"- {header} ({ts})")
+        else:
+            lines.append(f"- {header}")
+        lines.append(f"  - {t}")
+
+    return "\n".join(lines)
+
+
 # Helper used by learning speed panels and Option C report
 def compute_run_hours(history: List[Dict[str, Any]]) -> Optional[float]:
     """Approximate total hours between first and last cycle timestamps."""
@@ -3400,7 +3495,14 @@ def main() -> None:
 
     with col_rep3:
         if st.button("Findings report (cures, treatments)"):
-            findings_md = generate_findings_report(memory_store=memory, goal=None)
+            if used_fallback_history and history_for_reports:
+                # When MemoryStore has no cycles but we reconstructed history
+                # directly from finished runs, build a findings report from that
+                # synthetic history instead of returning the empty default text.
+                findings_md = build_findings_report_from_history(history_for_reports)
+            else:
+                findings_md = generate_findings_report(memory_store=memory, goal=None)
+
             st.markdown(findings_md)
             st.download_button(
                 "Download findings report (Markdown)",
