@@ -433,14 +433,25 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
     """
     Best effort heartbeat into the MemoryStore so the UI can see that the
     worker is alive. Silently ignored if heartbeat is not implemented.
+
+    IMPORTANT: some MemoryStore.heartbeat() implementations do NOT accept
+    a run_id keyword. We always at least call the basic form so the
+    watchdog panel keeps updating.
     """
     try:
         ms = _get_memory_store(agent)
-        if ms is not None and hasattr(ms, "heartbeat"):
+        if ms is None or not hasattr(ms, "heartbeat"):
+            return
+        hb = getattr(ms, "heartbeat")
+        try:
             if run_id is not None:
-                ms.heartbeat(label=label, run_id=run_id)
+                # Try extended signature first
+                hb(label=label, run_id=run_id)  # type: ignore[call-arg]
             else:
-                ms.heartbeat(label=label)
+                hb(label=label)
+        except TypeError:
+            # Fallback to classic signature
+            hb(label=label)
     except Exception:
         return
 
@@ -668,20 +679,31 @@ def _write_cycles_and_run_state(
 
     # Run state
     try:
+        state: Dict[str, Any] = {
+            "run_id": run_id,
+            "mode": mode,
+            "goal": goal,
+            "domain": domain,
+            "total_cycles": len(cycles),
+            "diagnostics": diag_local,
+            "last_update_utc": datetime.utcnow().isoformat() + "Z",
+        }
+
         if hasattr(ms, "save_run_state"):
-            state: Dict[str, Any] = {
-                "run_id": run_id,
-                "mode": mode,
-                "goal": goal,
-                "domain": domain,
-                "total_cycles": len(cycles),
-                "diagnostics": diag_local,
-                "last_update_utc": datetime.utcnow().isoformat() + "Z",
-            }
             try:
                 ms.save_run_state(run_id, state)  # type: ignore[arg-type]
             except TypeError:
                 ms.save_run_state(run_id=run_id, state=state)  # type: ignore[arg-type]
+        elif hasattr(ms, "write_run_state"):
+            try:
+                ms.write_run_state(run_id, state)  # type: ignore[arg-type]
+            except TypeError:
+                ms.write_run_state(run_id=run_id, state=state)  # type: ignore[arg-type]
+        elif hasattr(ms, "update_run_state"):
+            try:
+                ms.update_run_state(run_id, state)  # type: ignore[arg-type]
+            except TypeError:
+                ms.update_run_state(run_id=run_id, state=state)  # type: ignore[arg-type]
     except Exception:
         pass
 
@@ -1245,6 +1267,9 @@ def _write_job_progress(
     note: str = "",
     current: Optional[int] = None,
     total: Optional[int] = None,
+    goal: Optional[str] = None,
+    domain: Optional[str] = None,
+    job_config: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Best-effort progress writer for queue jobs.
@@ -1252,6 +1277,9 @@ def _write_job_progress(
     Writes runs/active/{run_id}_progress.json using run_jobs.progress_path
     so the Streamlit UI can show basic status, even if we do not have
     per-cycle callbacks.
+
+    Includes goal, domain, and job_config so logs and the UI can see
+    the original prompt and config for the job.
     """
     if progress_path is None:
         return
@@ -1264,6 +1292,9 @@ def _write_job_progress(
             "total_cycles": total,
             "last_update_utc": datetime.utcnow().isoformat() + "Z",
             "notes": note,
+            "goal": goal,
+            "domain": domain,
+            "job_config": job_config or {},
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf8") as f:
@@ -1463,6 +1494,9 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         note="Job started",
         current=0,
         total=max_rounds if mode == "swarm" else max_cycles,
+        goal=goal,
+        domain=domain,
+        job_config=cfg,
     )
 
     summaries: List[Dict[str, Any]] = []
@@ -1485,6 +1519,9 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                     note=str(note),
                     current=int(current) if isinstance(current, (int, float)) else None,
                     total=int(total_local) if isinstance(total_local, (int, float)) else None,
+                    goal=goal,
+                    domain=domain,
+                    job_config=cfg,
                 )
 
             goal_config: Dict[str, Any] = {
@@ -1575,6 +1612,9 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             note="Job finished",
             current=len(summaries),
             total=max_rounds if mode == "swarm" else max_cycles,
+            goal=goal,
+            domain=domain,
+            job_config=cfg,
         )
 
         diag: Dict[str, Any] = {}
@@ -1756,6 +1796,9 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             note=str(e),
             current=None,
             total=max_rounds if mode == "swarm" else max_cycles,
+            goal=goal,
+            domain=domain,
+            job_config=cfg,
         )
 
         error_payload: Dict[str, Any] = {
