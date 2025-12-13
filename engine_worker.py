@@ -445,12 +445,10 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
         hb = getattr(ms, "heartbeat")
         try:
             if run_id is not None:
-                # Try extended signature first
                 hb(label=label, run_id=run_id)  # type: ignore[call-arg]
             else:
                 hb(label=label)
         except TypeError:
-            # Fallback to classic signature
             hb(label=label)
     except Exception:
         return
@@ -616,6 +614,10 @@ def _update_worker_state(
     if ms is None or not hasattr(ms, "update_worker_state"):
         return
     try:
+        merged_extra = dict(extra or {})
+        # Always carry the prompt/goal at the worker-state level for easier introspection
+        if "prompt" not in merged_extra:
+            merged_extra["prompt"] = goal
         ms.update_worker_state(
             status=status,
             mode=mode,
@@ -627,7 +629,7 @@ def _update_worker_state(
             max_minutes=max_minutes,
             run_id=run_id,
             experiment_mode=experiment_mode,
-            extra=extra,
+            extra=merged_extra,
         )
     except Exception:
         return
@@ -1002,6 +1004,9 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     print(f"Source controls: {source_controls}")
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     print(f"Experiment fingerprint: {experiment_fingerprint}")
+    print("=== Job prompt (goal) ===")
+    print(goal)
+    print("=== End job prompt ===")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -1020,6 +1025,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
             "job_config": cfg,
+            "prompt": goal,
         },
     )
     _heartbeat(agent, label="direct_job_start", run_id=run_id)
@@ -1121,6 +1127,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
             "job_config": cfg,
+            "prompt": goal,
         }
         if diag:
             extra_manifest["diagnostics_snapshot"] = diag
@@ -1148,6 +1155,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "run_id": run_id,
             "mode": mode,
             "goal": goal,
+            "prompt": goal,
             "domain": domain,
             "runtime_profile": runtime_profile,
             "max_minutes": max_minutes,
@@ -1185,6 +1193,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 "final_diagnostics": diag,
                 "intelligence": intelligence_info if intelligence_info else None,
                 "job_config": cfg,
+                "prompt": goal,
             },
         )
 
@@ -1201,6 +1210,8 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "traceback": tb,
             "run_id": run_id,
             "goal": goal,
+            "prompt": goal,
+            "prompt_from_config": cfg.get("prompt") if isinstance(cfg, dict) else None,
             "domain": domain,
             "mode": mode,
             "runtime_profile": runtime_profile,
@@ -1248,6 +1259,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "run_id": run_id,
             "mode": mode,
             "goal": goal,
+            "prompt": goal,
             "domain": domain,
             "error": str(e),
             "traceback": tb,
@@ -1278,13 +1290,17 @@ def _write_job_progress(
     so the Streamlit UI can show basic status, even if we do not have
     per-cycle callbacks.
 
-    Includes goal, domain, and job_config so logs and the UI can see
-    the original prompt and config for the job.
+    Includes goal, domain, original prompt, and job_config so logs and the UI
+    can see the original prompt and config for the job.
     """
     if progress_path is None:
         return
     try:
         path = progress_path(run_id)
+        prompt_text: Optional[str] = None
+        if isinstance(job_config, dict):
+            prompt_text = job_config.get("prompt") or job_config.get("goal") or goal
+
         payload: Dict[str, Any] = {
             "run_id": run_id,
             "status": status,
@@ -1293,6 +1309,7 @@ def _write_job_progress(
             "last_update_utc": datetime.utcnow().isoformat() + "Z",
             "notes": note,
             "goal": goal,
+            "prompt": prompt_text or goal,
             "domain": domain,
             "job_config": job_config or {},
         }
@@ -1465,6 +1482,9 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     print(f"Source controls: {source_controls}")
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     print(f"Experiment fingerprint: {experiment_fingerprint}")
+    print("=== Job prompt (goal) ===")
+    print(goal)
+    print("=== End job prompt ===")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -1483,6 +1503,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
             "job_config": cfg,
+            "prompt": goal,
         },
     )
     _heartbeat(agent, label="queue_job_start", run_id=job.run_id)
@@ -1670,6 +1691,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
             "job_config": cfg,
+            "prompt": goal,
         }
         if diag:
             extra_manifest["diagnostics_snapshot"] = diag
@@ -1721,6 +1743,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "elapsed_seconds": completed_ts - start_ts,
                 "meta": job_meta or {},
                 "job_config": cfg,
+                "goal": goal,
+                "prompt": goal,
             }
             result_obj.update(fr)
 
@@ -1732,6 +1756,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "run_id": job.run_id,
                 "mode": mode,
                 "goal": goal,
+                "prompt": goal,
                 "domain": domain,
                 "runtime_profile": runtime_profile,
                 "max_minutes": max_minutes,
@@ -1780,6 +1805,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "final_diagnostics": diag,
                 "intelligence": intelligence_info if intelligence_info else None,
                 "job_config": cfg,
+                "prompt": goal,
             },
         )
 
@@ -1806,6 +1832,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             "traceback": tb,
             "run_id": job.run_id,
             "goal": goal,
+            "prompt": goal,
+            "prompt_from_config": cfg.get("prompt") if isinstance(cfg, dict) else None,
             "domain": domain,
             "mode": mode,
             "runtime_profile": runtime_profile,
@@ -2072,6 +2100,9 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Source controls: {source_controls}")
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     print(f"Experiment fingerprint: {experiment_fingerprint}")
+    print("=== Engine prompt (goal) ===")
+    print(goal)
+    print("=== End engine prompt ===")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -2086,7 +2117,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="single_engine",
-        extra={"experiment_fingerprint": experiment_fingerprint},
+        extra={"experiment_fingerprint": experiment_fingerprint, "prompt": goal},
     )
     _heartbeat(agent, label="worker_single_start", run_id=run_id)
 
@@ -2102,7 +2133,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="single_engine",
-        extra={"experiment_fingerprint": experiment_fingerprint},
+        extra={"experiment_fingerprint": experiment_fingerprint, "prompt": goal},
     )
 
     summaries = agent.run_continuous(
@@ -2159,6 +2190,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     extra_manifest: Dict[str, Any] = {
         "engine": "single",
         "experiment_fingerprint": experiment_fingerprint,
+        "prompt": goal,
     }
     if diag:
         extra_manifest["diagnostics_snapshot"] = diag
@@ -2198,6 +2230,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             "experiment_fingerprint": experiment_fingerprint,
             "final_diagnostics": diag,
             "intelligence": intelligence_info if intelligence_info else None,
+            "prompt": goal,
         },
     )
 
@@ -2317,6 +2350,9 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Shift minutes (clamped): {shift_minutes if shift_minutes is not None else 'None'}")
     print(f"Repeat shifts: {repeat_shifts}")
     print(f"Experiment fingerprint: {experiment_fingerprint}")
+    print("=== Engine prompt (goal) ===")
+    print(goal)
+    print("=== End engine prompt ===")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -2331,7 +2367,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="swarm_engine",
-        extra={"experiment_fingerprint": experiment_fingerprint},
+        extra={"experiment_fingerprint": experiment_fingerprint, "prompt": goal},
     )
     _heartbeat(agent, label="worker_swarm_start", run_id=run_id)
 
@@ -2347,7 +2383,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="swarm_engine",
-        extra={"experiment_fingerprint": experiment_fingerprint},
+        extra={"experiment_fingerprint": experiment_fingerprint, "prompt": goal},
     )
 
     summaries_all: List[Dict[str, Any]] = []
@@ -2477,6 +2513,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         "shift_minutes": shift_minutes,
         "repeat_shifts": repeat_shifts,
         "experiment_fingerprint": experiment_fingerprint,
+        "prompt": goal,
     }
     if diag:
         extra_manifest["diagnostics_snapshot"] = diag
@@ -2516,6 +2553,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             "experiment_fingerprint": experiment_fingerprint,
             "final_diagnostics": diag,
             "intelligence": intelligence_info if intelligence_info else None,
+            "prompt": goal,
         },
     )
 
@@ -2811,6 +2849,9 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Source controls: {source_controls}")
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     print(f"Experiment fingerprint: {experiment_fingerprint}")
+    print("=== Engine prompt (goal) ===")
+    print(goal)
+    print("=== End engine prompt ===")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -2825,7 +2866,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=total_budget_minutes,
         run_id=run_id,
         experiment_mode="meta_controller",
-        extra={"experiment_fingerprint": experiment_fingerprint},
+        extra={"experiment_fingerprint": experiment_fingerprint, "prompt": goal},
     )
     _heartbeat(agent, label="worker_meta_start", run_id=run_id)
 
@@ -2858,7 +2899,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=total_budget_minutes,
         run_id=run_id,
         experiment_mode="meta_controller",
-        extra={"experiment_fingerprint": experiment_fingerprint},
+        extra={"experiment_fingerprint": experiment_fingerprint, "prompt": goal},
     )
 
     for seg_index in range(meta_max_segments_int):
@@ -3009,6 +3050,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 "runtime_profile": phase_profile,
                 "minutes_requested": effective_minutes,
                 "segment_stats": seg_stats,
+                "prompt": goal,
             },
         )
 
@@ -3076,6 +3118,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         "engine": "meta",
         "segments": extra_segments,
         "experiment_fingerprint": experiment_fingerprint,
+        "prompt": goal,
     }
     if intelligence_info:
         extra_manifest["intelligence"] = intelligence_info
@@ -3114,6 +3157,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             "total_segments": total_segments,
             "total_summaries": total_summaries,
             "intelligence": intelligence_info if intelligence_info else None,
+            "prompt": goal,
         },
     )
 
