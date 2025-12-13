@@ -31,6 +31,7 @@ Finite-only note:
 
 from __future__ import annotations
 from typing import Dict, Any, List, Optional
+import copy
 
 # Simple version tag so the app and UI can display which preset set is loaded.
 PRESETS_VERSION: str = "2025-11-30-finite-only-v1"
@@ -1759,14 +1760,17 @@ def get_preset(name: str) -> Dict[str, Any]:
     """Return a preset config, falling back to general if unknown.
 
     Aliases such as 'antiaging' or 'theory' are mapped to core presets.
+
+    Returns a deep copy so callers can mutate safely without changing
+    the global presets for future runs.
     """
     key = (name or "general").lower()
     if key in PRESETS:
-        return PRESETS[key]
+        return copy.deepcopy(PRESETS[key])
     alias_target = PRESET_ALIASES.get(key)
     if alias_target and alias_target in PRESETS:
-        return PRESETS[alias_target]
-    return PRESETS["general"]
+        return copy.deepcopy(PRESETS[alias_target])
+    return copy.deepcopy(PRESETS["general"])
 
 
 def get_runtime_profile(name: str) -> Dict[str, Any]:
