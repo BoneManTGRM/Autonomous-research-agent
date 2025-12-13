@@ -1,258 +1,360 @@
+# -*- coding: utf-8 -*-
 """
-Background engine worker for the Autonomous Research Agent.
+Enhanced Streamlit interface for the Autonomous Research Agent.
 
-This file is the long-running engine that can run on Render as a
-Background Worker or separate service.
+Features:
+- Finite mode only with manual cycle budgets (no timed presets in this build)
+- Researcher + Critic multi agent mode
+- Swarm mode with up to dozens of mini agents
+- Domain presets (General, Longevity, Math)
+- PubMed / Semantic Scholar ingestion controls
+- Biomarker analysis toggle (for anti aging teams)
+- Hypothesis generation viewer
+- PDF ingestion for real scientific papers
+- RYE, delta_R, and Energy charts
+- Real Tavily search support detection
+- Source citation viewer
+- Tools status panel for web browser and sandbox tools
+- Discovery log viewer and autonomous discovery panel
+- Snapshot timeline with equilibrium and stability view
+- Hypothesis manager with confidence and domain filters
+- Memory pruning controls (if supported by MemoryStore)
+- Verification panel for cures, treatments, and stability checks
+- Multi agent insight graph for roles, hypotheses, and discoveries
+- Report generation from full cycle history
+- Optional PDF report export (if reportlab is installed)
+- Optional MSIL meta skill intelligence view when msil module is available
 
-Key ideas:
-- Uses the same CoreAgent and MemoryStore as the Streamlit UI.
-- Can run in three styles:
-    1) Single agent engine mode (finite-only)
-    2) Swarm engine mode (finite-only)
-    3) Meta-controller mode ("Option C") that plans multiple phases:
-       - exploration
-       - stabilization
-       - refinement
-       and adapts using RYE and time used (also finite-only).
+Reparodynamics:
+    The UI is a front panel on a reparodynamic system:
+    - It never runs TGRM cycles directly.
+    - Each run request is written as a job in a file based queue and picked up by an external engine worker.
+    - The worker runs TGRM loops, computes RYE = delta_R / E, and logs results.
 
-Finite-only mode:
-- "Forever" runs are disabled. All engines must have finite limits:
-  * Single agent: bounded by WORKER_MAX_CYCLES and/or WORKER_MAX_MINUTES
-  * Swarm: bounded by WORKER_MAX_ROUNDS and/or WORKER_MAX_MINUTES
-  * Meta controller: bounded by WORKER_MAX_MINUTES or derived budget
-- Runtime profiles are treated as hints for internal tuning only, not as
-  permission to run forever.
+Time:
+    In this finite only build, the Streamlit UI only sends explicit cycle budgets.
+    The engine worker decides how to map these to wall clock time if needed.
 
-Queue mode using agent/run_jobs.py:
-    - WORKER_QUEUE_MODE=1 (default) -> file-based job queue
-    - Worker polls the job queue via agent.run_jobs, executes jobs,
-      and writes results via save_job_result / mark_job_error.
-
-You can start it with commands like:
-    WORKER_GOAL="Long run test on reparodynamics" \
-    WORKER_RUNTIME_PROFILE="8_hours" \
-    WORKER_MAX_MINUTES=480 \
-    python engine_worker.py
-
-On Render:
-    startCommand: python engine_worker.py
-
-Hard safety caps:
-- All requested cycles / rounds / minutes are clamped to hard maximums:
-    WORKER_HARD_MAX_CYCLES   (default 1,000,000)
-    WORKER_HARD_MAX_ROUNDS   (default same as HARD_MAX_CYCLES)
-    WORKER_HARD_MAX_MINUTES  (default 1,440 minutes = 24 hours)
+Note:
+    This keeps the Streamlit app thin and safe:
+    - It only queues jobs through run_jobs.py
+    - It never imports or invokes the core loop
+    - It only reads finished JSON artifacts and MemoryStore.
 """
 
 from __future__ import annotations
 
-import os
-import sys
+import base64
 import json
-import time
-import hashlib
-import traceback
+import os
+import re
+import sys
+import glob
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 from datetime import datetime
 
+import streamlit as st
 import yaml
+import pandas as pd
 
-from agent.core_agent import CoreAgent
-from agent.memory_store import MemoryStore
-from agent.presets import PRESETS, get_preset  # PRESETS for domain defaults
-from agent.rye_metrics import build_run_diagnostics
+# Ensure repository root is on sys.path so imports work on Render and local
+# This is robust whether this file lives in repo root or in a subfolder (for example app/)
+_THIS_FILE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = _THIS_FILE_DIR
+if not (REPO_ROOT / "agent").is_dir() and (_THIS_FILE_DIR.parent / "agent").is_dir():
+    REPO_ROOT = _THIS_FILE_DIR.parent
 
-# Optional tools registry for web browser and sandbox detection
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# These will be filled from run_jobs imports when available
+RUNS_BASE_DIR: Optional[Path] = None
+RUNS_PENDING_DIR: Optional[Path] = None
+RUNS_ACTIVE_DIR: Optional[Path] = None
+RUNS_FINISHED_DIR: Optional[Path] = None
+RUNS_ERROR_DIR: Optional[Path] = None
+
+# -------------------------------------------------------------------
+# Imports: prefer package layout agent.*, guarded flat fallback
+# -------------------------------------------------------------------
 try:
-    from agent.tools import TOOL_REGISTRY  # type: ignore[import]
-except Exception:  # pragma: no cover
-    TOOL_REGISTRY = {}  # type: ignore[assignment]
-
-# File-based run queue integration
-try:
-    from agent.run_jobs import (
-        RunJob,
-        load_next_pending_job,
-        save_job_result,
-        mark_job_error,
-        progress_path,
+    # Package layout (recommended, what you have on Render)
+    from agent.memory_store import MemoryStore
+    from agent.presets import PRESETS, get_preset, RUNTIME_PROFILES
+    from agent.report_generator import (
+        generate_report,
+        generate_findings_report,
+        generate_report_pdf,
+        generate_findings_report_pdf,
     )
-except Exception:
-    # If run_jobs is not present, queue mode will not work
-    RunJob = None  # type: ignore[assignment]
-    load_next_pending_job = None  # type: ignore[assignment]
-    save_job_result = None  # type: ignore[assignment]
-    mark_job_error = None  # type: ignore[assignment]
-    progress_path = None  # type: ignore[assignment]
+    # Only import the rye_metrics symbols that are actually used here
+    from agent.rye_metrics import (
+        build_run_diagnostics,
+        rye_volatility_signature,
+        detect_rye_equilibrium,
+        tgrm_harmonic_index,
+        estimate_breakthrough_probability,
+        breakthrough_likelihood_90d,
+        autonomy_safety_envelope,
+        early_failure_warning_score,
+        classify_run_tier,
+    )
+    from agent.report_builder import build_agent_report
 
-CONFIG_PATH_DEFAULT = "config/settings.yaml"
+    # Optional discovery and verification helpers (imported lazily if present)
+    try:  # type: ignore[import]
+        from agent import discovery_log as _discovery_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _discovery_module = None  # type: ignore[assignment]
 
-# Base folder for runs for worker logs and queue fallbacks.
-# This must match agent.run_jobs BASE_DIR which also respects ARA_RUNS_DIR.
-BASE_DIR = Path(os.environ.get("ARA_RUNS_DIR", "runs"))
+    try:  # type: ignore[import]
+        from agent import verification_engine as _verification_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _verification_module = None  # type: ignore[assignment]
 
-# If agent.run_jobs defines its own BASE_DIR, prefer that so the worker,
-# Streamlit app, and queue layer are guaranteed to point at the same place.
-try:
-    import agent.run_jobs as _run_jobs_mod  # type: ignore[import]
+    try:  # type: ignore[import]
+        from agent import hypothesis_manager as _hypo_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _hypo_module = None  # type: ignore[assignment]
 
-    _rj_base_dir = getattr(_run_jobs_mod, "BASE_DIR", None)
-    if _rj_base_dir is not None:
-        BASE_DIR = _rj_base_dir  # type: ignore[assignment]
-except Exception:
-    pass
+    try:  # type: ignore[import]
+        from agent import memory_pruner as _pruner_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _pruner_module = None  # type: ignore[assignment]
 
-# NOTE: BASE_DIR is now always derived from agent.run_jobs.BASE_DIR when available,
-# so engine_worker, Streamlit, and the queue see the same runs directory tree.
+    # Optional MSIL meta skill intelligence layer
+    try:  # type: ignore[import]
+        from agent import msil as _msil_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _msil_module = None  # type: ignore[assignment]
 
-
-# ---------------------------------------------------------------------------
-# Hard safety caps (finite-only guard rails)
-# ---------------------------------------------------------------------------
-
-
-def _parse_int_env(name: str, default: int) -> int:
-    val = os.getenv(name)
-    if not val:
-        return default
+    # Optional tools registry (for web browser and sandbox status)
     try:
-        v = int(val)
-        if v <= 0:
-            return default
-        return v
-    except Exception:
-        return default
+        from agent.tools import TOOL_REGISTRY  # type: ignore[import]
+    except Exception:  # pragma: no cover
+        TOOL_REGISTRY = {}  # type: ignore[assignment]
 
-
-def _parse_float_env(name: str, default: float) -> float:
-    val = os.getenv(name)
-    if not val:
-        return default
+    # Job queue abstraction: import paths from run_jobs so UI and worker share the exact same directories
     try:
-        v = float(val)
-        if v <= 0:
-            return default
-        return v
+        from agent.run_jobs import (
+            create_job,
+            list_jobs as list_run_jobs,
+            result_path,
+            BASE_DIR as RUNS_BASE_DIR,
+            PENDING_DIR as RUNS_PENDING_DIR,
+            ACTIVE_DIR as RUNS_ACTIVE_DIR,
+            FINISHED_DIR as RUNS_FINISHED_DIR,
+            ERROR_DIR as RUNS_ERROR_DIR,
+        )
     except Exception:
-        return default
+        create_job = None  # type: ignore[assignment]
+        list_run_jobs = None  # type: ignore[assignment]
+        result_path = None  # type: ignore[assignment]
+        RUNS_BASE_DIR = None
+        RUNS_PENDING_DIR = None
+        RUNS_ACTIVE_DIR = None
+        RUNS_FINISHED_DIR = None
+        RUNS_ERROR_DIR = None
 
+except ModuleNotFoundError as e:
+    # If the agent package itself is missing, allow flat layout fallback.
+    # If something inside agent.* is missing, re raise so we see the real error.
+    if "agent" not in str(e):
+        raise
 
-HARD_MAX_CYCLES: int = _parse_int_env("WORKER_HARD_MAX_CYCLES", 1_000_000)
-HARD_MAX_ROUNDS: int = _parse_int_env("WORKER_HARD_MAX_ROUNDS", HARD_MAX_CYCLES)
-HARD_MAX_MINUTES: float = _parse_float_env("WORKER_HARD_MAX_MINUTES", 1440.0)
+    # Flat layout fallback: all modules live next to this file
+    from memory_store import MemoryStore
+    from presets import PRESETS, get_preset, RUNTIME_PROFILES  # type: ignore[no-redef]
+    from report_generator import (  # type: ignore[no-redef]
+        generate_report,
+        generate_findings_report,
+        generate_report_pdf,
+        generate_findings_report_pdf,
+    )
+    from rye_metrics import (  # type: ignore[no-redef]
+        build_run_diagnostics,
+        rye_volatility_signature,
+        detect_rye_equilibrium,
+        tgrm_harmonic_index,
+        estimate_breakthrough_probability,
+        breakthrough_likelihood_90d,
+        autonomy_safety_envelope,
+        early_failure_warning_score,
+        classify_run_tier,
+    )
+    from report_builder import build_agent_report  # type: ignore[no-redef]
 
+    try:  # type: ignore[import]
+        import discovery_log as _discovery_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _discovery_module = None  # type: ignore[assignment]
 
-def _clamp_int(value: int, hard_max: int, label: str) -> int:
-    if value > hard_max:
-        print(
-            f"[Safety] {label} requested {value} exceeds hard max {hard_max}. "
-            f"Clamping to {hard_max}."
+    try:  # type: ignore[import]
+        import verification_engine as _verification_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _verification_module = None  # type: ignore[assignment]
+
+    try:  # type: ignore[import]
+        import hypothesis_manager as _hypo_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _hypo_module = None  # type: ignore[assignment]
+
+    try:  # type: ignore[import]
+        import memory_pruner as _pruner_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _pruner_module = None  # type: ignore[assignment]
+
+    # Optional MSIL meta skill intelligence layer
+    try:  # type: ignore[import]
+        import msil as _msil_module  # pragma: no cover
+    except Exception:  # pragma: no cover
+        _msil_module = None  # type: ignore[assignment]
+
+    try:
+        from tools import TOOL_REGISTRY  # type: ignore[import]
+    except Exception:  # pragma: no cover
+        TOOL_REGISTRY = {}  # type: ignore[assignment]
+
+    # Flat layout run_jobs fallback (also import paths)
+    try:
+        from run_jobs import (  # type: ignore[no-redef]
+            create_job,
+            list_jobs as list_run_jobs,
+            result_path,
+            BASE_DIR as RUNS_BASE_DIR,
+            PENDING_DIR as RUNS_PENDING_DIR,
+            ACTIVE_DIR as RUNS_ACTIVE_DIR,
+            FINISHED_DIR as RUNS_FINISHED_DIR,
+            ERROR_DIR as RUNS_ERROR_DIR,
         )
-        sys.stdout.flush()
-        return hard_max
-    if value <= 0:
-        print(f"[Safety] {label} requested {value} is non-positive. Using 1.")
-        sys.stdout.flush()
-        return 1
-    return value
+    except Exception:
+        create_job = None  # type: ignore[assignment]
+        list_run_jobs = None  # type: ignore[assignment]
+        result_path = None  # type: ignore[assignment]
+        RUNS_BASE_DIR = None
+        RUNS_PENDING_DIR = None
+        RUNS_ACTIVE_DIR = None
+        RUNS_FINISHED_DIR = None
+        RUNS_ERROR_DIR = None
 
 
-def _clamp_minutes(value: Optional[float], label: str) -> Optional[float]:
-    if value is None:
-        return None
-    if value > HARD_MAX_MINUTES:
-        print(
-            f"[Safety] {label} minutes {value} exceeds hard max {HARD_MAX_MINUTES}. "
-            f"Clamping to {HARD_MAX_MINUTES}."
-        )
-        sys.stdout.flush()
-        return HARD_MAX_MINUTES
-    if value <= 0:
-        print(f"[Safety] {label} minutes {value} is non-positive. Ignoring.")
-        sys.stdout.flush()
-        return None
-    return value
+# Use absolute path for default config relative to repo root
+CONFIG_PATH_DEFAULT = str(REPO_ROOT / "config" / "settings.yaml")
+
+# Rough estimate for cycles per hour in continuous mode.
+# Used historically; now only advisory metadata handed to the worker.
+CYCLES_PER_HOUR_ESTIMATE = 120
+
+# Swarm roles: base archetypes for mini agents
+SWARM_ROLES: List[Tuple[str, str]] = [
+    ("researcher", "Deep literature and web researcher"),
+    ("critic", "Methodology critic and refiner"),
+    ("explorer", "Out of distribution explorer (new angles, analogies)"),
+    ("theorist", "Model builder and unifier"),
+    ("integrator", "Synthesizer that integrates and summarizes"),
+]
+
+# Safe upper bound for swarm size on typical Render or Streamlit setups.
+# All swarm agents are still run sequentially in a single process by the worker.
+MAX_SWARM_AGENTS: int = 32
+
+# Limit points in charts so the frontend does not hit RangeError on very long runs.
+MAX_POINTS_FOR_CHARTS: int = 1000
 
 
-# ---------------------------------------------------------------------------
-# Config and environment helpers
-# ---------------------------------------------------------------------------
-
-
+# -------------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------------
 def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
     """Load YAML settings file into a dictionary."""
-    path = Path(config_path)
-    if not path.exists():
+    if not os.path.exists(config_path):
         return {}
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-            if not isinstance(data, dict):
-                return {}
-            return data
-    except Exception:
-        # Never crash the worker because of a bad config file
-        return {}
+    with open(config_path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
 
 def ensure_directories() -> None:
-    """Ensure that log directories exist, same pattern as the Streamlit app."""
+    """Ensure that log directories exist."""
     logs_path = Path("logs")
     sessions_path = logs_path / "sessions"
     logs_path.mkdir(exist_ok=True)
     sessions_path.mkdir(exist_ok=True)
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    """Parse a boolean from environment variables."""
-    val = os.getenv(name)
-    if val is None:
-        return default
-    val = val.strip().lower()
-    return val in {"1", "true", "yes", "y", "on"}
+def get_runs_root() -> str:
+    """Return the root directory used for ARA run jobs.
+
+    Primary source is run_jobs.BASE_DIR so that UI and worker are always in sync.
+    If that is not available, fall back to ARA_RUNS_DIR or <repo_root>/runs.
+    """
+    if isinstance(RUNS_BASE_DIR, Path):
+        return str(RUNS_BASE_DIR)
+    root = os.getenv("ARA_RUNS_DIR")
+    if root:
+        return root
+    return str(REPO_ROOT / "runs")
 
 
-def _env_float(name: str) -> Optional[float]:
-    """Parse a float from environment variables, or None if missing."""
-    val = os.getenv(name)
-    if not val:
+@st.cache_resource
+def init_memory_store(config_path: str = CONFIG_PATH_DEFAULT) -> MemoryStore:
+    """Create a single MemoryStore instance for the Streamlit app (read only)."""
+    ensure_directories()
+    config = load_settings(config_path)
+    memory_file = config.get("memory_file", "logs/sessions/default_memory.json")
+    memory = MemoryStore(memory_file)
+    return memory
+
+
+def load_job_result(run_id: str) -> Optional[Dict[str, Any]]:
+    """Load a finished job result using run_jobs.result_path."""
+    if result_path is None:
+        return None
+    fp = result_path(run_id)
+    if not fp.exists():
         return None
     try:
-        return float(val)
+        with fp.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            return data
+        return None
     except Exception:
         return None
 
 
-def _env_list(name: str) -> Optional[List[str]]:
-    """Parse a comma separated list from environment variables."""
-    val = os.getenv(name)
-    if not val:
-        return None
-    parts = [p.strip() for p in val.split(",") if p.strip()]
-    return parts or None
+def tavily_status() -> Dict[str, Any]:
+    """Check whether a Tavily API key is available (per user or env)."""
+    # 1) Prefer per user key stored in session state (from sidebar input)
+    key = st.session_state.get("tavily_key", None)
+
+    # 2) Fallback to environment variable (in case you set it on the server)
+    if not key:
+        key = os.getenv("TAVILY_API_KEY")
+
+    # 3) Optional final fallback to secrets (owner only use, can be empty)
+    if not key:
+        try:
+            key = st.secrets.get("TAVILY_API_KEY", None)  # type: ignore[attr-defined]
+        except Exception:
+            key = None
+
+    if key:
+        tail = key[-4:]
+        return {"has_key": True, "display": f"Tavily key detected (...{tail})"}
+    return {
+        "has_key": False,
+        "display": "No Tavily API key found. Web search will use stubbed results.",
+    }
 
 
 def detect_tools() -> Dict[str, bool]:
-    """
-    Detect presence of web browser and sandbox tools from TOOL_REGISTRY.
-
-    Web detection includes:
-    - Generic browser style tools: web_search, browser, web, internet
-    - Tavily based tools: tavily_search
-    - Option C web wrapper: extreme_web_search (if you registered it with that name)
-    """
+    """Detect presence of web browser and sandbox tools from TOOL_REGISTRY."""
     if not isinstance(TOOL_REGISTRY, dict):
         return {"web": False, "sandbox": False}
 
-    web_keys = {
-        "web_search",
-        "browser",
-        "web",
-        "internet",
-        "tavily_search",
-        "extreme_web_search",
-    }
+    # Flexible detection by common keys
+    web_keys = {"web_search", "browser", "web", "internet"}
     sandbox_keys = {"sandbox", "code_sandbox", "python_sandbox", "exec_sandbox"}
 
     has_web = any(k in TOOL_REGISTRY for k in web_keys)
@@ -261,2913 +363,3094 @@ def detect_tools() -> Dict[str, bool]:
     return {"web": has_web, "sandbox": has_sandbox}
 
 
-def _configure_tavily_from_env() -> None:
-    """
-    Optional Tavily key configuration.
-
-    If WORKER_TAVILY_KEY is set, propagate it to TAVILY_API_KEY so the
-    same engine can be used headless without the Streamlit UI.
-    """
-    key = os.getenv("WORKER_TAVILY_KEY")
-    if key:
-        os.environ["TAVILY_API_KEY"] = key
-
-
-def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
-    """
-    Build source controls for the worker.
-
-    Keys:
-        web, pubmed, semantic, pdf, biomarkers, sandbox
-
-    Priority:
-    1. WORKER_SOURCES env (comma separated: web,pubmed,semantic,pdf,biomarkers,sandbox)
-       If present, only those listed are enabled.
-    2. config["default_source_controls"] from YAML (if provided)
-    3. Hard coded defaults.
-    4. Optional per source overrides:
-       WORKER_WEB, WORKER_PUBMED, WORKER_SEMANTIC, WORKER_PDF,
-       WORKER_BIOMARKERS, WORKER_SANDBOX.
-    5. Final clamp based on TOOL_REGISTRY detection: if sandbox tool is not
-       present, sandbox is forced to False.
-    """
-    defaults: Dict[str, bool] = {
-        "web": True,
-        "pubmed": True,
-        "semantic": True,
-        "pdf": True,
-        "biomarkers": False,
-        "sandbox": False,
-    }
-
-    cfg_sc = config.get("default_source_controls")
-    if isinstance(cfg_sc, dict):
-        merged = defaults.copy()
-        for k, v in cfg_sc.items():
-            merged[str(k)] = bool(v)
-        defaults = merged
-
-    env_sources = _env_list("WORKER_SOURCES")
-    if env_sources is not None:
-        allowed = {s.lower() for s in env_sources}
-        sc: Dict[str, bool] = {}
-        for key in defaults.keys():
-            sc[key] = key.lower() in allowed
-    else:
-        sc = defaults.copy()
-
-    def _override_bool(key: str, env_name: str) -> None:
-        raw = os.getenv(env_name)
-        if raw is not None:
-            sc[key] = _env_bool(env_name, default=sc.get(key, False))
-
-    _override_bool("web", "WORKER_WEB")
-    _override_bool("pubmed", "WORKER_PUBMED")
-    _override_bool("semantic", "WORKER_SEMANTIC")
-    _override_bool("pdf", "WORKER_PDF")
-    _override_bool("biomarkers", "WORKER_BIOMARKERS")
-    _override_bool("sandbox", "WORKER_SANDBOX")
-
-    flags = detect_tools()
-    if not flags["sandbox"]:
-        sc["sandbox"] = False
-
-    if not flags["web"]:
-        if not os.getenv("TAVILY_API_KEY"):
-            sc["web"] = False
-
-    return sc
-
-
-# ---------------------------------------------------------------------------
-# Agent and memory helpers
-# ---------------------------------------------------------------------------
-
-
-def init_agent_from_config() -> Tuple[CoreAgent, Dict[str, Any]]:
-    """Create a CoreAgent and MemoryStore from config/settings.yaml."""
-    ensure_directories()
-    config = load_settings(CONFIG_PATH_DEFAULT)
-
-    memory_file = os.getenv(
-        "WORKER_MEMORY_FILE",
-        config.get("memory_file", "logs/sessions/default_memory.json"),
+def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
+    """Pretty print cycle summary output."""
+    role = cycle_summary.get("role", "agent")
+    domain = cycle_summary.get("domain") or "general"
+    st.markdown(
+        f"### Cycle {cycle_summary.get('cycle', 0) + 1} "
+        f"(role: {role}, domain: {domain})"
     )
-    memory_path = Path(memory_file)
-    memory_path.parent.mkdir(parents=True, exist_ok=True)
 
-    memory = MemoryStore(str(memory_path))
-    agent = CoreAgent(memory_store=memory, config=config)
-    return agent, config
+    # Metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric(
+            "delta_R",
+            cycle_summary.get("delta_R", cycle_summary.get("delta_r", 0.0)),
+        )
+    with col2:
+        st.metric(
+            "Energy E",
+            cycle_summary.get("energy_E", cycle_summary.get("energy", 0.0)),
+        )
+    with col3:
+        st.metric(
+            "RYE",
+            round(cycle_summary.get("RYE", cycle_summary.get("rye", 0.0)), 3),
+        )
 
-
-def build_goal_and_domain() -> Tuple[str, str]:
-    """
-    Decide which goal and domain to use for this worker.
-
-    Priority for GOAL:
-    1. WORKER_GOAL env
-    2. config["default_worker_goal"]
-    3. Preset default goal (longevity if available, else general reparodynamics)
-
-    Priority for DOMAIN:
-    1. WORKER_DOMAIN env
-    2. config["default_worker_domain"]
-    3. "longevity" if longevity preset exists, else "general"
-    """
-    config = load_settings(CONFIG_PATH_DEFAULT)
-
-    env_goal = os.getenv("WORKER_GOAL")
-    if env_goal:
-        goal = env_goal
-    elif isinstance(config.get("default_worker_goal"), str):
-        goal = config["default_worker_goal"]
+    # Issues
+    issues_before = cycle_summary.get("issues_before", [])
+    if issues_before:
+        st.write("Issues before repair:")
+        for issue in issues_before:
+            st.write(f"- {issue}")
     else:
-        if "longevity" in PRESETS:
-            longevity_preset = get_preset("longevity")
-            goal = longevity_preset.get(
-                "default_goal",
-                "Long run autonomous research on anti aging, longevity, and reparodynamics.",
-            )
+        st.write("No issues detected before repair.")
+
+    # Repairs
+    repairs = cycle_summary.get("repairs", [])
+    if repairs:
+        st.write("Repairs applied:")
+        for rep in repairs:
+            st.write(f"- {rep}")
+    else:
+        st.write("No repairs performed.")
+
+    # Notes
+    if cycle_summary.get("notes_added"):
+        with st.expander("Notes added"):
+            for note in cycle_summary["notes_added"]:
+                st.write(f"- {note}")
+
+    # Hypotheses
+    hypotheses = cycle_summary.get("hypotheses") or []
+    if hypotheses:
+        with st.expander("Generated hypotheses"):
+            for h in hypotheses:
+                if isinstance(h, dict):
+                    text = h.get("text", "")
+                    conf = h.get("confidence")
+                    if conf is not None:
+                        st.write(f"• {text} (confidence ~ {conf})")
+                    else:
+                        st.write(f"• {text}")
+                else:
+                    st.write(f"• {h}")
+
+    # Citations
+    if cycle_summary.get("citations"):
+        with st.expander("Citations for this cycle"):
+            for c in cycle_summary["citations"]:
+                if not isinstance(c, dict):
+                    st.write(f"- {c}")
+                    continue
+                src = c.get("source", "")
+                title = c.get("title", "")
+                url = c.get("url", "")
+                st.write(f"- [{src}] {title} - {url}")
+
+
+def build_swarm_roles(enabled: bool, swarm_size: int) -> List[Tuple[str, str]]:
+    """Return the active swarm roles (name, description) given total swarm agents.
+
+    If swarm_size <= len(SWARM_ROLES), we just take the first N base roles.
+    If swarm_size > len(SWARM_ROLES), we create multiple agents per base role
+    with role names like researcher_1, critic_2, etc.
+    """
+    if not enabled or swarm_size <= 1:
+        return []
+
+    total = max(1, min(swarm_size, MAX_SWARM_AGENTS))
+    agents: List[Tuple[str, str]] = []
+
+    for idx in range(total):
+        base_role, base_desc = SWARM_ROLES[idx % len(SWARM_ROLES)]
+        if total <= len(SWARM_ROLES):
+            role_name = base_role
+            desc = base_desc
         else:
-            general_preset = get_preset("general")
-            goal = general_preset.get(
-                "default_goal",
-                "Long run autonomous research on reparodynamics, RYE, TGRM, and related stability frameworks.",
-            )
+            # Distinguish clones of the same archetype
+            role_name = f"{base_role}_{idx + 1}"
+            desc = f"{base_desc} (agent {idx + 1}/{total})"
+        agents.append((role_name, desc))
 
-    env_domain = os.getenv("WORKER_DOMAIN")
-    if env_domain:
-        domain = env_domain
-    elif isinstance(config.get("default_worker_domain"), str):
-        domain = config["default_worker_domain"]
+    return agents
+
+
+def role_specific_goal(base_goal: str, role: str) -> str:
+    """Specialize the goal text slightly for each swarm role."""
+    base_goal = base_goal.strip()
+
+    # Strip any clone suffix like _3 so we map back to the archetype
+    archetype = role.split("_", 1)[0] if "_" in role else role
+
+    if archetype == "researcher":
+        return (
+            f"Primary deep research agent for goal: {base_goal}.\n"
+            "Focus on high quality sources, detailed notes, and clear summaries."
+        )
+    if archetype == "critic":
+        return (
+            f"Critically review, cross check, and refine all existing Reparodynamic notes and hypotheses for: {base_goal}.\n"
+            "Identify weaknesses, gaps, and overclaims."
+        )
+    if archetype == "explorer":
+        return (
+            f"Exploration agent for goal: {base_goal}.\n"
+            "Look for unusual angles, analogies, adjacent fields, and surprising connections."
+        )
+    if archetype == "theorist":
+        return (
+            f"Theory building agent for goal: {base_goal}.\n"
+            "Try to organize findings into coherent models, equations, or structured frameworks."
+        )
+    if archetype == "integrator":
+        return (
+            f"Integration agent for goal: {base_goal}.\n"
+            "Synthesize results from all prior agents into clear narratives, tables, and distilled insights."
+        )
+    # Fallback: use the original goal
+    return base_goal
+
+
+def _get_job_id(job: Any) -> str:
+    """Extract a run id or job id from RunJob or legacy dict."""
+    if hasattr(job, "run_id"):
+        return str(getattr(job, "run_id"))
+    if isinstance(job, dict):
+        return str(job.get("run_id") or job.get("job_id") or "unknown")
+    return "unknown"
+
+
+def _get_job_config(job: Any) -> Dict[str, Any]:
+    """Get config dict from RunJob or legacy dict, safe default."""
+    cfg = getattr(job, "config", None)
+    if isinstance(job, dict):
+        cfg = job.get("config", cfg)
+    if not isinstance(cfg, dict):
+        return {}
+    return cfg
+
+
+def _get_job_meta(job: Any) -> Dict[str, Any]:
+    """Get meta dict from RunJob or legacy dict, safe default."""
+    meta = getattr(job, "meta", None)
+    if isinstance(job, dict):
+        meta = job.get("meta", meta)
+    if not isinstance(meta, dict):
+        return {}
+    return meta
+
+
+def _get_job_label(job: Any) -> str:
+    """Human friendly label for a job."""
+    cfg = _get_job_config(job)
+    meta = _get_job_meta(job)
+    label = (
+        meta.get("run_label")
+        or meta.get("label")
+        or cfg.get("notes")
+        or cfg.get("goal")
+        or _get_job_id(job)
+    )
+    return str(label)
+
+
+def render_job_summary(job: Any) -> None:
+    """Compact header row for a job (queued or finished)."""
+    job_id = _get_job_id(job)
+    if hasattr(job, "status"):
+        status = getattr(job, "status", "unknown")
+        created_at_raw = getattr(job, "created_at", None)
+    elif isinstance(job, dict):
+        status = job.get("status", "unknown")
+        created_at_raw = job.get("created_at")
     else:
-        domain = "longevity" if "longevity" in PRESETS else "general"
+        status = "unknown"
+        created_at_raw = None
 
-    return goal, domain
+    config = _get_job_config(job)
+    domain = config.get("domain", "general")
+
+    if isinstance(domain, dict):
+        domain = domain.get("tag") or domain.get("name") or "general"
+
+    # Mode detection from config
+    mode = config.get("mode")
+    swarm_cfg = config.get("swarm_config") or config.get("swarm") or {}
+    if not mode:
+        if swarm_cfg.get("swarm_size", 1) and swarm_cfg.get("swarm_size", 1) > 1:
+            mode = "swarm"
+        elif config.get("multi_agent_pair"):
+            mode = "two_stage"
+        else:
+            mode = "single"
+
+    label = _get_job_label(job)
+
+    if isinstance(created_at_raw, (int, float)):
+        created_at = datetime.utcfromtimestamp(created_at_raw).isoformat() + "Z"
+    else:
+        created_at = str(created_at_raw or "unknown")
+
+    cols = st.columns([3, 2, 2, 2])
+    cols[0].markdown(f"**{label}**")
+    cols[1].markdown(f"Run: `{job_id}`")
+    cols[2].markdown(f"Status: `{status}`")
+    cols[3].markdown(f"Domain: `{str(domain).title()}`")
+
+    st.caption(f"Mode: {mode} • Created at: {created_at}")
 
 
-def _get_memory_store(agent: CoreAgent) -> Optional[MemoryStore]:
-    """Best effort accessor for the agents MemoryStore."""
-    ms = getattr(agent, "memory_store", None)
-    if isinstance(ms, MemoryStore):
-        return ms
+# -------------------------------------------------------------------
+# Run-result → cycle-history helpers (used for citation table fallback)
+# -------------------------------------------------------------------
+def _extract_cycles_from_run_result(
+    run_result: Dict[str, Any],
+    run_id: Optional[str] = None,
+    default_timestamp: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    """Normalize cycles from a finished run result into history-style entries.
+
+    This is used as a fallback when MemoryStore.get_cycle_history() is empty,
+    so the History / Citations panels can still populate directly from
+    finished run JSON files written by the engine worker.
+
+    default_timestamp:
+        A best effort timestamp for the run (for example job.created_at).
+        Used when no per cycle or run level timestamp is present.
+    """
+    if not isinstance(run_result, dict):
+        return []
+
+    payload = run_result.get("result")
+    if isinstance(payload, dict):
+        base = payload
+    else:
+        base = run_result
+
+    cfg = run_result.get("config") if isinstance(run_result.get("config"), dict) else {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+
+    goal = base.get("goal") or cfg.get("goal")
+    domain = base.get("domain") or cfg.get("domain") or "general"
+    default_role = base.get("role") or "agent"
+
+    # Normalize a usable default timestamp string up front
+    normalized_default_ts: Optional[str] = None
+    ts_candidate = base.get("timestamp") or run_result.get("timestamp") or default_timestamp
+    if isinstance(ts_candidate, (int, float)):
+        try:
+            normalized_default_ts = datetime.utcfromtimestamp(ts_candidate).isoformat() + "Z"
+        except Exception:
+            normalized_default_ts = None
+    elif isinstance(ts_candidate, str):
+        normalized_default_ts = ts_candidate
+
+    # Find the first key that looks like cycle history
+    cycles_raw: Optional[List[Dict[str, Any]]] = None
+    for key in ("cycles", "cycle_history", "history", "tgrm_history", "run_history", "per_cycle"):
+        val = base.get(key)
+        if isinstance(val, list) and val:
+            cycles_raw = [c for c in val if isinstance(c, dict)]
+            if cycles_raw:
+                break
+
+    if not cycles_raw:
+        return []
+
+    cycles_out: List[Dict[str, Any]] = []
+    for idx, c in enumerate(cycles_raw):
+        c2: Dict[str, Any] = dict(c)
+
+        # Normalize cycle number
+        if c2.get("cycle") is None and c2.get("cycle_index") is not None:
+            c2["cycle"] = c2.get("cycle_index")
+        if c2.get("cycle") is None:
+            c2["cycle"] = idx + 1
+
+        # Domain / role / goal fallbacks
+        if not c2.get("domain"):
+            c2["domain"] = domain
+        if not c2.get("role"):
+            c2["role"] = default_role
+        if goal is not None and "goal" not in c2:
+            c2["goal"] = goal
+
+        # Timestamp fallback
+        ts_val = c2.get("timestamp")
+        if ts_val is None or ts_val == "":
+            ts_val = normalized_default_ts
+        if isinstance(ts_val, (int, float)):
+            try:
+                ts_val = datetime.utcfromtimestamp(ts_val).isoformat() + "Z"
+            except Exception:
+                ts_val = None
+        if ts_val is not None:
+            c2["timestamp"] = ts_val
+
+        # Attach run id if we have it
+        if run_id is not None and "run_id" not in c2:
+            c2["run_id"] = run_id
+
+        cycles_out.append(c2)
+
+    return cycles_out
+
+
+def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
+    """Rebuild a synthetic history from finished run JSON files.
+
+    This is a fallback for History / Citations when MemoryStore has no
+    cycle history (for example when the queue mode worker only writes
+    per run result JSON and does not stream cycles into MemoryStore).
+    """
+    if list_run_jobs is not None:
+        try:
+            jobs = list_run_jobs(status="finished")
+        except TypeError:
+            try:
+                jobs = list_run_jobs()  # type: ignore[call-arg]
+            except Exception:
+                jobs = []
+        except Exception:
+            jobs = []
+    else:
+        jobs = []
+
+    if not jobs:
+        return []
+
+    # Only look at the most recent N jobs to keep things light
+    jobs_slice = jobs[-limit_runs:]
+
+    history: List[Dict[str, Any]] = []
+    for job in jobs_slice:
+        run_id = _get_job_id(job)
+
+        # Best effort created_at timestamp from the job header
+        created_at_raw = None
+        if hasattr(job, "created_at"):
+            created_at_raw = getattr(job, "created_at", None)
+        elif isinstance(job, dict):
+            created_at_raw = job.get("created_at")
+
+        default_ts = None
+        if isinstance(created_at_raw, (int, float)):
+            try:
+                default_ts = datetime.utcfromtimestamp(created_at_raw).isoformat() + "Z"
+            except Exception:
+                default_ts = None
+        elif isinstance(created_at_raw, str):
+            default_ts = created_at_raw
+
+        result = load_job_result(run_id)
+        if not isinstance(result, dict):
+            continue
+        cycles = _extract_cycles_from_run_result(result, run_id=run_id, default_timestamp=default_ts)
+        history.extend(cycles)
+
+    if not history:
+        return []
+
+    # Sort by timestamp if present then by cycle
+    def _sort_key(e: Dict[str, Any]):
+        ts = e.get("timestamp")
+        if isinstance(ts, str):
+            sort_ts = ts
+        else:
+            sort_ts = ""
+        return sort_ts, int(e.get("cycle") or 0)
+
+    history.sort(key=_sort_key)
+    return history
+
+
+def render_result_details(result: Dict[str, Any]) -> None:
+    """Safe read only result viewer for a finished job.
+
+    Handles both flat and nested schemas such as:
+    - result["summary"], result["cycles"], result["citations"]
+    - result["result"]["summary"], result["result"]["cycle_history"], etc.
+    Also attempts to surface citations and discovery candidates even when
+    they are only present inside per cycle entries.
+    """
+    # Some workers nest the payload under "result"
+    payload = result.get("result")
+    if isinstance(payload, dict):
+        base = payload
+    else:
+        base = result
+
+    st.markdown("### Run summary")
+
+    summary = (
+        base.get("summary")
+        or base.get("human_summary")
+        or base.get("run_summary")
+    )
+    if summary:
+        st.write(summary)
+    else:
+        st.info("No summary was provided by the engine.")
+
+    # Discoveries or key findings at run level
+    key_findings = (
+        base.get("key_findings")
+        or base.get("discoveries")
+        or base.get("discovery_candidates")
+    )
+    if isinstance(key_findings, list) and key_findings:
+        st.markdown("#### Key findings and discovery candidates")
+        for item in key_findings:
+            if isinstance(item, dict):
+                txt = item.get("text") or item.get("summary") or item.get("title") or str(
+                    item
+                )
+            else:
+                txt = str(item)
+            st.markdown(f"- {txt}")
+
+    # RYE metrics at run level
+    rye_metrics = (
+        base.get("rye_metrics")
+        or base.get("rye")
+        or base.get("run_rye_metrics")
+        or base.get("metrics")
+    )
+    if isinstance(rye_metrics, dict):
+        st.markdown("#### RYE metrics")
+        cols = st.columns(3)
+        avg_rye = rye_metrics.get("avg_rye") or rye_metrics.get("rye_avg")
+        if isinstance(avg_rye, (int, float)):
+            cols[0].metric("Average RYE", f"{avg_rye:.4f}")
+        trend = rye_metrics.get("trend_slope")
+        if isinstance(trend, (int, float)):
+            cols[1].metric("RYE trend slope", f"{trend:.4f}")
+        stability = rye_metrics.get("stability_index")
+        if isinstance(stability, (int, float)):
+            cols[2].metric("Stability index", f"{stability:.3f}")
+
+    # Try to normalize cycle history from various possible keys
+    cycles: Optional[List[Dict[str, Any]]] = None
+    for key in (
+        "cycles",
+        "cycle_history",
+        "history",
+        "tgrm_history",
+        "run_history",
+        "per_cycle",
+    ):
+        val = base.get(key)
+        if isinstance(val, list) and val:
+            cycles = [c for c in val if isinstance(c, dict)]
+            if cycles:
+                break
+
+    if cycles:
+        st.markdown("#### Cycle timeline")
+
+        cycle_numbers: List[Any] = []
+        delta_r_values: List[Any] = []
+        energy_values: List[Any] = []
+        rye_values: List[Any] = []
+
+        for idx, c in enumerate(cycles):
+            c_num = c.get("cycle")
+            if c_num is None:
+                c_num = c.get("cycle_index")
+            if c_num is None:
+                c_num = idx + 1
+            cycle_numbers.append(c_num)
+
+            d_val = c.get("delta_r")
+            if d_val is None:
+                d_val = c.get("delta_R")
+            delta_r_values.append(d_val)
+
+            e_val = c.get("energy")
+            if e_val is None:
+                e_val = c.get("energy_E")
+            energy_values.append(e_val)
+
+            r_val = c.get("rye")
+            if r_val is None:
+                r_val = c.get("RYE")
+            rye_values.append(r_val)
+
+        chart_data: Dict[str, List[Any]] = {"cycle": cycle_numbers}
+        if any(v is not None for v in delta_r_values):
+            chart_data["delta_R"] = delta_r_values
+        if any(v is not None for v in energy_values):
+            chart_data["energy"] = energy_values
+        if any(v is not None for v in rye_values):
+            chart_data["RYE"] = rye_values
+
+        if len(chart_data) > 1:
+            st.line_chart(chart_data)
+
+        # Detailed per cycle summaries
+        with st.expander("Per cycle details"):
+            for c in cycles:
+                render_cycle_summary(c)
+
+    # Sources and citations at run level or flattened from cycles
+    sources = (
+        base.get("sources")
+        or base.get("citations")
+        or base.get("source_list")
+    )
+
+    flattened_citations: List[Dict[str, Any]] = []
+    if not sources and cycles:
+        # Reuse the helper that flattens citations from cycle history
+        flattened_citations = extract_citations_from_history(cycles)
+        if flattened_citations:
+            sources = flattened_citations
+
+    if isinstance(sources, list) and sources:
+        st.markdown("#### Sources and citations")
+        for s in sources:
+            if not isinstance(s, dict):
+                st.markdown(f"- {s}")
+                continue
+            title = s.get("title", "Source")
+            url = s.get("url") or s.get("link")
+            snippet = s.get("snippet") or s.get("summary") or ""
+            provider = s.get("source") or s.get("provider") or ""
+            line = ""
+            if provider:
+                line += f"[{provider}] "
+            if url:
+                line += f"[{title}]({url})"
+            else:
+                line += title
+            if snippet:
+                line += f"  \n  {snippet}"
+            st.markdown(f"- {line}")
+
+    # Optional debug or diagnostics view
+    debug = (
+        base.get("debug")
+        or base.get("diagnostics")
+        or result.get("debug")
+        or result.get("diagnostics")
+    )
+    if debug:
+        with st.expander("Diagnostics and debug"):
+            st.json(debug)
+
+
+# -------------------------------------------------------------------
+# Outcome focused summary helper
+# -------------------------------------------------------------------
+def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
+    """Create a markdown summary focused on outcomes and run time."""
+    if not history:
+        return "# Outcome summary\n\nNo cycles have been recorded yet."
+
+    total_cycles = len(history)
+    roles = sorted({str(e.get("role", "agent")) for e in history})
+    domains = sorted({str(e.get("domain", "general")) for e in history})
+
+    # Parse timestamps if possible
+    timestamps: List[datetime] = []
+    for e in history:
+        ts = e.get("timestamp")
+        if isinstance(ts, str):
+            try:
+                timestamps.append(datetime.fromisoformat(ts))
+            except Exception:
+                continue
+
+    runtime_text = "Runtime not available"
+    if len(timestamps) >= 2:
+        start = min(timestamps)
+        end = max(timestamps)
+        delta = end - start
+        total_seconds = int(delta.total_seconds())
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        runtime_text = f"Approx runtime: {hours} hours {minutes} minutes (from first to last cycle)."
+
+    # RYE stats
+    rye_vals: List[float] = []
+    for e in history:
+        v = e.get("RYE")
+        if isinstance(v, (int, float)):
+            rye_vals.append(float(v))
+    rye_text = "RYE statistics not available."
+    if rye_vals:
+        avg_rye = sum(rye_vals) / len(rye_vals)
+        rye_text = (
+            f"RYE statistics:\n"
+            f"- Min RYE: {min(rye_vals):.3f}\n"
+            f"- Max RYE: {max(rye_vals):.3f}\n"
+            f"- Average RYE: {avg_rye:.3f}"
+        )
+
+    # Collect candidate findings from notes, repairs, and hypotheses
+    findings: List[str] = []
+    for e in history:
+        for n in (e.get("notes_added") or []):
+            findings.append(str(n))
+        for r in e.get("repairs") or []:
+            findings.append(str(r))
+        for h in e.get("hypotheses") or []:
+            if isinstance(h, dict):
+                txt = h.get("text", "")
+            else:
+                txt = str(h)
+            if txt:
+                findings.append(txt)
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique_findings: List[str] = []
+    for f in findings:
+        f_clean = f.strip()
+        if not f_clean:
+            continue
+        if f_clean in seen:
+            continue
+        seen.add(f_clean)
+        unique_findings.append(f_clean)
+        if len(unique_findings) >= 80:
+            break
+
+    lines: List[str] = []
+    lines.append("# Outcome summary\n")
+    lines.append("## Run overview\n")
+    lines.append(f"- Total cycles: {total_cycles}")
+    lines.append(f"- Roles used: {', '.join(roles) if roles else 'None recorded'}")
+    lines.append(f"- Domains used: {', '.join(domains) if domains else 'None recorded'}")
+    lines.append(f"- {runtime_text}\n")
+    lines.append("## RYE and efficiency\n")
+    lines.append(rye_text + "\n")
+    lines.append("## Candidate findings\n")
+    if not unique_findings:
+        lines.append("No candidate findings extracted from notes, repairs, or hypotheses.")
+    else:
+        lines.append(
+            "Below are candidate interventions, mechanisms, treatments, or key ideas extracted "
+            "from notes, repairs, and hypotheses. This is a raw list to review, not medical advice."
+        )
+        for f in unique_findings:
+            if len(f) > 400:
+                f = f[:400] + "..."
+            lines.append(f"- {f}")
+
+    return "\n".join(lines)
+
+
+# Helper used by learning speed panels and Option C report
+def compute_run_hours(history: List[Dict[str, Any]]) -> Optional[float]:
+    """Approximate total hours between first and last cycle timestamps."""
+    timestamps: List[datetime] = []
+    for e in history:
+        ts = e.get("timestamp")
+        if isinstance(ts, str):
+            try:
+                timestamps.append(datetime.fromisoformat(ts))
+            except Exception:
+                continue
+    if len(timestamps) < 2:
+        return None
+    start = min(timestamps)
+    end = max(timestamps)
+    delta = end - start
+    return max(delta.total_seconds() / 3600.0, 0.0)
+
+
+def compute_msil_profile(
+    history: List[Dict[str, Any]],
+    goal: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Call optional MSIL layer if available to compute meta skill intelligence profile.
+
+    This is wired to the msil.analyze_run helper when present, and falls back
+    to constructing an internal MetaSkillIntelligenceLayer using the
+    msil._HistoryBackedMemoryStore wrapper if needed.
+    """
+    if not history or _msil_module is None:
+        return None
+
+    if goal is None:
+        goal = str(history[-1].get("goal") or "unknown_goal")
+
+    try:
+        # Preferred simple function style (matches msil.analyze_run signature)
+        analyze_run = getattr(_msil_module, "analyze_run", None)
+        if callable(analyze_run):
+            return analyze_run(history=history, goal=goal, config=None)
+
+        # Class based API fallback using msil._HistoryBackedMemoryStore
+        layer_cls = getattr(_msil_module, "MetaSkillIntelligenceLayer", None)
+        store_cls = getattr(_msil_module, "_HistoryBackedMemoryStore", None)
+        if layer_cls is not None and store_cls is not None:
+            store = store_cls(history)  # type: ignore[call-arg]
+            layer = layer_cls(memory_store=store, config={})  # type: ignore[call-arg]
+            return layer.summarise_run(goal=goal, run_id=None, limit=len(history))  # type: ignore[call-arg]
+    except Exception:
+        return None
+
     return None
 
 
-def _current_run_id(mode: str) -> str:
-    """
-    Construct a stable run id for this worker process.
-
-    Priority:
-        1) WORKER_RUN_ID env
-        2) derived from mode and pid
-    """
-    base = os.getenv("WORKER_RUN_ID")
-    if base:
-        return base
-    return f"{mode}-{os.getpid()}"
-
-
-def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> None:
-    """
-    Best effort heartbeat into the MemoryStore so the UI can see that the
-    worker is alive. Silently ignored if heartbeat is not implemented.
-    """
-    try:
-        ms = _get_memory_store(agent)
-        if ms is not None and hasattr(ms, "heartbeat"):
-            if run_id is not None:
-                ms.heartbeat(label=label, run_id=run_id)
-            else:
-                ms.heartbeat(label=label)
-    except Exception:
-        return
-
-
-def _safe_agent_hook(agent: CoreAgent, hook_name: str, **kwargs: Any) -> Optional[Any]:
-    """
-    Best effort call into optional intelligence hooks on CoreAgent.
-
-    This allows us to integrate learning, discovery, and verification hooks
-    without requiring them to exist or changing CoreAgent's contract.
-    """
-    fn = getattr(agent, hook_name, None)
-    if not callable(fn):
+# -------------------------------------------------------------------
+# Advanced log and snapshot helpers
+# -------------------------------------------------------------------
+def _load_json_file(path: Path) -> Optional[Any]:
+    """Small helper to load a JSON file and return the decoded data."""
+    if not path.exists():
         return None
     try:
-        return fn(**kwargs)
+        with path.open("r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
         return None
 
 
-def _build_experiment_fingerprint(
-    *,
-    goal: str,
-    domain: str,
-    mode: str,
-    runtime_profile: Optional[str],
-    source_controls: Dict[str, bool],
-    roles: Optional[Sequence[str]] = None,
-    env_keys: Optional[Sequence[str]] = None,
-) -> str:
-    """
-    Build a reproducibility fingerprint for this run configuration.
-
-    This does not change behavior, it just records a hash of configuration
-    so long runs can be compared or replicated later.
-    """
-    payload: Dict[str, Any] = {
-        "goal": goal,
-        "domain": domain,
-        "mode": mode,
-        "runtime_profile": runtime_profile,
-        "source_controls": dict(sorted(source_controls.items())),
-    }
-    if roles is not None:
-        payload["roles"] = sorted(list(roles))
-
-    env_sample: Dict[str, str] = {}
-    if env_keys is not None:
-        for name in env_keys:
-            val = os.getenv(name)
-            if val is not None:
-                env_sample[name] = val
-    if env_sample:
-        payload["env"] = env_sample
-
-    try:
-        data = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
-        return hashlib.sha256(data).hexdigest()
-    except Exception:
-        return "unknown"
-
-
-def _log_run_manifest(
-    agent: CoreAgent,
-    run_id: str,
-    *,
-    mode: str,
-    domain: str,
-    goal: str,
-    runtime_profile: Optional[str],
-    stop_rye: Optional[float],
-    max_minutes: Optional[float],
-    summaries: List[Dict[str, Any]],
-    extra: Optional[Dict[str, Any]] = None,
-) -> None:
-    """
-    Best effort manifest logging into MemoryStore using the new run_manifests section.
-    """
-    ms = _get_memory_store(agent)
-    if ms is None or not hasattr(ms, "log_run_manifest"):
-        return
-
-    try:
-        diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
-    except Exception:
-        diag = {}
-
-    manifest: Dict[str, Any] = {
-        "run_id": run_id,
-        "mode": mode,
-        "domain": domain,
-        "goal": goal,
-        "runtime_profile": runtime_profile,
-        "stop_rye": stop_rye,
-        "max_minutes": max_minutes,
-        "total_items": len(summaries),
-        "rye_avg": diag.get("rye_avg"),
-        "rye_median": diag.get("rye_median"),
-        "rye_last": diag.get("rye_last"),
-        "stability_index": diag.get("stability_index"),
-        "recovery_momentum": diag.get("recovery_momentum"),
-    }
-    if extra:
-        manifest["extra"] = extra
-
-    try:
-        ms.log_run_manifest(run_id, manifest)
-    except Exception:
-        return
-
-
-def _log_milestone(
-    agent: CoreAgent,
-    *,
-    run_id: str,
-    goal: str,
-    domain: str,
-    label: str,
-    description: str,
-    level: str = "info",
-    role: Optional[str] = None,
-    cycle_index: Optional[int] = None,
-    extra: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Best effort helper to write milestones for long runs and meta segments."""
-    ms = _get_memory_store(agent)
-    if ms is None or not hasattr(ms, "log_milestone"):
-        return
-    try:
-        ms.log_milestone(
-            run_id=run_id,
-            goal=goal,
-            domain=domain,
-            label=label,
-            description=description,
-            level=level,
-            role=role,
-            cycle_index=cycle_index,
-            extra=extra,
-        )
-    except Exception:
-        return
-
-
-def _update_worker_state(
-    agent: CoreAgent,
-    *,
-    status: str,
-    mode: str,
-    goal: str,
-    domain: str,
-    roles: Optional[List[str]] = None,
-    runtime_profile: Optional[str] = None,
-    stop_rye: Optional[float] = None,
-    max_minutes: Optional[float] = None,
-    run_id: Optional[str] = None,
-    experiment_mode: Optional[str] = None,
-    extra: Optional[Dict[str, Any]] = None,
-) -> None:
-    """Thin wrapper around MemoryStore.update_worker_state."""
-    ms = _get_memory_store(agent)
-    if ms is None or not hasattr(ms, "update_worker_state"):
-        return
-    try:
-        ms.update_worker_state(
-            status=status,
-            mode=mode,
-            goal=goal,
-            domain=domain,
-            roles=roles,
-            runtime_profile=runtime_profile,
-            stop_rye=stop_rye,
-            max_minutes=max_minutes,
-            run_id=run_id,
-            experiment_mode=experiment_mode,
-            extra=extra,
-        )
-    except Exception:
-        return
-
-
-def _write_cycles_and_run_state(
-    agent: CoreAgent,
-    *,
-    run_id: str,
-    mode: str,
-    goal: str,
-    domain: str,
-    cycles: List[Dict[str, Any]],
-    diagnostics: Optional[Dict[str, Any]] = None,
-) -> None:
-    """
-    Best effort helper so diagnostics and reports see:
-      - cycle history
-      - run_state snapshot
-    This writes once at run end using the full cycle list.
-    """
-    ms = _get_memory_store(agent)
-    if ms is None:
-        return
-
-    diag_local = diagnostics or {}
-
-    # Cycle history
-    try:
-        if hasattr(ms, "write_cycle_history"):
-            # Preferred: single call with full history
-            ms.write_cycle_history(run_id, cycles)  # type: ignore[arg-type]
-        elif hasattr(ms, "append_cycle_log"):
-            # Fallback: append one by one
-            for idx, c in enumerate(cycles):
-                try:
-                    ms.append_cycle_log(run_id, c, index=idx)  # type: ignore[arg-type]
-                except TypeError:
-                    ms.append_cycle_log(run_id, c)  # type: ignore[arg-type]
-        elif hasattr(ms, "append_cycle_history"):
-            for idx, c in enumerate(cycles):
-                try:
-                    ms.append_cycle_history(run_id, c, index=idx)  # type: ignore[arg-type]
-                except TypeError:
-                    ms.append_cycle_history(run_id, c)  # type: ignore[arg-type]
-    except Exception:
-        # Never break the worker from logging issues
-        pass
-
-    # Run state
-    try:
-        if hasattr(ms, "save_run_state"):
-            state: Dict[str, Any] = {
-                "run_id": run_id,
-                "mode": mode,
-                "goal": goal,
-                "domain": domain,
-                "total_cycles": len(cycles),
-                "diagnostics": diag_local,
-                "last_update_utc": datetime.utcnow().isoformat() + "Z",
-            }
-            try:
-                ms.save_run_state(run_id, state)  # type: ignore[arg-type]
-            except TypeError:
-                ms.save_run_state(run_id=run_id, state=state)  # type: ignore[arg-type]
-    except Exception:
-        pass
-
-
-def _run_post_run_intelligence(
-    agent: CoreAgent,
-    *,
-    mode: str,
-    goal: str,
-    domain: str,
-    run_id: str,
-    history: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """
-    Optional learning, discovery, and verification pass after a run.
-
-    This function is strictly additive:
-    - It never changes run control flow.
-    - It only calls hooks if they exist on CoreAgent.
-    - It logs a milestone summarizing any returned intelligence.
-    """
-    info: Dict[str, Any] = {}
-    hooks = [
-        ("learn_from_run", "learning"),
-        ("run_discovery_pass", "discovery"),
-        ("run_verification_pass", "verification"),
+def load_discovery_log() -> List[Dict[str, Any]]:
+    """Try to load discovery log entries from standard locations."""
+    candidates = [
+        Path("logs/discovery_log.json"),
+        Path("logs/discovery/discovery_log.json"),
+        Path("logs/discovery/discoveries.json"),
     ]
-
-    for hook_name, label in hooks:
-        result = _safe_agent_hook(
-            agent,
-            hook_name,
-            history=history,
-            mode=mode,
-            goal=goal,
-            domain=domain,
-            run_id=run_id,
-        )
-        if result is not None:
-            info[label] = result
-
-    if info:
+    for p in candidates:
+        data = _load_json_file(p)
+        if isinstance(data, list):
+            return [d for d in data if isinstance(d, dict)]
+    # If discovery module exposes a helper, use it
+    if _discovery_module is not None:
         try:
-            _log_milestone(
-                agent,
-                run_id=run_id,
-                goal=goal,
-                domain=domain,
-                label="post_run_intelligence",
-                description="Post run learning, discovery, and verification hooks executed.",
-                level="info",
-                extra={"intelligence": info},
-            )
+            func = getattr(_discovery_module, "load_discovery_log", None)
+            if callable(func):
+                data = func()
+                if isinstance(data, list):
+                    return [d for d in data if isinstance(d, dict)]
         except Exception:
             pass
-
-    return info
-
-
-# ---------------------------------------------------------------------------
-# Result normalization helpers for UI
-# ---------------------------------------------------------------------------
+    return []
 
 
-def _normalize_cycles_for_ui(cycles_list: List[Any]) -> List[Dict[str, Any]]:
-    """
-    Normalize a list of cycle or round summaries so the UI always sees:
-        - index and cycle_index
-        - citations, discoveries, sources as lists
-    """
-    normalized: List[Dict[str, Any]] = []
-    for i, entry in enumerate(cycles_list):
-        if isinstance(entry, dict):
-            c = dict(entry)
-        else:
-            c = {"raw": entry}
-        c.setdefault("index", i + 1)
-        c.setdefault("cycle_index", i)
-        c.setdefault("citations", [])
-        c.setdefault("discoveries", [])
-        c.setdefault("sources", [])
-        normalized.append(c)
-    return normalized
-
-
-def _aggregate_from_cycles(
-    cycles: List[Dict[str, Any]],
-    key: str,
-) -> List[Any]:
-    """
-    Aggregate a list field from cycles, for example citations or discoveries.
-    """
-    out: List[Any] = []
-    for c in cycles:
-        val = c.get(key)
-        if isinstance(val, list):
-            out.extend(val)
-    return out
-
-
-def _attach_top_level_defaults(
-    result_obj: Dict[str, Any],
-    cycles: List[Dict[str, Any]],
-    diagnostics: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
-    """
-    Make sure the top level result always exposes:
-        cycles, summaries, citations, discoveries, sources, rye_metrics.
-    """
-    result_obj.setdefault("cycles", cycles)
-    result_obj.setdefault("summaries", cycles)
-
-    citations = result_obj.get("citations")
-    if not isinstance(citations, list):
-        citations = _aggregate_from_cycles(cycles, "citations")
-    discoveries = result_obj.get("discoveries")
-    if not isinstance(discoveries, list):
-        discoveries = _aggregate_from_cycles(cycles, "discoveries")
-    sources = result_obj.get("sources")
-    if not isinstance(sources, list):
-        sources = _aggregate_from_cycles(cycles, "sources")
-
-    result_obj["citations"] = citations
-    result_obj["discoveries"] = discoveries
-    result_obj["sources"] = sources
-
-    if diagnostics is None:
-        diagnostics = {}
-    result_obj.setdefault("diagnostics", diagnostics)
-    result_obj.setdefault("rye_metrics", diagnostics)
-
-    return result_obj
-
-
-# ---------------------------------------------------------------------------
-# Direct single-job API for engine_worker_queue.py / tests
-# ---------------------------------------------------------------------------
-
-
-def run_engine_job(job: Any) -> Dict[str, Any]:
-    """
-    Execute a single engine job and return a result dict.
-
-    This is a pure "one-shot" API:
-      - It does NOT use the file-based queue helpers.
-      - It does NOT write result JSON to disk.
-      - It returns a structured result that Streamlit / queue wrappers can save.
-
-    `job` may be:
-      - A dict with keys: "run_id", "config", optional "meta"
-      - An object with .run_id, .config, optional .meta attributes (e.g. RunJob)
-    """
-    _configure_tavily_from_env()
-    agent, base_config = init_agent_from_config()
-
-    # Normalize job payload
-    if isinstance(job, dict):
-        cfg: Dict[str, Any] = dict(job.get("config") or {})
-        run_id = str(job.get("run_id") or cfg.get("run_id") or f"job-{int(time.time())}")
-        job_meta = job.get("meta")
-    else:
-        cfg = dict(getattr(job, "config", {}) or {})
-        run_id = str(getattr(job, "run_id", f"job-{int(time.time())}"))
-        job_meta = getattr(job, "meta", None)
-
-    base_goal, base_domain = build_goal_and_domain()
-
-    goal = str(cfg.get("goal", base_goal))
-    domain = str(cfg.get("domain", base_domain))
-
-    preset_cfg = get_preset(domain)
-    runtime_profile = cfg.get(
-        "runtime_profile",
-        preset_cfg.get("default_runtime_profile"),
-    )
-
-    mode = str(cfg.get("mode", cfg.get("engine_mode", "single"))).lower()
-    role = str(cfg.get("role", "agent"))
-    roles_list: Optional[List[str]] = None
-    if mode == "swarm":
-        raw_roles = cfg.get("roles")
-        if isinstance(raw_roles, (list, tuple)):
-            roles_list = [str(r) for r in raw_roles]
-        else:
-            try:
-                roles_list = agent.get_agent_roles()
-            except Exception:
-                roles_list = ["agent"]
-
-    # ------------------------------------------------------------------
-    # Safe extraction of cycles / rounds (never int(None))
-    # ------------------------------------------------------------------
-    max_cycles_explicit = (
-        ("max_cycles" in cfg and cfg.get("max_cycles") is not None)
-        or ("cycles" in cfg and cfg.get("cycles") is not None)
-    )
-    max_rounds_explicit = (
-        ("max_rounds" in cfg and cfg.get("max_rounds") is not None)
-        or ("rounds" in cfg and cfg.get("rounds") is not None)
-    )
-
-    raw_cycles = cfg.get("max_cycles")
-    if raw_cycles is None:
-        raw_cycles = cfg.get("cycles")
-    if raw_cycles is None:
-        raw_cycles = HARD_MAX_CYCLES
-    try:
-        requested_cycles = int(raw_cycles)
-    except Exception:
-        requested_cycles = HARD_MAX_CYCLES
-
-    raw_rounds = cfg.get("max_rounds")
-    if raw_rounds is None:
-        raw_rounds = cfg.get("rounds")
-    if raw_rounds is None:
-        raw_rounds = requested_cycles
-    try:
-        requested_rounds = int(raw_rounds)
-    except Exception:
-        requested_rounds = requested_cycles
-
-    max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "max_cycles")
-    max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
-
-    raw_max_minutes = cfg.get("max_minutes")
-    if (mode == "single" and max_cycles_explicit) or (mode == "swarm" and max_rounds_explicit):
-        max_minutes: Optional[float] = None
-    else:
-        if raw_max_minutes is not None:
-            try:
-                max_minutes = float(raw_max_minutes)
-            except Exception:
-                max_minutes = None
-        else:
-            max_minutes = None
-
-    max_minutes = _clamp_minutes(max_minutes, "job.max_minutes")
-
-    stop_rye = cfg.get("stop_rye")
-    if stop_rye is not None:
-        try:
-            stop_rye = float(stop_rye)
-        except Exception:
-            stop_rye = None
-
-    resume = bool(cfg.get("resume", True))
-    watchdog_minutes = float(cfg.get("watchdog_minutes", 5.0))
-
-    cfg_for_sources = dict(base_config)
-    if "default_source_controls" not in cfg_for_sources:
-        sc_preset = preset_cfg.get("source_controls")
-        if isinstance(sc_preset, dict):
-            cfg_for_sources["default_source_controls"] = sc_preset
-
-    source_controls = _build_source_controls(cfg_for_sources)
-    if isinstance(cfg.get("source_controls"), dict):
-        override_sc = cfg["source_controls"]
-        for k, v in override_sc.items():
-            source_controls[str(k)] = bool(v)
-
-    tool_flags = detect_tools()
-
-    env_keys_for_fingerprint = [
-        "WORKER_QUEUE_MODE",
-        "WORKER_DOMAIN",
-        "WORKER_GOAL",
+def load_snapshots() -> List[Dict[str, Any]]:
+    """Load snapshot JSON files as a list of {name, timestamp, data}."""
+    snapshot_dir_candidates = [
+        Path("logs/snapshots"),
+        Path("logs/snapshot"),
     ]
-    experiment_fingerprint = _build_experiment_fingerprint(
-        goal=goal,
-        domain=domain,
-        mode=f"direct_{mode}",
-        runtime_profile=runtime_profile,
-        source_controls=source_controls,
-        roles=roles_list if mode == "swarm" else [role],
-        env_keys=env_keys_for_fingerprint,
-    )
-
-    print("")
-    print("=== Direct engine job ===")
-    print(f"Run id: {run_id}")
-    print(f"Mode: {mode}")
-    print(f"Goal: {goal}")
-    print(f"Domain: {domain}")
-    print(f"Role (single): {role}")
-    print(f"Roles (swarm): {roles_list if roles_list is not None else 'auto'}")
-    print(f"Max cycles (single, clamped): {max_cycles} (explicit: {max_cycles_explicit})")
-    print(f"Max rounds (swarm, clamped): {max_rounds} (explicit: {max_rounds_explicit})")
-    print(
-        "Max minutes guard (clamped): "
-        f"{max_minutes if max_minutes is not None else 'None (cycles/rounds driven)'}"
-    )
-    print(f"Stop RYE: {stop_rye if stop_rye is not None else 'None'}")
-    print(f"Runtime profile: {runtime_profile or 'None'}")
-    print(f"Resume: {resume}")
-    print(f"Watchdog minutes: {watchdog_minutes}")
-    print(f"Source controls: {source_controls}")
-    print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
-    print(f"Experiment fingerprint: {experiment_fingerprint}")
-    sys.stdout.flush()
-
-    _update_worker_state(
-        agent,
-        status="running_job",
-        mode=mode,
-        goal=goal,
-        domain=domain,
-        roles=roles_list if mode == "swarm" else [role],
-        runtime_profile=runtime_profile,
-        stop_rye=stop_rye,
-        max_minutes=max_minutes,
-        run_id=run_id,
-        experiment_mode="direct_job",
-        extra={
-            "experiment_fingerprint": experiment_fingerprint,
-            "job_meta": job_meta,
-            "job_config": cfg,
-        },
-    )
-    _heartbeat(agent, label="direct_job_start", run_id=run_id)
-
-    summaries: List[Dict[str, Any]] = []
-
-    try:
-        if mode == "swarm":
-            if roles_list is None:
-                try:
-                    roles_list = agent.get_agent_roles()
-                except Exception:
-                    roles_list = ["agent"]
-
-            summaries = agent.run_swarm_continuous(
-                goal=goal,
-                max_rounds=max_rounds,
-                stop_rye=stop_rye,
-                roles=roles_list,
-                source_controls=source_controls,
-                pdf_bytes=None,
-                biomarker_snapshot=None,
-                domain=domain,
-                max_minutes=max_minutes,
-                forever=False,
-                resume_from_checkpoint=resume,
-                watchdog_interval_minutes=watchdog_minutes,
-                runtime_profile=runtime_profile,
+    snapshots: List[Dict[str, Any]] = []
+    for base in snapshot_dir_candidates:
+        if not base.exists() or not base.is_dir():
+            continue
+        for path in sorted(base.glob("*.json")):
+            data = _load_json_file(path)
+            if not isinstance(data, dict):
+                continue
+            ts_val = data.get("timestamp") or data.get("timestamp_utc") or data.get("created_at")
+            try:
+                if isinstance(ts_val, str):
+                    ts = datetime.fromisoformat(ts_val)
+                else:
+                    ts = None
+            except Exception:
+                ts = None
+            snapshots.append(
+                {
+                    "name": path.name,
+                    "path": str(path),
+                    "timestamp": ts,
+                    "raw_timestamp": ts_val,
+                    "data": data,
+                }
             )
-        else:
-            summaries = agent.run_continuous(
-                goal=goal,
-                max_cycles=max_cycles,
-                stop_rye=stop_rye,
-                role=role,
-                source_controls=source_controls,
-                pdf_bytes=None,
-                biomarker_snapshot=None,
-                domain=domain,
-                max_minutes=max_minutes,
-                forever=False,
-                resume_from_checkpoint=resume,
-                watchdog_interval_minutes=watchdog_minutes,
-                runtime_profile=runtime_profile,
+    # Sort by timestamp if available
+    snapshots.sort(key=lambda s: s["timestamp"] or datetime.min)
+    return snapshots
+
+
+def extract_hypotheses_from_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten hypotheses across all cycles into a list with cycle info."""
+    results: List[Dict[str, Any]] = []
+    for entry in history:
+        cycle_idx = entry.get("cycle")
+        role = entry.get("role", "agent")
+        domain = entry.get("domain", "general")
+        ts = entry.get("timestamp")
+        hyps = entry.get("hypotheses") or []
+        for h in hyps:
+            if isinstance(h, dict):
+                text = h.get("text", "")
+                conf = h.get("confidence")
+            else:
+                text = str(h)
+                conf = None
+            if not text:
+                continue
+            results.append(
+                {
+                    "cycle": cycle_idx,
+                    "role": role,
+                    "domain": domain,
+                    "timestamp": ts,
+                    "text": text,
+                    "confidence": conf,
+                }
             )
+    return results
 
-        _heartbeat(agent, label="direct_job_finished", run_id=run_id)
 
-        print(f"=== Direct job {run_id} finished cleanly ===")
-        print(f"Total summaries: {len(summaries)}")
+def extract_citations_from_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten citations across all cycles into a list with cycle info for the citation viewer."""
+    results: List[Dict[str, Any]] = []
+    for entry in history:
+        cycle_idx = entry.get("cycle")
+        role = entry.get("role", "agent")
+        domain = entry.get("domain", "general")
+        ts = entry.get("timestamp")
+        cites = entry.get("citations") or []
+        for c in cites:
+            if not isinstance(c, dict):
+                continue
+            source = c.get("source") or c.get("provider") or ""
+            title = c.get("title") or ""
+            url = c.get("url") or c.get("link") or ""
+            snippet = c.get("snippet") or c.get("summary") or ""
+            results.append(
+                {
+                    "cycle": cycle_idx,
+                    "role": role,
+                    "domain": domain,
+                    "timestamp": ts,
+                    "source": source,
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet,
+                }
+            )
+    return results
 
-        diag: Dict[str, Any] = {}
+
+def load_verification_log() -> List[Dict[str, Any]]:
+    """Try to load verification log entries from standard locations."""
+    candidates = [
+        Path("logs/verification_log.json"),
+        Path("logs/verification/verification_log.json"),
+        Path("logs/verification/results.json"),
+    ]
+    for p in candidates:
+        data = _load_json_file(p)
+        if isinstance(data, list):
+            return [d for d in data if isinstance(d, dict)]
+    if _verification_module is not None:
         try:
-            diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
-            print(f"RYE avg: {diag.get('rye_avg')}")
-            print(f"RYE median: {diag.get('rye_median')}")
-            print(f"RYE last: {diag.get('rye_last')}")
-            print(f"Stability index: {diag.get('stability_index')}")
-            print(f"Recovery momentum: {diag.get('recovery_momentum')}")
+            func = getattr(_verification_module, "load_verification_log", None)
+            if callable(func):
+                data = func()
+                if isinstance(data, list):
+                    return [d for d in data if isinstance(d, dict)]
         except Exception:
-            print("Diagnostics computation failed for direct job, see logs for details.")
+            pass
+    return []
 
-        # Normalize cycles for UI and diagnostics
-        normalized_cycles: List[Dict[str, Any]] = _normalize_cycles_for_ui(summaries)
 
-        # Write cycle history and run_state snapshots for diagnostics panel
-        _write_cycles_and_run_state(
-            agent,
-            run_id=run_id,
-            mode=mode,
-            goal=goal,
-            domain=domain,
-            cycles=normalized_cycles,
-            diagnostics=diag,
-        )
+def equilibrium_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Optional[float]]:
+    """Extract equilibrium related metrics from a snapshot if present."""
+    metrics = snapshot.get("metrics") or snapshot.get("rye_metrics") or {}
+    if not isinstance(metrics, dict):
+        metrics = {}
+    return {
+        "rye_avg": metrics.get("rye_avg"),
+        "stability_index": metrics.get("stability_index"),
+        "coherence_plateau": metrics.get("coherence_plateau"),
+        "equilibrium_fraction": metrics.get("equilibrium_fraction"),
+    }
 
-        intelligence_info = _run_post_run_intelligence(
-            agent,
-            mode=mode,
-            goal=goal,
-            domain=domain,
-            run_id=run_id,
-            history=normalized_cycles,
-        )
 
-        # Build a simple overall summary string if possible
-        overall_summary: Optional[str] = None
-        for c in normalized_cycles:
-            for key in ("summary", "brief", "title", "description"):
-                val = c.get(key)
-                if isinstance(val, str) and val.strip():
-                    overall_summary = val.strip()
+def _safe_gv_id(prefix: str, raw: str) -> str:
+    """Sanitize Graphviz node id to avoid spaces and punctuation issues."""
+    clean = re.sub(r"[^a-zA-Z0-9_]", "_", raw)
+    if not clean:
+        clean = "node"
+    return f"{prefix}{clean}"
+
+
+def _clean_label_text(text: str, max_len: int = 60) -> str:
+    """Clean label text for Graphviz: strip quotes, newlines, and compress spaces."""
+    text = str(text)
+    text = text.replace('"', "'").replace("\n", " ").replace("\r", " ")
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > max_len:
+        text = text[:max_len] + "..."
+    return text
+
+
+def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[str, Any]]) -> str:
+    """Build a Graphviz DOT string linking goals, roles, hypotheses, and discoveries."""
+    nodes: List[str] = []
+    edges: List[str] = []
+
+    # Single root node for the run
+    nodes.append('run [label="Run", shape=box, style=filled, fillcolor="#eeeeee"]')
+
+    # Domains
+    domains = sorted({str(e.get("domain", "general")) for e in history})
+    domain_ids: Dict[str, str] = {}
+    for d in domains:
+        safe_d_label = _clean_label_text(f"Domain: {d}")
+        node_id = _safe_gv_id("domain_", d)
+        domain_ids[d] = node_id
+        nodes.append(f'{node_id} [label="{safe_d_label}", shape=box]')
+        edges.append(f"run -> {node_id}")
+
+    # Roles
+    roles = sorted({str(e.get("role", "agent")) for e in history})
+    role_ids: Dict[str, str] = {}
+    for r in roles:
+        safe_r_label = _clean_label_text(f"Role: {r}")
+        node_id = _safe_gv_id("role_", r)
+        role_ids[r] = node_id
+        nodes.append(f'{node_id} [label="{safe_r_label}", shape=ellipse]')
+        edges.append(f"run -> {node_id}")
+
+    # Hypotheses, take top 8 by confidence if available
+    hyps = extract_hypotheses_from_history(history)
+    if hyps:
+        scored = []
+        for h in hyps:
+            conf = h.get("confidence")
+            if isinstance(conf, (int, float)):
+                score = float(conf)
+            else:
+                score = 0.0
+            scored.append((score, h))
+        scored.sort(key=lambda x: x[0], reverse=True)
+    else:
+        scored = []
+    top_hyps = [h for _, h in scored[:8]]
+
+    for idx, h in enumerate(top_hyps):
+        label_text = _clean_label_text(h["text"])
+        hyp_id = f"hyp_{idx}"
+        nodes.append(f'{hyp_id} [label="H: {label_text}", shape=note]')
+        d = str(h.get("domain", "general"))
+        r = str(h.get("role", "agent"))
+        d_id = domain_ids.get(d, _safe_gv_id("domain_", d))
+        r_id = role_ids.get(r, _safe_gv_id("role_", r))
+        if d_id not in domain_ids.values():
+            safe_d2_label = _clean_label_text(f"Domain: {d}")
+            nodes.append(f'{d_id} [label="{safe_d2_label}", shape=box]')
+        if r_id not in role_ids.values():
+            safe_r2_label = _clean_label_text(f"Role: {r}")
+            nodes.append(f'{r_id} [label="{safe_r2_label}", shape=ellipse]')
+        edges.append(f"{d_id} -> {hyp_id}")
+        edges.append(f"{r_id} -> {hyp_id}")
+
+    # Discoveries, top 8 by rye_gain if present
+    top_disc: List[Dict[str, Any]] = []
+    if discoveries:
+        scored_disc = []
+        for d in discoveries:
+            gain = d.get("rye_gain") or d.get("delta_rye") or 0.0
+            try:
+                gain_f = float(gain)
+            except Exception:
+                gain_f = 0.0
+            scored_disc.append((gain_f, d))
+        scored_disc.sort(key=lambda x: x[0], reverse=True)
+        top_disc = [d for _, d in scored_disc[:8]]
+
+    for idx, d in enumerate(top_disc):
+        label_src = d.get("title") or d.get("summary") or d.get("id") or f"Discovery {idx + 1}"
+        label_text = _clean_label_text(label_src)
+        disc_id = f"disc_{idx}"
+        nodes.append(f'{disc_id} [label="D: {label_text}", shape=diamond]')
+        edges.append(f"run -> {disc_id}")
+
+    dot_lines = ["digraph G {", "rankdir=LR;", 'node [fontname="Helvetica"];']
+    dot_lines.extend(nodes)
+    dot_lines.extend(edges)
+    dot_lines.append("}")
+    return "\n".join(dot_lines)
+
+
+def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[Dict[str, Any]]) -> str:
+    """Build a markdown style breakthrough snapshot report from history and discovery log."""
+    lines: List[str] = []
+    lines.append("# Breakthrough snapshot report\n")
+
+    if not history and not discoveries:
+        lines.append("No cycles or discoveries recorded yet.")
+        return "\n".join(lines)
+
+    lines.append(
+        "This report highlights candidate breakthroughs based on high RYE, strong delta_R, "
+        "and discovery log entries. It is an autonomous research artifact, not medical advice.\n"
+    )
+
+    # Top cycles by RYE
+    scored_cycles: List[Tuple[float, Dict[str, Any]]] = []
+    for e in history:
+        rye_val = e.get("RYE")
+        d_r = e.get("delta_R")
+        if isinstance(rye_val, (int, float)):
+            score = float(rye_val)
+        elif isinstance(d_r, (int, float)):
+            score = float(d_r)
+        else:
+            continue
+        scored_cycles.append((score, e))
+
+    scored_cycles.sort(key=lambda x: x[0], reverse=True)
+    top_cycles = [e for _, e in scored_cycles[:10]]
+
+    lines.append("## Top cycles by efficiency and improvement\n")
+    if not top_cycles:
+        lines.append("No cycles with numeric RYE or delta_R found.\n")
+    else:
+        for e in top_cycles:
+            cycle_idx = e.get("cycle")
+            role = e.get("role", "agent")
+            domain = e.get("domain", "general")
+            rye_val = e.get("RYE")
+            d_r = e.get("delta_R")
+            energy_e = e.get("energy_E")
+            ts = e.get("timestamp")
+
+            header = f"- Cycle {cycle_idx} [{domain}/{role}]"
+            metrics_parts = []
+            if isinstance(rye_val, (int, float)):
+                metrics_parts.append(f"RYE={rye_val:.3f}")
+            if isinstance(d_r, (int, float)):
+                metrics_parts.append(f"delta_R={d_r:.3f}")
+            if isinstance(energy_e, (int, float)):
+                metrics_parts.append(f"E={energy_e:.3f}")
+            if ts:
+                metrics_parts.append(f"time={ts}")
+            if metrics_parts:
+                header += " (" + ", ".join(metrics_parts) + ")"
+            lines.append(header)
+
+            # Attach one or two short notes or hypotheses as evidence
+            notes = e.get("notes_added") or []
+            hyps = e.get("hypotheses") or []
+            details_added = 0
+            for n in notes:
+                txt = str(n).strip()
+                if not txt:
+                    continue
+                if len(txt) > 220:
+                    txt = txt[:220] + "..."
+                lines.append(f"  - Note: {txt}")
+                details_added += 1
+                if details_added >= 2:
                     break
-            if overall_summary:
-                break
+            if details_added < 2:
+                for h in hyps:
+                    if isinstance(h, dict):
+                        txt = h.get("text", "")
+                    else:
+                        txt = str(h)
+                    txt = txt.strip()
+                    if not txt:
+                        continue
+                    if len(txt) > 220:
+                        txt = txt[:220] + "..."
+                    lines.append(f"  - Hypothesis: {txt}")
+                    details_added += 1
+                    if details_added >= 2:
+                        break
 
-        extra_manifest: Dict[str, Any] = {
-            "engine": f"direct_{mode}",
-            "experiment_fingerprint": experiment_fingerprint,
-            "job_meta": job_meta,
-            "job_config": cfg,
-        }
-        if diag:
-            extra_manifest["diagnostics_snapshot"] = diag
-        if intelligence_info:
-            extra_manifest["intelligence"] = intelligence_info
-
-        try:
-            _log_run_manifest(
-                agent,
-                run_id,
-                mode=mode,
-                domain=domain,
-                goal=goal,
-                runtime_profile=runtime_profile,
-                stop_rye=stop_rye,
-                max_minutes=max_minutes,
-                summaries=normalized_cycles,
-                extra=extra_manifest,
-            )
-        except Exception:
-            print("Manifest logging failed for direct job, see logs for details.")
-
-        result_obj: Dict[str, Any] = {
-            "status": "ok",
-            "run_id": run_id,
-            "mode": mode,
-            "goal": goal,
-            "domain": domain,
-            "runtime_profile": runtime_profile,
-            "max_minutes": max_minutes,
-            "max_cycles": max_cycles if mode == "single" else None,
-            "max_rounds": max_rounds if mode == "swarm" else None,
-            "stop_rye": stop_rye,
-            "summaries": normalized_cycles,
-            "cycles": normalized_cycles,
-            "diagnostics": diag,
-            "intelligence": intelligence_info,
-            "experiment_fingerprint": experiment_fingerprint,
-            "job_meta": job_meta,
-            "job_config": cfg,
-        }
-        if overall_summary:
-            result_obj["summary"] = overall_summary
-
-        # Attach top level defaults including citations / discoveries / sources / rye_metrics
-        result_obj = _attach_top_level_defaults(result_obj, normalized_cycles, diag)
-
-        _update_worker_state(
-            agent,
-            status="idle",
-            mode=mode,
-            goal=goal,
-            domain=domain,
-            roles=roles_list if mode == "swarm" else [role],
-            runtime_profile=runtime_profile,
-            stop_rye=stop_rye,
-            max_minutes=max_minutes,
-            run_id=run_id,
-            experiment_mode="direct_job",
-            extra={
-                "experiment_fingerprint": experiment_fingerprint,
-                "final_diagnostics": diag,
-                "intelligence": intelligence_info if intelligence_info else None,
-                "job_config": cfg,
-            },
-        )
-
-        return result_obj
-
-    except Exception as e:
-        print(f"Fatal error while running direct job {run_id}: {e}")
-        tb = traceback.format_exc()
-        print(tb)
-        sys.stdout.flush()
-
-        error_payload: Dict[str, Any] = {
-            "error": str(e),
-            "traceback": tb,
-            "run_id": run_id,
-            "goal": goal,
-            "domain": domain,
-            "mode": mode,
-            "runtime_profile": runtime_profile,
-            "stop_rye": stop_rye,
-            "max_minutes": max_minutes,
-            "max_cycles": max_cycles if mode == "single" else None,
-            "max_rounds": max_rounds if mode == "swarm" else None,
-            "job_meta": job_meta,
-            "job_config": cfg,
-            "experiment_fingerprint": experiment_fingerprint,
-        }
-
-        try:
-            # Log a milestone so the UI can see prompt and error context
-            _log_milestone(
-                agent,
-                run_id=run_id,
-                goal=goal,
-                domain=domain,
-                label="direct_job_error",
-                description=f"Direct job failed with error: {e}",
-                level="error",
-                extra=error_payload,
-            )
-        except Exception:
-            pass
-
-        _update_worker_state(
-            agent,
-            status="error",
-            mode=mode,
-            goal=goal,
-            domain=domain,
-            roles=roles_list if mode == "swarm" else [role],
-            runtime_profile=runtime_profile,
-            stop_rye=stop_rye,
-            max_minutes=max_minutes,
-            run_id=run_id,
-            experiment_mode="direct_job",
-            extra=error_payload,
-        )
-
-        return {
-            "status": "error",
-            "run_id": run_id,
-            "mode": mode,
-            "goal": goal,
-            "domain": domain,
-            "error": str(e),
-            "traceback": tb,
-            "job_config": cfg,
-            "job_meta": job_meta,
-        }
-
-
-# ---------------------------------------------------------------------------
-# Queue mode: process jobs from agent/run_jobs
-# ---------------------------------------------------------------------------
-
-
-def _write_job_progress(
-    run_id: str,
-    status: str,
-    note: str = "",
-    current: Optional[int] = None,
-    total: Optional[int] = None,
-) -> None:
-    """
-    Best-effort progress writer for queue jobs.
-
-    Writes runs/active/{run_id}_progress.json using run_jobs.progress_path
-    so the Streamlit UI can show basic status, even if we do not have
-    per-cycle callbacks.
-    """
-    if progress_path is None:
-        return
-    try:
-        path = progress_path(run_id)
-        payload: Dict[str, Any] = {
-            "run_id": run_id,
-            "status": status,
-            "current_cycle": current,
-            "total_cycles": total,
-            "last_update_utc": datetime.utcnow().isoformat() + "Z",
-            "notes": note,
-        }
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf8") as f:
-            json.dump(payload, f, indent=2)
-    except Exception:
-        # Progress should never crash the worker
-        return
-
-
-def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJob) -> None:
-    """
-    Execute a single RunJob from the file based queue.
-
-    Job config can include:
-        mode: "single" or "swarm" (default "single")
-        goal: optional override goal
-        domain: optional override domain
-        role: role for single agent (default "agent")
-        roles: list of roles for swarm
-        max_cycles: finite cycles for single
-        max_rounds: finite rounds for swarm
-        max_minutes: optional wall time guard
-        stop_rye: optional stop threshold
-        runtime_profile: optional profile name
-        source_controls: optional explicit source controls dict
-        resume: optional resume flag (default True)
-        watchdog_minutes: optional watchdog interval
-
-    If explicit cycle or round limits are provided in the job config,
-    the worker ignores max_minutes so the job runs until the specified
-    cycles or rounds complete (or stop_rye triggers).
-    """
-    start_ts = time.time()
-
-    base_goal, base_domain = build_goal_and_domain()
-    cfg = job.config or {}
-
-    goal = str(cfg.get("goal", base_goal))
-    domain = str(cfg.get("domain", base_domain))
-
-    preset_cfg = get_preset(domain)
-    runtime_profile = cfg.get(
-        "runtime_profile",
-        preset_cfg.get("default_runtime_profile"),
-    )
-
-    mode = str(cfg.get("mode", cfg.get("engine_mode", "single"))).lower()
-    role = str(cfg.get("role", "agent"))
-    roles_list: Optional[List[str]] = None
-    if mode == "swarm":
-        raw_roles = cfg.get("roles")
-        if isinstance(raw_roles, (list, tuple)):
-            roles_list = [str(r) for r in raw_roles]
-        else:
-            try:
-                roles_list = agent.get_agent_roles()
-            except Exception:
-                roles_list = ["agent"]
-
-    # ------------------------------------------------------------------
-    # Safe extraction of cycles / rounds for queue jobs
-    # ------------------------------------------------------------------
-    max_cycles_explicit = (
-        ("max_cycles" in cfg and cfg.get("max_cycles") is not None)
-        or ("cycles" in cfg and cfg.get("cycles") is not None)
-    )
-    max_rounds_explicit = (
-        ("max_rounds" in cfg and cfg.get("max_rounds") is not None)
-        or ("rounds" in cfg and cfg.get("rounds") is not None)
-    )
-
-    raw_cycles = cfg.get("max_cycles")
-    if raw_cycles is None:
-        raw_cycles = cfg.get("cycles")
-    if raw_cycles is None:
-        raw_cycles = HARD_MAX_CYCLES
-    try:
-        requested_cycles = int(raw_cycles)
-    except Exception:
-        requested_cycles = HARD_MAX_CYCLES
-
-    raw_rounds = cfg.get("max_rounds")
-    if raw_rounds is None:
-        raw_rounds = cfg.get("rounds")
-    if raw_rounds is None:
-        raw_rounds = requested_cycles
-    try:
-        requested_rounds = int(raw_rounds)
-    except Exception:
-        requested_rounds = requested_cycles
-
-    max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "max_cycles")
-    max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
-
-    raw_max_minutes = cfg.get("max_minutes")
-    if (mode == "single" and max_cycles_explicit) or (mode == "swarm" and max_rounds_explicit):
-        max_minutes: Optional[float] = None
+    # Pull best discoveries from discovery log
+    lines.append("\n## Discovery log highlights\n")
+    if not discoveries:
+        lines.append("No discovery log entries found.\n")
     else:
-        if raw_max_minutes is not None:
+        scored_disc: List[Tuple[float, Dict[str, Any]]] = []
+        for d in discoveries:
+            gain = d.get("rye_gain") or d.get("delta_rye") or 0.0
             try:
-                max_minutes = float(raw_max_minutes)
+                gain_f = float(gain)
             except Exception:
-                max_minutes = None
-        else:
-            max_minutes = None
+                gain_f = 0.0
+            scored_disc.append((gain_f, d))
+        scored_disc.sort(key=lambda x: x[0], reverse=True)
+        top_disc = [d for _, d in scored_disc[:10]]
 
-    max_minutes = _clamp_minutes(max_minutes, "job.max_minutes")
+        for d in top_disc:
+            dom = d.get("domain", "general")
+            label = d.get("title") or d.get("summary") or d.get("id") or "discovery"
+            gain = d.get("rye_gain") or d.get("delta_rye") or 0.0
+            try:
+                gain_f = float(gain)
+                gain_txt = f"{gain_f:.3f}"
+            except Exception:
+                gain_txt = str(gain)
 
-    stop_rye = cfg.get("stop_rye")
-    if stop_rye is not None:
-        try:
-            stop_rye = float(stop_rye)
-        except Exception:
-            stop_rye = None
+            header = f"- [{dom}] {label} (approx RYE gain {gain_txt})"
+            lines.append(header)
 
-    resume = bool(cfg.get("resume", True))
-    watchdog_minutes = float(cfg.get("watchdog_minutes", 5.0))
+            desc = d.get("description") or d.get("details") or ""
+            if desc:
+                txt = str(desc).strip()
+                if len(txt) > 260:
+                    txt = txt[:260] + "..."
+                lines.append(f"  - Description: {txt}")
 
-    cfg_for_sources = dict(base_config)
-    if "default_source_controls" not in cfg_for_sources:
-        sc_preset = preset_cfg.get("source_controls")
-        if isinstance(sc_preset, dict):
-            cfg_for_sources["default_source_controls"] = sc_preset
-
-    source_controls = _build_source_controls(cfg_for_sources)
-    if isinstance(cfg.get("source_controls"), dict):
-        override_sc = cfg["source_controls"]
-        for k, v in override_sc.items():
-            source_controls[str(k)] = bool(v)
-
-    tool_flags = detect_tools()
-
-    env_keys_for_fingerprint = [
-        "WORKER_QUEUE_MODE",
-        "WORKER_DOMAIN",
-        "WORKER_GOAL",
-    ]
-    experiment_fingerprint = _build_experiment_fingerprint(
-        goal=goal,
-        domain=domain,
-        mode=f"queue_{mode}",
-        runtime_profile=runtime_profile,
-        source_controls=source_controls,
-        roles=roles_list if mode == "swarm" else [role],
-        env_keys=env_keys_for_fingerprint,
+    lines.append(
+        "\nThis snapshot is designed to give a human reviewer a short list of high impact cycles "
+        "and discovery candidates to investigate further."
     )
 
-    job_meta = getattr(job, "meta", None)
+    return "\n".join(lines)
 
-    print("")
-    print("=== Queue worker: starting job ===")
-    print(f"Run id: {job.run_id}")
-    print(f"Mode: {mode}")
-    print(f"Goal: {goal}")
-    print(f"Domain: {domain}")
-    print(f"Role (single): {role}")
-    print(f"Roles (swarm): {roles_list if roles_list is not None else 'auto'}")
-    print(f"Max cycles (single, clamped): {max_cycles} (explicit: {max_cycles_explicit})")
-    print(f"Max rounds (swarm, clamped): {max_rounds} (explicit: {max_rounds_explicit})")
-    print(
-        "Max minutes guard (clamped): "
-        f"{max_minutes if max_minutes is not None else 'None (rounds driven)'}"
-    )
-    print(f"Stop RYE: {stop_rye if stop_rye is not None else 'None'}")
-    print(f"Runtime profile: {runtime_profile or 'None'}")
-    print(f"Resume: {resume}")
-    print(f"Watchdog minutes: {watchdog_minutes}")
-    print(f"Source controls: {source_controls}")
-    print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
-    print(f"Experiment fingerprint: {experiment_fingerprint}")
-    sys.stdout.flush()
 
-    _update_worker_state(
-        agent,
-        status="running_job",
-        mode=mode,
-        goal=goal,
-        domain=domain,
-        roles=roles_list if mode == "swarm" else [role],
-        runtime_profile=runtime_profile,
-        stop_rye=stop_rye,
-        max_minutes=max_minutes,
-        run_id=job.run_id,
-        experiment_mode="queue_worker",
-        extra={
-            "experiment_fingerprint": experiment_fingerprint,
-            "job_meta": job_meta,
-            "job_config": cfg,
-        },
-    )
-    _heartbeat(agent, label="queue_job_start", run_id=job.run_id)
-
-    # Initial progress write
-    _write_job_progress(
-        job.run_id,
-        status="active",
-        note="Job started",
-        current=0,
-        total=max_rounds if mode == "swarm" else max_cycles,
-    )
-
-    summaries: List[Dict[str, Any]] = []
-    full_result: Optional[Dict[str, Any]] = None
+def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
+    """Extract citations from finished run JSONs as a fallback for the citation viewer."""
+    if list_run_jobs is None:
+        return []
 
     try:
-        # Prefer a structured run_goal path if the agent exposes it.
-        if hasattr(agent, "run_goal"):
-            print("[Queue] Using CoreAgent.run_goal for structured result bundle.")
-            sys.stdout.flush()
+        jobs = list_run_jobs(status="finished")
+    except TypeError:
+        try:
+            jobs = list_run_jobs()  # type: ignore[call-arg]
+        except Exception:
+            jobs = []
+    except Exception:
+        jobs = []
 
-            def _progress_cb(update: Dict[str, Any]) -> None:
-                # Pass through to progress file so UI can live-refresh.
-                current = update.get("current_cycle")
-                total_local = update.get("total_cycles")
-                note = update.get("notes", "")
-                _write_job_progress(
-                    job.run_id,
-                    status=str(update.get("status", "active")),
-                    note=str(note),
-                    current=int(current) if isinstance(current, (int, float)) else None,
-                    total=int(total_local) if isinstance(total_local, (int, float)) else None,
-                )
+    if not jobs:
+        return []
 
-            goal_config: Dict[str, Any] = {
-                **cfg,
-                "mode": mode,
-                "domain": domain,
-                "runtime_profile": runtime_profile,
-                "max_minutes": max_minutes,
-                "max_cycles": max_cycles,
-                "max_rounds": max_rounds,
-                "stop_rye": stop_rye,
-                "source_controls": source_controls,
-            }
-            if mode == "swarm":
-                goal_config["roles"] = roles_list
-            else:
-                goal_config["role"] = role
+    jobs_slice = jobs[-limit_runs:]
 
+    all_history: List[Dict[str, Any]] = []
+    top_level_citations: List[Dict[str, Any]] = []
+
+    for job in jobs_slice:
+        run_id = _get_job_id(job)
+
+        created_at_raw = None
+        if hasattr(job, "created_at"):
+            created_at_raw = getattr(job, "created_at", None)
+        elif isinstance(job, dict):
+            created_at_raw = job.get("created_at")
+
+        default_ts = None
+        if isinstance(created_at_raw, (int, float)):
             try:
-                full_result = agent.run_goal(
-                    goal=goal,
-                    config=goal_config,
-                    progress_callback=_progress_cb,
-                )
-            except TypeError:
-                # Fallback if run_goal does not accept progress_callback
-                full_result = agent.run_goal(goal=goal, config=goal_config)  # type: ignore[arg-type]
+                default_ts = datetime.utcfromtimestamp(created_at_raw).isoformat() + "Z"
+            except Exception:
+                default_ts = None
+        elif isinstance(created_at_raw, str):
+            default_ts = created_at_raw
 
-            if isinstance(full_result, dict):
-                cycles_from_result = (
-                    full_result.get("cycles")
-                    or full_result.get("summaries")
-                    or []
-                )
-                if isinstance(cycles_from_result, list):
-                    summaries = cycles_from_result  # for diagnostics below
+        result = load_job_result(run_id)
+        if not isinstance(result, dict):
+            continue
 
-        # If no run_goal or it failed, fall back to legacy continuous engines.
-        if not summaries and full_result is None:
-            if mode == "swarm":
-                if roles_list is None:
+        payload = result.get("result")
+        if isinstance(payload, dict):
+            base = payload
+        else:
+            base = result
+
+        # Per cycle entries (with citations) routed through the history flattener
+        cycles = _extract_cycles_from_run_result(result, run_id=run_id, default_timestamp=default_ts)
+        all_history.extend(cycles)
+
+        # Run level citations or sources
+        cites = (
+            base.get("citations")
+            or base.get("sources")
+            or base.get("source_list")
+            or []
+        )
+        if isinstance(cites, list):
+            for c in cites:
+                if not isinstance(c, dict):
+                    continue
+                source = c.get("source") or c.get("provider") or ""
+                title = c.get("title") or ""
+                url = c.get("url") or c.get("link") or ""
+                snippet = c.get("snippet") or c.get("summary") or ""
+
+                ts_val = base.get("timestamp") or result.get("timestamp") or default_ts
+                if isinstance(ts_val, (int, float)):
                     try:
-                        roles_list = agent.get_agent_roles()
+                        ts_val = datetime.utcfromtimestamp(ts_val).isoformat() + "Z"
                     except Exception:
-                        roles_list = ["agent"]
+                        ts_val = None
 
-                summaries = agent.run_swarm_continuous(
-                    goal=goal,
-                    max_rounds=max_rounds,
-                    stop_rye=stop_rye,
-                    roles=roles_list,
-                    source_controls=source_controls,
-                    pdf_bytes=None,
-                    biomarker_snapshot=None,
-                    domain=domain,
-                    max_minutes=max_minutes,
-                    forever=False,
-                    resume_from_checkpoint=resume,
-                    watchdog_interval_minutes=watchdog_minutes,
-                    runtime_profile=runtime_profile,
-                )
-            else:
-                summaries = agent.run_continuous(
-                    goal=goal,
-                    max_cycles=max_cycles,
-                    stop_rye=stop_rye,
-                    role=role,
-                    source_controls=source_controls,
-                    pdf_bytes=None,
-                    biomarker_snapshot=None,
-                    domain=domain,
-                    max_minutes=max_minutes,
-                    forever=False,
-                    resume_from_checkpoint=resume,
-                    watchdog_interval_minutes=watchdog_minutes,
-                    runtime_profile=runtime_profile,
+                top_level_citations.append(
+                    {
+                        "cycle": None,
+                        "role": c.get("role") or "run",
+                        "domain": c.get("domain") or base.get("domain") or "general",
+                        "timestamp": ts_val,
+                        "source": source,
+                        "title": title,
+                        "url": url,
+                        "snippet": snippet,
+                    }
                 )
 
-        _heartbeat(agent, label="queue_job_finished", run_id=job.run_id)
+    flattened = extract_citations_from_history(all_history)
+    flattened.extend(top_level_citations)
+    return flattened
 
-        print(f"=== Queue worker: job {job.run_id} finished cleanly ===")
-        print(f"Total summaries: {len(summaries)}")
 
-        # Final progress write (we only know final count now)
-        _write_job_progress(
-            job.run_id,
-            status="finished",
-            note="Job finished",
-            current=len(summaries),
-            total=max_rounds if mode == "swarm" else max_cycles,
-        )
+def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
+    """Extract discovery entries from finished run JSONs as a fallback for the discovery tab."""
+    if list_run_jobs is None:
+        return []
 
-        diag: Dict[str, Any] = {}
+    try:
+        jobs = list_run_jobs(status="finished")
+    except TypeError:
         try:
-            diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
-            print(f"RYE avg: {diag.get('rye_avg')}")
-            print(f"RYE median: {diag.get('rye_median')}")
-            print(f"RYE last: {diag.get('rye_last')}")
-            print(f"Stability index: {diag.get('stability_index')}")
-            print(f"Recovery momentum: {diag.get('recovery_momentum')}")
+            jobs = list_run_jobs()  # type: ignore[call-arg]
         except Exception:
-            print("Diagnostics computation failed for job, see logs for details.")
+            jobs = []
+    except Exception:
+        jobs = []
 
-        # Normalize cycles so diagnostics and UI always see a consistent list
-        normalized_cycles: List[Dict[str, Any]] = _normalize_cycles_for_ui(summaries)
+    if not jobs:
+        return []
 
-        # Write cycle history and run_state snapshots for diagnostics panel
-        _write_cycles_and_run_state(
-            agent,
-            run_id=job.run_id,
-            mode=mode,
-            goal=goal,
-            domain=domain,
-            cycles=normalized_cycles,
-            diagnostics=diag,
-        )
+    jobs_slice = jobs[-limit_runs:]
 
-        intelligence_info = _run_post_run_intelligence(
-            agent,
-            mode=mode,
-            goal=goal,
-            domain=domain,
-            run_id=job.run_id,
-            history=normalized_cycles,
-        )
+    discoveries: List[Dict[str, Any]] = []
 
-        # ------------------------------------------------------------------
-        # Normalize cycles so the UI always sees cycles + summaries lists
-        # with index / cycle_index and an overall summary string.
-        # ------------------------------------------------------------------
-        overall_summary: Optional[str] = None
-        for c in normalized_cycles:
-            for key in ("summary", "brief", "title", "description"):
-                val = c.get(key)
-                if isinstance(val, str) and val.strip():
-                    overall_summary = val.strip()
-                    break
-            if overall_summary:
-                break
+    for job in jobs_slice:
+        run_id = _get_job_id(job)
 
-        extra_manifest: Dict[str, Any] = {
-            "engine": f"queue_{mode}",
-            "experiment_fingerprint": experiment_fingerprint,
-            "job_meta": job_meta,
-            "job_config": cfg,
-        }
-        if diag:
-            extra_manifest["diagnostics_snapshot"] = diag
-        if intelligence_info:
-            extra_manifest["intelligence"] = intelligence_info
+        created_at_raw = None
+        if hasattr(job, "created_at"):
+            created_at_raw = getattr(job, "created_at", None)
+        elif isinstance(job, dict):
+            created_at_raw = job.get("created_at")
 
-        try:
-            _log_run_manifest(
-                agent,
-                job.run_id,
-                mode=mode,
-                domain=domain,
-                goal=goal,
-                runtime_profile=runtime_profile,
-                stop_rye=stop_rye,
-                max_minutes=max_minutes,
-                summaries=normalized_cycles,
-                extra=extra_manifest,
-            )
-        except Exception:
-            print("Manifest logging failed for job, see logs for details.")
+        default_ts = None
+        if isinstance(created_at_raw, (int, float)):
+            try:
+                default_ts = datetime.utcfromtimestamp(created_at_raw).isoformat() + "Z"
+            except Exception:
+                default_ts = None
+        elif isinstance(created_at_raw, str):
+            default_ts = created_at_raw
 
-        completed_ts = time.time()
+        result = load_job_result(run_id)
+        if not isinstance(result, dict):
+            continue
 
-        # Build final result bundle.
-        if isinstance(full_result, dict):
-            # Ensure both "cycles" and "summaries" keys are present for the UI.
-            fr = dict(full_result)
-
-            # Prefer whatever the agent returned, but fall back to our normalized list.
-            cycles_src = fr.get("cycles") or fr.get("summaries") or normalized_cycles
-            if not isinstance(cycles_src, list):
-                cycles_src = normalized_cycles
-
-            norm_fr_cycles: List[Dict[str, Any]] = _normalize_cycles_for_ui(cycles_src)
-
-            fr["cycles"] = norm_fr_cycles
-            fr.setdefault("summaries", norm_fr_cycles)
-
-            # Add overall summary if missing.
-            if "summary" not in fr and overall_summary:
-                fr["summary"] = overall_summary
-
-            result_obj: Dict[str, Any] = {
-                "job_id": job.run_id,
-                "status": fr.get("status", "finished"),
-                "created_at": job.created_at,
-                "completed_at": completed_ts,
-                "elapsed_seconds": completed_ts - start_ts,
-                "meta": job_meta or {},
-                "job_config": cfg,
-            }
-            result_obj.update(fr)
-
-            # Attach top level defaults for the structured full_result case
-            result_obj = _attach_top_level_defaults(result_obj, norm_fr_cycles, diag)
+        payload = result.get("result")
+        if isinstance(payload, dict):
+            base = payload
         else:
-            # Legacy minimal shape, but still expose cycles alias.
-            result_obj = {
-                "run_id": job.run_id,
-                "mode": mode,
-                "goal": goal,
-                "domain": domain,
-                "runtime_profile": runtime_profile,
-                "max_minutes": max_minutes,
-                "max_cycles": max_cycles if mode == "single" else None,
-                "max_rounds": max_rounds if mode == "swarm" else None,
-                "stop_rye": stop_rye,
-                "summaries": normalized_cycles,
-                "cycles": normalized_cycles,
-                "diagnostics": diag,
-                "intelligence": intelligence_info,
-                "experiment_fingerprint": experiment_fingerprint,
-                "job_meta": job_meta,
-                "job_config": cfg,
-            }
-            result_obj = _attach_top_level_defaults(result_obj, normalized_cycles, diag)
+            base = result
 
-        if overall_summary:
-            result_obj["summary"] = overall_summary
-
-        try:
-            if save_job_result is not None:
-                save_job_result(job, result_obj)
-            else:
-                out_dir = BASE_DIR / "finished"
-                out_dir.mkdir(parents=True, exist_ok=True)
-                rp = out_dir / f"{job.run_id}.json"
-                with rp.open("w", encoding="utf8") as f:
-                    json.dump(result_obj, f, indent=2)
-        except Exception:
-            print("Failed to write result JSON for job, see logs for details.")
-
-        _update_worker_state(
-            agent,
-            status="idle",
-            mode=mode,
-            goal=goal,
-            domain=domain,
-            roles=roles_list if mode == "swarm" else [role],
-            runtime_profile=runtime_profile,
-            stop_rye=stop_rye,
-            max_minutes=max_minutes,
-            run_id=job.run_id,
-            experiment_mode="queue_worker",
-            extra={
-                "experiment_fingerprint": experiment_fingerprint,
-                "final_diagnostics": diag,
-                "intelligence": intelligence_info if intelligence_info else None,
-                "job_config": cfg,
-            },
+        candidates = (
+            base.get("discoveries")
+            or base.get("discovery_candidates")
+            or base.get("discovery_log")
+            or []
         )
+        if not isinstance(candidates, list):
+            continue
 
-    except Exception as e:
-        print(f"Fatal error while running job {job.run_id}: {e}")
-        tb = traceback.format_exc()
-        print(tb)
-        sys.stdout.flush()
+        ts_val = base.get("timestamp") or result.get("timestamp") or default_ts
+        if isinstance(ts_val, (int, float)):
+            try:
+                ts_val = datetime.utcfromtimestamp(ts_val).isoformat() + "Z"
+            except Exception:
+                ts_val = None
 
-        # Progress -> error
-        _write_job_progress(
-            job.run_id,
-            status="error",
-            note=str(e),
-            current=None,
-            total=max_rounds if mode == "swarm" else max_cycles,
-        )
+        for d in candidates:
+            if not isinstance(d, dict):
+                continue
+            d2 = dict(d)
+            if "run_id" not in d2:
+                d2["run_id"] = run_id
+            if "domain" not in d2:
+                d2["domain"] = base.get("domain", "general")
+            if "timestamp" not in d2:
+                d2["timestamp"] = ts_val
+            discoveries.append(d2)
 
-        error_payload: Dict[str, Any] = {
-            "error": str(e),
-            "traceback": tb,
-            "run_id": job.run_id,
-            "goal": goal,
-            "domain": domain,
-            "mode": mode,
-            "runtime_profile": runtime_profile,
-            "stop_rye": stop_rye,
-            "max_minutes": max_minutes,
-            "max_cycles": max_cycles if mode == "single" else None,
-            "max_rounds": max_rounds if mode == "swarm" else None,
-            "job_meta": job_meta,
-            "job_config": cfg,
-            "experiment_fingerprint": experiment_fingerprint,
+    return discoveries
+
+
+# -------------------------------------------------------------------
+# JSON preview helper to avoid front-end RangeError on huge histories
+# -------------------------------------------------------------------
+def safe_json_preview(
+    obj: Any,
+    max_chars: int = 200_000,
+    max_items: Optional[int] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Convert an object to JSON for display with size limits.
+
+    Returns (json_string_or_none, info_message_or_none).
+    """
+    note_parts: List[str] = []
+
+    if max_items is not None and isinstance(obj, list) and len(obj) > max_items:
+        obj = obj[-max_items:]
+        note_parts.append(f"Showing last {max_items} items from a larger array.")
+
+    try:
+        s = json.dumps(obj, indent=2)
+    except TypeError:
+        return None, "Object contains non JSON serializable entries."
+
+    if len(s) > max_chars:
+        s = s[:max_chars] + "\n... (truncated)"
+        note_parts.append(f"Output truncated to {max_chars} characters for display.")
+
+    note = " ".join(note_parts) if note_parts else None
+    return s, note
+
+
+# -------------------------------------------------------------------
+# Main Streamlit app
+# -------------------------------------------------------------------
+def main() -> None:
+    st.set_page_config(
+        page_title="Autonomous Research Agent (Finite queue mode)",
+        page_icon="🧪",
+        layout="wide",
+    )
+
+    st.title("Autonomous Research Agent")
+    st.caption(
+        "Finite mode only • Queue based runs • Engine worker processes jobs from ARA_RUNS_DIR/pending.\n"
+        "This UI never runs TGRM loops directly. It only queues jobs and visualizes finished artifacts."
+    )
+
+    # Shared MemoryStore instance for diagnostics and history
+    memory = init_memory_store()
+
+    # Sidebar layout
+    st.sidebar.title("Run configuration")
+
+    # Optional Tavily key input (per user, not stored on disk)
+    st.sidebar.subheader("Tavily API key (optional)")
+    current_key = st.session_state.get("tavily_key", "")
+    new_key = st.sidebar.text_input(
+        "Tavily API key",
+        type="password",
+        value=current_key or "",
+        help="Optional. If provided, allows real web search through Tavily in the engine worker.",
+    )
+    if new_key and new_key != current_key:
+        st.session_state["tavily_key"] = new_key
+
+    # Preset and domain selection
+    st.sidebar.subheader("Preset and domain")
+
+    if not PRESETS:
+        st.sidebar.warning("No presets are defined. Using a basic default configuration.")
+        preset = {
+            "label": "Default",
+            "domain": "general",
+            "default_goal": (
+                "Explore Reparodynamics, define RYE and TGRM, and compare with related frameworks."
+            ),
         }
-
+        selected_label = "Default"
+        selected_key = "default"
+    else:
+        preset_labels = list(PRESETS.keys())
+        # For safety, selected_key and selected_label are the same in this mapping
+        selected_label = st.sidebar.selectbox(
+            "Select preset",
+            options=preset_labels,
+            index=0,
+            help="Choose a domain oriented preset for this run.",
+        )
+        selected_key = selected_label
+        # PRESETS may be a dict of dicts, get_preset can add extra defaults
         try:
-            if mark_job_error is not None:
-                # Save full context including prompt and config into error record
-                mark_job_error(job, error_payload)
-            else:
-                err_dir = BASE_DIR / "error"
-                err_dir.mkdir(parents=True, exist_ok=True)
-                ep = err_dir / f"{job.run_id}.json"
-                with ep.open("w", encoding="utf8") as f:
-                    json.dump(error_payload, f, indent=2)
+            preset = get_preset(selected_key)  # type: ignore[arg-type]
         except Exception:
-            pass
+            preset = PRESETS.get(selected_key, {})
 
-        try:
-            _log_milestone(
-                agent,
-                run_id=job.run_id,
-                goal=goal,
-                domain=domain,
-                label="queue_job_error",
-                description=f"Queue job failed with error: {e}",
-                level="error",
-                extra=error_payload,
-            )
-        except Exception:
-            pass
+        if not isinstance(preset, dict):
+            preset = {}
 
-        _update_worker_state(
-            agent,
-            status="error",
-            mode=mode,
-            goal=goal,
-            domain=domain,
-            roles=roles_list if mode == "swarm" else [role],
-            runtime_profile=runtime_profile,
-            stop_rye=stop_rye,
-            max_minutes=max_minutes,
-            run_id=job.run_id,
-            experiment_mode="queue_worker",
-            extra=error_payload,
+    # Domain tag used in run_config and longevity detection
+    domain_tag = (
+        preset.get("domain")
+        or preset.get("domain_tag")
+        or preset.get("domain_key")
+        or "general"
+    )
+
+    st.sidebar.caption(f"Active domain: **{str(domain_tag).title()}**")
+
+    # Runtime profile view (finite only, advisory)
+    st.sidebar.subheader("Runtime profile (advisory, finite only)")
+
+    runtime_profile = None
+    runtime_profile_key = preset.get("runtime_profile") or preset.get("runtime_profile_key")
+    if runtime_profile_key and isinstance(RUNTIME_PROFILES, dict):
+        runtime_profile = RUNTIME_PROFILES.get(runtime_profile_key)
+
+    if isinstance(runtime_profile, dict):
+        label = runtime_profile.get("label") or runtime_profile_key
+        description = runtime_profile.get("description") or runtime_profile.get("desc")
+        max_minutes = runtime_profile.get("max_minutes")
+        max_cycles = runtime_profile.get("max_cycles")
+
+        lines = []
+        if label:
+            lines.append(f"Profile: **{label}**")
+        if description:
+            lines.append(str(description))
+        if max_minutes is not None or max_cycles is not None:
+            caps = []
+            if max_minutes is not None:
+                caps.append(f"~{max_minutes} minutes")
+            if max_cycles is not None:
+                caps.append(f"~{max_cycles} cycles")
+            if caps:
+                lines.append("Approx caps: " + ", ".join(caps))
+        lines.append(
+            "In this UI, the cycle input below is the hard limit. "
+            "The profile is only a hint to the engine worker for internal tuning."
+        )
+        st.sidebar.caption("\n\n".join(lines))
+    else:
+        st.sidebar.caption(
+            "This preset has no runtime profile configured. "
+            "Manual finite mode uses generic defaults."
         )
 
+    # Friendly label per run
+    st.sidebar.subheader("Run label")
+    run_label = st.sidebar.text_input(
+        "Run label",
+        value="experiment",
+        help="Human friendly label for this run request.",
+    )
 
-def run_job_queue_worker() -> None:
-    """
-    Main loop for queue mode.
+    # Tavily status (after handling key input)
+    status = tavily_status()
+    st.sidebar.subheader("Internet research")
+    if status["has_key"]:
+        st.sidebar.success(status["display"])
+    else:
+        st.sidebar.warning(status["display"])
+        st.sidebar.write(
+            "Paste a Tavily key above to enable real web search. "
+            "Otherwise, stubbed results are used."
+        )
 
-    Behavior:
-        - Initializes CoreAgent and MemoryStore once.
-        - Polls the job queue via agent.run_jobs.load_next_pending_job.
-        - For each job:
-            * Runs it with _process_single_job
-        - Loops continuously so Render worker can stay alive.
-    """
-    if RunJob is None or load_next_pending_job is None:
-        print("Queue mode requested but agent/run_jobs.py is not available.")
-        sys.stdout.flush()
-        return
+    # Tool status (web browser and sandbox)
+    st.sidebar.subheader("Tools status")
+    tool_flags = detect_tools()
 
-    print("Starting Autonomous Research Agent queue worker (file based jobs)...")
-    sys.stdout.flush()
+    if tool_flags["web"]:
+        st.sidebar.success("Web browser tool is available in tools.py.")
+    else:
+        st.sidebar.info(
+            "Web browser tool not detected in tools.py. "
+            "Core engine may still use Tavily directly."
+        )
 
-    _configure_tavily_from_env()
-    agent, config = init_agent_from_config()
+    if tool_flags["sandbox"]:
+        st.sidebar.success("Sandbox tool is available for safe code execution.")
+    else:
+        st.sidebar.info("Sandbox tool not detected in tools.py.")
 
-    # Extra debug so you can validate path alignment with Streamlit and run_jobs
-    ara_runs_env = os.getenv("ARA_RUNS_DIR")
-    print(f"[Queue] ARA_RUNS_DIR env: {ara_runs_env!r}")
-    try:
-        print(f"[Queue] BASE_DIR (engine_worker): {BASE_DIR.resolve()}")
-    except Exception:
-        print(f"[Queue] BASE_DIR (engine_worker): {BASE_DIR}")
-    pending_dir = BASE_DIR / "pending"
-    try:
-        import agent.run_jobs as run_jobs_mod  # type: ignore[import]
-        rj_base = getattr(run_jobs_mod, "BASE_DIR", None)
-        rj_pending = getattr(run_jobs_mod, "PENDING_DIR", None)
-        if rj_base is not None:
-            try:
-                print(f"[Queue] run_jobs.BASE_DIR: {rj_base.resolve()}")
-            except Exception:
-                print(f"[Queue] run_jobs.BASE_DIR: {rj_base}")
-        if rj_pending is not None:
-            try:
-                print(f"[Queue] run_jobs.PENDING_DIR: {rj_pending.resolve()}")
-            except Exception:
-                print(f"[Queue] run_jobs.PENDING_DIR: {rj_pending}")
-            pending_dir = rj_pending
-    except Exception:
-        print("[Queue] Could not import agent.run_jobs for extra debug info.")
-    sys.stdout.flush()
+    # Web browser and sandbox toggles
+    use_web_tool = st.sidebar.checkbox(
+        "Use web browser tool",
+        value=status["has_key"],
+        help=(
+            "If enabled, the engine can use the web browser tool for searches. "
+            "If disabled, only local notes and PDFs are used."
+        ),
+    )
 
-    # Debug: show which directory this worker is actually watching
-    try:
-        print(f"[Queue] Watching pending dir: {pending_dir.resolve()}")
-    except Exception:
-        print(f"[Queue] Watching pending dir: {pending_dir}")
-    sys.stdout.flush()
+    allow_sandbox = st.sidebar.checkbox(
+        "Allow sandbox code execution",
+        value=tool_flags["sandbox"],
+        help=(
+            "If enabled and the sandbox tool is present, the engine can run code in a bounded sandbox. "
+            "If disabled, code execution tools are not used."
+        ),
+    )
 
-    idle_loops = 0
+    # Swarm toggle and size
+    st.sidebar.subheader("Swarm configuration")
+    enable_swarm = st.sidebar.checkbox(
+        "Enable Swarm (multi role mini agents)",
+        value=False,
+        help=(
+            "Request up to dozens of specialized agents (researchers, critics, explorers, "
+            "theorists, integrators). The worker runs them sequentially for safety."
+        ),
+    )
 
-    while True:
-        # Debug: list any pending files the worker can see
+    swarm_size = 1
+    swarm_roles: List[Tuple[str, str]] = []
+    if enable_swarm:
+        swarm_size = st.sidebar.slider(
+            "Total swarm agents",
+            min_value=2,
+            max_value=MAX_SWARM_AGENTS,
+            value=min(5, MAX_SWARM_AGENTS),
+            help=(
+                "Total number of mini agents in the swarm. "
+                "Higher values mean more total cycles and more API usage."
+            ),
+        )
+        swarm_roles = build_swarm_roles(True, swarm_size)
+        st.sidebar.write("Active swarm agents:")
+        for name, desc in swarm_roles:
+            st.sidebar.write(f"- **{name}**: {desc}")
+
+    # Multi agent toggle (classic researcher plus critic)
+    multi_agent = False
+    if not enable_swarm:
+        multi_agent = st.sidebar.checkbox(
+            "Enable classic Multi Agent (Researcher + Critic)",
+            value=False,
+            help="If swarm is disabled, you can still request a simple researcher plus critic pair.",
+        )
+    else:
+        st.sidebar.info("Classic Multi Agent is disabled when Swarm is enabled.")
+
+    # Source controls (defaults from preset, but user can override)
+    sc_defaults = preset.get("source_controls", {})
+    use_pubmed = st.sidebar.checkbox(
+        "Use PubMed (scientific literature)",
+        value=bool(sc_defaults.get("pubmed", False)),
+    )
+    use_semantic = st.sidebar.checkbox(
+        "Use Semantic Scholar ingestion",
+        value=bool(sc_defaults.get("semantic", False)),
+    )
+    use_pdf = st.sidebar.checkbox(
+        "Enable PDF ingestion (upload papers below)",
+        value=bool(sc_defaults.get("pdf", True)),
+    )
+
+    uploaded_pdf = None
+    if use_pdf:
+        uploaded_pdf = st.sidebar.file_uploader("Upload a PDF paper", type=["pdf"])
+
+    # Biomarker mode
+    use_biomarkers = st.sidebar.checkbox(
+        "Biomarker / Longevity Mode (anti aging teams)",
+        value=bool(sc_defaults.get("biomarkers", False)),
+    )
+
+    # Run mode presets: finite only in this build
+    run_mode = st.sidebar.radio(
+        "Run mode",
+        ["Manual (finite cycles)"],
+        index=0,
+        help=(
+            "This build uses finite mode only. "
+            "Each run requests a fixed number of cycles from the engine worker."
+        ),
+    )
+
+    # No RYE based stop for finite only build
+    stop_rye_threshold: Optional[float] = None
+
+    # -----------------------------
+    # Main area
+    # -----------------------------
+    st.subheader("Research goal")
+
+    default_goal = preset.get("default_goal") or (
+        "Research and summarize the concept of Reparodynamics, define RYE and TGRM, "
+        "identify similar frameworks in the literature, and produce a structured comparison table."
+    )
+
+    if "goal_text" not in st.session_state:
+        st.session_state["goal_text"] = default_goal
+
+    goal = st.text_area("Enter research goal:", value=st.session_state["goal_text"], height=160)
+    st.session_state["goal_text"] = goal
+
+    # Cycles only matter in manual mode (hint to worker)
+    cycles = st.number_input(
+        "Number of TGRM cycles to request (manual mode)",
+        min_value=1,
+        max_value=200,
+        value=3,
+        step=1,
+        help="Used when Run mode is Manual. There are no timed presets in this build.",
+    )
+
+    run_button = st.button("Queue run request")
+
+    # ------------------------------
+    # Queue job (never run cycles here)
+    # ------------------------------
+    if run_button:
+        goal_clean = goal.strip()
+        if not goal_clean:
+            st.error("Please provide a research goal or question before queuing a run.")
+        elif create_job is None:
+            st.error(
+                "Job queue backend (run_jobs.py) is not available. "
+                "Make sure agent/run_jobs.py exists and is importable."
+            )
+        else:
+            # Source controls for the engine worker
+            source_controls = {
+                "web": bool(use_web_tool),
+                "pubmed": bool(use_pubmed),
+                "semantic": bool(use_semantic),
+                "pdf": bool(use_pdf and uploaded_pdf is not None),
+                "biomarkers": bool(use_biomarkers),
+                "sandbox": bool(allow_sandbox and tool_flags["sandbox"]),
+            }
+
+            # Optional PDF embedded as base64 (worker can decode)
+            pdf_payload: Optional[Dict[str, Any]] = None
+            if use_pdf and uploaded_pdf is not None:
+                try:
+                    pdf_bytes = uploaded_pdf.getvalue()
+                    pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
+                    pdf_payload = {
+                        "name": uploaded_pdf.name,
+                        "base64": pdf_b64,
+                    }
+                except Exception:
+                    pdf_payload = {
+                        "name": uploaded_pdf.name,
+                        "base64": None,
+                    }
+
+            # Decide mode for RunManager (needs to be known before runtime_hints and run_config)
+            if enable_swarm and swarm_size > 1:
+                mode = "swarm"
+            elif multi_agent:
+                mode = "two_stage"
+            else:
+                mode = "single"
+
+            # Runtime hints for the worker (finite only, advisory)
+            # For swarm, the worker will respect max_rounds; for single or two_stage, max_cycles.
+            runtime_hints: Dict[str, Any] = {
+                "run_mode": "finite_manual",
+                "manual_cycles": int(cycles),
+                "max_cycles": int(cycles) if mode != "swarm" else None,
+                "max_rounds": int(cycles) if mode == "swarm" else None,
+                "stop_rye_threshold": stop_rye_threshold,
+                "cycles_per_hour_estimate": CYCLES_PER_HOUR_ESTIMATE,
+            }
+
+            # Swarm configuration for the worker
+            if enable_swarm:
+                swarm_config: Dict[str, Any] = {
+                    "swarm_size": int(swarm_size),
+                    "roles": [name for name, _ in swarm_roles] if swarm_roles else ["agent"],
+                    "max_cycles_per_agent": int(cycles),
+                    "stagger_start": False,
+                    "max_agents_per_tick": 0,
+                }
+            else:
+                swarm_config = {
+                    "swarm_size": 1,
+                    "roles": ["agent"],
+                    "max_cycles_per_agent": int(cycles),
+                    "stagger_start": False,
+                    "max_agents_per_tick": 0,
+                }
+
+            # Optional longevity config stub for worker
+            longevity_config: Dict[str, Any] = {}
+            if str(domain_tag).lower() in {"longevity", "aging", "anti_aging"}:
+                longevity_defaults = preset.get("longevity_config", {})
+                if isinstance(longevity_defaults, dict):
+                    longevity_config = {
+                        "hallmark_targets": longevity_defaults.get("hallmark_targets", []),
+                        "curriculum_profile": longevity_defaults.get("curriculum_profile"),
+                    }
+
+            # Core run configuration that engine_worker can map to RunConfig
+            # Explicit finite guards:
+            # For single and two_stage, max_cycles limits the run.
+            # For swarm, max_rounds limits the run, while max_cycles_per_agent is in swarm_config.
+            run_config: Dict[str, Any] = {
+                "goal": goal_clean,
+                "domain": domain_tag,
+                "mode": mode,
+                "total_cycles": int(cycles),
+                "max_cycles": int(cycles) if mode != "swarm" else None,
+                "max_rounds": int(cycles) if mode == "swarm" else None,
+                "max_seconds": None,
+                "rye_stop_threshold": stop_rye_threshold,
+                "equilibrium_stop_label": None,
+                "min_cycles_before_stop": 3,
+                "source_controls": source_controls,
+                "runtime_hints": runtime_hints,
+                "swarm": swarm_config,
+                "longevity_config": longevity_config,
+                "use_biomarkers": bool(use_biomarkers),
+                "multi_agent_pair": bool(multi_agent),
+                "notes": (run_label or "experiment").strip(),
+            }
+
+            if pdf_payload is not None:
+                run_config["pdf"] = pdf_payload
+
+            # Meta for UI and analytics (does not go into RunConfig directly)
+            meta: Dict[str, Any] = {
+                "run_label": (run_label or "experiment").strip(),
+                "preset_key": selected_key,
+                "preset_label": preset.get("label", selected_label),
+                "domain": domain_tag,
+                "mode": mode,
+                "tavily_enabled": bool(status["has_key"]),
+                "ui_metadata": {
+                    "requested_from": "streamlit",
+                    "client_version": "v3-run-manager-finite-only",
+                },
+            }
+
+            # Single source of truth: register job through run_jobs.create_job.
+            # This writes the JSON into PENDING_DIR (and legacy queue) using the same BASE_DIR as the worker.
+            run_id = create_job(config=run_config, meta=meta)
+
+            st.success(f"Run request queued with run id `{run_id}`.")
+            if RUNS_PENDING_DIR is not None:
+                st.caption(f"Pending job written to `{RUNS_PENDING_DIR / (str(run_id) + '.json')}`")
+            else:
+                st.caption(
+                    "Job was queued via run_jobs.create_job. "
+                    "The engine worker should watch ARA_RUNS_DIR/pending for new jobs."
+                )
+
+    # ------------------------------
+    # Runs and job queue (queued or finished via run_jobs.py)
+    # ------------------------------
+    st.markdown("---")
+    st.subheader("Runs and job queue")
+
+    # Debug view of what the UI actually sees on disk for the queue
+    runs_root = get_runs_root()
+    st.caption(f"DEBUG runs root: `{runs_root}`")
+
+    def _debug_list_dir(label: str, specific: Optional[Path]) -> None:
+        if isinstance(specific, Path):
+            base = specific
+        else:
+            base = Path(runs_root) / label
         try:
-            if pending_dir.exists():
-                pending_files = sorted(pending_dir.glob("*.json"))
-                if pending_files:
-                    print(
-                        f"[Queue] Pending .json files visible to worker: "
-                        f"{[p.name for p in pending_files]}"
+            items = sorted(p.name for p in base.glob("*.json"))
+        except Exception as e:
+            items = [f"error: {e}"]
+        st.text(f"DEBUG {label}: {items}")
+
+    _debug_list_dir("pending", RUNS_PENDING_DIR)
+    _debug_list_dir("active", RUNS_ACTIVE_DIR)
+    _debug_list_dir("finished", RUNS_FINISHED_DIR)
+    _debug_list_dir("error", RUNS_ERROR_DIR)
+
+    if list_run_jobs is not None:
+        # Finished jobs
+        try:
+            finished_jobs = list_run_jobs(status="finished")
+        except TypeError:
+            # Fallback if signature is list_jobs() without args
+            finished_jobs = list_run_jobs()  # type: ignore[call-arg]
+        except Exception:
+            finished_jobs = []
+
+        # Pending or queued jobs (support both status names)
+        pending_jobs: List[Any] = []
+        try:
+            pending_jobs = list_run_jobs(status="queued")
+            if not pending_jobs:
+                pending_jobs = list_run_jobs(status="pending")
+        except TypeError:
+            # Old signature, no status support
+            pending_jobs = []
+        except Exception:
+            pending_jobs = []
+    else:
+        finished_jobs = []
+        pending_jobs = []
+
+    col_runs_left, col_runs_right = st.columns([2, 1])
+
+    with col_runs_left:
+        st.markdown("#### Finished runs")
+        if not finished_jobs:
+            st.info("No finished runs found yet.")
+        else:
+            run_ids = [_get_job_id(j) for j in finished_jobs]
+
+            def _format_run(jid: str) -> str:
+                for j in finished_jobs:
+                    if _get_job_id(j) == jid:
+                        return _get_job_label(j)
+                return jid
+
+            selected_run_id = st.selectbox(
+                "Select a finished run",
+                options=run_ids,
+                format_func=_format_run,
+            )
+            if selected_run_id:
+                selected_job_header = next(
+                    (j for j in finished_jobs if _get_job_id(j) == selected_run_id),
+                    None,
+                )
+                if selected_job_header:
+                    render_job_summary(selected_job_header)
+                result = load_job_result(selected_run_id)
+                if result is None:
+                    st.warning(
+                        "Result file missing or unreadable for this run. "
+                        "The engine worker may not have written it yet."
                     )
                 else:
-                    print("[Queue] No pending .json files visible to worker.")
-            else:
+                    st.markdown("---")
+                    render_result_details(result)
+
+    with col_runs_right:
+        st.markdown("#### Queued runs")
+
+        # Show the canonical pending directory used by run_jobs
+        if isinstance(RUNS_PENDING_DIR, Path):
+            pending_dir = str(RUNS_PENDING_DIR)
+        else:
+            runs_root = get_runs_root()
+            pending_dir = os.path.join(runs_root, "pending")
+
+        st.caption(f"Queue directory: `{pending_dir}`")
+
+        # Clear queue button (file based jobs under ARA_RUNS_DIR/pending)
+        if st.button("🧹 Clear job queue", key="clear_queue_btn"):
+            pattern = os.path.join(pending_dir, "*.json")
+            removed = 0
+            for fp in glob.glob(pattern):
                 try:
-                    print(f"[Queue] Pending dir does not exist: {pending_dir.resolve()}")
+                    os.remove(fp)
+                    removed += 1
                 except Exception:
-                    print(f"[Queue] Pending dir does not exist: {pending_dir}")
-        except Exception as e:
-            print(f"[Queue] Error listing pending dir: {e}")
+                    # Ignore deletion errors and continue
+                    pass
+            st.success(f"Cleared {removed} queued job file(s) from {pending_dir}.")
+            st.rerun()
 
-        sys.stdout.flush()
+        if not pending_jobs:
+            st.info("No queued runs. Use the form above to queue one.")
+        else:
+            for job in pending_jobs:
+                with st.container():
+                    render_job_summary(job)
+                    st.caption("Waiting for engine worker to start.")
+                    st.markdown("---")
 
+    # ------------------------------
+    # History and advanced panels
+    # ------------------------------
+    st.markdown("---")
+    st.subheader("History and advanced analysis")
+
+    get_cycle_history = getattr(memory, "get_cycle_history", None)
+    history: List[Dict[str, Any]] = []
+    if callable(get_cycle_history):
         try:
-            job = load_next_pending_job()
-        except Exception as e:
-            print(f"[Queue] load_next_pending_job() raised an exception: {e}")
-            print(traceback.format_exc())
-            sys.stdout.flush()
-            _heartbeat(agent, label="queue_error")
-            time.sleep(5.0)
-            continue
-
-        if job is None:
-            idle_loops += 1
-            print("[Queue] No runnable job returned by load_next_pending_job().")
-            sys.stdout.flush()
-            _heartbeat(agent, label="queue_idle")
-            time.sleep(5.0)
-            continue
-
-        print(f"[Queue] Loaded job from queue: {getattr(job, 'run_id', 'unknown')}")
-        sys.stdout.flush()
-
-        _process_single_job(agent, config, job)
-        time.sleep(1.0)
-
-
-# ---------------------------------------------------------------------------
-# Single and swarm engines
-# ---------------------------------------------------------------------------
-
-
-def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
-    """
-    Run a long continuous single agent session (finite-only).
-
-    Controlled by:
-    - WORKER_MAX_MINUTES (optional wall time guard)
-    - WORKER_MAX_CYCLES (optional cycle guard; default very large finite)
-    - WORKER_STOP_RYE (optional)
-    - WORKER_RUNTIME_PROFILE (optional: hint only)
-    - WORKER_ROLE (default "agent")
-    - WORKER_SOURCES (optional, comma separated)
-    - WORKER_RESUME (bool, default True)
-    - WORKER_WATCHDOG_MINUTES (float, default 5.0)
-
-    Forever mode is disabled: the engine always runs with finite limits.
-    """
-    goal, domain = build_goal_and_domain()
-    preset_cfg = get_preset(domain)
-
-    max_minutes_env = _env_float("WORKER_MAX_MINUTES")
-    max_minutes = _clamp_minutes(max_minutes_env, "single.max_minutes")
-
-    stop_rye = _env_float("WORKER_STOP_RYE")
-
-    runtime_profile_env = os.getenv("WORKER_RUNTIME_PROFILE")
-    runtime_profile = runtime_profile_env or preset_cfg.get("default_runtime_profile")
-
-    role = os.getenv("WORKER_ROLE", "agent")
-    resume = _env_bool("WORKER_RESUME", default=True)
-    watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
-
-    max_cycles_env = os.getenv("WORKER_MAX_CYCLES")
-    if max_cycles_env is not None:
-        try:
-            requested_cycles = int(max_cycles_env)
+            history = get_cycle_history() or []
         except Exception:
-            requested_cycles = HARD_MAX_CYCLES
+            history = []
+
+    # Fallback to finished run results if MemoryStore has no cycles
+    if not history:
+        history = load_history_from_finished_runs()
+
+    if not history:
+        st.write("No cycles yet.")
     else:
-        requested_cycles = HARD_MAX_CYCLES
+        # Pre compute optional MSIL profile
+        msil_profile_full = compute_msil_profile(history)
 
-    max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "single.max_cycles")
-    forever = False
-
-    config_for_sources = dict(config)
-    if "default_source_controls" not in config_for_sources:
-        sc_preset = preset_cfg.get("source_controls")
-        if isinstance(sc_preset, dict):
-            config_for_sources["default_source_controls"] = sc_preset
-    source_controls = _build_source_controls(config_for_sources)
-
-    tool_flags = detect_tools()
-    run_id = _current_run_id("single")
-
-    env_keys_for_fingerprint = [
-        "WORKER_MAX_MINUTES",
-        "WORKER_MAX_CYCLES",
-        "WORKER_STOP_RYE",
-        "WORKER_RUNTIME_PROFILE",
-        "WORKER_MODE",
-        "WORKER_SWARM",
-        "WORKER_META",
-        "WORKER_SOURCES",
-        "WORKER_SWARM_ROLES",
-        "WORKER_DOMAIN",
-        "WORKER_GOAL",
-    ]
-    experiment_fingerprint = _build_experiment_fingerprint(
-        goal=goal,
-        domain=domain,
-        mode="single",
-        runtime_profile=runtime_profile,
-        source_controls=source_controls,
-        roles=[role],
-        env_keys=env_keys_for_fingerprint,
-    )
-
-    print("=== Autonomous Research Engine - Single Agent Mode (Finite Only) ===")
-    print(f"Goal: {goal}")
-    print(f"Domain: {domain}")
-    print(f"Role: {role}")
-    print(f"Run id: {run_id}")
-    print(f"Runtime profile (env override): {runtime_profile_env or 'None'}")
-    print(
-        "Runtime profile (effective, hint only): "
-        f"{runtime_profile or 'None (engine default)'}"
-    )
-    print(
-        "Max minutes (explicit, clamped): "
-        f"{max_minutes if max_minutes is not None else 'None (cycles-only guard)'}"
-    )
-    print(f"Max cycles (clamped): {max_cycles}")
-    print(
-        "Stop RYE threshold (explicit): "
-        f"{stop_rye if stop_rye is not None else 'None (preset/profile)'}"
-    )
-    print(f"Forever mode (disabled in finite-only): {forever}")
-    print(f"Resume from checkpoint: {resume}")
-    print(f"Watchdog interval (min): {watchdog_minutes}")
-    print(f"Source controls: {source_controls}")
-    print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
-    print(f"Experiment fingerprint: {experiment_fingerprint}")
-    sys.stdout.flush()
-
-    _update_worker_state(
-        agent,
-        status="starting",
-        mode="single",
-        goal=goal,
-        domain=domain,
-        roles=[role],
-        runtime_profile=runtime_profile,
-        stop_rye=stop_rye,
-        max_minutes=max_minutes,
-        run_id=run_id,
-        experiment_mode="single_engine",
-        extra={"experiment_fingerprint": experiment_fingerprint},
-    )
-    _heartbeat(agent, label="worker_single_start", run_id=run_id)
-
-    _update_worker_state(
-        agent,
-        status="running",
-        mode="single",
-        goal=goal,
-        domain=domain,
-        roles=[role],
-        runtime_profile=runtime_profile,
-        stop_rye=stop_rye,
-        max_minutes=max_minutes,
-        run_id=run_id,
-        experiment_mode="single_engine",
-        extra={"experiment_fingerprint": experiment_fingerprint},
-    )
-
-    summaries = agent.run_continuous(
-        goal=goal,
-        max_cycles=max_cycles,
-        stop_rye=stop_rye,
-        role=role,
-        source_controls=source_controls,
-        pdf_bytes=None,
-        biomarker_snapshot=None,
-        domain=domain,
-        max_minutes=max_minutes,
-        forever=forever,
-        resume_from_checkpoint=resume,
-        watchdog_interval_minutes=watchdog_minutes,
-        runtime_profile=runtime_profile,
-    )
-
-    _heartbeat(agent, label="worker_single_finished", run_id=run_id)
-
-    print("=== Continuous run finished cleanly (finite) ===")
-    print(f"Total completed cycles: {len(summaries)}")
-    diag: Dict[str, Any] = {}
-    try:
-        diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
-        print(f"RYE avg: {diag.get('rye_avg')}")
-        print(f"RYE median: {diag.get('rye_median')}")
-        print(f"RYE last: {diag.get('rye_last')}")
-        print(f"Stability index: {diag.get('stability_index')}")
-        print(f"Recovery momentum: {diag.get('recovery_momentum')}")
-    except Exception:
-        print("Diagnostics computation failed, see logs for details.")
-
-    # Write cycle history and run_state snapshots for diagnostics panel
-    _write_cycles_and_run_state(
-        agent,
-        run_id=run_id,
-        mode="single",
-        goal=goal,
-        domain=domain,
-        cycles=_normalize_cycles_for_ui(summaries),
-        diagnostics=diag,
-    )
-
-    intelligence_info = _run_post_run_intelligence(
-        agent,
-        mode="single",
-        goal=goal,
-        domain=domain,
-        run_id=run_id,
-        history=summaries,
-    )
-
-    extra_manifest: Dict[str, Any] = {
-        "engine": "single",
-        "experiment_fingerprint": experiment_fingerprint,
-    }
-    if diag:
-        extra_manifest["diagnostics_snapshot"] = diag
-    if intelligence_info:
-        extra_manifest["intelligence"] = intelligence_info
-
-    try:
-        _log_run_manifest(
-            agent,
-            run_id,
-            mode="single",
-            domain=domain,
-            goal=goal,
-            runtime_profile=runtime_profile,
-            stop_rye=stop_rye,
-            max_minutes=max_minutes,
-            summaries=summaries,
-            extra=extra_manifest,
+        # Top level tabs
+        tab_history, tab_citations, tab_discovery, tab_snapshots, tab_hypo, tab_memory, tab_verify, tab_graph = st.tabs(
+            [
+                "Cycle history",
+                "Citations",
+                "Discovery log",
+                "Snapshots and equilibrium",
+                "Hypothesis manager",
+                "Memory pruning",
+                "Verification and cures",
+                "Multi agent insight graph",
+            ]
         )
-    except Exception:
-        print("Manifest logging failed, see logs for details.")
-    sys.stdout.flush()
 
-    _update_worker_state(
-        agent,
-        status="stopped",
-        mode="single",
-        goal=goal,
-        domain=domain,
-        roles=[role],
-        runtime_profile=runtime_profile,
-        stop_rye=stop_rye,
-        max_minutes=max_minutes,
-        run_id=run_id,
-        experiment_mode="single_engine",
-        extra={
-            "experiment_fingerprint": experiment_fingerprint,
-            "final_diagnostics": diag,
-            "intelligence": intelligence_info if intelligence_info else None,
-        },
-    )
+        # ----------------- Cycle history tab -----------------
+        with tab_history:
+            rows: List[Dict[str, Any]] = []
+            for entry in history:
+                goal_text = entry.get("goal", "") or ""
+                rows.append(
+                    {
+                        "cycle": entry.get("cycle"),
+                        "role": entry.get("role", "agent"),
+                        "domain": entry.get("domain", "general"),
+                        "goal": goal_text[:60] + ("..." if len(goal_text) > 60 else ""),
+                        "delta_R": entry.get("delta_R"),
+                        "energy_E": entry.get("energy_E"),
+                        "RYE": entry.get("RYE"),
+                        "timestamp": entry.get("timestamp"),
+                    }
+                )
 
+            st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
-    """
-    Run a long continuous swarm session (finite-only).
+            st.markdown("### Efficiency Charts")
 
-    Controlled by:
-    - WORKER_SWARM_ROLES (comma separated, optional)
-    - WORKER_MAX_MINUTES (optional wall time guard)
-    - WORKER_MAX_ROUNDS (optional round guard; default very large finite)
-    - WORKER_STOP_RYE (optional)
-    - WORKER_RUNTIME_PROFILE (optional hint)
-    - WORKER_SOURCES (optional, comma separated)
-    - WORKER_RESUME (bool, default True)
-    - WORKER_WATCHDOG_MINUTES (float, default 5.0)
-    - WORKER_SHIFT_MINUTES (optional, minutes per shift; enables shift mode if > 0)
-    - WORKER_REPEAT_SHIFTS (bool, default False; if True and shift minutes set, runs back to back shifts)
+            plot_rows = rows[-MAX_POINTS_FOR_CHARTS:]
 
-    Forever mode is disabled: swarm always runs with finite limits.
-    """
-    goal, domain = build_goal_and_domain()
-    preset_cfg = get_preset(domain)
+            cycles_x = [r["cycle"] for r in plot_rows if r["cycle"] is not None]
+            rye_y = [r["RYE"] for r in plot_rows]
+            delta_y = [r["delta_R"] for r in plot_rows]
+            energy_y = [r["energy_E"] for r in plot_rows]
 
-    max_minutes_env = _env_float("WORKER_MAX_MINUTES")
-    max_minutes = _clamp_minutes(max_minutes_env, "swarm.max_minutes")
+            if cycles_x:
+                st.line_chart({"RYE": rye_y})
+                st.caption("Higher RYE means more efficient repair (delta_R per unit energy).")
 
-    stop_rye = _env_float("WORKER_STOP_RYE")
+                st.line_chart({"delta_R": delta_y})
+                st.caption("delta_R is how much improvement each cycle produced.")
 
-    runtime_profile_env = os.getenv("WORKER_RUNTIME_PROFILE")
-    runtime_profile = runtime_profile_env or preset_cfg.get("default_runtime_profile")
+                st.line_chart({"energy_E": energy_y})
+                st.caption("Energy per cycle (approximate effort cost).")
 
-    roles_list = _env_list("WORKER_SWARM_ROLES")
-    resume = _env_bool("WORKER_RESUME", default=True)
-    watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
+            # Advanced RYE diagnostics using rye_metrics build_run_diagnostics
+            st.markdown("### Advanced RYE diagnostics")
 
-    max_rounds_env = os.getenv("WORKER_MAX_ROUNDS")
-    if max_rounds_env is not None:
-        try:
-            requested_rounds = int(max_rounds_env)
-        except Exception:
-            requested_rounds = HARD_MAX_ROUNDS
-    else:
-        requested_rounds = HARD_MAX_ROUNDS
+            try:
+                diagnostics = build_run_diagnostics(history=history, domain=None, window=10)
+            except Exception:
+                diagnostics = {}
 
-    max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "swarm.max_rounds")
+            roll_val = diagnostics.get("rolling_rye")
+            trend_val = diagnostics.get("trend_simple")
+            slope_val = diagnostics.get("trend_slope")
+            stability_val = diagnostics.get("stability_index")
+            momentum_val = diagnostics.get("recovery_momentum")
 
-    shift_minutes_env = _env_float("WORKER_SHIFT_MINUTES")
-    shift_minutes = _clamp_minutes(shift_minutes_env, "swarm.shift_minutes")
-    repeat_shifts = _env_bool("WORKER_REPEAT_SHIFTS", default=False)
+            adv_cols = st.columns(5)
+            with adv_cols[0]:
+                st.metric("Rolling RYE (10)", f"{roll_val:.3f}" if roll_val is not None else "n/a")
+            with adv_cols[1]:
+                st.metric("RYE trend", f"{trend_val:.3f}" if trend_val is not None else "n/a")
+            with adv_cols[2]:
+                st.metric("RYE slope", f"{slope_val:.4f}" if slope_val is not None else "n/a")
+            with adv_cols[3]:
+                st.metric("Stability index", f"{stability_val:.3f}" if stability_val is not None else "n/a")
+            with adv_cols[4]:
+                st.metric("Recovery momentum", f"{momentum_val:.3f}" if momentum_val is not None else "n/a")
 
-    if roles_list is None:
-        roles_list = agent.get_agent_roles()
+            # Learning speed and breakthrough profile plus 10x Option C view
+            st.markdown("### Learning speed and breakthrough profile")
 
-    forever = False
+            hours_run = compute_run_hours(history)
+            try:
+                bp_short = estimate_breakthrough_probability(diagnostics, domain=None, horizon_hours=hours_run)
+            except Exception:
+                bp_short = None
+            try:
+                bp90 = breakthrough_likelihood_90d(diagnostics, domain=None, hours_run_so_far=hours_run)
+            except Exception:
+                bp90 = None
+            try:
+                env = autonomy_safety_envelope(diagnostics)
+            except Exception:
+                env = {}
+            try:
+                fail = early_failure_warning_score(diagnostics)
+            except Exception:
+                fail = {}
 
-    config_for_sources = dict(config)
-    if "default_source_controls" not in config_for_sources:
-        sc_preset = preset_cfg.get("source_controls")
-        if isinstance(sc_preset, dict):
-            config_for_sources["default_source_controls"] = sc_preset
-    source_controls = _build_source_controls(config_for_sources)
+            bp_prob = None
+            if isinstance(bp_short, dict):
+                bp_prob = bp_short.get("probability")
 
-    tool_flags = detect_tools()
-    run_id = _current_run_id("swarm")
+            bp90_prob = None
+            if isinstance(bp90, dict):
+                bp90_prob = bp90.get("probability")
 
-    env_keys_for_fingerprint = [
-        "WORKER_MAX_MINUTES",
-        "WORKER_MAX_ROUNDS",
-        "WORKER_STOP_RYE",
-        "WORKER_RUNTIME_PROFILE",
-        "WORKER_MODE",
-        "WORKER_SWARM",
-        "WORKER_META",
-        "WORKER_SOURCES",
-        "WORKER_SWARM_ROLES",
-        "WORKER_DOMAIN",
-        "WORKER_GOAL",
-        "WORKER_SHIFT_MINUTES",
-        "WORKER_REPEAT_SHIFTS",
-    ]
-    experiment_fingerprint = _build_experiment_fingerprint(
-        goal=goal,
-        domain=domain,
-        mode="swarm",
-        runtime_profile=runtime_profile,
-        source_controls=source_controls,
-        roles=roles_list,
-        env_keys=env_keys_for_fingerprint,
-    )
+            try:
+                tier_info = classify_run_tier(diagnostics, breakthrough_prob=bp_prob)
+            except Exception:
+                tier_info = None
 
-    print("=== Autonomous Research Engine - Swarm Mode (Finite Only) ===")
-    print(f"Goal: {goal}")
-    print(f"Domain: {domain}")
-    print(f"Roles: {roles_list}")
-    print(f"Run id: {run_id}")
-    print(f"Runtime profile (env override): {runtime_profile_env or 'None'}")
-    print(
-        "Runtime profile (effective, hint only): "
-        f"{runtime_profile or 'None (engine default)'}"
-    )
-    print(
-        "Max minutes (explicit, clamped): "
-        f"{max_minutes if max_minutes is not None else 'None (rounds-only guard)'}"
-    )
-    print(f"Max rounds (clamped): {max_rounds}")
-    print(
-        "Stop RYE threshold (explicit): "
-        f"{stop_rye if stop_rye is not None else 'None (preset/profile)'}"
-    )
-    print(f"Forever mode (disabled in finite-only): {forever}")
-    print(f"Resume from checkpoint: {resume}")
-    print(f"Watchdog interval (min): {watchdog_minutes}")
-    print(f"Source controls: {source_controls}")
-    print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
-    print(f"Shift minutes (clamped): {shift_minutes if shift_minutes is not None else 'None'}")
-    print(f"Repeat shifts: {repeat_shifts}")
-    print(f"Experiment fingerprint: {experiment_fingerprint}")
-    sys.stdout.flush()
+            tier_label = None
+            if isinstance(tier_info, dict):
+                tier_label = tier_info.get("tier") or tier_info.get("label")
 
-    _update_worker_state(
-        agent,
-        status="starting",
-        mode="swarm",
-        goal=goal,
-        domain=domain,
-        roles=roles_list,
-        runtime_profile=runtime_profile,
-        stop_rye=stop_rye,
-        max_minutes=max_minutes,
-        run_id=run_id,
-        experiment_mode="swarm_engine",
-        extra={"experiment_fingerprint": experiment_fingerprint},
-    )
-    _heartbeat(agent, label="worker_swarm_start", run_id=run_id)
-
-    _update_worker_state(
-        agent,
-        status="running",
-        mode="swarm",
-        goal=goal,
-        domain=domain,
-        roles=roles_list,
-        runtime_profile=runtime_profile,
-        stop_rye=stop_rye,
-        max_minutes=max_minutes,
-        run_id=run_id,
-        experiment_mode="swarm_engine",
-        extra={"experiment_fingerprint": experiment_fingerprint},
-    )
-
-    summaries_all: List[Dict[str, Any]] = []
-
-    if not repeat_shifts or shift_minutes is None or shift_minutes <= 0:
-        summaries_all = agent.run_swarm_continuous(
-            goal=goal,
-            max_rounds=max_rounds,
-            stop_rye=stop_rye,
-            roles=roles_list,
-            source_controls=source_controls,
-            pdf_bytes=None,
-            biomarker_snapshot=None,
-            domain=domain,
-            max_minutes=max_minutes,
-            forever=forever,
-            resume_from_checkpoint=resume,
-            watchdog_interval_minutes=watchdog_minutes,
-            runtime_profile=runtime_profile,
-        )
-    else:
-        total_elapsed = 0.0
-        shift_index = 0
-
-        while True:
-            if max_minutes is not None:
-                remaining = max_minutes - total_elapsed
-                if remaining <= 0:
-                    break
-                this_shift_minutes = min(shift_minutes, remaining)
-            else:
-                this_shift_minutes = shift_minutes
-
-            shift_index += 1
-            print(
-                f"--- Swarm shift {shift_index} starting, "
-                f"budget {this_shift_minutes:.2f} minutes ---"
-            )
-            sys.stdout.flush()
-
-            shift_summaries = agent.run_swarm_continuous(
-                goal=goal,
-                max_rounds=max_rounds,
-                stop_rye=stop_rye,
-                roles=roles_list,
-                source_controls=source_controls,
-                pdf_bytes=None,
-                biomarker_snapshot=None,
-                domain=domain,
-                max_minutes=this_shift_minutes,
-                forever=False,
-                resume_from_checkpoint=resume,
-                watchdog_interval_minutes=watchdog_minutes,
-                runtime_profile=runtime_profile,
-            )
-
-            if not shift_summaries:
-                used = this_shift_minutes
-            else:
-                last_meta = shift_summaries[-1].get("run_metadata")
-                em = None
-                if isinstance(last_meta, dict):
-                    em = last_meta.get("elapsed_minutes")
-                if isinstance(em, (int, float)):
-                    used = float(em)
+            ls_cols = st.columns(4)
+            with ls_cols[0]:
+                st.metric(
+                    "Approx hours run",
+                    f"{hours_run:.2f}" if isinstance(hours_run, (int, float)) else "n/a",
+                )
+            with ls_cols[1]:
+                if isinstance(bp_prob, (int, float)):
+                    st.metric("Breakthrough signal (near term, 0 to 1)", f"{bp_prob:.3f}")
                 else:
-                    used = this_shift_minutes
-
-            total_elapsed += used
-            summaries_all.extend(shift_summaries)
-
-            print(
-                f"--- Swarm shift {shift_index} finished, "
-                f"elapsed this shift {used:.2f} minutes, total {total_elapsed:.2f} ---"
-            )
-            sys.stdout.flush()
-
-            if max_minutes is not None and total_elapsed >= max_minutes:
-                break
-
-            if not repeat_shifts:
-                break
-
-    summaries = summaries_all
-
-    _heartbeat(agent, label="worker_swarm_finished", run_id=run_id)
-
-    print("=== Swarm run finished cleanly (finite) ===")
-    print(
-        "Total summaries produced across all roles and rounds: "
-        f"{len(summaries)}"
-    )
-    diag: Dict[str, Any] = {}
-    try:
-        diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
-        print(f"RYE avg: {diag.get('rye_avg')}")
-        print(f"RYE median: {diag.get('rye_median')}")
-        print(f"RYE last: {diag.get('rye_last')}")
-        print(f"Stability index: {diag.get('stability_index')}")
-        print(f"Recovery momentum: {diag.get('recovery_momentum')}")
-    except Exception:
-        print("Diagnostics computation failed, see logs for details.")
-
-    # Write cycle history and run_state snapshots for diagnostics panel
-    _write_cycles_and_run_state(
-        agent,
-        run_id=run_id,
-        mode="swarm",
-        goal=goal,
-        domain=domain,
-        cycles=_normalize_cycles_for_ui(summaries),
-        diagnostics=diag,
-    )
-
-    intelligence_info = _run_post_run_intelligence(
-        agent,
-        mode="swarm",
-        goal=goal,
-        domain=domain,
-        run_id=run_id,
-        history=summaries,
-    )
-
-    extra_manifest: Dict[str, Any] = {
-        "engine": "swarm",
-        "roles": roles_list,
-        "shift_minutes": shift_minutes,
-        "repeat_shifts": repeat_shifts,
-        "experiment_fingerprint": experiment_fingerprint,
-    }
-    if diag:
-        extra_manifest["diagnostics_snapshot"] = diag
-    if intelligence_info:
-        extra_manifest["intelligence"] = intelligence_info
-
-    try:
-        _log_run_manifest(
-            agent,
-            run_id,
-            mode="swarm",
-            domain=domain,
-            goal=goal,
-            runtime_profile=runtime_profile,
-            stop_rye=stop_rye,
-            max_minutes=max_minutes,
-            summaries=summaries,
-            extra=extra_manifest,
-        )
-    except Exception:
-        print("Manifest logging failed, see logs for details.")
-    sys.stdout.flush()
-
-    _update_worker_state(
-        agent,
-        status="stopped",
-        mode="swarm",
-        goal=goal,
-        domain=domain,
-        roles=roles_list,
-        runtime_profile=runtime_profile,
-        stop_rye=stop_rye,
-        max_minutes=max_minutes,
-        run_id=run_id,
-        experiment_mode="swarm_engine",
-        extra={
-            "experiment_fingerprint": experiment_fingerprint,
-            "final_diagnostics": diag,
-            "intelligence": intelligence_info if intelligence_info else None,
-        },
-    )
-
-
-# ---------------------------------------------------------------------------
-# Meta-controller engine (Option C)
-# ---------------------------------------------------------------------------
-
-
-def _compute_segment_stats(segment_summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """
-    Inspect a list of cycle or swarm summaries and compute stats for the meta-controller.
-
-    Uses build_run_diagnostics so segment stats are consistent with the UI.
-    Returns:
-        {
-            "count": int,
-            "avg_rye": Optional[float],
-            "max_rye": Optional[float],
-            "min_rye": Optional[float],
-            "last_rye": Optional[float],
-            "stability": Optional[float],
-            "momentum": Optional[float],
-        }
-    """
-    if not segment_summaries:
-        return {
-            "count": 0,
-            "avg_rye": None,
-            "max_rye": None,
-            "min_rye": None,
-            "last_rye": None,
-            "stability": None,
-            "momentum": None,
-        }
-
-    diag = build_run_diagnostics(history=segment_summaries, domain=None, window=10)
-    rye_vals: List[float] = [
-        float(e["RYE"]) for e in segment_summaries if isinstance(e.get("RYE"), (int, float))
-    ]
-    if not rye_vals:
-        return {
-            "count": len(segment_summaries),
-            "avg_rye": diag.get("rye_avg"),
-            "max_rye": None,
-            "min_rye": None,
-            "last_rye": None,
-            "stability": diag.get("stability_index"),
-            "momentum": diag.get("recovery_momentum"),
-        }
-
-    return {
-        "count": len(segment_summaries),
-        "avg_rye": diag.get("rye_avg"),
-        "max_rye": max(rye_vals),
-        "min_rye": min(rye_vals),
-        "last_rye": rye_vals[-1],
-        "stability": diag.get("stability_index"),
-        "momentum": diag.get("recovery_momentum"),
-    }
-
-
-def _initial_meta_plan(
-    goal: str,
-    domain: str,
-    preferred_mode: str,
-    total_budget_minutes: Optional[float],
-) -> Dict[str, Any]:
-    """
-    Create an initial meta plan with three conceptual phases:
-        1) exploration (usually swarm)
-        2) stabilization (usually single)
-        3) refinement (small targeted segment)
-
-    The exact minutes per phase are distributed from total_budget_minutes.
-    If no total budget is given, defaults to a 60 minute plan.
-
-    Note: this is also finite-only; there is always a macro budget.
-    """
-    if total_budget_minutes is None or total_budget_minutes <= 0:
-        total_budget_minutes = 60.0
-
-    # Apply hard clamp for macro budget
-    total_budget_minutes = _clamp_minutes(total_budget_minutes, "meta.total_budget") or 60.0
-
-    explore_min = max(5.0, total_budget_minutes * 0.4)
-    stabilize_min = max(5.0, total_budget_minutes * 0.4)
-    refine_min = max(5.0, total_budget_minutes * 0.2)
-
-    if explore_min + stabilize_min + refine_min > total_budget_minutes:
-        scale = total_budget_minutes / (explore_min + stabilize_min + refine_min)
-        explore_min *= scale
-        stabilize_min *= scale
-        refine_min *= scale
-
-    if preferred_mode not in {"single", "swarm"}:
-        preferred_mode = "swarm"
-
-    if domain.lower() == "longevity":
-        explore_profile = "1_hour"
-        stabilize_profile = "8_hours"
-        refine_profile = "1_hour"
-    elif domain.lower() == "math":
-        explore_profile = "1_hour"
-        stabilize_profile = "8_hours"
-        refine_profile = "8_hours"
-    else:
-        explore_profile = "1_hour"
-        stabilize_profile = "8_hours"
-        refine_profile = "1_hour"
-
-    plan = {
-        "goal": goal,
-        "domain": domain,
-        "total_budget_minutes": total_budget_minutes,
-        "phases": [
-            {
-                "name": "exploration",
-                "mode": "swarm" if preferred_mode == "swarm" else "single",
-                "runtime_profile": explore_profile,
-                "target_minutes": explore_min,
-                "min_minutes": max(5.0, explore_min * 0.5),
-                "max_minutes": explore_min * 1.5,
-                "base_stop_rye": 0.02,
-            },
-            {
-                "name": "stabilization",
-                "mode": "single",
-                "runtime_profile": stabilize_profile,
-                "target_minutes": stabilize_min,
-                "min_minutes": max(5.0, stabilize_min * 0.5),
-                "max_minutes": stabilize_min * 1.5,
-                "base_stop_rye": 0.05,
-            },
-            {
-                "name": "refinement",
-                "mode": preferred_mode,
-                "runtime_profile": refine_profile,
-                "target_minutes": refine_min,
-                "min_minutes": max(5.0, refine_min * 0.3),
-                "max_minutes": refine_min * 1.5,
-                "base_stop_rye": 0.08,
-            },
-        ],
-    }
-    return plan
-
-
-def _adjust_phase_from_stats(
-    phase_cfg: Dict[str, Any],
-    stats: Dict[str, Any],
-    recent_avg_rye: Optional[float],
-) -> Tuple[float, Optional[float]]:
-    """
-    Given a phase configuration and recent RYE behavior, choose:
-        - effective_minutes for the next segment
-        - effective_stop_rye for the next segment
-
-    Rules of thumb:
-        - If RYE is very low or trending down, shorten the next segment and lower stop_rye.
-        - If RYE is healthy or trending up, keep or extend the next segment and raise stop_rye a bit.
-    """
-    _ = stats
-    base_target = float(phase_cfg.get("target_minutes", 20.0))
-    min_minutes = float(phase_cfg.get("min_minutes", 5.0))
-    max_minutes_phase = float(phase_cfg.get("max_minutes", base_target))
-    base_stop_rye = phase_cfg.get("base_stop_rye")
-    effective_stop_rye: Optional[float] = None
-
-    if recent_avg_rye is None:
-        effective_minutes = base_target
-        effective_stop_rye = base_stop_rye
-    else:
-        if recent_avg_rye < 0.01:
-            effective_minutes = max(min_minutes, base_target * 0.5)
-            effective_stop_rye = None
-        elif recent_avg_rye < 0.05:
-            effective_minutes = base_target
-            effective_stop_rye = (base_stop_rye or 0.03) * 0.8
-        elif recent_avg_rye < 0.15:
-            effective_minutes = base_target
-            effective_stop_rye = (base_stop_rye or 0.05) * 1.1
-        else:
-            effective_minutes = min(max_minutes_phase, base_target * 1.2)
-            effective_stop_rye = (base_stop_rye or 0.08) * 1.25
-
-    if effective_minutes < min_minutes:
-        effective_minutes = min_minutes
-    if effective_minutes > max_minutes_phase:
-        effective_minutes = max_minutes_phase
-
-    effective_minutes = _clamp_minutes(effective_minutes, "meta.segment") or min_minutes
-
-    return effective_minutes, effective_stop_rye
-
-
-def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
-    """
-    Meta-controller engine (Option C).
-
-    Instead of one giant continuous call, this orchestrates multiple segments:
-
-        Phase 1: exploration (usually swarm)
-        Phase 2: stabilization (usually single)
-        Phase 3: refinement (mode depends on domain and env)
-
-    Between segments it:
-        - reads RYE behavior
-        - adjusts segment duration and stop_rye
-        - can stop early if time is almost exhausted or RYE has clearly collapsed
-
-    Controlled by (finite-only):
-    - WORKER_MAX_MINUTES (overall macro budget; if not set, derived from presets)
-    - WORKER_META_MAX_SEGMENTS (max number of segments, default 6)
-    - WORKER_RUNTIME_PROFILE (hint for phase profiles only)
-    - WORKER_MODE / WORKER_SWARM (preferred mode: single vs swarm)
-    - WORKER_SOURCES etc as in single and swarm engines
-    """
-    goal, domain = build_goal_and_domain()
-    preset_cfg = get_preset(domain)
-
-    total_budget_minutes_env = _env_float("WORKER_MAX_MINUTES")
-    if total_budget_minutes_env is None:
-        total_budget_minutes_env = float(preset_cfg.get("runtime_minutes", 60.0))
-    total_budget_minutes = _clamp_minutes(total_budget_minutes_env, "meta.total_budget")
-    if total_budget_minutes is None:
-        total_budget_minutes = 60.0
-
-    meta_max_segments = _env_float("WORKER_META_MAX_SEGMENTS")
-    if meta_max_segments is None or meta_max_segments <= 0:
-        meta_max_segments = 6.0
-    meta_max_segments_int = int(meta_max_segments)
-
-    use_swarm_flag = _env_bool("WORKER_SWARM", default=False)
-    mode_env = os.getenv("WORKER_MODE", "single").strip().lower()
-    preferred_mode = "swarm" if (use_swarm_flag or mode_env == "swarm") else "single"
-
-    runtime_profile_env = os.getenv("WORKER_RUNTIME_PROFILE")
-    stop_rye_env = _env_float("WORKER_STOP_RYE")
-    resume = _env_bool("WORKER_RESUME", default=True)
-    watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
-
-    config_for_sources = dict(config)
-    if "default_source_controls" not in config_for_sources:
-        sc_preset = preset_cfg.get("source_controls")
-        if isinstance(sc_preset, dict):
-            config_for_sources["default_source_controls"] = sc_preset
-    source_controls = _build_source_controls(config_for_sources)
-
-    tool_flags = detect_tools()
-    run_id = _current_run_id("meta")
-
-    env_keys_for_fingerprint = [
-        "WORKER_MAX_MINUTES",
-        "WORKER_STOP_RYE",
-        "WORKER_RUNTIME_PROFILE",
-        "WORKER_MODE",
-        "WORKER_SWARM",
-        "WORKER_META",
-        "WORKER_SOURCES",
-        "WORKER_SWARM_ROLES",
-        "WORKER_DOMAIN",
-        "WORKER_GOAL",
-        "WORKER_META_MAX_SEGMENTS",
-    ]
-    experiment_fingerprint = _build_experiment_fingerprint(
-        goal=goal,
-        domain=domain,
-        mode="meta",
-        runtime_profile=runtime_profile_env,
-        source_controls=source_controls,
-        roles=None,
-        env_keys=env_keys_for_fingerprint,
-    )
-
-    print(
-        "=== Autonomous Research Engine - Meta Controller Mode "
-        "(Option C, Finite Only) ==="
-    )
-    print(f"Goal: {goal}")
-    print(f"Domain: {domain}")
-    print(f"Run id: {run_id}")
-    print(f"Preferred mode: {preferred_mode}")
-    print(f"Total macro budget (minutes, clamped): {total_budget_minutes}")
-    print(f"Max meta segments: {meta_max_segments_int}")
-    print(f"Runtime profile hint (env): {runtime_profile_env or 'none'}")
-    print(
-        "Explicit stop RYE (env): "
-        f"{stop_rye_env if stop_rye_env is not None else 'None'}"
-    )
-    print(f"Resume from checkpoint: {resume}")
-    print(f"Watchdog interval (min): {watchdog_minutes}")
-    print(f"Source controls: {source_controls}")
-    print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
-    print(f"Experiment fingerprint: {experiment_fingerprint}")
-    sys.stdout.flush()
-
-    _update_worker_state(
-        agent,
-        status="starting",
-        mode="meta",
-        goal=goal,
-        domain=domain,
-        roles=None,
-        runtime_profile=runtime_profile_env,
-        stop_rye=stop_rye_env,
-        max_minutes=total_budget_minutes,
-        run_id=run_id,
-        experiment_mode="meta_controller",
-        extra={"experiment_fingerprint": experiment_fingerprint},
-    )
-    _heartbeat(agent, label="worker_meta_start", run_id=run_id)
-
-    meta_plan = _initial_meta_plan(
-        goal=goal,
-        domain=domain,
-        preferred_mode=preferred_mode,
-        total_budget_minutes=total_budget_minutes,
-    )
-
-    segments_run: List[Dict[str, Any]] = []
-    recent_avg_rye: Optional[float] = None
-    total_elapsed = 0.0
-
-    roles_env = _env_list("WORKER_SWARM_ROLES")
-    if roles_env is None:
-        roles_for_swarm: Sequence[str] = agent.get_agent_roles()
-    else:
-        roles_for_swarm = roles_env
-
-    _update_worker_state(
-        agent,
-        status="running",
-        mode="meta",
-        goal=goal,
-        domain=domain,
-        roles=list(roles_for_swarm),
-        runtime_profile=runtime_profile_env,
-        stop_rye=stop_rye_env,
-        max_minutes=total_budget_minutes,
-        run_id=run_id,
-        experiment_mode="meta_controller",
-        extra={"experiment_fingerprint": experiment_fingerprint},
-    )
-
-    for seg_index in range(meta_max_segments_int):
-        time_left = total_budget_minutes - total_elapsed
-        if time_left <= 1.0:
-            print(
-                f"[Meta] Time almost exhausted, "
-                f"stopping before segment {seg_index + 1}."
-            )
-            break
-
-        if seg_index < len(meta_plan["phases"]):
-            phase_cfg = meta_plan["phases"][seg_index]
-        else:
-            phase_cfg = meta_plan["phases"][-1]
-
-        phase_name = phase_cfg.get("name", f"segment_{seg_index + 1}")
-        phase_mode = phase_cfg.get("mode", preferred_mode)
-        phase_profile = phase_cfg.get("runtime_profile")
-
-        if runtime_profile_env and phase_profile is None:
-            phase_profile = runtime_profile_env
-
-        effective_minutes, effective_stop_rye = _adjust_phase_from_stats(
-            phase_cfg=phase_cfg,
-            stats={"count": 0},
-            recent_avg_rye=recent_avg_rye,
-        )
-
-        if effective_minutes > time_left:
-            effective_minutes = time_left
-
-        effective_minutes = _clamp_minutes(effective_minutes, "meta.segment") or time_left
-
-        if stop_rye_env is not None:
-            effective_stop_rye = stop_rye_env
-
-        print("")
-        print(f"[Meta] Starting segment {seg_index + 1} / {meta_max_segments_int}")
-        print(f"[Meta] Phase: {phase_name}")
-        print(f"[Meta] Mode: {phase_mode}")
-        print(f"[Meta] Segment minutes (requested, clamped): {effective_minutes:.2f}")
-        print(
-            "[Meta] Time left after this segment (approx): "
-            f"{time_left - effective_minutes:.2f}"
-        )
-        print(
-            "[Meta] Segment stop RYE (auto/explicit): "
-            f"{effective_stop_rye if effective_stop_rye is not None else 'None'}"
-        )
-        print(
-            f"[Meta] Phase runtime profile: "
-            f"{phase_profile or 'preset default'}"
-        )
-        sys.stdout.flush()
-
-        if phase_mode == "swarm":
-            segment_summaries = agent.run_swarm_continuous(
-                goal=goal,
-                max_rounds=HARD_MAX_ROUNDS,
-                stop_rye=effective_stop_rye,
-                roles=roles_for_swarm,
-                source_controls=source_controls,
-                pdf_bytes=None,
-                biomarker_snapshot=None,
-                domain=domain,
-                max_minutes=effective_minutes,
-                forever=False,
-                resume_from_checkpoint=resume,
-                watchdog_interval_minutes=watchdog_minutes,
-                runtime_profile=phase_profile,
-            )
-        else:
-            segment_summaries = agent.run_continuous(
-                goal=goal,
-                max_cycles=HARD_MAX_CYCLES,
-                stop_rye=effective_stop_rye,
-                role=os.getenv("WORKER_ROLE", "agent"),
-                source_controls=source_controls,
-                pdf_bytes=None,
-                biomarker_snapshot=None,
-                domain=domain,
-                max_minutes=effective_minutes,
-                forever=False,
-                resume_from_checkpoint=resume,
-                watchdog_interval_minutes=watchdog_minutes,
-                runtime_profile=phase_profile,
+                    st.metric("Breakthrough signal (near term, 0 to 1)", "n/a")
+            with ls_cols[2]:
+                if isinstance(bp90_prob, (int, float)):
+                    st.metric("Breakthrough signal 90d (0 to 1)", f"{bp90_prob:.3f}")
+                else:
+                    st.metric("Breakthrough signal 90d (0 to 1)", "n/a")
+            with ls_cols[3]:
+                st.metric("Run tier", tier_label or "n/a")
+
+            st.caption(
+                "Breakthrough signals are heuristic scores on a 0 to 1 scale derived from RYE and stability trends, "
+                "not calibrated real world probabilities."
             )
 
-        segments_run.append(
-            {
-                "phase": phase_name,
-                "mode": phase_mode,
-                "runtime_profile": phase_profile,
-                "minutes_requested": effective_minutes,
-                "summaries": segment_summaries,
-            }
-        )
+            # Optional MSIL meta intelligence view
+            st.markdown("### Meta skill intelligence (MSIL)")
 
-        seg_stats = _compute_segment_stats(segment_summaries)
-        seg_avg_rye = seg_stats["avg_rye"]
-        if seg_avg_rye is not None:
-            if recent_avg_rye is None:
-                recent_avg_rye = seg_avg_rye
+            if msil_profile_full:
+                msil_score = msil_profile_full.get("msil_score")
+                skills = msil_profile_full.get("skills") or msil_profile_full.get("dimensions") or {}
+                domains_profile = (
+                    msil_profile_full.get("domains")
+                    or msil_profile_full.get("domain_profiles")
+                    or []
+                )
+                dynamics = msil_profile_full.get("dynamics") or {}
+
+                msil_cols = st.columns(3)
+                with msil_cols[0]:
+                    if isinstance(msil_score, (int, float)):
+                        st.metric("MSIL score", f"{msil_score:.3f}")
+                    else:
+                        st.metric("MSIL score", "n/a")
+                with msil_cols[1]:
+                    st.metric("Skill dimensions", len(skills) if isinstance(skills, dict) else 0)
+                with msil_cols[2]:
+                    dom_count = 0
+                    if isinstance(domains_profile, list):
+                        dom_count = len(domains_profile)
+                    elif isinstance(domains_profile, dict):
+                        dom_count = len(domains_profile)
+                    st.metric("Domain profiles", dom_count)
+
+                with st.expander("Skill breakdown"):
+                    st.json(skills)
+                with st.expander("Domain intelligence profile"):
+                    st.json(domains_profile)
+                if dynamics:
+                    with st.expander("Learning and stability dynamics"):
+                        st.json(dynamics)
             else:
-                recent_avg_rye = 0.6 * recent_avg_rye + 0.4 * seg_avg_rye
+                st.info(
+                    "MSIL module not detected or no MSIL profile available. "
+                    "This panel stays optional and non blocking."
+                )
 
-        segment_elapsed = 0.0
-        if segment_summaries:
-            meta = segment_summaries[-1].get("run_metadata")
-            if isinstance(meta, dict):
-                em = meta.get("elapsed_minutes")
-                if isinstance(em, (int, float)):
-                    segment_elapsed = float(em)
+            # New Option C style 10x learning dashboard
+            st.markdown("#### 10x learning dashboard (Option C signals)")
 
-        if segment_elapsed <= 0.0:
-            segment_elapsed = effective_minutes
+            # Volatility
+            volatility_info: Dict[str, Any] = {}
+            try:
+                volatility_info = rye_volatility_signature(diagnostics)
+            except TypeError:
+                try:
+                    volatility_info = rye_volatility_signature(history=history, domain=None, window=10)  # type: ignore[call-arg]
+                except Exception:
+                    volatility_info = {}
+            except Exception:
+                volatility_info = {}
 
-        total_elapsed += segment_elapsed
+            # Equilibrium detection
+            equilibrium_info: Dict[str, Any] = {}
+            try:
+                equilibrium_info = detect_rye_equilibrium(diagnostics)
+            except TypeError:
+                try:
+                    equilibrium_info = detect_rye_equilibrium(history=history, domain=None, window=10)  # type: ignore[call-arg]
+                except Exception:
+                    equilibrium_info = {}
+            except Exception:
+                equilibrium_info = {}
 
-        print(f"[Meta] Segment {seg_index + 1} stats:")
-        print(f"        cycles/summaries: {seg_stats['count']}")
-        print(f"        avg RYE: {seg_stats['avg_rye']}")
-        print(f"        best RYE: {seg_stats['max_rye']}")
-        print(f"        stability: {seg_stats['stability']}")
-        print(f"        momentum: {seg_stats['momentum']}")
-        print(f"        smoothed recent RYE: {recent_avg_rye}")
-        print(
-            "        total elapsed minutes: "
-            f"{total_elapsed:.2f} / {total_budget_minutes:.2f}"
-        )
-        sys.stdout.flush()
+            # Harmonic index
+            harmonic_val: Optional[float] = None
+            try:
+                harmonic_val = tgrm_harmonic_index(diagnostics)
+            except TypeError:
+                try:
+                    harmonic_val = tgrm_harmonic_index(history=history, domain=None, window=10)  # type: ignore[call-arg]
+                except Exception:
+                    harmonic_val = None
+            except Exception:
+                harmonic_val = None
 
-        _log_milestone(
-            agent,
-            run_id=run_id,
-            goal=goal,
-            domain=domain,
-            label=f"meta_segment_{seg_index + 1}",
-            description=(
-                f"Phase {phase_name} ({phase_mode}) finished with avg RYE "
-                f"{seg_stats['avg_rye']} and stability {seg_stats['stability']}."
-            ),
-            level="info",
-            extra={
-                "segment_index": seg_index + 1,
-                "phase_mode": phase_mode,
-                "runtime_profile": phase_profile,
-                "minutes_requested": effective_minutes,
-                "segment_stats": seg_stats,
-            },
-        )
+            vol_score = volatility_info.get("volatility_score")
+            vol_regime = volatility_info.get("regime") or volatility_info.get("label")
+            eq_flag = equilibrium_info.get("in_equilibrium")
+            eq_reason = equilibrium_info.get("reason")
+            eq_state_text = "unknown"
+            if isinstance(eq_flag, bool):
+                eq_state_text = "yes" if eq_flag else "no"
 
-        _heartbeat(agent, label="worker_meta_segment", run_id=run_id)
+            oc_cols = st.columns(3)
+            with oc_cols[0]:
+                st.metric("Equilibrium detected", eq_state_text)
+            with oc_cols[1]:
+                if isinstance(vol_score, (int, float)):
+                    st.metric("Volatility score", f"{vol_score:.3f}")
+                else:
+                    st.metric("Volatility score", "n/a")
+            with oc_cols[2]:
+                if isinstance(harmonic_val, (int, float)):
+                    st.metric("TGRM harmonic index", f"{harmonic_val:.3f}")
+                else:
+                    st.metric("TGRM harmonic index", "n/a")
 
-        if (
-            recent_avg_rye is not None
-            and recent_avg_rye < 0.01
-            and total_elapsed > total_budget_minutes * 0.6
-        ):
-            print("[Meta] RYE collapsed and most of the budget is used. Stopping early.")
-            break
+            if vol_regime:
+                st.caption(f"Volatility regime: {vol_regime}")
+            if eq_reason:
+                st.caption(f"Equilibrium reasoning: {eq_reason}")
 
-    _heartbeat(agent, label="worker_meta_finished", run_id=run_id)
+            with st.expander("Autonomy safety and failure envelope"):
+                st.write("Autonomy safety envelope:")
+                st.json(env)
+                st.write("Early failure warning score:")
+                st.json(fail)
 
-    total_segments = len(segments_run)
-    total_summaries = sum(len(seg["summaries"]) for seg in segments_run)
-    print("")
-    print("=== Meta controller run finished (finite) ===")
-    print(f"Segments executed: {total_segments}")
-    print(f"Total summaries across segments: {total_summaries}")
-    print(f"Final smoothed recent RYE: {recent_avg_rye}")
-    print(
-        "Total elapsed minutes (approx): "
-        f"{total_elapsed:.2f} / {total_budget_minutes:.2f}"
-    )
-    sys.stdout.flush()
+            with st.expander("Raw Option C style signals"):
+                raw_signals = {
+                    "diagnostics": diagnostics,
+                    "volatility": volatility_info,
+                    "equilibrium": equilibrium_info,
+                    "harmonic_index": harmonic_val,
+                    "breakthrough_near_term": bp_short,
+                    "breakthrough_90d": bp90,
+                    "run_tier": tier_info,
+                    "msil_profile": msil_profile_full,
+                }
+                preview, note = safe_json_preview(raw_signals)
+                if preview is not None:
+                    st.code(preview, language="json")
+                    if note:
+                        st.caption(note)
+                else:
+                    st.info(note or "Signals contain non JSON serializable objects.")
 
-    combined_history: List[Dict[str, Any]] = []
-    for seg in segments_run:
-        combined_history.extend(seg.get("summaries", []))
+            with st.expander("Raw history JSON"):
+                # Limit to avoid RangeError in the browser
+                preview, note = safe_json_preview(history, max_items=MAX_POINTS_FOR_CHARTS)
+                if preview is not None:
+                    st.code(preview, language="json")
+                    if note:
+                        st.caption(note)
+                else:
+                    st.info(note or "History contains non JSON serializable objects.")
 
-    # Write aggregated cycle history and run_state snapshots for diagnostics panel
-    _write_cycles_and_run_state(
-        agent,
-        run_id=run_id,
-        mode="meta",
-        goal=goal,
-        domain=domain,
-        cycles=_normalize_cycles_for_ui(combined_history),
-        diagnostics=None,
-    )
+            with st.expander("Raw diagnostics JSON"):
+                preview, note = safe_json_preview(diagnostics)
+                if preview is not None:
+                    st.code(preview, language="json")
+                    if note:
+                        st.caption(note)
+                else:
+                    st.info(note or "Diagnostics contain non JSON serializable objects.")
 
-    intelligence_info = _run_post_run_intelligence(
-        agent,
-        mode="meta",
-        goal=goal,
-        domain=domain,
-        run_id=run_id,
-        history=combined_history,
-    )
+        # ----------------- Citations tab -----------------
+        with tab_citations:
+            st.markdown("### Source citation viewer")
 
-    extra_segments = [
-        {
-            "phase": seg.get("phase"),
-            "mode": seg.get("mode"),
-            "runtime_profile": seg.get("runtime_profile"),
-            "minutes_requested": seg.get("minutes_requested"),
-            "segment_items": len(seg.get("summaries", [])),
-        }
-        for seg in segments_run
-    ]
+            # First try per cycle citations from history
+            citations = extract_citations_from_history(history)
+            # Fallback to finished run JSONs if nothing found
+            if not citations:
+                citations = load_citations_from_finished_runs()
 
-    extra_manifest: Dict[str, Any] = {
-        "engine": "meta",
-        "segments": extra_segments,
-        "experiment_fingerprint": experiment_fingerprint,
-    }
-    if intelligence_info:
-        extra_manifest["intelligence"] = intelligence_info
-
-    try:
-        _log_run_manifest(
-            agent,
-            run_id,
-            mode="meta",
-            domain=domain,
-            goal=goal,
-            runtime_profile=runtime_profile_env,
-            stop_rye=stop_rye_env,
-            max_minutes=total_budget_minutes,
-            summaries=combined_history,
-            extra=extra_manifest,
-        )
-    except Exception:
-        print("Manifest logging failed, see logs for details.")
-
-    _update_worker_state(
-        agent,
-        status="stopped",
-        mode="meta",
-        goal=goal,
-        domain=domain,
-        roles=list(roles_for_swarm),
-        runtime_profile=runtime_profile_env,
-        stop_rye=stop_rye_env,
-        max_minutes=total_budget_minutes,
-        run_id=run_id,
-        experiment_mode="meta_controller",
-        extra={
-            "experiment_fingerprint": experiment_fingerprint,
-            "final_recent_rye": recent_avg_rye,
-            "total_segments": total_segments,
-            "total_summaries": total_summaries,
-            "intelligence": intelligence_info if intelligence_info else None,
-        },
-    )
-
-
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-
-def main() -> None:
-    """
-    Entry point for the background worker.
-
-    Mode selection:
-    - WORKER_QUEUE_MODE=1 (default) -> file-based queue worker using agent/run_jobs.
-      If agent/run_jobs.py is missing or fails to import, queue mode logs an error
-      and returns; the queue worker cannot start.
-    - WORKER_QUEUE_MODE=0 -> direct engine behavior:
-        - WORKER_META=1          -> run meta controller (Option C, finite-only)
-        - WORKER_META=0 and WORKER_MODE=swarm or WORKER_SWARM=1 -> swarm engine (finite-only)
-        - otherwise             -> single agent engine (finite-only)
-    """
-    print("Starting Autonomous Research Agent background engine (finite-only mode)...")
-    print(
-        f"[Safety] HARD_MAX_CYCLES={HARD_MAX_CYCLES}, "
-        f"HARD_MAX_ROUNDS={HARD_MAX_ROUNDS}, "
-        f"HARD_MAX_MINUTES={HARD_MAX_MINUTES}"
-    )
-    # Extra debug: show effective runs directory for this worker instance
-    print(f"[engine_worker] ARA_RUNS_DIR env: {os.getenv('ARA_RUNS_DIR')!r}")
-    try:
-        print(f"[engine_worker] BASE_DIR (effective): {BASE_DIR.resolve()}")
-    except Exception:
-        print(f"[engine_worker] BASE_DIR (effective): {BASE_DIR}")
-    sys.stdout.flush()
-
-    queue_mode = _env_bool("WORKER_QUEUE_MODE", default=True)
-
-    if queue_mode:
-        if RunJob is None or load_next_pending_job is None:
-            print(
-                "Queue mode was requested (WORKER_QUEUE_MODE=1), "
-                "but agent/run_jobs.py is missing or failed to import. "
-                "Queue worker cannot start."
-            )
-            sys.stdout.flush()
-            return
-        run_job_queue_worker()
-        return
-
-    _configure_tavily_from_env()
-    agent, config = init_agent_from_config()
-
-    use_swarm = _env_bool("WORKER_SWARM", default=False)
-    mode = os.getenv("WORKER_MODE", "single").strip().lower()
-    # IMPORTANT: meta mode is now OFF by default. You must explicitly set
-    # WORKER_META=1 to enable the Option C meta-controller.
-    use_meta = _env_bool("WORKER_META", default=False)
-
-    try:
-        if use_meta:
-            run_meta_engine(agent, config)
-        else:
-            if use_swarm or mode == "swarm":
-                run_swarm_engine(agent, config)
+            if not citations:
+                st.info("No citations recorded yet in cycle history or finished run artifacts.")
             else:
-                run_single_agent_engine(agent, config)
-    except KeyboardInterrupt:
-        print("Engine interrupted by user or environment.")
-        sys.stdout.flush()
-    except Exception:
-        print("Fatal error in engine_worker:")
-        traceback.print_exc()
-        sys.stdout.flush()
+                citations_df = pd.DataFrame(citations)
+
+                # Ensure required columns exist so the table never breaks
+                expected_cols = [
+                    "cycle",
+                    "role",
+                    "domain",
+                    "source",
+                    "title",
+                    "snippet",
+                    "url",
+                    "timestamp",
+                ]
+                for col in expected_cols:
+                    if col not in citations_df.columns:
+                        citations_df[col] = None
+
+                total_cites = len(citations_df)
+                unique_sources = sorted(
+                    {s for s in citations_df["source"].dropna().astype(str).unique() if s}
+                )
+                domains_c = sorted(
+                    {str(d) for d in citations_df["domain"].dropna().astype(str).unique()}
+                )
+                roles_c = sorted(
+                    {str(r) for r in citations_df["role"].dropna().astype(str).unique()}
+                )
+
+                col_c1, col_c2, col_c3 = st.columns(3)
+                with col_c1:
+                    st.metric("Total citation hits", total_cites)
+                with col_c2:
+                    st.metric("Unique sources", len(unique_sources))
+                with col_c3:
+                    st.metric("Domains with citations", len(domains_c))
+
+                citations_domain_filter = st.multiselect(
+                    "Filter by domain",
+                    options=domains_c,
+                    default=domains_c,
+                    key="citations_domain_filter",
+                )
+                citations_role_filter = st.multiselect(
+                    "Filter by role",
+                    options=roles_c,
+                    default=roles_c,
+                    key="citations_role_filter",
+                )
+                citations_source_filter = st.multiselect(
+                    "Filter by source",
+                    options=unique_sources,
+                    default=unique_sources,
+                    key="citations_source_filter",
+                )
+
+                # Search box for filtering citations by text
+                search_query = st.text_input(
+                    "Search citations (title or snippet)",
+                    value="",
+                    key="citations_search",
+                )
+
+                # Group by selector: None, cycle, or source
+                group_by_option = st.selectbox(
+                    "Group citations by",
+                    options=["None", "Cycle", "Source"],
+                    index=0,
+                    key="citations_group_by",
+                )
+
+                # Apply filters based on domain, role, source
+                filtered_df = citations_df[
+                    citations_df["domain"].astype(str).isin(citations_domain_filter)
+                    & citations_df["role"].astype(str).isin(citations_role_filter)
+                    & citations_df["source"].astype(str).isin(citations_source_filter)
+                ].copy()
+
+                # Apply search filter if provided
+                if search_query:
+                    search_lower = search_query.lower()
+                    filtered_df = filtered_df[
+                        filtered_df["title"].astype(str).str.lower().str.contains(search_lower, na=False)
+                        | filtered_df["snippet"].astype(str).str.lower().str.contains(search_lower, na=False)
+                    ]
+
+                # Show grouping if selected
+                if group_by_option == "Cycle":
+                    group_counts = (
+                        filtered_df.groupby("cycle")
+                        .size()
+                        .reset_index(name="citation_count")
+                        .sort_values("cycle")
+                    )
+                    st.write("Citations grouped by cycle:")
+                    st.dataframe(group_counts, use_container_width=True)
+
+                elif group_by_option == "Source":
+                    group_counts = (
+                        filtered_df.groupby("source")
+                        .size()
+                        .reset_index(name="citation_count")
+                        .sort_values("citation_count", ascending=False)
+                    )
+                    st.write("Citations grouped by source:")
+                    st.dataframe(group_counts, use_container_width=True)
+
+                else:
+                    # Flat table view
+                    display_df = filtered_df.copy().reset_index(drop=True)
+                    display_df["title_short"] = (
+                        display_df["title"].fillna("").astype(str).str.slice(0, 80)
+                    )
+                    display_df["snippet_short"] = (
+                        display_df["snippet"].fillna("").astype(str).str.slice(0, 120)
+                    )
+
+                    view_df = display_df[
+                        [
+                            "cycle",
+                            "role",
+                            "domain",
+                            "source",
+                            "title_short",
+                            "snippet_short",
+                            "url",
+                            "timestamp",
+                        ]
+                    ].rename(
+                        columns={
+                            "title_short": "title",
+                            "snippet_short": "snippet",
+                        }
+                    )
+
+                    st.write(f"Showing {len(view_df)} citations after filters.")
+                    st.dataframe(view_df, use_container_width=True)
+
+                    # Add a selectbox to display full citation details
+                    if not view_df.empty:
+                        selected_index = st.selectbox(
+                            "Select a citation to view details",
+                            options=list(range(len(view_df))),
+                            format_func=lambda i: f"{view_df.iloc[i]['source']} - {str(view_df.iloc[i]['title'])[:50]}",
+                            key="citations_select",
+                        )
+
+                        selected_citation = display_df.iloc[selected_index]
+                        with st.expander("Citation details", expanded=False):
+                            st.write(f"**Cycle:** {selected_citation['cycle']}")
+                            st.write(f"**Role:** {selected_citation['role']}")
+                            st.write(f"**Domain:** {selected_citation['domain']}")
+                            st.write(f"**Source:** {selected_citation['source']}")
+                            st.write(f"**Title:** {selected_citation['title']}")
+                            st.write(f"**URL:** {selected_citation['url']}")
+                            st.write(f"**Timestamp:** {selected_citation['timestamp']}")
+                            st.write(f"**Snippet:** {selected_citation['snippet']}")
+
+                    # Provide a download button for CSV export
+                    if not filtered_df.empty:
+                        csv_data = filtered_df.to_csv(index=False)
+                        st.download_button(
+                            "Download citations as CSV",
+                            data=csv_data,
+                            file_name="citations_export.csv",
+                            mime="text/csv",
+                        )
+
+                # Raw citations JSON
+                with st.expander("Raw citations JSON"):
+                    preview, note = safe_json_preview(citations)
+                    if preview is not None:
+                        st.code(preview, language="json")
+                        if note:
+                            st.caption(note)
+                    else:
+                        st.info(note or "Citations contain non JSON serializable objects.")
+
+        # ----------------- Discovery log tab -----------------
+        with tab_discovery:
+            st.markdown("### Discovery log")
+            discoveries = load_discovery_log()
+            if not discoveries:
+                # Fallback: infer from finished run JSONs
+                discoveries = load_discoveries_from_finished_runs()
+
+            if not discoveries:
+                st.info(
+                    "No discovery log entries found yet. The worker may not be writing discovery logs or run level discovery fields."
+                )
+            else:
+                # High level stats for discoveries
+                total_disc = len(discoveries)
+                domains_disc = sorted({str(d.get("domain", "general")) for d in discoveries})
+                best_gain = None
+                best_label = None
+                for d in discoveries:
+                    gain = d.get("rye_gain") or d.get("delta_rye") or 0.0
+                    try:
+                        gain_f = float(gain)
+                    except Exception:
+                        gain_f = 0.0
+                    if best_gain is None or gain_f > best_gain:
+                        best_gain = gain_f
+                        best_label = d.get("title") or d.get("summary") or d.get("id") or "discovery"
+
+                col_d1, col_d2, col_d3 = st.columns(3)
+                with col_d1:
+                    st.metric("Total discoveries", total_disc)
+                with col_d2:
+                    st.metric("Domains with discoveries", len(domains_disc))
+                with col_d3:
+                    if best_gain is not None:
+                        st.metric("Best RYE gain", f"{best_gain:.3f}")
+                    else:
+                        st.metric("Best RYE gain", "n/a")
+
+                if best_label is not None and best_gain is not None:
+                    st.caption(f"Top discovery candidate: {str(best_label)[:80]}")
+
+                # Simple filters
+                domains_available = sorted(
+                    {str(d.get("domain", "general")) for d in discoveries}
+                )
+                discovery_domain_filter = st.multiselect(
+                    "Filter by domain",
+                    options=domains_available,
+                    default=domains_available,
+                    key="discovery_domain_filter",
+                )
+                min_gain = st.number_input(
+                    "Minimum RYE gain to show",
+                    min_value=0.0,
+                    max_value=10.0,
+                    value=0.0,
+                    step=0.01,
+                )
+
+                filtered = []
+                for d in discoveries:
+                    dom = str(d.get("domain", "general"))
+                    if discovery_domain_filter and dom not in discovery_domain_filter:
+                        continue
+                    gain = d.get("rye_gain") or d.get("delta_rye") or 0.0
+                    try:
+                        gain_f = float(gain)
+                    except Exception:
+                        gain_f = 0.0
+                    if gain_f < min_gain:
+                        continue
+                    d_view = dict(d)
+                    d_view["rye_gain"] = gain_f
+                    filtered.append(d_view)
+
+                if filtered:
+                    st.write(f"Showing {len(filtered)} discoveries after filters.")
+                    st.dataframe(pd.DataFrame(filtered), use_container_width=True)
+                else:
+                    st.info("No discoveries matched the current filters.")
+
+                with st.expander("Raw discovery log JSON"):
+                    preview, note = safe_json_preview(discoveries)
+                    if preview is not None:
+                        st.code(preview, language="json")
+                        if note:
+                            st.caption(note)
+                    else:
+                        st.info(note or "Discovery log contains non JSON serializable objects.")
+
+        # ----------------- Snapshots and equilibrium tab -----------------
+        with tab_snapshots:
+            st.markdown("### Snapshots and equilibrium")
+
+            snapshots = load_snapshots()
+            if not snapshots:
+                st.info(
+                    "No snapshots found yet. The worker will create them when snapshot generation is enabled."
+                )
+            else:
+                labels = []
+                for s in snapshots:
+                    ts = s["timestamp"]
+                    if isinstance(ts, datetime):
+                        label = f"{s['name']} - {ts.isoformat(timespec='seconds')}"
+                    else:
+                        label = s["name"]
+                    labels.append(label)
+
+                st.write(f"Total snapshots: {len(snapshots)}")
+
+                # Timeline view of equilibrium RYE across snapshots
+                rye_series = []
+                for s in snapshots:
+                    eq = equilibrium_from_snapshot(s["data"])
+                    if eq["rye_avg"] is not None:
+                        rye_series.append(eq["rye_avg"])
+                if rye_series:
+                    st.markdown("#### Snapshot RYE timeline")
+                    timeline_data = {"RYE avg": rye_series}
+                    st.line_chart(timeline_data)
+                    st.caption("Approximate evolution of equilibrium RYE across saved snapshots.")
+
+                col_sel1, col_sel2 = st.columns(2)
+                with col_sel1:
+                    idx1 = st.selectbox(
+                        "Select first snapshot",
+                        options=list(range(len(snapshots))),
+                        format_func=lambda i: labels[i],
+                    )
+                with col_sel2:
+                    idx2 = st.selectbox(
+                        "Select second snapshot to compare",
+                        options=list(range(len(snapshots))),
+                        index=min(len(snapshots) - 1, max(0, len(snapshots) - 1)),
+                        format_func=lambda i: labels[i],
+                    )
+
+                s1 = snapshots[idx1]
+                s2 = snapshots[idx2]
+
+                st.markdown("#### Snapshot 1 equilibrium view")
+                eq1 = equilibrium_from_snapshot(s1["data"])
+                col_eq1 = st.columns(4)
+                col_eq1[0].metric(
+                    "RYE avg",
+                    f"{eq1['rye_avg']:.3f}" if eq1["rye_avg"] is not None else "n/a",
+                )
+                col_eq1[1].metric(
+                    "Stability idx",
+                    f"{eq1['stability_index']:.3f}" if eq1["stability_index"] is not None else "n/a",
+                )
+                col_eq1[2].metric(
+                    "Coherence plateau",
+                    f"{eq1['coherence_plateau']:.3f}" if eq1["coherence_plateau"] is not None else "n/a",
+                )
+                col_eq1[3].metric(
+                    "Equilibrium fraction",
+                    f"{eq1['equilibrium_fraction']:.3f}" if eq1["equilibrium_fraction"] is not None else "n/a",
+                )
+
+                st.markdown("#### Snapshot 2 equilibrium view")
+                eq2 = equilibrium_from_snapshot(s2["data"])
+                col_eq2 = st.columns(4)
+                col_eq2[0].metric(
+                    "RYE avg",
+                    f"{eq2['rye_avg']:.3f}" if eq2["rye_avg"] is not None else "n/a",
+                )
+                col_eq2[1].metric(
+                    "Stability idx",
+                    f"{eq2['stability_index']:.3f}" if eq2["stability_index"] is not None else "n/a",
+                )
+                col_eq2[2].metric(
+                    "Coherence plateau",
+                    f"{eq2['coherence_plateau']:.3f}" if eq2["coherence_plateau"] is not None else "n/a",
+                )
+                col_eq2[3].metric(
+                    "Equilibrium fraction",
+                    f"{eq2['equilibrium_fraction']:.3f}" if eq2["equilibrium_fraction"] is not None else "n/a",
+                )
+
+                st.markdown("#### Equilibrium delta (snapshot2 minus snapshot1)")
+
+                def _delta(a: Optional[float], b: Optional[float]) -> Optional[float]:
+                    if a is None or b is None:
+                        return None
+                    return b - a
+
+                d_rye = _delta(eq1["rye_avg"], eq2["rye_avg"])
+                d_stab = _delta(eq1["stability_index"], eq2["stability_index"])
+                d_plateau = _delta(eq1["coherence_plateau"], eq2["coherence_plateau"])
+                d_eqfrac = _delta(eq1["equilibrium_fraction"], eq2["equilibrium_fraction"])
+
+                col_de = st.columns(4)
+                col_de[0].metric(
+                    "Delta RYE avg", f"{d_rye:+.3f}" if d_rye is not None else "n/a"
+                )
+                col_de[1].metric(
+                    "Delta stability", f"{d_stab:+.3f}" if d_stab is not None else "n/a"
+                )
+                col_de[2].metric(
+                    "Delta plateau",
+                    f"{d_plateau:+.3f}" if d_plateau is not None else "n/a",
+                )
+                col_de[3].metric(
+                    "Delta equilibrium",
+                    f"{d_eqfrac:+.3f}" if d_eqfrac is not None else "n/a",
+                )
+
+                with st.expander("Raw snapshot 1 JSON"):
+                    preview, note = safe_json_preview(s1["data"])
+                    if preview is not None:
+                        st.code(preview, language="json")
+                        if note:
+                            st.caption(note)
+                    else:
+                        st.info(note or "Snapshot 1 contains non JSON serializable objects.")
+                with st.expander("Raw snapshot 2 JSON"):
+                    preview, note = safe_json_preview(s2["data"])
+                    if preview is not None:
+                        st.code(preview, language="json")
+                        if note:
+                            st.caption(note)
+                    else:
+                        st.info(note or "Snapshot 2 contains non JSON serializable objects.")
+
+        # ----------------- Hypothesis manager tab -----------------
+        with tab_hypo:
+            st.markdown("### Hypothesis manager")
+
+            all_hyps = extract_hypotheses_from_history(history)
+            if not all_hyps:
+                st.info("No hypotheses recorded yet in cycle history.")
+            else:
+                # Filters
+                domains = sorted({str(h["domain"]) for h in all_hyps})
+                roles = sorted({str(h["role"]) for h in all_hyps})
+                hypo_domain_filter = st.multiselect(
+                    "Filter by domain",
+                    options=domains,
+                    default=domains,
+                    key="hypo_domain_filter",
+                )
+                hypo_role_filter = st.multiselect(
+                    "Filter by role",
+                    options=roles,
+                    default=roles,
+                    key="hypo_role_filter",
+                )
+
+                min_conf = st.number_input(
+                    "Minimum confidence",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.0,
+                    step=0.05,
+                )
+
+                filtered_h = []
+                for h in all_hyps:
+                    d = str(h["domain"])
+                    r = str(h["role"])
+                    if hypo_domain_filter and d not in hypo_domain_filter:
+                        continue
+                    if hypo_role_filter and r not in hypo_role_filter:
+                        continue
+                    conf = h.get("confidence")
+                    if isinstance(conf, (int, float)) and conf < min_conf:
+                        continue
+                    filtered_h.append(h)
+
+                st.write(
+                    f"Total hypotheses: {len(all_hyps)}, after filters: {len(filtered_h)}"
+                )
+
+                # Sort by confidence if present
+                def _score(h: Dict[str, Any]) -> float:
+                    c = h.get("confidence")
+                    try:
+                        return float(c) if c is not None else 0.0
+                    except Exception:
+                        return 0.0
+
+                filtered_h.sort(key=_score, reverse=True)
+                view_rows = []
+                for h in filtered_h:
+                    text = h["text"]
+                    text_short = text[:120] + ("..." if len(text) > 120 else "")
+                    view_rows.append(
+                        {
+                            "cycle": h["cycle"],
+                            "role": h["role"],
+                            "domain": h["domain"],
+                            "confidence": h["confidence"],
+                            "text": text_short,
+                            "timestamp": h["timestamp"],
+                        }
+                    )
+                st.dataframe(pd.DataFrame(view_rows), use_container_width=True)
+
+                hypo_md = ["# Hypotheses\n"]
+                for h in filtered_h:
+                    conf_txt = ""
+                    if isinstance(h.get("confidence"), (int, float)):
+                        conf_txt = f" (confidence ~ {h['confidence']:.2f})"
+                    hypo_md.append(
+                        f"- [{h['domain']}/{h['role']} cycle {h['cycle']}] {h['text']}{conf_txt}"
+                    )
+                hypo_md_text = "\n".join(hypo_md)
+                st.download_button(
+                    "Download hypotheses as Markdown",
+                    data=hypo_md_text,
+                    file_name="hypotheses_export.md",
+                    mime="text/markdown",
+                )
+
+        # ----------------- Memory pruning tab -----------------
+        with tab_memory:
+            st.markdown("### Memory pruning and compaction")
+
+            total_cycles = len(history)
+            st.metric("Total cycles in history", total_cycles)
+
+            # Check for optional pruning hooks on MemoryStore or pruner module
+            has_prune_method = hasattr(memory, "prune_low_value_notes") or hasattr(
+                memory, "prune_history"
+            )
+            has_pruner_module = _pruner_module is not None
+
+            if not has_prune_method and not has_pruner_module:
+                st.info(
+                    "No pruning hooks detected on MemoryStore or memory_pruner module. "
+                    "You can still manually clear history by deleting the memory file on disk."
+                )
+            else:
+                threshold = st.number_input(
+                    "Approximate minimum RYE gain to keep entries (used if supported)",
+                    min_value=0.0,
+                    max_value=1.0,
+                    value=0.01,
+                    step=0.005,
+                )
+                max_keep = st.number_input(
+                    "Maximum entries to keep in detailed history (0 means no cap)",
+                    min_value=0,
+                    max_value=100000,
+                    value=5000,
+                    step=500,
+                )
+
+                if st.button("Run pruning now (experimental)"):
+                    pruned_count = 0
+                    error_msg = None
+                    try:
+                        if hasattr(memory, "prune_low_value_notes"):
+                            func = getattr(memory, "prune_low_value_notes")
+                            pruned_count = int(
+                                func(threshold=threshold, max_keep=max_keep)  # type: ignore[arg-type]
+                            )
+                        elif hasattr(memory, "prune_history"):
+                            func = getattr(memory, "prune_history")
+                            pruned_count = int(
+                                func(threshold=threshold, max_keep=max_keep)  # type: ignore[arg-type]
+                            )
+                        elif has_pruner_module and hasattr(
+                            _pruner_module, "run_memory_pruning"
+                        ):
+                            func = getattr(_pruner_module, "run_memory_pruning")
+                            pruned_count = int(
+                                func(
+                                    memory_store=memory,
+                                    threshold=threshold,
+                                    max_keep=max_keep,
+                                )  # type: ignore[arg-type]
+                            )
+                    except Exception as e:
+                        error_msg = str(e)
+
+                    if error_msg:
+                        st.error(f"Pruning call raised an error: {error_msg}")
+                    else:
+                        st.success(
+                            f"Pruning completed. Approximate entries removed: {pruned_count}"
+                        )
+                        st.info(
+                            "Reload the page to reflect updated history and diagnostics."
+                        )
+
+        # ----------------- Verification and cures tab -----------------
+        with tab_verify:
+            st.markdown("### Verification and cure oriented findings")
+
+            verifications = load_verification_log()
+            if not verifications:
+                st.info(
+                    "No verification log found yet. Verification engine has not written results or file is empty."
+                )
+            else:
+                # Summaries
+                success_flags = []
+                rye_deltas = []
+                for v in verifications:
+                    ok = v.get("verified") or v.get("success")
+                    success_flags.append(bool(ok))
+                    delta = (
+                        v.get("rye_gain")
+                        or v.get("delta_rye")
+                        or v.get("delta_RYE")
+                    )
+                    try:
+                        rye_deltas.append(float(delta))
+                    except Exception:
+                        continue
+
+                total = len(verifications)
+                successful = sum(1 for x in success_flags if x)
+                st.metric("Total verifications", total)
+                st.metric("Successful verifications", successful)
+                st.metric(
+                    "Success rate",
+                    f"{(successful / total * 100.0):.1f}%" if total > 0 else "n/a",
+                )
+                if rye_deltas:
+                    st.metric(
+                        "Average RYE change when verified",
+                        f"{(sum(rye_deltas) / len(rye_deltas)):.3f}",
+                    )
+                else:
+                    st.metric(
+                        "Average RYE change when verified",
+                        "n/a",
+                    )
+
+                # Table
+                view_rows_v = []
+                for v in verifications:
+                    label = v.get("label") or v.get("id") or v.get("target") or "item"
+                    hyp = v.get("hypothesis") or v.get("text")
+                    ok = bool(v.get("verified") or v.get("success"))
+                    d_rye = (
+                        v.get("rye_gain")
+                        or v.get("delta_rye")
+                        or v.get("delta_RYE")
+                    )
+                    domain = v.get("domain", "general")
+                    view_rows_v.append(
+                        {
+                            "label": label,
+                            "domain": domain,
+                            "verified": ok,
+                            "delta_RYE": d_rye,
+                            "hypothesis": (hyp or "")[:120]
+                            + ("..." if hyp and len(hyp) > 120 else ""),
+                        }
+                    )
+                st.dataframe(pd.DataFrame(view_rows_v), use_container_width=True)
+
+                with st.expander("Raw verification log JSON"):
+                    preview, note = safe_json_preview(verifications)
+                    if preview is not None:
+                        st.code(preview, language="json")
+                        if note:
+                            st.caption(note)
+                    else:
+                        st.info(note or "Verification log contains non JSON serializable objects.")
+
+        # ----------------- Multi agent insight graph tab -----------------
+        with tab_graph:
+            st.markdown("### Multi agent insight graph")
+
+            discoveries_for_graph = load_discovery_log()
+            if not discoveries_for_graph:
+                discoveries_for_graph = load_discoveries_from_finished_runs()
+
+            if not history:
+                st.info("No history yet to build a graph.")
+            else:
+                dot = build_insight_graph(
+                    history=history, discoveries=discoveries_for_graph
+                )
+                st.graphviz_chart(dot)
+
+    # ------------------------------
+    # Run diagnostics (state from MemoryStore)
+    # ------------------------------
+    st.markdown("---")
+    st.subheader("Run diagnostics")
+
+    col_state, col_watchdog = st.columns(2)
+
+    with col_state:
+        st.markdown("**Last saved run state (MemoryStore)**")
+        load_run_state = getattr(memory, "load_run_state", None)
+        if callable(load_run_state):
+            state = load_run_state()
+        else:
+            state = {}
+        if not state:
+            st.write("No saved run state yet.")
+        else:
+            st.json(state)
+            if callable(getattr(memory, "clear_run_state", None)):
+                if st.button("Clear saved run state", key="clear_run_state_btn"):
+                    memory.clear_run_state()  # type: ignore[call-arg]
+                    st.success(
+                        "Saved run state cleared. It will be rebuilt on the next run "
+                        "by your engine worker."
+                    )
+            else:
+                st.info("MemoryStore.clear_run_state not available in this build.")
+
+    with col_watchdog:
+        st.markdown("**Watchdog heartbeat (MemoryStore)**")
+        get_watchdog_info = getattr(memory, "get_watchdog_info", None)
+        if callable(get_watchdog_info):
+            info = get_watchdog_info()
+            last_beat = info.get("last_beat")
+            count = info.get("count", 0)
+            seconds_since = info.get("seconds_since_last")
+
+            st.write(f"Last beat: {last_beat if last_beat else 'None recorded'}")
+            st.write(f"Heartbeat count: {count}")
+            if isinstance(seconds_since, (int, float)):
+                st.write(f"Seconds since last beat: {seconds_since:.1f}")
+            else:
+                st.write("Seconds since last beat: not available")
+        else:
+            st.write("MemoryStore.get_watchdog_info not available in this build.")
+
+    # ------------------------------
+    # Report generation
+    # ------------------------------
+    st.markdown("---")
+    st.subheader("Generate report")
+
+    # For reports, prefer MemoryStore history when present, otherwise
+    # fall back to synthetic history rebuilt from finished runs.
+    raw_memory_history: List[Dict[str, Any]] = []
+    if callable(getattr(memory, "get_cycle_history", None)):
+        try:
+            raw_memory_history = memory.get_cycle_history() or []
+        except Exception:
+            raw_memory_history = []
+
+    if raw_memory_history:
+        history_for_reports = raw_memory_history
+        used_fallback_history = False
+    else:
+        history_for_reports = load_history_from_finished_runs()
+        used_fallback_history = bool(history_for_reports)
+
+    hours_run_for_reports = (
+        compute_run_hours(history_for_reports) if history_for_reports else None
+    )
+    msil_profile_for_reports = (
+        compute_msil_profile(history_for_reports) if history_for_reports else None
+    )
+
+    col_rep1, col_rep2, col_rep3 = st.columns(3)
+
+    with col_rep1:
+        if st.button("Full history report"):
+            if used_fallback_history and history_for_reports:
+                # When MemoryStore has no cycles but finished runs do,
+                # fall back to an outcome style report instead of the
+                # empty "No cycles logged" MemoryStore report.
+                report_md = build_outcome_summary(history_for_reports)
+            else:
+                report_md = generate_report(memory_store=memory, goal=None)
+
+            st.markdown(report_md)
+            st.download_button(
+                "Download full report (Markdown)",
+                data=report_md,
+                file_name="autonomous_research_report.md",
+                mime="text/markdown",
+            )
+            # Optional PDF from MemoryStore only; if it has no cycles this may be empty,
+            # but PDF generation still stays best-effort.
+            try:
+                pdf_path = generate_report_pdf(
+                    memory_store=memory,
+                    goal=None,
+                    output_path="autonomous_research_report.pdf",
+                )
+                with open(pdf_path, "rb") as f:
+                    st.download_button(
+                        "Download full report (PDF)",
+                        data=f,
+                        file_name="autonomous_research_report.pdf",
+                        mime="application/pdf",
+                    )
+            except RuntimeError as e:
+                st.info(str(e))
+            except Exception:
+                st.info(
+                    "PDF generation failed unexpectedly. Check server logs for details."
+                )
+
+        if st.button("Full Option C learning speed report", key="option_c_report_btn"):
+            if used_fallback_history and history_for_reports:
+                # When we only have synthetic history, reuse the breakthrough report
+                # as a proxy for a learning speed snapshot.
+                discoveries_for_option = load_discovery_log()
+                if not discoveries_for_option:
+                    discoveries_for_option = load_discoveries_from_finished_runs()
+                option_md = build_breakthrough_report(
+                    history_for_reports,
+                    discoveries_for_option,
+                )
+            else:
+                option_md = build_agent_report(
+                    memory_store=memory,
+                    goal=None,
+                    domain=None,
+                    hours_run_so_far=hours_run_for_reports,
+                    swarm_stats=None,
+                    intelligence_profile=msil_profile_for_reports,
+                    biomarker_snapshot=None,
+                )
+            st.markdown(option_md)
+            st.download_button(
+                "Download Option C report (Markdown)",
+                data=option_md,
+                file_name="autonomous_option_c_report.md",
+                mime="text/markdown",
+            )
+
+    with col_rep2:
+        if st.button("Outcome focused summary"):
+            outcome_md = build_outcome_summary(
+                history_for_reports if history_for_reports else []
+            )
+            st.markdown(outcome_md)
+            st.download_button(
+                "Download outcome summary",
+                data=outcome_md,
+                file_name="autonomous_outcome_summary.md",
+                mime="text/markdown",
+            )
+
+    with col_rep3:
+        if st.button("Findings report (cures, treatments)"):
+            findings_md = generate_findings_report(memory_store=memory, goal=None)
+            st.markdown(findings_md)
+            st.download_button(
+                "Download findings report (Markdown)",
+                data=findings_md,
+                file_name="autonomous_findings_report.md",
+                mime="text/markdown",
+            )
+            # Optional PDF
+            try:
+                pdf_path = generate_findings_report_pdf(
+                    memory_store=memory,
+                    goal=None,
+                    output_path="autonomous_agent_findings_report.pdf",
+                )
+            except RuntimeError as e:
+                pdf_path = None
+                st.info(str(e))
+            except Exception:
+                pdf_path = None
+                st.info(
+                    "PDF generation failed unexpectedly. Check server logs for details."
+                )
+            if pdf_path is not None:
+                try:
+                    with open(pdf_path, "rb") as f:
+                        st.download_button(
+                            "Download findings report (PDF)",
+                            data=f,
+                            file_name="autonomous_agent_findings_report.pdf",
+                            mime="application/pdf",
+                        )
+                except Exception:
+                    st.info("PDF file not available after generation attempt.")
+
+        if st.button("Breakthrough snapshot report"):
+            discoveries = load_discovery_log()
+            if not discoveries:
+                discoveries = load_discoveries_from_finished_runs()
+            breakthrough_md = build_breakthrough_report(
+                history_for_reports if history_for_reports else [],
+                discoveries,
+            )
+            st.markdown(breakthrough_md)
+            st.download_button(
+                "Download breakthrough snapshot",
+                data=breakthrough_md,
+                file_name="autonomous_breakthrough_snapshot.md",
+                mime="text/markdown",
+            )
 
 
 if __name__ == "__main__":
-    # Updated guard: if WORKER_MODE is empty, default to "queue" so the
-    # queue worker runs and picks up jobs. Only explicit "off" values
-    # prevent the worker from starting.
-    raw_mode = os.getenv("WORKER_MODE", "").strip().lower()
-    effective_mode = raw_mode or "queue"
-
-    print(
-        f"[engine_worker] WORKER_MODE raw={raw_mode!r} -> effective={effective_mode!r}"
-    )
-    sys.stdout.flush()
-
-    if effective_mode in {"off", "disabled", "0", "none"}:
-        print(
-            "[engine_worker] WORKER_MODE is disabled. "
-            "Exiting without starting worker."
-        )
-        sys.stdout.flush()
-        sys.exit(0)
-
-    if effective_mode == "queue":
-        os.environ["WORKER_QUEUE_MODE"] = "1"
-
     main()
