@@ -3381,6 +3381,66 @@ def main() -> None:
         else:
             st.write("MemoryStore.get_watchdog_info not available in this build.")
 
+        st.markdown("---")
+        st.markdown("**Worker state (engine queue)**")
+
+        # Try several possible worker state methods for compatibility
+        get_worker_state = getattr(memory, "get_worker_state", None)
+        if not callable(get_worker_state):
+            get_worker_state = getattr(memory, "read_worker_state", None)
+        if not callable(get_worker_state):
+            get_worker_state = getattr(memory, "load_worker_state", None)
+
+        if callable(get_worker_state):
+            try:
+                worker_state = get_worker_state()
+            except Exception:
+                worker_state = None
+
+            if not worker_state:
+                st.write("No worker state recorded yet. The engine worker may not have started a run.")
+            else:
+                status_val = worker_state.get("status") or "unknown"
+                run_id_val = worker_state.get("run_id") or worker_state.get("job_id") or "none"
+                current = worker_state.get("current")
+                total = worker_state.get("total")
+                mode = worker_state.get("mode") or worker_state.get("run_mode")
+                goal_ws = worker_state.get("goal") or ""
+                domain_ws = worker_state.get("domain") or ""
+
+                cols_ws = st.columns(3)
+                with cols_ws[0]:
+                    st.write(f"Status: `{status_val}`")
+                    if mode:
+                        st.write(f"Mode: `{mode}`")
+                with cols_ws[1]:
+                    st.write(f"Run id: `{run_id_val}`")
+                    if domain_ws:
+                        st.write(f"Domain: `{domain_ws}`")
+                with cols_ws[2]:
+                    if isinstance(current, (int, float)) and isinstance(total, (int, float)) and total > 0:
+                        try:
+                            pct = (float(current) / float(total)) * 100.0
+                            st.write(f"Progress: {int(current)}/{int(total)} ({pct:.1f} percent)")
+                        except Exception:
+                            st.write(f"Progress: {int(current)}/{int(total)}")
+                    else:
+                        st.write("Progress: n/a")
+
+                if goal_ws:
+                    st.caption(f"Worker goal: {str(goal_ws)[:140]}")
+
+                with st.expander("Raw worker state JSON"):
+                    preview, note = safe_json_preview(worker_state)
+                    if preview is not None:
+                        st.code(preview, language="json")
+                        if note:
+                            st.caption(note)
+                    else:
+                        st.info(note or "Worker state contains non JSON serializable objects.")
+        else:
+            st.write("Worker state method is not available in this MemoryStore build.")
+
     # ------------------------------
     # Report generation
     # ------------------------------
