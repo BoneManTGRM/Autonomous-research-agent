@@ -378,6 +378,13 @@ class RunJob:
         filtered["run_id"] = run_id
         filtered["config"] = _inject_run_id_into_config(run_id, raw_config)
 
+        # Ensure meta exists and has run_id for UI convenience
+        meta = filtered.get("meta")
+        if not isinstance(meta, dict):
+            meta = {}
+        meta.setdefault("run_id", run_id)
+        filtered["meta"] = meta
+
         return cls(**filtered)
 
     def save_to(self, folder: Path, filename: Optional[str] = None) -> Path:
@@ -465,11 +472,94 @@ def create_job(
     # Inject run_id into config and common nested sections
     cfg = _inject_run_id_into_config(run_id, config)
 
-    # Include run_id in meta for UI convenience
+    # Include run_id in meta for UI convenience, and auto-fill a few
+    # important fields if present in the config. This helps the Streamlit UI
+    # show richer job information in the job list and diagnostics.
     meta_with_id: Dict[str, Any] = {}
     if isinstance(meta, dict):
         meta_with_id.update(meta)
     meta_with_id.setdefault("run_id", run_id)
+
+    try:
+        # Goal
+        goal = (
+            cfg.get("goal")
+            or cfg.get("problem")
+            or cfg.get("objective")
+            or cfg.get("task")
+        )
+        if goal and "goal" not in meta_with_id:
+            meta_with_id["goal"] = goal
+
+        # Domain
+        domain = (
+            cfg.get("domain")
+            or cfg.get("topic")
+            or cfg.get("field")
+        )
+        if domain and "domain" not in meta_with_id:
+            meta_with_id["domain"] = domain
+
+        # Mode (single, swarm, option_c, etc)
+        mode = (
+            cfg.get("mode")
+            or (isinstance(cfg.get("engine"), dict) and cfg["engine"].get("mode"))
+            or None
+        )
+        if mode and "mode" not in meta_with_id:
+            meta_with_id["mode"] = mode
+
+        # Runtime profile
+        runtime_profile = (
+            cfg.get("runtime_profile")
+            or (isinstance(cfg.get("engine"), dict) and cfg["engine"].get("runtime_profile"))
+        )
+        if runtime_profile and "runtime_profile" not in meta_with_id:
+            meta_with_id["runtime_profile"] = runtime_profile
+
+        # Limits
+        limits = cfg.get("limits") if isinstance(cfg.get("limits"), dict) else {}
+        engine_cfg = cfg.get("engine") if isinstance(cfg.get("engine"), dict) else {}
+        runtime_cfg = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
+
+        max_cycles = (
+            cfg.get("max_cycles")
+            or limits.get("max_cycles")
+            or engine_cfg.get("max_cycles")
+            or runtime_cfg.get("max_cycles")
+        )
+        if max_cycles is not None and "max_cycles" not in meta_with_id:
+            meta_with_id["max_cycles"] = max_cycles
+
+        max_rounds = (
+            cfg.get("max_rounds")
+            or limits.get("max_rounds")
+            or engine_cfg.get("max_rounds")
+            or runtime_cfg.get("max_rounds")
+        )
+        if max_rounds is not None and "max_rounds" not in meta_with_id:
+            meta_with_id["max_rounds"] = max_rounds
+
+        max_minutes = (
+            cfg.get("max_minutes")
+            or limits.get("max_minutes")
+            or engine_cfg.get("max_minutes")
+            or runtime_cfg.get("max_minutes")
+        )
+        if max_minutes is not None and "max_minutes" not in meta_with_id:
+            meta_with_id["max_minutes"] = max_minutes
+
+        # Experiment fingerprint
+        experiment_fingerprint = (
+            cfg.get("experiment_fingerprint")
+            or engine_cfg.get("experiment_fingerprint")
+            or runtime_cfg.get("experiment_fingerprint")
+        )
+        if experiment_fingerprint and "experiment_fingerprint" not in meta_with_id:
+            meta_with_id["experiment_fingerprint"] = experiment_fingerprint
+    except Exception:
+        # Never fail job creation because of meta enrichment
+        pass
 
     job = RunJob(
         run_id=run_id,
