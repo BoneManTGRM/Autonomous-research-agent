@@ -7,7 +7,9 @@
 # ------------------------------------------------
 # STORAGE / MEMORY
 # ------------------------------------------------
-memory_file: logs/sessions/default_memory.json
+# Canonical shared memory file (Streamlit UI + engine_worker)
+memory_file: logs/sessions/ara_memory.json
+
 vector_memory_path: logs/vector_store/vector_memory.jsonl
 
 # Checkpoint system for long autonomous runs
