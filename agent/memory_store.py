@@ -92,6 +92,16 @@ def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _to_int(value: Any) -> Optional[int]:
+    """Best effort conversion to int that tolerates None and non int types."""
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
 class MemoryStore:
     """A lightweight persistent memory store using a JSON file.
 
@@ -1431,8 +1441,8 @@ class MemoryStore:
             "max_minutes": max_minutes,
             "run_id": run_id,
             "experiment_mode": experiment_mode,
-            "current": int(current) if isinstance(current, int) else None,
-            "total": int(total) if isinstance(total, int) else None,
+            "current": _to_int(current),
+            "total": _to_int(total),
         }
         if extra:
             state["extra"] = extra
@@ -1645,7 +1655,7 @@ class MemoryStore:
 
         Designed for engine_worker so each cycle or round can emit:
             - a streaming event for the UI
-            - a run scoped watchdog label for diagnostics dashboards
+            - watchdog beats that can be inspected by dashboards
         """
         payload: Dict[str, Any] = {
             "run_id": run_id,
@@ -1668,10 +1678,12 @@ class MemoryStore:
             run_id=run_id,
         )
 
-        # Watchdog beat with a run specific label
+        # Watchdog beats for this run and the global label used by most UIs
         try:
-            label = f"run:{run_id}"
-            self.heartbeat(label=label, run_id=run_id)
+            if run_id:
+                run_label = f"run:{run_id}"
+                self.heartbeat(label=run_label, run_id=run_id)
+            self.heartbeat(label="continuous_run", run_id=run_id)
         except Exception:
             pass
 
