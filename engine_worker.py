@@ -356,6 +356,10 @@ def init_agent_from_config() -> Tuple[CoreAgent, Dict[str, Any]]:
     memory_path = Path(memory_file)
     memory_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Debug so you can confirm worker and UI are using the same memory file
+    print(f"[engine_worker] Using memory file: {memory_path}")
+    sys.stdout.flush()
+
     memory = MemoryStore(str(memory_path))
     agent = CoreAgent(memory_store=memory, config=config)
     return agent, config
