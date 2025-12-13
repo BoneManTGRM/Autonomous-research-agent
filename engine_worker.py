@@ -441,7 +441,20 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
     IMPORTANT: some MemoryStore.heartbeat() implementations do NOT accept
     a run_id keyword. We always at least call the basic form so the
     watchdog panel keeps updating.
+
+    This version also writes a clear log line so you can see heartbeats
+    explicitly in your Render logs.
     """
+    # Explicit console log for heartbeat
+    try:
+        ts = datetime.utcnow().isoformat() + "Z"
+        rid = run_id or "n/a"
+        print(f"[HB] {ts} label={label} run_id={rid}")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+    # MemoryStore heartbeat
     try:
         ms = _get_memory_store(agent)
         if ms is None or not hasattr(ms, "heartbeat"):
@@ -1305,6 +1318,9 @@ def _write_job_progress(
 
     Includes goal, domain, job_config, and prompt_details so logs and the UI
     can see the original prompt and config for the job.
+
+    This version also writes a console log line including a cycles counter
+    like 3/100 or 76/1000 whenever current and total are available.
     """
     if progress_path is None:
         return
@@ -1325,6 +1341,24 @@ def _write_job_progress(
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("w", encoding="utf8") as f:
             json.dump(payload, f, indent=2)
+
+        # Explicit console log for progress including cycle fraction if known
+        parts: List[str] = [
+            f"[Progress] run_id={run_id}",
+            f"status={status}",
+        ]
+        if current is not None and total is not None and total > 0:
+            try:
+                cur_int = int(current)
+                tot_int = int(total)
+                parts.append(f"cycles={cur_int}/{tot_int}")
+            except Exception:
+                pass
+        if note:
+            parts.append(f"note={note}")
+        print(" ".join(parts))
+        sys.stdout.flush()
+
     except Exception:
         # Progress should never crash the worker
         return
@@ -1554,21 +1588,56 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             sys.stdout.flush()
 
             def _progress_cb(update: Dict[str, Any]) -> None:
-                # Pass through to progress file so UI can live-refresh.
-                current = update.get("current_cycle")
+                # Live progress from CoreAgent into progress file + heartbeat + worker_state
+                status_local = str(update.get("status", "active"))
+                current_local = update.get("current_cycle")
                 total_local = update.get("total_cycles")
-                note = update.get("notes", "")
+                note_local = update.get("notes", "")
+
+                cur_int = int(current_local) if isinstance(current_local, (int, float)) else None
+                tot_int = int(total_local) if isinstance(total_local, (int, float)) else None
+
                 _write_job_progress(
                     job.run_id,
-                    status=str(update.get("status", "active")),
-                    note=str(note),
-                    current=int(current) if isinstance(current, (int, float)) else None,
-                    total=int(total_local) if isinstance(total_local, (int, float)) else None,
+                    status=status_local,
+                    note=str(note_local),
+                    current=cur_int,
+                    total=tot_int,
                     goal=goal,
                     domain=domain,
                     job_config=cfg,
                     prompt_details=prompt_details,
                 )
+
+                _heartbeat(agent, label="queue_job_progress", run_id=job.run_id)
+
+                try:
+                    _update_worker_state(
+                        agent,
+                        status="running_job",
+                        mode=mode,
+                        goal=goal,
+                        domain=domain,
+                        roles=roles_list if mode == "swarm" else [role],
+                        runtime_profile=runtime_profile,
+                        stop_rye=stop_rye,
+                        max_minutes=max_minutes,
+                        run_id=job.run_id,
+                        experiment_mode="queue_worker",
+                        extra={
+                            "experiment_fingerprint": experiment_fingerprint,
+                            "job_meta": job_meta,
+                            "job_config": cfg,
+                            "prompt_details": prompt_details,
+                            "progress": {
+                                "current_cycle": cur_int,
+                                "total_cycles": tot_int,
+                                "note": str(note_local),
+                            },
+                        },
+                    )
+                except Exception:
+                    pass
 
             goal_config: Dict[str, Any] = {
                 **cfg,
