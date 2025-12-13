@@ -1695,7 +1695,6 @@ class MemoryStore:
 
     def get_recent_discoveries(
         self,
-        *,
         limit: int = 50,
         goal: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
