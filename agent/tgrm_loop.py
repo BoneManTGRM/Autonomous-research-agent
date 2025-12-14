@@ -1017,6 +1017,12 @@ class TGRMLoop:
             avg_rye = None
             total_cycles_for_goal = 0
 
+        # Per goal cycle counter: how many cycles for this goal including this one
+        try:
+            cycle_number_for_goal = (total_cycles_for_goal or 0) + 1
+        except Exception:
+            cycle_number_for_goal = 1
+
         # Maintenance mode:
         # If there are many cycles on this goal and RYE is high, avoid heavy
         # repeated external calls and focus on light refinement.
@@ -1337,6 +1343,7 @@ class TGRMLoop:
         # Short structured view - tuned for Ultra mode and UI
         short_view = {
             "cycle": cycle_index,
+            "cycle_number_for_goal": cycle_number_for_goal,
             "goal": goal,
             "role": role,
             "domain": domain_tag,
@@ -1374,6 +1381,8 @@ class TGRMLoop:
 
         # Meta controller friendly signals
         meta_signals = {
+            "cycle": cycle_index,
+            "cycle_number_for_goal": cycle_number_for_goal,
             "rye": rye_value,
             "delta_R": delta_r,
             "energy_E": energy_e,
@@ -1406,6 +1415,7 @@ class TGRMLoop:
         # Machine facing log
         cycle_summary: Dict[str, Any] = {
             "cycle": cycle_index,
+            "cycle_number_for_goal": cycle_number_for_goal,
             "timestamp": cycle_started_iso,
             "ts_utc": cycle_started_iso,
             "ts_epoch": cycle_started_ts,
@@ -1501,6 +1511,7 @@ class TGRMLoop:
         # Human readable summary
         human_summary = {
             "cycle": cycle_index,
+            "cycle_number_for_goal": cycle_number_for_goal,
             "timestamp": cycle_started_iso,
             "ts_utc": cycle_started_iso,
             "ts_epoch": cycle_started_ts,
