@@ -1432,6 +1432,8 @@ class MemoryStore:
         runtime_profile: Optional[str] = None,
         stop_rye: Optional[float] = None,
         max_minutes: Optional[float] = None,
+        max_cycles: Optional[int] = None,
+        max_rounds: Optional[int] = None,
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
         current: Optional[int] = None,
@@ -1447,45 +1449,80 @@ class MemoryStore:
             - "stopped"
             - "error"
         """
-        state: Dict[str, Any] = {
-            "updated_at": _utc_now_iso(),
-            "status": status,
-            "mode": mode,
-            "goal": goal,
-            "domain": domain,
-            "roles": roles or [],
-            "runtime_profile": runtime_profile,
-            "stop_rye": stop_rye,
-            "max_minutes": max_minutes,
-            "run_id": run_id,
-            "experiment_mode": experiment_mode,
-            "current": _to_int(current),
-            "total": _to_int(total),
-        }
-        if extra:
-            state["extra"] = extra
+        # Start from existing worker_state.json if it exists so we keep counters
+        state: Dict[str, Any]
+        file_state = self._read_json_file(self.worker_state_path)
+        if isinstance(file_state, dict):
+            state = dict(file_state)
+        else:
+            ws = self._data.get("worker_state") or {}
+            state = dict(ws) if isinstance(ws, dict) else {}
 
+        # Compute heartbeat info
+        now_iso = _utc_now_iso()
+        last_beat = state.get("last_beat") or state.get("last_heartbeat_utc")
+        seconds_since_last: Optional[float] = None
+        if isinstance(last_beat, str):
+            try:
+                dt = datetime.fromisoformat(last_beat.replace("Z", "+00:00"))
+                seconds_since_last = (datetime.now(timezone.utc) - dt).total_seconds()
+            except Exception:
+                seconds_since_last = None
+
+        heartbeat_count = int(state.get("heartbeat_count", 0) or 0) + 1
+
+        # Update core fields
+        state.update(
+            {
+                "updated_at": now_iso,
+                "last_beat": now_iso,
+                "last_heartbeat_utc": now_iso,
+                "seconds_since_last_beat": seconds_since_last,
+                "heartbeat_count": heartbeat_count,
+                "status": status,
+                "mode": mode,
+                "goal": goal,
+                "domain": domain,
+                "roles": roles or [],
+                "runtime_profile": runtime_profile,
+                "stop_rye": stop_rye,
+                "max_minutes": max_minutes,
+                "max_cycles": _to_int(max_cycles),
+                "max_rounds": _to_int(max_rounds),
+                "run_id": run_id,
+                "experiment_mode": experiment_mode,
+                "current": _to_int(current),
+                "total": _to_int(total),
+            }
+        )
+
+        if extra:
+            existing_extra = state.get("extra") or {}
+            if not isinstance(existing_extra, dict):
+                existing_extra = {}
+            existing_extra.update(extra)
+            state["extra"] = existing_extra
+
+        # Persist in-memory and to the small worker_state.json file
         self._data["worker_state"] = state
         self._save()
-
-        # Mirror to dedicated JSON file for fast UI reads
         try:
             self._write_json_file(self.worker_state_path, dict(state))
         except Exception:
             pass
 
     def get_worker_state(self) -> Optional[Dict[str, Any]]:
-        """Return current worker_state snapshot from memory.json."""
+        """Return current worker_state snapshot, preferring worker_state.json."""
+        data = self._read_json_file(self.worker_state_path)
+        if isinstance(data, dict) and data:
+            return data
         ws = self._data.get("worker_state") or {}
         if not isinstance(ws, dict) or not ws:
             return None
         return dict(ws)
 
     def read_worker_state(self) -> Optional[Dict[str, Any]]:
-        """Read worker_state from worker_state.json, falling back to memory.json."""
-        data = self._read_json_file(self.worker_state_path)
-        if isinstance(data, dict) and data:
-            return data
+        """Compatibility alias for get_worker_state."""
         return self.get_worker_state()
 
     def clear_worker_state(self) -> None:
