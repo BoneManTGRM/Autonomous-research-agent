@@ -291,7 +291,7 @@ def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
 
 def ensure_directories() -> None:
     """Ensure that log directories exist."""
-    logs_path = Path("logs")
+    logs_path = REPO_ROOT / "logs"
     sessions_path = logs_path / "sessions"
     logs_path.mkdir(exist_ok=True)
     sessions_path.mkdir(exist_ok=True)
@@ -317,6 +317,8 @@ def init_memory_store(config_path: str = CONFIG_PATH_DEFAULT) -> MemoryStore:
     ensure_directories()
     config = load_settings(config_path)
     memory_file = config.get("memory_file", "logs/sessions/default_memory.json")
+    if not os.path.isabs(memory_file):
+        memory_file = str(REPO_ROOT / memory_file)
     memory = MemoryStore(memory_file)
     return memory
 
@@ -738,8 +740,29 @@ def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]
     if not jobs:
         return []
 
+    # Sort jobs by created_at so we can take the most recent N
+    def _job_created_at(j: Any) -> float:
+        ts_raw = None
+        if hasattr(j, "created_at"):
+            ts_raw = getattr(j, "created_at", None)
+        elif isinstance(j, dict):
+            ts_raw = j.get("created_at")
+        if isinstance(ts_raw, (int, float)):
+            return float(ts_raw)
+        if isinstance(ts_raw, str):
+            try:
+                return datetime.fromisoformat(ts_raw.replace("Z", "")).timestamp()
+            except Exception:
+                return 0.0
+        return 0.0
+
+    try:
+        jobs_sorted = sorted(jobs, key=_job_created_at)
+    except Exception:
+        jobs_sorted = jobs
+
     # Only look at the most recent N jobs to keep things light
-    jobs_slice = jobs[-limit_runs:]
+    jobs_slice = jobs_sorted[-limit_runs:]
 
     history: List[Dict[str, Any]] = []
     for job in jobs_slice:
@@ -1229,9 +1252,9 @@ def _load_json_file(path: Path) -> Optional[Any]:
 def load_discovery_log() -> List[Dict[str, Any]]:
     """Try to load discovery log entries from standard locations."""
     candidates = [
-        Path("logs/discovery_log.json"),
-        Path("logs/discovery/discovery_log.json"),
-        Path("logs/discovery/discoveries.json"),
+        REPO_ROOT / "logs" / "discovery_log.json",
+        REPO_ROOT / "logs" / "discovery" / "discovery_log.json",
+        REPO_ROOT / "logs" / "discovery" / "discoveries.json",
     ]
     for p in candidates:
         data = _load_json_file(p)
@@ -1253,8 +1276,8 @@ def load_discovery_log() -> List[Dict[str, Any]]:
 def load_snapshots() -> List[Dict[str, Any]]:
     """Load snapshot JSON files as a list of {name, timestamp, data}."""
     snapshot_dir_candidates = [
-        Path("logs/snapshots"),
-        Path("logs/snapshot"),
+        REPO_ROOT / "logs" / "snapshots",
+        REPO_ROOT / "logs" / "snapshot",
     ]
     snapshots: List[Dict[str, Any]] = []
     for base in snapshot_dir_candidates:
@@ -1351,9 +1374,9 @@ def extract_citations_from_history(history: List[Dict[str, Any]]) -> List[Dict[s
 def load_verification_log() -> List[Dict[str, Any]]:
     """Try to load verification log entries from standard locations."""
     candidates = [
-        Path("logs/verification_log.json"),
-        Path("logs/verification/verification_log.json"),
-        Path("logs/verification/results.json"),
+        REPO_ROOT / "logs" / "verification_log.json",
+        REPO_ROOT / "logs" / "verification" / "verification_log.json",
+        REPO_ROOT / "logs" / "verification" / "results.json",
     ]
     for p in candidates:
         data = _load_json_file(p)
@@ -1640,7 +1663,28 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
     if not jobs:
         return []
 
-    jobs_slice = jobs[-limit_runs:]
+    # Sort jobs by created_at so we can take the most recent N
+    def _job_created_at(j: Any) -> float:
+        ts_raw = None
+        if hasattr(j, "created_at"):
+            ts_raw = getattr(j, "created_at", None)
+        elif isinstance(j, dict):
+            ts_raw = j.get("created_at")
+        if isinstance(ts_raw, (int, float)):
+            return float(ts_raw)
+        if isinstance(ts_raw, str):
+            try:
+                return datetime.fromisoformat(ts_raw.replace("Z", "")).timestamp()
+            except Exception:
+                return 0.0
+        return 0.0
+
+    try:
+        jobs_sorted = sorted(jobs, key=_job_created_at)
+    except Exception:
+        jobs_sorted = jobs
+
+    jobs_slice = jobs_sorted[-limit_runs:]
 
     all_history: List[Dict[str, Any]] = []
     top_level_citations: List[Dict[str, Any]] = []
@@ -1736,7 +1780,28 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
     if not jobs:
         return []
 
-    jobs_slice = jobs[-limit_runs:]
+    # Sort jobs by created_at so we can take the most recent N
+    def _job_created_at(j: Any) -> float:
+        ts_raw = None
+        if hasattr(j, "created_at"):
+            ts_raw = getattr(j, "created_at", None)
+        elif isinstance(j, dict):
+            ts_raw = j.get("created_at")
+        if isinstance(ts_raw, (int, float)):
+            return float(ts_raw)
+        if isinstance(ts_raw, str):
+            try:
+                return datetime.fromisoformat(ts_raw.replace("Z", "")).timestamp()
+            except Exception:
+                return 0.0
+        return 0.0
+
+    try:
+        jobs_sorted = sorted(jobs, key=_job_created_at)
+    except Exception:
+        jobs_sorted = jobs
+
+    jobs_slice = jobs_sorted[-limit_runs:]
 
     discoveries: List[Dict[str, Any]] = []
 
@@ -2186,7 +2251,7 @@ def main() -> None:
                 "pdf": bool(use_pdf and uploaded_pdf is not None),
                 "biomarkers": bool(use_biomarkers),
                 "sandbox": bool(allow_sandbox and tool_flags["sandbox"]),
-                "tavily_key": st.session_state.get("tavily_key"),
+                "tavily_enabled": bool(status["has_key"]),
             }
 
             # Optional PDF embedded as base64 (worker can decode)
@@ -2229,7 +2294,7 @@ def main() -> None:
                 swarm_config: Dict[str, Any] = {
                     "swarm_size": int(swarm_size),
                     "roles": [name for name, _ in swarm_roles] if swarm_roles else ["agent"],
-                    "max_cycles_per_agent": int(cycles),
+                    "max_cycles_per_agent": 1,
                     "stagger_start": False,
                     "max_agents_per_tick": 0,
                 }
@@ -2252,6 +2317,11 @@ def main() -> None:
                         "curriculum_profile": longevity_defaults.get("curriculum_profile"),
                     }
 
+            # Total cycles requested (for swarm, scale by swarm_size so this reflects approximate global budget)
+            total_cycles_requested = int(cycles)
+            if mode == "swarm":
+                total_cycles_requested = int(cycles) * int(swarm_size)
+
             # Core run configuration that engine_worker can map to RunConfig
             # Explicit finite guards:
             # For single and two_stage, max_cycles limits the run.
@@ -2260,13 +2330,13 @@ def main() -> None:
                 "goal": goal_clean,
                 "domain": domain_tag,
                 "mode": mode,
-                "total_cycles": int(cycles),
+                "total_cycles": total_cycles_requested,
                 "max_cycles": int(cycles) if mode != "swarm" else None,
                 "max_rounds": int(cycles) if mode == "swarm" else None,
                 "max_seconds": None,
                 "rye_stop_threshold": stop_rye_threshold,
                 "equilibrium_stop_label": None,
-                "min_cycles_before_stop": 3,
+                "min_cycles_before_stop": min(3, int(cycles)),
                 "source_controls": source_controls,
                 "runtime_hints": runtime_hints,
                 "swarm": swarm_config,
