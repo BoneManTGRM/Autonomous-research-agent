@@ -1247,10 +1247,21 @@ class CoreAgent:
             role = str(payload.get("role", "agent"))
             domain = str(payload.get("domain", "general"))
 
-            max_cycles = int(payload.get("max_cycles", 8))
+            max_cycles_raw = payload.get("max_cycles", 8)
+            try:
+                max_cycles = int(max_cycles_raw)
+            except Exception:
+                max_cycles = 8
+            if max_cycles <= 0:
+                max_cycles = 1
 
             max_minutes_raw = payload.get("max_minutes")
-            max_minutes = float(max_minutes_raw) if isinstance(max_minutes_raw, (int, float)) else None
+            if isinstance(max_minutes_raw, (int, float)):
+                max_minutes = float(max_minutes_raw)
+                if max_minutes <= 0:
+                    max_minutes = None
+            else:
+                max_minutes = None
 
             experiment_mode = payload.get("experiment_mode")
             source_controls = payload.get("source_controls")
@@ -1348,6 +1359,21 @@ class CoreAgent:
                 "reason": "swarm_orchestrator_not_available",
             }
 
+        # Defensive clamp for swarm_size and max_cycles per agent
+        try:
+            swarm_size = int(swarm_size)
+        except Exception:
+            swarm_size = 4
+        if swarm_size <= 0:
+            swarm_size = 1
+
+        try:
+            max_cycles = int(max_cycles)
+        except Exception:
+            max_cycles = 6
+        if max_cycles <= 0:
+            max_cycles = 1
+
         swarm_summary = self.swarm_orchestrator.run_swarm(
             goal=goal,
             base_preset=base_preset,
@@ -1393,12 +1419,19 @@ class CoreAgent:
         if self.swarm_orchestrator is None:
             return results
 
+        try:
+            rounds = int(rounds)
+        except Exception:
+            rounds = 3
+        if rounds <= 0:
+            rounds = 1
+
         domain_effective = domain or "general"
         preset_with_runtime = dict(base_preset)
         if runtime_profile is not None:
             preset_with_runtime["runtime_profile"] = runtime_profile
 
-        for _ in range(max(1, int(rounds))):
+        for _ in range(max(1, rounds)):
             summary = self.run_orchestrated_swarm(
                 goal=goal,
                 base_preset=preset_with_runtime,
@@ -1785,12 +1818,20 @@ class CoreAgent:
         # Advanced path: TGRMLoop.run_multi_goal_cycle
         if hasattr(self.tgrm_loop, "run_multi_goal_cycle"):
             try:
+                effective_source_controls: Dict[str, bool] = {}
+                if self.source_controls:
+                    effective_source_controls.update(self.source_controls)
+                if source_controls:
+                    effective_source_controls.update(source_controls)
+
+                eff_pdf_bytes = pdf_bytes if pdf_bytes is not None else self._attached_pdf_bytes
+
                 result = self.tgrm_loop.run_multi_goal_cycle(  # type: ignore[attr-defined]
                     goals=goals_list,
                     cycle_index=cycle_index,
                     role=role,
-                    source_controls=source_controls or self.source_controls,
-                    pdf_bytes=pdf_bytes if pdf_bytes is not None else self._attached_pdf_bytes,
+                    source_controls=effective_source_controls,
+                    pdf_bytes=eff_pdf_bytes,
                     biomarker_snapshot=biomarker_snapshot,
                     domain=domain,
                     msil_mode=self.msil_mode,
@@ -1867,6 +1908,22 @@ class CoreAgent:
             run will still be bounded by max_cycles and or max_minutes
             plus an internal failsafe.
         """
+        # Defensive normalization for max_cycles and max_minutes
+        try:
+            max_cycles = int(max_cycles)
+        except Exception:
+            max_cycles = 100
+        if max_cycles <= 0:
+            max_cycles = 1
+
+        if max_minutes is not None:
+            try:
+                max_minutes = float(max_minutes)
+            except Exception:
+                max_minutes = None
+            if max_minutes is not None and max_minutes <= 0:
+                max_minutes = None
+
         summaries: List[Dict[str, Any]] = []
         recent_rye: List[float] = []
 
@@ -1874,7 +1931,10 @@ class CoreAgent:
         run_started_at_ts = time.time()
 
         # Global failsafe on cycles
-        max_cycles_failsafe = int(CONTINUOUS_MODE_DEFAULTS.get("max_cycles_failsafe", 10_000_000))
+        try:
+            max_cycles_failsafe = int(CONTINUOUS_MODE_DEFAULTS.get("max_cycles_failsafe", 10_000_000))
+        except Exception:
+            max_cycles_failsafe = 10_000_000
         if max_cycles > max_cycles_failsafe:
             max_cycles = max_cycles_failsafe
 
@@ -1884,7 +1944,12 @@ class CoreAgent:
         effective_domain = domain or "general"
         preset_cfg = get_preset(effective_domain)
 
-        default_watchdog = float(CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes))
+        try:
+            default_watchdog = float(
+                CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes)
+            )
+        except Exception:
+            default_watchdog = watchdog_interval_minutes
         if watchdog_interval_minutes == 5.0:
             watchdog_interval_minutes = default_watchdog
 
@@ -2167,6 +2232,22 @@ class CoreAgent:
             pass forever=True or select a "forever" runtime_profile, the
             run will still be bounded by max_rounds and or max_minutes.
         """
+        # Defensive normalization for max_rounds and max_minutes
+        try:
+            max_rounds = int(max_rounds)
+        except Exception:
+            max_rounds = 50
+        if max_rounds <= 0:
+            max_rounds = 1
+
+        if max_minutes is not None:
+            try:
+                max_minutes = float(max_minutes)
+            except Exception:
+                max_minutes = None
+            if max_minutes is not None and max_minutes <= 0:
+                max_minutes = None
+
         all_summaries: List[Dict[str, Any]] = []
         recent_round_rye: List[float] = []
 
@@ -2183,6 +2264,16 @@ class CoreAgent:
         else:
             roles_seq = roles
         roles_list: List[str] = [str(r) for r in roles_seq][: self.max_agents]
+        if not roles_list:
+            roles_list = ["agent"]
+
+        # Global failsafe on rounds
+        try:
+            max_rounds_failsafe = int(CONTINUOUS_MODE_DEFAULTS.get("max_rounds_failsafe", 10_000_000))
+        except Exception:
+            max_rounds_failsafe = 10_000_000
+        if max_rounds > max_rounds_failsafe:
+            max_rounds = max_rounds_failsafe
 
         if self._swarm_cfg:
             try:
@@ -2197,7 +2288,12 @@ class CoreAgent:
             except Exception:
                 pass
 
-        default_watchdog = float(CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes))
+        try:
+            default_watchdog = float(
+                CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes)
+            )
+        except Exception:
+            default_watchdog = watchdog_interval_minutes
         if watchdog_interval_minutes == 5.0:
             watchdog_interval_minutes = default_watchdog
 
