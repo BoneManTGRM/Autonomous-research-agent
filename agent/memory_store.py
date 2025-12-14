@@ -240,6 +240,10 @@ class MemoryStore:
             "source_index": {},
             "schema_version": MEMORY_SCHEMA_VERSION,
         }
+
+        # Track last save error for debugging long runs
+        self._last_save_error: Optional[str] = None
+
         self._load()
         self._ensure_keys()
 
@@ -342,7 +346,14 @@ class MemoryStore:
                 with open(self.memory_file, "r", encoding="utf-8") as f:
                     self._data = json.load(f)
             except (json.JSONDecodeError, OSError):
-                # If the file is corrupt or cannot be read, start fresh
+                # If the file is corrupt or cannot be read, rename it for forensics
+                try:
+                    now = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+                    backup_path = f"{self.memory_file}.corrupt-{now}"
+                    os.rename(self.memory_file, backup_path)
+                except Exception:
+                    pass
+                # Start with a fresh structure
                 self._data = {
                     "notes": [],
                     "cycles": [],
@@ -384,7 +395,10 @@ class MemoryStore:
             with open(tmp_path, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, ensure_ascii=False, indent=2)
             os.replace(tmp_path, self.memory_file)
-        except Exception:
+            self._last_save_error = None
+        except Exception as e:
+            # Track last save error in memory for debugging
+            self._last_save_error = f"{type(e).__name__}: {e}"
             try:
                 if os.path.exists(tmp_path):
                     os.remove(tmp_path)
@@ -479,6 +493,10 @@ class MemoryStore:
         except Exception:
             info["file_size_bytes"] = None
         return info
+
+    def get_last_save_error(self) -> Optional[str]:
+        """Return the last save error (if any) for debugging."""
+        return self._last_save_error
 
     # Optional hard reset for dev and testing
     def reset_memory(self, keep_run_state: bool = False) -> None:
@@ -933,7 +951,7 @@ class MemoryStore:
 
         # URL normalization
         url_val = c.get("url")
-        url = str(url_val).strip() if isinstance(url_val, str) else ""
+        url = str(url_val).strip() if url_val is not None else ""
 
         # Content or snippet normalization
         snippet = ""
@@ -1488,6 +1506,9 @@ class MemoryStore:
         The agent can call this periodically so that:
             - you can see if it is still alive
             - a supervising process can measure downtime
+
+        To avoid heavy disk writes, this updates watchdog in memory and
+        writes only to the small watchdog.json file, not the main memory.json.
         """
         wd = self._data.setdefault("watchdog", {})
         now = _utc_now_iso()
@@ -1504,9 +1525,8 @@ class MemoryStore:
             "count": count,
             "run_id": run_id or prev_run_id,
         }
-        self._save()
 
-        # Mirror watchdog dict to a dedicated JSON file
+        # Mirror watchdog dict to a dedicated JSON file without rewriting memory.json
         try:
             payload = dict(self._data.get("watchdog") or {})
             self._write_json_file(self.watchdog_path, payload)
@@ -2411,7 +2431,13 @@ class MemoryStore:
         early_avg = None
         late_avg = None
         if history:
-            sorted_hist = sorted(history, key=lambda c: c.get("cycle", 0))
+            def _cycle_key(c: Dict[str, Any]) -> int:
+                try:
+                    return int(c.get("cycle", 0))
+                except Exception:
+                    return 0
+
+            sorted_hist = sorted(history, key=_cycle_key)
             n = len(sorted_hist)
             k = max(1, n // 4)
             early_slice = sorted_hist[:k]
