@@ -1041,6 +1041,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
 
     max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "max_cycles")
     max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
+    macro_total = max_rounds if mode == "swarm" else max_cycles
 
     raw_max_minutes = cfg.get("max_minutes")
     if (mode == "single" and max_cycles_explicit) or (mode == "swarm" and max_rounds_explicit):
@@ -1148,7 +1149,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         run_id=run_id,
         experiment_mode="direct_job",
         current=0,
-        total=max_rounds if mode == "swarm" else max_cycles,
+        total=macro_total,
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
@@ -1317,6 +1318,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         # Attach top level defaults including citations / discoveries / sources / rye_metrics
         result_obj = _attach_top_level_defaults(result_obj, normalized_cycles, diag)
 
+        final_macro_total = macro_total
         _update_worker_state(
             agent,
             status="idle",
@@ -1329,8 +1331,8 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             max_minutes=max_minutes,
             run_id=run_id,
             experiment_mode="direct_job",
-            current=len(normalized_cycles),
-            total=max_rounds if mode == "swarm" else max_cycles,
+            current=final_macro_total,
+            total=final_macro_total,
             extra={
                 "experiment_fingerprint": experiment_fingerprint,
                 "final_diagnostics": diag,
@@ -1394,7 +1396,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             run_id=run_id,
             experiment_mode="direct_job",
             current=None,
-            total=max_rounds if mode == "swarm" else max_cycles,
+            total=macro_total,
             extra=error_payload,
         )
 
@@ -1574,6 +1576,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
 
     max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "max_cycles")
     max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
+    macro_total = max_rounds if mode == "swarm" else max_cycles
 
     raw_max_minutes = cfg.get("max_minutes")
     if (mode == "single" and max_cycles_explicit) or (mode == "swarm" and max_rounds_explicit):
@@ -1683,7 +1686,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         run_id=job.run_id,
         experiment_mode="queue_worker",
         current=0,
-        total=max_rounds if mode == "swarm" else max_cycles,
+        total=macro_total,
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
@@ -1699,7 +1702,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         status="active",
         note="Job started",
         current=0,
-        total=max_rounds if mode == "swarm" else max_cycles,
+        total=macro_total,
         goal=goal,
         domain=domain,
         job_config=cfg,
@@ -1708,6 +1711,10 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
 
     summaries: List[Dict[str, Any]] = []
     full_result: Optional[Dict[str, Any]] = None
+
+    # Track last macro progress so final X/Y matches
+    last_progress_current: Optional[int] = None
+    last_progress_total: Optional[int] = macro_total
 
     hb_stop: Optional[threading.Event] = None
     hb_thread: Optional[threading.Thread] = None
@@ -1737,6 +1744,13 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
 
                 cur_int = int(current_local) if isinstance(current_local, (int, float)) else None
                 tot_int = int(total_local) if isinstance(total_local, (int, float)) else None
+
+                # Remember last seen values so the final X/Y matches macro progress
+                nonlocal last_progress_current, last_progress_total
+                if cur_int is not None:
+                    last_progress_current = cur_int
+                if tot_int is not None:
+                    last_progress_total = tot_int
 
                 _write_job_progress(
                     job.run_id,
@@ -1863,13 +1877,22 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         print(f"=== Queue worker: job {job.run_id} finished cleanly ===")
         print(f"Total summaries: {len(summaries)}")
 
-        # Final progress write (we only know final count now)
+        # Decide final macro X/Y
+        if last_progress_current is not None and last_progress_total is not None:
+            final_current = last_progress_current
+            final_total = last_progress_total
+        else:
+            # Fallback: mark as fully completed macros so you see 2/2, 4/4, etc.
+            final_current = macro_total
+            final_total = macro_total
+
+        # Final progress write (macro scale)
         _write_job_progress(
             job.run_id,
             status="finished",
             note="Job finished",
-            current=len(summaries),
-            total=max_rounds if mode == "swarm" else max_cycles,
+            current=final_current,
+            total=final_total,
             goal=goal,
             domain=domain,
             job_config=cfg,
@@ -2041,8 +2064,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             max_minutes=max_minutes,
             run_id=job.run_id,
             experiment_mode="queue_worker",
-            current=len(normalized_cycles),
-            total=max_rounds if mode == "swarm" else max_cycles,
+            current=final_current,
+            total=final_total,
             extra={
                 "experiment_fingerprint": experiment_fingerprint,
                 "final_diagnostics": diag,
@@ -2064,7 +2087,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             status="error",
             note=str(e),
             current=None,
-            total=max_rounds if mode == "swarm" else max_cycles,
+            total=macro_total,
             goal=goal,
             domain=domain,
             job_config=cfg,
@@ -2129,7 +2152,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             run_id=job.run_id,
             experiment_mode="queue_worker",
             current=None,
-            total=max_rounds if mode == "swarm" else max_cycles,
+            total=macro_total,
             extra=error_payload,
         )
     finally:
