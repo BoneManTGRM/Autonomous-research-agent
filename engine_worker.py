@@ -24,8 +24,10 @@ Finite-only mode:
   permission to run forever.
 
 Queue mode using agent/run_jobs.py:
-    - WORKER_QUEUE_MODE=1 (default) -> file-based job queue
-    - Worker polls the job queue via agent.run_jobs, executes jobs,
+    - When WORKER_MODE is unset or set to "queue", the worker runs in
+      file-based queue mode by default (Render-friendly).
+    - You can also force queue mode with WORKER_QUEUE_MODE=1.
+    - The worker polls the job queue via agent.run_jobs, executes jobs,
       and writes results via save_job_result / mark_job_error.
 
 You can start it with commands like:
@@ -39,7 +41,7 @@ On Render:
 
 Hard safety caps:
 - All requested cycles / rounds / minutes are clamped to hard maximums:
-    WORKER_HARD_MAX_CYCLES   (default 1,000,000)
+    WORKER_HARD_MAX_CYCLES   (default 10,000,000)
     WORKER_HARD_MAX_ROUNDS   (default same as HARD_MAX_CYCLES)
     WORKER_HARD_MAX_MINUTES  (default 1,440 minutes = 24 hours)
 """
@@ -139,7 +141,7 @@ def _parse_float_env(name: str, default: float) -> float:
         return default
 
 
-HARD_MAX_CYCLES: int = _parse_int_env("WORKER_HARD_MAX_CYCLES", 1_000_000)
+HARD_MAX_CYCLES: int = _parse_int_env("WORKER_HARD_MAX_CYCLES", 10_000_000)
 HARD_MAX_ROUNDS: int = _parse_int_env("WORKER_HARD_MAX_ROUNDS", HARD_MAX_CYCLES)
 HARD_MAX_MINUTES: float = _parse_float_env("WORKER_HARD_MAX_MINUTES", 1440.0)
 
@@ -2089,6 +2091,10 @@ def run_job_queue_worker() -> None:
         - For each job:
             * Runs it with _process_single_job
         - Loops continuously so Render worker can stay alive.
+
+    Queue mode is activated when:
+        - WORKER_MODE is unset or explicitly "queue" (default behavior in __main__), or
+        - WORKER_QUEUE_MODE=1 is set in the environment.
     """
     if RunJob is None or load_next_pending_job is None:
         print("Queue mode requested but agent/run_jobs.py is not available.")
@@ -2136,28 +2142,29 @@ def run_job_queue_worker() -> None:
     sys.stdout.flush()
 
     idle_loops = 0
+    debug_pending = _env_bool("WORKER_QUEUE_DEBUG_PENDING", default=False)
 
     while True:
-        # Debug: list any pending files the worker can see
-        try:
-            if pending_dir.exists():
-                pending_files = sorted(pending_dir.glob("*.json"))
-                if pending_files:
-                    print(
-                        f"[Queue] Pending .json files visible to worker: "
-                        f"{[p.name for p in pending_files]}"
-                    )
+        # Optional debug listing of pending files, gated by env
+        if debug_pending:
+            try:
+                if pending_dir.exists():
+                    pending_files = sorted(pending_dir.glob("*.json"))
+                    if pending_files:
+                        print(
+                            f"[Queue] Pending .json files visible to worker: "
+                            f"{[p.name for p in pending_files]}"
+                        )
+                    else:
+                        print("[Queue] No pending .json files visible to worker.")
                 else:
-                    print("[Queue] No pending .json files visible to worker.")
-            else:
-                try:
-                    print(f"[Queue] Pending dir does not exist: {pending_dir.resolve()}")
-                except Exception:
-                    print(f"[Queue] Pending dir does not exist: {pending_dir}")
-        except Exception as e:
-            print(f"[Queue] Error listing pending dir: {e}")
-
-        sys.stdout.flush()
+                    try:
+                        print(f"[Queue] Pending dir does not exist: {pending_dir.resolve()}")
+                    except Exception:
+                        print(f"[Queue] Pending dir does not exist: {pending_dir}")
+            except Exception as e:
+                print(f"[Queue] Error listing pending dir: {e}")
+            sys.stdout.flush()
 
         try:
             job = load_next_pending_job()
@@ -3513,13 +3520,22 @@ def main() -> None:
     Entry point for the background worker.
 
     Mode selection:
-    - WORKER_QUEUE_MODE=1 (default) -> file-based queue worker using agent/run_jobs.
-      If agent/run_jobs.py is missing or fails to import, queue mode logs an error
-      and returns; the queue worker cannot start.
-    - WORKER_QUEUE_MODE=0 -> direct engine behavior:
-        - WORKER_META=1          -> run meta controller (Option C, finite-only)
-        - WORKER_META=0 and WORKER_MODE=swarm or WORKER_SWARM=1 -> swarm engine (finite-only)
-        - otherwise             -> single agent engine (finite-only)
+
+    1) Queue worker (file-based jobs via agent/run_jobs):
+
+       - If WORKER_MODE is unset or explicitly "queue", the worker runs the
+         file-based queue worker. This is the default behavior when you just
+         run `python engine_worker.py` on Render.
+       - You can also force queue mode with WORKER_QUEUE_MODE=1.
+       - If agent/run_jobs.py is missing or fails to import, queue mode logs
+         an error and exits; the queue worker cannot start.
+
+    2) Direct engines (no queue):
+
+       - WORKER_QUEUE_MODE=0 and WORKER_MODE != "queue" -> direct engine behavior:
+           * WORKER_META=1          -> run meta controller (Option C, finite-only)
+           * WORKER_META=0 and WORKER_MODE=swarm or WORKER_SWARM=1 -> swarm engine (finite-only)
+           * otherwise             -> single agent engine (finite-only)
     """
     print("Starting Autonomous Research Agent background engine (finite-only mode)...")
     print(
@@ -3535,7 +3551,7 @@ def main() -> None:
         print(f"[engine_worker] BASE_DIR (effective): {BASE_DIR}")
     sys.stdout.flush()
 
-    # Default queue_mode to False so direct engines can run when explicitly configured.
+    # Default queue_mode to False; __main__ can still force queue by setting WORKER_QUEUE_MODE=1.
     queue_mode = _env_bool("WORKER_QUEUE_MODE", default=False)
 
     if queue_mode:
