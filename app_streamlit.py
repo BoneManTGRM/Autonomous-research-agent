@@ -1850,14 +1850,28 @@ def main() -> None:
     if isinstance(ws, dict):
         cur = ws.get("current")
         tot = ws.get("total")
+        eff_cur = ws.get("effective_current")
+        eff_tot = ws.get("effective_total")
         status_val = ws.get("status") or "unknown"
         run_id_val = ws.get("run_id") or ws.get("job_id") or ""
-        if isinstance(cur, (int, float)) and isinstance(tot, (int, float)) and tot > 0:
+
+        # Prefer effective_current / effective_total when present and valid
+        if isinstance(eff_cur, (int, float)) and isinstance(eff_tot, (int, float)) and eff_tot > 0:
+            display_cur = eff_cur
+            display_tot = eff_tot
+        elif isinstance(cur, (int, float)) and isinstance(tot, (int, float)) and tot > 0:
+            display_cur = cur
+            display_tot = tot
+        else:
+            display_cur = None
+            display_tot = None
+
+        if isinstance(display_cur, (int, float)) and isinstance(display_tot, (int, float)) and display_tot > 0:
             try:
-                fraction = float(cur) / float(tot)
+                fraction = float(display_cur) / float(display_tot)
             except Exception:
                 fraction = None
-            st.sidebar.caption(f"Current cycle: {int(cur)}/{int(tot)}")
+            st.sidebar.caption(f"Current cycle: {int(display_cur)}/{int(display_tot)}")
             if fraction is not None:
                 try:
                     st.sidebar.progress(min(fraction, 1.0))
@@ -3450,9 +3464,22 @@ def main() -> None:
                 run_id_val = worker_state.get("run_id") or worker_state.get("job_id") or "none"
                 current = worker_state.get("current")
                 total = worker_state.get("total")
+                eff_cur = worker_state.get("effective_current")
+                eff_tot = worker_state.get("effective_total")
                 mode = worker_state.get("mode") or worker_state.get("run_mode")
                 goal_ws = worker_state.get("goal") or ""
                 domain_ws = worker_state.get("domain") or ""
+
+                # Prefer effective_current / effective_total when present
+                if isinstance(eff_cur, (int, float)) and isinstance(eff_tot, (int, float)) and eff_tot > 0:
+                    display_cur = eff_cur
+                    display_tot = eff_tot
+                elif isinstance(current, (int, float)) and isinstance(total, (int, float)) and total > 0:
+                    display_cur = current
+                    display_tot = total
+                else:
+                    display_cur = None
+                    display_tot = None
 
                 cols_ws = st.columns(3)
                 with cols_ws[0]:
@@ -3464,12 +3491,12 @@ def main() -> None:
                     if domain_ws:
                         st.write(f"Domain: `{domain_ws}`")
                 with cols_ws[2]:
-                    if isinstance(current, (int, float)) and isinstance(total, (int, float)) and total > 0:
+                    if isinstance(display_cur, (int, float)) and isinstance(display_tot, (int, float)) and display_tot > 0:
                         try:
-                            pct = (float(current) / float(total)) * 100.0
-                            st.write(f"Progress: {int(current)}/{int(total)} ({pct:.1f} percent)")
+                            pct = (float(display_cur) / float(display_tot)) * 100.0
+                            st.write(f"Progress: {int(display_cur)}/{int(display_tot)} ({pct:.1f} percent)")
                         except Exception:
-                            st.write(f"Progress: {int(current)}/{int(total)}")
+                            st.write(f"Progress: {int(display_cur)}/{int(display_tot)}")
                     else:
                         st.write("Progress: n/a")
 
