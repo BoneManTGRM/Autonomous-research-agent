@@ -442,14 +442,12 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
     Best effort heartbeat into the MemoryStore so the UI can see that the
     worker is alive. Silently ignored if heartbeat is not implemented.
 
-    IMPORTANT: some MemoryStore.heartbeat() implementations do NOT accept
-    a run_id keyword. We always at least call the basic form so the
-    watchdog panel keeps updating.
-
-    This version also writes a clear log line so you can see heartbeats
-    explicitly in your Render logs.
+    This version also logs a clear line to stdout and, if the MemoryStore
+    does not expose a heartbeat method, it directly writes a watchdog
+    record into the underlying store so the diagnostics panel can still
+    see last beat, count, and seconds since last beat.
     """
-    # Explicit console log for heartbeat
+    # Console log for heartbeat timing
     try:
         ts = datetime.utcnow().isoformat() + "Z"
         rid = run_id or "n/a"
@@ -458,21 +456,50 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
     except Exception:
         pass
 
-    # MemoryStore heartbeat
-    try:
-        ms = _get_memory_store(agent)
-        if ms is None or not hasattr(ms, "heartbeat"):
-            return
-        hb = getattr(ms, "heartbeat")
-        try:
-            if run_id is not None:
-                hb(label=label, run_id=run_id)  # type: ignore[call-arg]
-            else:
-                hb(label=label)
-        except TypeError:
-            hb(label=label)
-    except Exception:
+    ms = _get_memory_store(agent)
+    if ms is None:
         return
+
+    # Preferred path, use MemoryStore.heartbeat if present
+    try:
+        if hasattr(ms, "heartbeat"):
+            hb = getattr(ms, "heartbeat")
+            try:
+                if run_id is not None:
+                    hb(label=label, run_id=run_id)  # type: ignore[call-arg]
+                else:
+                    hb(label=label)
+            except TypeError:
+                # Older signature that only accepts label
+                hb(label=label)
+        else:
+            # Fallback path, write watchdog info directly
+            data_attr = getattr(ms, "data", getattr(ms, "_data", None))
+            if isinstance(data_attr, dict):
+                now = datetime.utcnow().isoformat() + "Z"
+                wd = data_attr.setdefault("watchdog", {})
+                wd["last_heartbeat_utc"] = now
+                wd["last_label"] = label
+                if run_id is not None:
+                    wd["last_run_id"] = run_id
+                try:
+                    current = int(wd.get("heartbeat_count", 0))
+                except Exception:
+                    current = 0
+                wd["heartbeat_count"] = current + 1
+                wd["last_heartbeat_ts"] = time.time()
+    except Exception:
+        # Never let heartbeat crash the worker
+        return
+    finally:
+        # Try to flush store to disk so diagnostics can see it quickly
+        try:
+            if hasattr(ms, "save"):
+                ms.save()  # type: ignore[call-arg]
+            elif hasattr(ms, "_save"):
+                ms._save()  # type: ignore[call-arg]
+        except Exception:
+            pass
 
 
 def _start_heartbeat_loop(
@@ -701,6 +728,11 @@ def _write_cycles_and_run_state(
       - cycle history
       - run_state snapshot
     This writes once at run end using the full cycle list.
+
+    It tries the explicit MemoryStore methods if present and falls back
+    to writing into a generic run_state map on the underlying data
+    structure so the diagnostics panel has something to read even if the
+    helper methods are missing.
     """
     ms = _get_memory_store(agent)
     if ms is None:
@@ -711,10 +743,8 @@ def _write_cycles_and_run_state(
     # Cycle history
     try:
         if hasattr(ms, "write_cycle_history"):
-            # Preferred: single call with full history
             ms.write_cycle_history(run_id, cycles)  # type: ignore[arg-type]
         elif hasattr(ms, "append_cycle_log"):
-            # Fallback: append one by one
             for idx, c in enumerate(cycles):
                 try:
                     ms.append_cycle_log(run_id, c, index=idx)  # type: ignore[arg-type]
@@ -726,11 +756,17 @@ def _write_cycles_and_run_state(
                     ms.append_cycle_history(run_id, c, index=idx)  # type: ignore[arg-type]
                 except TypeError:
                     ms.append_cycle_history(run_id, c)  # type: ignore[arg-type]
+        else:
+            # Direct write fallback into data or _data
+            data_attr = getattr(ms, "data", getattr(ms, "_data", None))
+            if isinstance(data_attr, dict):
+                hist = data_attr.setdefault("cycle_history", {})
+                hist[run_id] = list(cycles)
     except Exception:
         # Never break the worker from logging issues
         pass
 
-    # Run state
+    # Run state snapshot
     try:
         state: Dict[str, Any] = {
             "run_id": run_id,
@@ -742,21 +778,46 @@ def _write_cycles_and_run_state(
             "last_update_utc": datetime.utcnow().isoformat() + "Z",
         }
 
+        wrote_via_api = False
+
         if hasattr(ms, "save_run_state"):
             try:
                 ms.save_run_state(run_id, state)  # type: ignore[arg-type]
+                wrote_via_api = True
             except TypeError:
                 ms.save_run_state(run_id=run_id, state=state)  # type: ignore[arg-type]
+                wrote_via_api = True
         elif hasattr(ms, "write_run_state"):
             try:
                 ms.write_run_state(run_id, state)  # type: ignore[arg-type]
+                wrote_via_api = True
             except TypeError:
                 ms.write_run_state(run_id=run_id, state=state)  # type: ignore[arg-type]
+                wrote_via_api = True
         elif hasattr(ms, "update_run_state"):
             try:
                 ms.update_run_state(run_id, state)  # type: ignore[arg-type]
+                wrote_via_api = True
             except TypeError:
                 ms.update_run_state(run_id=run_id, state=state)  # type: ignore[arg-type]
+                wrote_via_api = True
+
+        if not wrote_via_api:
+            # Direct write fallback into run_state map
+            data_attr = getattr(ms, "data", getattr(ms, "_data", None))
+            if isinstance(data_attr, dict):
+                rs = data_attr.setdefault("run_state", {})
+                rs[run_id] = state
+
+        # Try flushing to disk
+        try:
+            if hasattr(ms, "save"):
+                ms.save()  # type: ignore[call-arg]
+            elif hasattr(ms, "_save"):
+                ms._save()  # type: ignore[call-arg]
+        except Exception:
+            pass
+
     except Exception:
         pass
 
@@ -1668,7 +1729,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             sys.stdout.flush()
 
             def _progress_cb(update: Dict[str, Any]) -> None:
-                # Live progress from CoreAgent into progress file + heartbeat + worker_state
+                # Live progress from CoreAgent into progress file plus heartbeat plus worker_state
                 status_local = str(update.get("status", "active"))
                 current_local = update.get("current_cycle")
                 total_local = update.get("total_cycles")
@@ -1850,8 +1911,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         )
 
         # ------------------------------------------------------------------
-        # Normalize cycles so the UI always sees cycles + summaries lists
-        # with index / cycle_index and an overall summary string.
+        # Normalize cycles so the UI always sees cycles plus summaries lists
+        # with index and cycle_index and an overall summary string.
         # ------------------------------------------------------------------
         overall_summary: Optional[str] = None
         for c in normalized_cycles:
