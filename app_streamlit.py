@@ -266,6 +266,21 @@ MAX_POINTS_FOR_CHARTS: int = 1000
 # -------------------------------------------------------------------
 # Helpers
 # -------------------------------------------------------------------
+def _parse_timestamp_str(ts: str) -> Optional[datetime]:
+    """Parse ISO style timestamps, including those with a trailing Z."""
+    if not isinstance(ts, str):
+        return None
+    ts = ts.strip()
+    if not ts:
+        return None
+    try:
+        if ts.endswith("Z"):
+            ts = ts[:-1]
+        return datetime.fromisoformat(ts)
+    except Exception:
+        return None
+
+
 def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
     """Load YAML settings file into a dictionary."""
     if not os.path.exists(config_path):
@@ -951,10 +966,9 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
     for e in history:
         ts = e.get("timestamp")
         if isinstance(ts, str):
-            try:
-                timestamps.append(datetime.fromisoformat(ts))
-            except Exception:
-                continue
+            dt = _parse_timestamp_str(ts)
+            if dt is not None:
+                timestamps.append(dt)
 
     runtime_text = "Runtime not available"
     if len(timestamps) >= 2:
@@ -1138,10 +1152,9 @@ def compute_run_hours(history: List[Dict[str, Any]]) -> Optional[float]:
     for e in history:
         ts = e.get("timestamp")
         if isinstance(ts, str):
-            try:
-                timestamps.append(datetime.fromisoformat(ts))
-            except Exception:
-                continue
+            dt = _parse_timestamp_str(ts)
+            if dt is not None:
+                timestamps.append(dt)
     if len(timestamps) < 2:
         return None
     start = min(timestamps)
@@ -1240,7 +1253,7 @@ def load_snapshots() -> List[Dict[str, Any]]:
             ts_val = data.get("timestamp") or data.get("timestamp_utc") or data.get("created_at")
             try:
                 if isinstance(ts_val, str):
-                    ts = datetime.fromisoformat(ts_val)
+                    ts = _parse_timestamp_str(ts_val)
                 else:
                     ts = None
             except Exception:
@@ -3030,7 +3043,7 @@ def main() -> None:
                 )
                 col_eq2[3].metric(
                     "Equilibrium fraction",
-                    f"{eq2['equilibrium_fraction']:.3f}" if eq2["equilibrium_fraction"] is not None else "n/a",
+                    f"{eq2['equilibrium_fraction']:.3f}" if eq2['equilibrium_fraction'] is not None else "n/a",
                 )
 
                 st.markdown("#### Equilibrium delta (snapshot2 minus snapshot1)")
