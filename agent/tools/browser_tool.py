@@ -38,6 +38,7 @@ class BrowserTool:
         - Cache key includes include_answer/include_raw_content/include_images/auto_parameters
           so toggles cannot return mismatched cached results.
         - Query clamp to stay under Tavily query limits.
+        - PubMed-safe term clamp helper to prevent 414 URI too long errors.
         - Safer logging encoding ("utf-8") and atomic-ish log writes guarded.
         - Better normalization of Tavily responses across SDK variants.
         - Fetch safety caps and content type normalization.
@@ -53,8 +54,11 @@ class BrowserTool:
     _cache_ts: Dict[Tuple[Any, ...], float] = {}
     CACHE_TTL_SECONDS: float = 600.0
 
-    # Tavily hard limit is 400 chars; keep margin
+    # Tavily hard limit is ~400 chars; keep margin
     MAX_TAVILY_QUERY_CHARS: int = 360
+
+    # PubMed URLs break if term is huge (entire JSON config). Keep it short.
+    MAX_PUBMED_TERM_CHARS: int = 300
 
     def __init__(
         self,
@@ -211,6 +215,65 @@ class BrowserTool:
         self._cache_ts[key] = time.time()
 
     # ------------------------------------------------------------------
+    # Internal helpers for clamping queries
+    # ------------------------------------------------------------------
+    def _clamp_query(self, query: str) -> Tuple[str, bool]:
+        """Clamp query to Tavily-safe length."""
+        q = (query or "").strip()
+        if len(q) > self.MAX_TAVILY_QUERY_CHARS:
+            return q[: self.MAX_TAVILY_QUERY_CHARS], True
+        return q, False
+
+    def _clamp_pubmed_term(self, raw: Any) -> Tuple[str, bool]:
+        """
+        Build a short PubMed-safe term from a possibly huge object.
+
+        This is intended to be used by the PubMed integration so we never send
+        an entire JSON job config in the `term` URL parameter (which causes
+        414 Request-URI Too Long errors).
+        """
+        # If a dict is passed, pull out the human-meaningful fields
+        if isinstance(raw, dict):
+            pieces: List[str] = []
+
+            for key in ("goal", "question", "domain", "topic", "hypothesis"):
+                v = raw.get(key)
+                if isinstance(v, str):
+                    pieces.append(v)
+
+            roles = raw.get("roles") or raw.get("role")
+            if isinstance(roles, str):
+                pieces.append(roles)
+            elif isinstance(roles, list):
+                for r in roles:
+                    if isinstance(r, str):
+                        pieces.append(r)
+
+            if not pieces:
+                # Fall back to a compact JSON but still clamp
+                term = json.dumps(raw, separators=(",", ":"))
+            else:
+                term = " ".join(pieces)
+        else:
+            term = str(raw or "")
+
+        term = term.replace("\n", " ").strip()
+        if len(term) > self.MAX_PUBMED_TERM_CHARS:
+            return term[: self.MAX_PUBMED_TERM_CHARS], True
+        return term, False
+
+    # Expose a small helper that other modules can call directly.
+    def build_pubmed_term(self, raw: Any) -> str:
+        """
+        Public wrapper for PubMed term building.
+
+        Use this in your PubMed tool code instead of dumping the full config
+        into the `term` parameter.
+        """
+        term, _ = self._clamp_pubmed_term(raw)
+        return term
+
+    # ------------------------------------------------------------------
     # Internal HTTP or client helpers
     # ------------------------------------------------------------------
     def _post_tavily_http(self, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -332,13 +395,6 @@ class BrowserTool:
             )
 
         return normalized
-
-    def _clamp_query(self, query: str) -> Tuple[str, bool]:
-        """Clamp query to Tavily-safe length."""
-        q = (query or "").strip()
-        if len(q) > self.MAX_TAVILY_QUERY_CHARS:
-            return q[: self.MAX_TAVILY_QUERY_CHARS], True
-        return q, False
 
     # ------------------------------------------------------------------
     # Public API - search
