@@ -340,6 +340,7 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
         sc["sandbox"] = False
 
     if not flags["web"]:
+        # If no browser tool AND no Tavily key, disable web fully
         if not os.getenv("TAVILY_API_KEY"):
             sc["web"] = False
 
@@ -2616,7 +2617,10 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     repeat_shifts = _env_bool("WORKER_REPEAT_SHIFTS", default=False)
 
     if roles_list is None:
-        roles_list = agent.get_agent_roles()
+        try:
+            roles_list = agent.get_agent_roles()
+        except Exception:
+            roles_list = ["agent"]
 
     forever = False
 
@@ -3290,7 +3294,10 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
     roles_env = _env_list("WORKER_SWARM_ROLES")
     if roles_env is None:
-        roles_for_swarm: Sequence[str] = agent.get_agent_roles()
+        try:
+            roles_for_swarm: Sequence[str] = agent.get_agent_roles()
+        except Exception:
+            roles_for_swarm = ["agent"]
     else:
         roles_for_swarm = roles_env
 
