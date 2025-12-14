@@ -104,6 +104,10 @@ Update notes:
       (and common sub-config sections) so the engine and MemoryStore use the
       exact same run_id that the UI uses when generating reports. This closes
       the common "job id vs run id vs cycles folder id" divergence.
+    - Limits (max_cycles, max_rounds, max_minutes) are sanitized into clean
+      positive integers when possible, but no artificial upper cap is imposed.
+      Very large values such as 1_000_000 are allowed; engine_worker is
+      responsible for enforcing any global safety limits.
 """
 
 # Public exports (useful for type checkers and explicit imports)
@@ -271,6 +275,62 @@ def _normalize_status(status: Any) -> str:
     return "queued"
 
 
+def _coerce_positive_int(value: Any) -> Optional[int]:
+    """
+    Try to convert value to a positive integer.
+
+    Returns:
+        int if successful and > 0, otherwise None.
+    """
+    try:
+        v = int(value)
+    except Exception:
+        return None
+    if v <= 0:
+        return None
+    return v
+
+
+def _sanitize_limits_in_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Return a copy of config where max_cycles, max_rounds, and max_minutes
+    are normalized to positive integers when possible.
+
+    No upper cap is enforced here; extremely large values are allowed.
+    Global safety limits (if any) should be enforced in engine_worker.py.
+    """
+    try:
+        cfg: Dict[str, Any] = dict(config)
+    except Exception:
+        return config
+
+    # Helper to apply coercion in multiple nested dicts
+    def sanitize_key(obj: Dict[str, Any], key: str) -> None:
+        if not isinstance(obj, dict):
+            return
+        if key in obj:
+            val = _coerce_positive_int(obj.get(key))
+            if val is None:
+                # If value cannot be coerced, drop it rather than leaving junk
+                obj.pop(key, None)
+            else:
+                obj[key] = val
+
+    # Top level
+    for key in ("max_cycles", "max_rounds", "max_minutes"):
+        sanitize_key(cfg, key)
+
+    # Common nested sections
+    for section_key in ("limits", "engine", "runtime"):
+        sub = cfg.get(section_key)
+        if isinstance(sub, dict):
+            for key in ("max_cycles", "max_rounds", "max_minutes"):
+                sanitize_key(sub, key)
+            cfg[section_key] = sub
+
+    return cfg
+
+
 def _inject_run_id_into_config(run_id: str, config: Dict[str, Any]) -> Dict[str, Any]:
     """
     Ensure the config passed to the engine carries the same run_id that the
@@ -281,11 +341,8 @@ def _inject_run_id_into_config(run_id: str, config: Dict[str, Any]) -> Dict[str,
 
     We keep this very defensive so job creation never crashes.
     """
-    try:
-        cfg: Dict[str, Any] = dict(config)
-    except Exception:
-        # If config is not a normal mapping, just return it unchanged.
-        return config
+    # First sanitize numeric limits to positive ints
+    cfg = _sanitize_limits_in_config(config)
 
     try:
         # Top level run_id hint
@@ -375,8 +432,10 @@ class RunJob:
         # Make sure required fields from original data are present
         run_id = str(data["run_id"])
         raw_config = dict(data["config"])
+        # Sanitize and inject run_id
+        sanitized_cfg = _sanitize_limits_in_config(raw_config)
         filtered["run_id"] = run_id
-        filtered["config"] = _inject_run_id_into_config(run_id, raw_config)
+        filtered["config"] = _inject_run_id_into_config(run_id, sanitized_cfg)
 
         # Ensure meta exists and has run_id for UI convenience
         meta = filtered.get("meta")
@@ -469,8 +528,9 @@ def create_job(
     if run_id is None:
         run_id = str(uuid.uuid4())
 
-    # Inject run_id into config and common nested sections
-    cfg = _inject_run_id_into_config(run_id, config)
+    # Sanitize numeric limits and inject run_id into config and common sections
+    cfg_sanitized = _sanitize_limits_in_config(config)
+    cfg = _inject_run_id_into_config(run_id, cfg_sanitized)
 
     # Include run_id in meta for UI convenience, and auto-fill a few
     # important fields if present in the config. This helps the Streamlit UI
