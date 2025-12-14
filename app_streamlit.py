@@ -356,10 +356,11 @@ def tavily_status() -> Dict[str, Any]:
 
     if key:
         tail = key[-4:]
-        return {"has_key": True, "display": f"Tavily key detected (...{tail})"}
+        return {"has_key": True, "display": f"Tavily key detected (...{tail})", "tail": tail}
     return {
         "has_key": False,
         "display": "No Tavily API key found. Web search will use stubbed results.",
+        "tail": None,
     }
 
 
@@ -382,8 +383,16 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
     """Pretty print cycle summary output."""
     role = cycle_summary.get("role", "agent")
     domain = cycle_summary.get("domain") or "general"
+
+    # Respect the cycle index written by the worker (do not add 1 again)
+    cycle_index = cycle_summary.get("cycle")
+    if cycle_index is None:
+        cycle_index = cycle_summary.get("cycle_index")
+    if cycle_index is None:
+        cycle_index = 1
+
     st.markdown(
-        f"### Cycle {cycle_summary.get('cycle', 0) + 1} "
+        f"### Cycle {cycle_index} "
         f"(role: {role}, domain: {domain})"
     )
 
@@ -895,7 +904,9 @@ def render_result_details(result: Dict[str, Any]) -> None:
             chart_data["RYE"] = rye_values
 
         if len(chart_data) > 1:
-            st.line_chart(chart_data)
+            df = pd.DataFrame(chart_data).set_index("cycle")
+            st.line_chart(df)
+            st.caption("Timeline of delta_R, energy, and RYE per cycle.")
 
         # Detailed per cycle summaries
         with st.expander("Per cycle details"):
@@ -980,12 +991,15 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
         minutes = (total_seconds % 3600) // 60
         runtime_text = f"Approx runtime: {hours} hours {minutes} minutes (from first to last cycle)."
 
-    # RYE stats
+    # RYE stats (support both RYE and rye keys)
     rye_vals: List[float] = []
     for e in history:
         v = e.get("RYE")
+        if not isinstance(v, (int, float)):
+            v = e.get("rye")
         if isinstance(v, (int, float)):
             rye_vals.append(float(v))
+
     rye_text = "RYE statistics not available."
     if rye_vals:
         avg_rye = sum(rye_vals) / len(rye_vals)
@@ -1835,6 +1849,14 @@ def main() -> None:
     # Shared MemoryStore instance for diagnostics and history
     memory = init_memory_store()
 
+    # Try to surface memory file path so you can confirm a single shared MemoryStore
+    try:
+        mem_path = getattr(memory, "path", None) or getattr(memory, "memory_file", None)
+        if isinstance(mem_path, str):
+            st.sidebar.caption(f"Memory file: `{mem_path}`")
+    except Exception:
+        pass
+
     # Small always visible sidebar cycle counter from worker_state
     get_worker_state = getattr(memory, "get_worker_state", None)
     if not callable(get_worker_state):
@@ -1937,6 +1959,8 @@ def main() -> None:
         or preset.get("domain_key")
         or "general"
     )
+    if isinstance(domain_tag, dict):
+        domain_tag = domain_tag.get("tag") or domain_tag.get("name") or "general"
 
     st.sidebar.caption(f"Active domain: **{str(domain_tag).title()}**")
 
@@ -2162,6 +2186,7 @@ def main() -> None:
                 "pdf": bool(use_pdf and uploaded_pdf is not None),
                 "biomarkers": bool(use_biomarkers),
                 "sandbox": bool(allow_sandbox and tool_flags["sandbox"]),
+                "tavily_key": st.session_state.get("tavily_key"),
             }
 
             # Optional PDF embedded as base64 (worker can decode)
@@ -2255,6 +2280,9 @@ def main() -> None:
                 run_config["pdf"] = pdf_payload
 
             # Meta for UI and analytics (does not go into RunConfig directly)
+            t_key = st.session_state.get("tavily_key")
+            t_tail = t_key[-4:] if isinstance(t_key, str) and len(t_key) >= 4 else None
+
             meta: Dict[str, Any] = {
                 "run_label": (run_label or "experiment").strip(),
                 "preset_key": selected_key,
@@ -2262,6 +2290,7 @@ def main() -> None:
                 "domain": domain_tag,
                 "mode": mode,
                 "tavily_enabled": bool(status["has_key"]),
+                "tavily_key_tail": t_tail,
                 "ui_metadata": {
                     "requested_from": "streamlit",
                     "client_version": "v3-run-manager-finite-only",
@@ -2466,20 +2495,27 @@ def main() -> None:
 
             plot_rows = rows[-MAX_POINTS_FOR_CHARTS:]
 
-            cycles_x = [r["cycle"] for r in plot_rows if r["cycle"] is not None]
-            rye_y = [r["RYE"] for r in plot_rows]
-            delta_y = [r["delta_R"] for r in plot_rows]
-            energy_y = [r["energy_E"] for r in plot_rows]
+            if plot_rows:
+                chart_df = pd.DataFrame(plot_rows)[
+                    ["cycle", "RYE", "delta_R", "energy_E"]
+                ].copy()
+                chart_df = chart_df[chart_df["cycle"].notna()]
+                if not chart_df.empty:
+                    chart_df = chart_df.set_index("cycle")
 
-            if cycles_x:
-                st.line_chart({"RYE": rye_y})
-                st.caption("Higher RYE means more efficient repair (delta_R per unit energy).")
+                    if chart_df["RYE"].notna().any():
+                        st.line_chart(chart_df[["RYE"]])
+                        st.caption("Higher RYE means more efficient repair (delta_R per unit energy).")
 
-                st.line_chart({"delta_R": delta_y})
-                st.caption("delta_R is how much improvement each cycle produced.")
+                    if chart_df["delta_R"].notna().any():
+                        st.line_chart(chart_df[["delta_R"]])
+                        st.caption("delta_R is how much improvement each cycle produced.")
 
-                st.line_chart({"energy_E": energy_y})
-                st.caption("Energy per cycle (approximate effort cost).")
+                    if chart_df["energy_E"].notna().any():
+                        st.line_chart(chart_df[["energy_E"]])
+                        st.caption("Energy per cycle (approximate effort cost).")
+                else:
+                    st.info("No cycle indices available for charting yet.")
 
             # Advanced RYE diagnostics using rye_metrics build_run_diagnostics
             st.markdown("### Advanced RYE diagnostics")
@@ -3090,7 +3126,7 @@ def main() -> None:
                 )
                 col_eq2[3].metric(
                     "Equilibrium fraction",
-                    f"{eq2['equilibrium_fraction']:.3f}" if eq2['equilibrium_fraction'] is not None else "n/a",
+                    f"{eq2['equilibrium_fraction']:.3f}" if eq2["equilibrium_fraction"] is not None else "n/a",
                 )
 
                 st.markdown("#### Equilibrium delta (snapshot2 minus snapshot1)")
