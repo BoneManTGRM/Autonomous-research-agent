@@ -143,6 +143,28 @@ __all__ = [
 _THIS_FILE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = _THIS_FILE_DIR.parent
 
+# Debug toggle (optional, controlled via env var)
+DEBUG_RUN_JOBS = os.getenv("ARA_DEBUG_RUNJOBS", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _log(*args: Any) -> None:
+    """
+    Lightweight debug logger for this module.
+
+    Enable by setting:
+        ARA_DEBUG_RUNJOBS=1
+    """
+    if not DEBUG_RUN_JOBS:
+        return
+    print("[run_jobs]", *args)
+    try:
+        import sys
+
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
 # Base folder for all runs.
 #
 # IMPORTANT:
@@ -183,6 +205,9 @@ LEGACY_QUEUE_DIR = BASE_DIR / "queue"
 # Make sure directories exist at import time
 for folder in [BASE_DIR, PENDING_DIR, ACTIVE_DIR, FINISHED_DIR, ERROR_DIR, LEGACY_QUEUE_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
+
+_log("Initialized BASE_DIR:", BASE_DIR)
+_log("PENDING_DIR:", PENDING_DIR, "ACTIVE_DIR:", ACTIVE_DIR, "FINISHED_DIR:", FINISHED_DIR)
 
 
 # Optional helper you can call from Streamlit to debug the layout
@@ -552,11 +577,7 @@ def create_job(
             meta_with_id["goal"] = goal
 
         # Domain
-        domain = (
-            cfg.get("domain")
-            or cfg.get("topic")
-            or cfg.get("field")
-        )
+        domain = (cfg.get("domain") or cfg.get("topic") or cfg.get("field"))
         if domain and "domain" not in meta_with_id:
             meta_with_id["domain"] = domain
 
@@ -640,9 +661,10 @@ def create_job(
         # Compatibility should never crash job creation.
         pass
 
-    print("[run_jobs] Created job", run_id, "status=queued", "BASE_DIR:", BASE_DIR)
+    _log("Created job", run_id, "status=queued", "BASE_DIR:", BASE_DIR)
     try:
         import sys
+
         sys.stdout.flush()
     except Exception:
         pass
