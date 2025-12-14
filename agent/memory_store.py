@@ -980,6 +980,38 @@ class MemoryStore:
         if snippet:
             c["snippet"] = snippet
 
+        # Filter out obvious tool errors so they do not pollute citations
+        is_error_like = False
+        title_lower = str(c.get("title", "")).lower()
+        snippet_lower = str(c.get("snippet", "")).lower()
+
+        if "search error" in title_lower or "semantic scholar error" in title_lower:
+            is_error_like = True
+        if snippet_lower.startswith("[stub]"):
+            is_error_like = True
+        if c.get("error"):
+            is_error_like = True
+        if not url and not snippet:
+            is_error_like = True
+
+        if is_error_like:
+            # Log as tool error instead of a citation
+            try:
+                self.log_tool_event(
+                    run_id=run_id,
+                    goal=goal,
+                    domain=domain,
+                    role=role,
+                    cycle_index=cycle_index,
+                    tool_name=tool_name or str(provider or source or "unknown"),
+                    status="error",
+                    error=str(c.get("error") or c.get("title") or "citation_error"),
+                    extra={"raw_citation": c},
+                )
+            except Exception:
+                pass
+            return
+
         entry: Dict[str, Any] = {
             "timestamp": _utc_now_iso(),
             "goal": goal,
@@ -1571,11 +1603,22 @@ class MemoryStore:
             pass
 
     def get_watchdog_info(self, label: str = "continuous_run") -> Dict[str, Any]:
-        """Return watchdog data for a label from in memory data."""
-        wd = self._data.get("watchdog") or {}
-        if not isinstance(wd, dict):
-            wd = {}
-        entry = wd.get(label) or {}
+        """Return watchdog data for a label.
+
+        Prefers watchdog.json so separate processes see live heartbeats,
+        but falls back to in memory data if the file is missing.
+        """
+        entry: Dict[str, Any]
+
+        data = self._read_json_file(self.watchdog_path)
+        if isinstance(data, dict) and data:
+            entry = data.get(label) or {}
+        else:
+            wd = self._data.get("watchdog") or {}
+            if not isinstance(wd, dict):
+                wd = {}
+            entry = wd.get(label) or {}
+
         last_beat = entry.get("last_beat") or entry.get("last_heartbeat_utc")
         count = entry.get("count", 0)
         run_id = entry.get("run_id")
@@ -1601,26 +1644,7 @@ class MemoryStore:
         self.heartbeat(label=label, run_id=run_id)
 
     def read_watchdog_status(self, label: str = "continuous_run") -> Dict[str, Any]:
-        """Read watchdog status from watchdog.json, falling back to memory.json."""
-        data = self._read_json_file(self.watchdog_path)
-        if isinstance(data, dict) and data:
-            entry = data.get(label) or {}
-            last_beat = entry.get("last_beat") or entry.get("last_heartbeat_utc")
-            count = entry.get("count", 0)
-            run_id = entry.get("run_id")
-            seconds_since_last: Optional[float] = None
-            if isinstance(last_beat, str):
-                try:
-                    dt = datetime.fromisoformat(last_beat.replace("Z", "+00:00"))
-                    seconds_since_last = (datetime.now(timezone.utc) - dt).total_seconds()
-                except Exception:
-                    seconds_since_last = None
-            return {
-                "last_beat": last_beat,
-                "count": count,
-                "seconds_since_last": seconds_since_last,
-                "run_id": run_id,
-            }
+        """Compatibility wrapper that uses the same logic as get_watchdog_info."""
         return self.get_watchdog_info(label=label)
 
     # ------------------------------------------------------------------
