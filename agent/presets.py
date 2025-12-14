@@ -34,7 +34,7 @@ from typing import Dict, Any, List, Optional
 import copy
 
 # Simple version tag so the app and UI can display which preset set is loaded.
-PRESETS_VERSION: str = "2025-11-30-finite-only-v1"
+PRESETS_VERSION: str = "2025-12-13-finite-only-v2"
 
 # ---------------------------------------------------------------------
 # Global Runtime Profiles (applies for all presets)
@@ -293,8 +293,13 @@ PDF_REPORT_DEFAULTS: Dict[str, Any] = {
 # In finite-only mode, these are treated as policy and hint values.
 # ---------------------------------------------------------------------
 CONTINUOUS_MODE_DEFAULTS: Dict[str, Any] = {
+    # Heartbeat and watchdog cadence. Engine uses this as a target interval
+    # for status updates; actual timing may vary slightly with workload.
     "watchdog_interval_minutes": 5.0,
+    # Checkpoint cadence for long runs. This is a policy hint, not a hard cap.
     "checkpoint_interval_cycles": 10,
+    # Global hard safety ceiling for cycles in continuous mode.
+    # This should stay synchronized with engine_worker WORKER_MAX_* settings.
     "max_cycles_failsafe": 10_000_000,
     "heartbeat_labels": {
         "single": "continuous_single",
