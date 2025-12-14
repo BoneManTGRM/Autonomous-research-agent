@@ -55,6 +55,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 from datetime import datetime
+import threading
 
 import yaml
 
@@ -469,6 +470,31 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
             hb(label=label)
     except Exception:
         return
+
+
+def _start_heartbeat_loop(
+    agent: CoreAgent,
+    *,
+    run_id: str,
+    label: str,
+    interval_seconds: int = 15,
+) -> tuple[threading.Event, threading.Thread]:
+    """
+    Background heartbeat loop so long runs always tick the watchdog.
+
+    Returns:
+        (stop_event, thread)
+    """
+    stop_event = threading.Event()
+
+    def _loop() -> None:
+        while not stop_event.is_set():
+            _heartbeat(agent, label=label, run_id=run_id)
+            stop_event.wait(interval_seconds)
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+    return stop_event, t
 
 
 def _safe_agent_hook(agent: CoreAgent, hook_name: str, **kwargs: Any) -> Optional[Any]:
@@ -1059,7 +1085,20 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
 
     summaries: List[Dict[str, Any]] = []
 
+    hb_stop: Optional[threading.Event] = None
+    hb_thread: Optional[threading.Thread] = None
     try:
+        try:
+            hb_stop, hb_thread = _start_heartbeat_loop(
+                agent,
+                run_id=run_id,
+                label="direct_job_running",
+                interval_seconds=30,
+            )
+        except Exception:
+            hb_stop = None
+            hb_thread = None
+
         if mode == "swarm":
             if roles_list is None:
                 try:
@@ -1291,6 +1330,9 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "job_config": cfg,
             "job_meta": job_meta,
         }
+    finally:
+        if hb_stop is not None:
+            hb_stop.set()
 
 
 # ---------------------------------------------------------------------------
@@ -1581,7 +1623,20 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     summaries: List[Dict[str, Any]] = []
     full_result: Optional[Dict[str, Any]] = None
 
+    hb_stop: Optional[threading.Event] = None
+    hb_thread: Optional[threading.Thread] = None
     try:
+        try:
+            hb_stop, hb_thread = _start_heartbeat_loop(
+                agent,
+                run_id=job.run_id,
+                label="queue_job_running",
+                interval_seconds=30,
+            )
+        except Exception:
+            hb_stop = None
+            hb_thread = None
+
         # Prefer a structured run_goal path if the agent exposes it.
         if hasattr(agent, "run_goal"):
             print("[Queue] Using CoreAgent.run_goal for structured result bundle.")
@@ -1985,6 +2040,9 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             experiment_mode="queue_worker",
             extra=error_payload,
         )
+    finally:
+        if hb_stop is not None:
+            hb_stop.set()
 
 
 def run_job_queue_worker() -> None:
@@ -2254,103 +2312,120 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         },
     )
 
-    summaries = agent.run_continuous(
-        goal=goal,
-        max_cycles=max_cycles,
-        stop_rye=stop_rye,
-        role=role,
-        source_controls=source_controls,
-        pdf_bytes=None,
-        biomarker_snapshot=None,
-        domain=domain,
-        max_minutes=max_minutes,
-        forever=forever,
-        resume_from_checkpoint=resume,
-        watchdog_interval_minutes=watchdog_minutes,
-        runtime_profile=runtime_profile,
-    )
-
-    _heartbeat(agent, label="worker_single_finished", run_id=run_id)
-
-    print("=== Continuous run finished cleanly (finite) ===")
-    print(f"Total completed cycles: {len(summaries)}")
-    diag: Dict[str, Any] = {}
+    hb_stop: Optional[threading.Event] = None
+    hb_thread: Optional[threading.Thread] = None
     try:
-        diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
-        print(f"RYE avg: {diag.get('rye_avg')}")
-        print(f"RYE median: {diag.get('rye_median')}")
-        print(f"RYE last: {diag.get('rye_last')}")
-        print(f"Stability index: {diag.get('stability_index')}")
-        print(f"Recovery momentum: {diag.get('recovery_momentum')}")
-    except Exception:
-        print("Diagnostics computation failed, see logs for details.")
+        try:
+            hb_stop, hb_thread = _start_heartbeat_loop(
+                agent,
+                run_id=run_id,
+                label="single_engine_running",
+                interval_seconds=30,
+            )
+        except Exception:
+            hb_stop = None
+            hb_thread = None
 
-    # Write cycle history and run_state snapshots for diagnostics panel
-    _write_cycles_and_run_state(
-        agent,
-        run_id=run_id,
-        mode="single",
-        goal=goal,
-        domain=domain,
-        cycles=_normalize_cycles_for_ui(summaries),
-        diagnostics=diag,
-    )
-
-    intelligence_info = _run_post_run_intelligence(
-        agent,
-        mode="single",
-        goal=goal,
-        domain=domain,
-        run_id=run_id,
-        history=summaries,
-    )
-
-    extra_manifest: Dict[str, Any] = {
-        "engine": "single",
-        "experiment_fingerprint": experiment_fingerprint,
-        "prompt_details": prompt_details,
-    }
-    if diag:
-        extra_manifest["diagnostics_snapshot"] = diag
-    if intelligence_info:
-        extra_manifest["intelligence"] = intelligence_info
-
-    try:
-        _log_run_manifest(
-            agent,
-            run_id,
-            mode="single",
-            domain=domain,
+        summaries = agent.run_continuous(
             goal=goal,
+            max_cycles=max_cycles,
+            stop_rye=stop_rye,
+            role=role,
+            source_controls=source_controls,
+            pdf_bytes=None,
+            biomarker_snapshot=None,
+            domain=domain,
+            max_minutes=max_minutes,
+            forever=forever,
+            resume_from_checkpoint=resume,
+            watchdog_interval_minutes=watchdog_minutes,
+            runtime_profile=runtime_profile,
+        )
+
+        _heartbeat(agent, label="worker_single_finished", run_id=run_id)
+
+        print("=== Continuous run finished cleanly (finite) ===")
+        print(f"Total completed cycles: {len(summaries)}")
+        diag: Dict[str, Any] = {}
+        try:
+            diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
+            print(f"RYE avg: {diag.get('rye_avg')}")
+            print(f"RYE median: {diag.get('rye_median')}")
+            print(f"RYE last: {diag.get('rye_last')}")
+            print(f"Stability index: {diag.get('stability_index')}")
+            print(f"Recovery momentum: {diag.get('recovery_momentum')}")
+        except Exception:
+            print("Diagnostics computation failed, see logs for details.")
+
+        # Write cycle history and run_state snapshots for diagnostics panel
+        _write_cycles_and_run_state(
+            agent,
+            run_id=run_id,
+            mode="single",
+            goal=goal,
+            domain=domain,
+            cycles=_normalize_cycles_for_ui(summaries),
+            diagnostics=diag,
+        )
+
+        intelligence_info = _run_post_run_intelligence(
+            agent,
+            mode="single",
+            goal=goal,
+            domain=domain,
+            run_id=run_id,
+            history=summaries,
+        )
+
+        extra_manifest: Dict[str, Any] = {
+            "engine": "single",
+            "experiment_fingerprint": experiment_fingerprint,
+            "prompt_details": prompt_details,
+        }
+        if diag:
+            extra_manifest["diagnostics_snapshot"] = diag
+        if intelligence_info:
+            extra_manifest["intelligence"] = intelligence_info
+
+        try:
+            _log_run_manifest(
+                agent,
+                run_id,
+                mode="single",
+                domain=domain,
+                goal=goal,
+                runtime_profile=runtime_profile,
+                stop_rye=stop_rye,
+                max_minutes=max_minutes,
+                summaries=summaries,
+                extra=extra_manifest,
+            )
+        except Exception:
+            print("Manifest logging failed, see logs for details.")
+        sys.stdout.flush()
+
+        _update_worker_state(
+            agent,
+            status="stopped",
+            mode="single",
+            goal=goal,
+            domain=domain,
+            roles=[role],
             runtime_profile=runtime_profile,
             stop_rye=stop_rye,
             max_minutes=max_minutes,
-            summaries=summaries,
-            extra=extra_manifest,
+            run_id=run_id,
+            experiment_mode="single_engine",
+            extra={
+                "experiment_fingerprint": experiment_fingerprint,
+                "final_diagnostics": diag,
+                "intelligence": intelligence_info if intelligence_info else None,
+                "prompt_details": prompt_details,
+            },
         )
-    except Exception:
-        print("Manifest logging failed, see logs for details.")
-    sys.stdout.flush()
-
-    _update_worker_state(
-        agent,
-        status="stopped",
-        mode="single",
-        goal=goal,
-        domain=domain,
-        roles=[role],
-        runtime_profile=runtime_profile,
-        stop_rye=stop_rye,
-        max_minutes=max_minutes,
-        run_id=run_id,
-        experiment_mode="single_engine",
-        extra={
-            "experiment_fingerprint": experiment_fingerprint,
-            "final_diagnostics": diag,
-            "intelligence": intelligence_info if intelligence_info else None,
-            "prompt_details": prompt_details,
-        },
-    )
+    finally:
+        if hb_stop is not None:
+            hb_stop.set()
 
 
 def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
@@ -2526,45 +2601,24 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         },
     )
 
-    summaries_all: List[Dict[str, Any]] = []
-
-    if not repeat_shifts or shift_minutes is None or shift_minutes <= 0:
-        summaries_all = agent.run_swarm_continuous(
-            goal=goal,
-            max_rounds=max_rounds,
-            stop_rye=stop_rye,
-            roles=roles_list,
-            source_controls=source_controls,
-            pdf_bytes=None,
-            biomarker_snapshot=None,
-            domain=domain,
-            max_minutes=max_minutes,
-            forever=forever,
-            resume_from_checkpoint=resume,
-            watchdog_interval_minutes=watchdog_minutes,
-            runtime_profile=runtime_profile,
-        )
-    else:
-        total_elapsed = 0.0
-        shift_index = 0
-
-        while True:
-            if max_minutes is not None:
-                remaining = max_minutes - total_elapsed
-                if remaining <= 0:
-                    break
-                this_shift_minutes = min(shift_minutes, remaining)
-            else:
-                this_shift_minutes = shift_minutes
-
-            shift_index += 1
-            print(
-                f"--- Swarm shift {shift_index} starting, "
-                f"budget {this_shift_minutes:.2f} minutes ---"
+    hb_stop: Optional[threading.Event] = None
+    hb_thread: Optional[threading.Thread] = None
+    try:
+        try:
+            hb_stop, hb_thread = _start_heartbeat_loop(
+                agent,
+                run_id=run_id,
+                label="swarm_engine_running",
+                interval_seconds=30,
             )
-            sys.stdout.flush()
+        except Exception:
+            hb_stop = None
+            hb_thread = None
 
-            shift_summaries = agent.run_swarm_continuous(
+        summaries_all: List[Dict[str, Any]] = []
+
+        if not repeat_shifts or shift_minutes is None or shift_minutes <= 0:
+            summaries_all = agent.run_swarm_continuous(
                 goal=goal,
                 max_rounds=max_rounds,
                 stop_rye=stop_rye,
@@ -2573,129 +2627,167 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 pdf_bytes=None,
                 biomarker_snapshot=None,
                 domain=domain,
-                max_minutes=this_shift_minutes,
-                forever=False,
+                max_minutes=max_minutes,
+                forever=forever,
                 resume_from_checkpoint=resume,
                 watchdog_interval_minutes=watchdog_minutes,
                 runtime_profile=runtime_profile,
             )
+        else:
+            total_elapsed = 0.0
+            shift_index = 0
 
-            if not shift_summaries:
-                used = this_shift_minutes
-            else:
-                last_meta = shift_summaries[-1].get("run_metadata")
-                em = None
-                if isinstance(last_meta, dict):
-                    em = last_meta.get("elapsed_minutes")
-                if isinstance(em, (int, float)):
-                    used = float(em)
+            while True:
+                if max_minutes is not None:
+                    remaining = max_minutes - total_elapsed
+                    if remaining <= 0:
+                        break
+                    this_shift_minutes = min(shift_minutes, remaining)
                 else:
+                    this_shift_minutes = shift_minutes
+
+                shift_index += 1
+                print(
+                    f"--- Swarm shift {shift_index} starting, "
+                    f"budget {this_shift_minutes:.2f} minutes ---"
+                )
+                sys.stdout.flush()
+
+                shift_summaries = agent.run_swarm_continuous(
+                    goal=goal,
+                    max_rounds=max_rounds,
+                    stop_rye=stop_rye,
+                    roles=roles_list,
+                    source_controls=source_controls,
+                    pdf_bytes=None,
+                    biomarker_snapshot=None,
+                    domain=domain,
+                    max_minutes=this_shift_minutes,
+                    forever=False,
+                    resume_from_checkpoint=resume,
+                    watchdog_interval_minutes=watchdog_minutes,
+                    runtime_profile=runtime_profile,
+                )
+
+                if not shift_summaries:
                     used = this_shift_minutes
+                else:
+                    last_meta = shift_summaries[-1].get("run_metadata")
+                    em = None
+                    if isinstance(last_meta, dict):
+                        em = last_meta.get("elapsed_minutes")
+                    if isinstance(em, (int, float)):
+                        used = float(em)
+                    else:
+                        used = this_shift_minutes
 
-            total_elapsed += used
-            summaries_all.extend(shift_summaries)
+                total_elapsed += used
+                summaries_all.extend(shift_summaries)
 
-            print(
-                f"--- Swarm shift {shift_index} finished, "
-                f"elapsed this shift {used:.2f} minutes, total {total_elapsed:.2f} ---"
-            )
-            sys.stdout.flush()
+                print(
+                    f"--- Swarm shift {shift_index} finished, "
+                    f"elapsed this shift {used:.2f} minutes, total {total_elapsed:.2f} ---"
+                )
+                sys.stdout.flush()
 
-            if max_minutes is not None and total_elapsed >= max_minutes:
-                break
+                if max_minutes is not None and total_elapsed >= max_minutes:
+                    break
 
-            if not repeat_shifts:
-                break
+                if not repeat_shifts:
+                    break
 
-    summaries = summaries_all
+        summaries = summaries_all
 
-    _heartbeat(agent, label="worker_swarm_finished", run_id=run_id)
+        _heartbeat(agent, label="worker_swarm_finished", run_id=run_id)
 
-    print("=== Swarm run finished cleanly (finite) ===")
-    print(
-        "Total summaries produced across all roles and rounds: "
-        f"{len(summaries)}"
-    )
-    diag: Dict[str, Any] = {}
-    try:
-        diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
-        print(f"RYE avg: {diag.get('rye_avg')}")
-        print(f"RYE median: {diag.get('rye_median')}")
-        print(f"RYE last: {diag.get('rye_last')}")
-        print(f"Stability index: {diag.get('stability_index')}")
-        print(f"Recovery momentum: {diag.get('recovery_momentum')}")
-    except Exception:
-        print("Diagnostics computation failed, see logs for details.")
+        print("=== Swarm run finished cleanly (finite) ===")
+        print(
+            "Total summaries produced across all roles and rounds: "
+            f"{len(summaries)}"
+        )
+        diag: Dict[str, Any] = {}
+        try:
+            diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
+            print(f"RYE avg: {diag.get('rye_avg')}")
+            print(f"RYE median: {diag.get('rye_median')}")
+            print(f"RYE last: {diag.get('rye_last')}")
+            print(f"Stability index: {diag.get('stability_index')}")
+            print(f"Recovery momentum: {diag.get('recovery_momentum')}")
+        except Exception:
+            print("Diagnostics computation failed, see logs for details.")
 
-    # Write cycle history and run_state snapshots for diagnostics panel
-    _write_cycles_and_run_state(
-        agent,
-        run_id=run_id,
-        mode="swarm",
-        goal=goal,
-        domain=domain,
-        cycles=_normalize_cycles_for_ui(summaries),
-        diagnostics=diag,
-    )
-
-    intelligence_info = _run_post_run_intelligence(
-        agent,
-        mode="swarm",
-        goal=goal,
-        domain=domain,
-        run_id=run_id,
-        history=summaries,
-    )
-
-    extra_manifest: Dict[str, Any] = {
-        "engine": "swarm",
-        "roles": roles_list,
-        "shift_minutes": shift_minutes,
-        "repeat_shifts": repeat_shifts,
-        "experiment_fingerprint": experiment_fingerprint,
-        "prompt_details": prompt_details,
-    }
-    if diag:
-        extra_manifest["diagnostics_snapshot"] = diag
-    if intelligence_info:
-        extra_manifest["intelligence"] = intelligence_info
-
-    try:
-        _log_run_manifest(
+        # Write cycle history and run_state snapshots for diagnostics panel
+        _write_cycles_and_run_state(
             agent,
-            run_id,
+            run_id=run_id,
             mode="swarm",
-            domain=domain,
             goal=goal,
+            domain=domain,
+            cycles=_normalize_cycles_for_ui(summaries),
+            diagnostics=diag,
+        )
+
+        intelligence_info = _run_post_run_intelligence(
+            agent,
+            mode="swarm",
+            goal=goal,
+            domain=domain,
+            run_id=run_id,
+            history=summaries,
+        )
+
+        extra_manifest: Dict[str, Any] = {
+            "engine": "swarm",
+            "roles": roles_list,
+            "shift_minutes": shift_minutes,
+            "repeat_shifts": repeat_shifts,
+            "experiment_fingerprint": experiment_fingerprint,
+            "prompt_details": prompt_details,
+        }
+        if diag:
+            extra_manifest["diagnostics_snapshot"] = diag
+        if intelligence_info:
+            extra_manifest["intelligence"] = intelligence_info
+
+        try:
+            _log_run_manifest(
+                agent,
+                run_id,
+                mode="swarm",
+                domain=domain,
+                goal=goal,
+                runtime_profile=runtime_profile,
+                stop_rye=stop_rye,
+                max_minutes=max_minutes,
+                summaries=summaries,
+                extra=extra_manifest,
+            )
+        except Exception:
+            print("Manifest logging failed, see logs for details.")
+        sys.stdout.flush()
+
+        _update_worker_state(
+            agent,
+            status="stopped",
+            mode="swarm",
+            goal=goal,
+            domain=domain,
+            roles=roles_list,
             runtime_profile=runtime_profile,
             stop_rye=stop_rye,
             max_minutes=max_minutes,
-            summaries=summaries,
-            extra=extra_manifest,
+            run_id=run_id,
+            experiment_mode="swarm_engine",
+            extra={
+                "experiment_fingerprint": experiment_fingerprint,
+                "final_diagnostics": diag,
+                "intelligence": intelligence_info if intelligence_info else None,
+                "prompt_details": prompt_details,
+            },
         )
-    except Exception:
-        print("Manifest logging failed, see logs for details.")
-    sys.stdout.flush()
-
-    _update_worker_state(
-        agent,
-        status="stopped",
-        mode="swarm",
-        goal=goal,
-        domain=domain,
-        roles=roles_list,
-        runtime_profile=runtime_profile,
-        stop_rye=stop_rye,
-        max_minutes=max_minutes,
-        run_id=run_id,
-        experiment_mode="swarm_engine",
-        extra={
-            "experiment_fingerprint": experiment_fingerprint,
-            "final_diagnostics": diag,
-            "intelligence": intelligence_info if intelligence_info else None,
-            "prompt_details": prompt_details,
-        },
-    )
+    finally:
+        if hb_stop is not None:
+            hb_stop.set()
 
 
 # ---------------------------------------------------------------------------
@@ -3064,263 +3156,280 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         },
     )
 
-    for seg_index in range(meta_max_segments_int):
-        time_left = total_budget_minutes - total_elapsed
-        if time_left <= 1.0:
-            print(
-                f"[Meta] Time almost exhausted, "
-                f"stopping before segment {seg_index + 1}."
+    hb_stop: Optional[threading.Event] = None
+    hb_thread: Optional[threading.Thread] = None
+    try:
+        try:
+            hb_stop, hb_thread = _start_heartbeat_loop(
+                agent,
+                run_id=run_id,
+                label="meta_engine_running",
+                interval_seconds=30,
             )
-            break
+        except Exception:
+            hb_stop = None
+            hb_thread = None
 
-        if seg_index < len(meta_plan["phases"]):
-            phase_cfg = meta_plan["phases"][seg_index]
-        else:
-            phase_cfg = meta_plan["phases"][-1]
+        for seg_index in range(meta_max_segments_int):
+            time_left = total_budget_minutes - total_elapsed
+            if time_left <= 1.0:
+                print(
+                    f"[Meta] Time almost exhausted, "
+                    f"stopping before segment {seg_index + 1}."
+                )
+                break
 
-        phase_name = phase_cfg.get("name", f"segment_{seg_index + 1}")
-        phase_mode = phase_cfg.get("mode", preferred_mode)
-        phase_profile = phase_cfg.get("runtime_profile")
-
-        if runtime_profile_env and phase_profile is None:
-            phase_profile = runtime_profile_env
-
-        effective_minutes, effective_stop_rye = _adjust_phase_from_stats(
-            phase_cfg=phase_cfg,
-            stats={"count": 0},
-            recent_avg_rye=recent_avg_rye,
-        )
-
-        if effective_minutes > time_left:
-            effective_minutes = time_left
-
-        effective_minutes = _clamp_minutes(effective_minutes, "meta.segment") or time_left
-
-        if stop_rye_env is not None:
-            effective_stop_rye = stop_rye_env
-
-        print("")
-        print(f"[Meta] Starting segment {seg_index + 1} / {meta_max_segments_int}")
-        print(f"[Meta] Phase: {phase_name}")
-        print(f"[Meta] Mode: {phase_mode}")
-        print(f"[Meta] Segment minutes (requested, clamped): {effective_minutes:.2f}")
-        print(
-            "[Meta] Time left after this segment (approx): "
-            f"{time_left - effective_minutes:.2f}"
-        )
-        print(
-            "[Meta] Segment stop RYE (auto/explicit): "
-            f"{effective_stop_rye if effective_stop_rye is not None else 'None'}"
-        )
-        print(
-            f"[Meta] Phase runtime profile: "
-            f"{phase_profile or 'preset default'}"
-        )
-        sys.stdout.flush()
-
-        if phase_mode == "swarm":
-            segment_summaries = agent.run_swarm_continuous(
-                goal=goal,
-                max_rounds=HARD_MAX_ROUNDS,
-                stop_rye=effective_stop_rye,
-                roles=roles_for_swarm,
-                source_controls=source_controls,
-                pdf_bytes=None,
-                biomarker_snapshot=None,
-                domain=domain,
-                max_minutes=effective_minutes,
-                forever=False,
-                resume_from_checkpoint=resume,
-                watchdog_interval_minutes=watchdog_minutes,
-                runtime_profile=phase_profile,
-            )
-        else:
-            segment_summaries = agent.run_continuous(
-                goal=goal,
-                max_cycles=HARD_MAX_CYCLES,
-                stop_rye=effective_stop_rye,
-                role=os.getenv("WORKER_ROLE", "agent"),
-                source_controls=source_controls,
-                pdf_bytes=None,
-                biomarker_snapshot=None,
-                domain=domain,
-                max_minutes=effective_minutes,
-                forever=False,
-                resume_from_checkpoint=resume,
-                watchdog_interval_minutes=watchdog_minutes,
-                runtime_profile=phase_profile,
-            )
-
-        segments_run.append(
-            {
-                "phase": phase_name,
-                "mode": phase_mode,
-                "runtime_profile": phase_profile,
-                "minutes_requested": effective_minutes,
-                "summaries": segment_summaries,
-            }
-        )
-
-        seg_stats = _compute_segment_stats(segment_summaries)
-        seg_avg_rye = seg_stats["avg_rye"]
-        if seg_avg_rye is not None:
-            if recent_avg_rye is None:
-                recent_avg_rye = seg_avg_rye
+            if seg_index < len(meta_plan["phases"]):
+                phase_cfg = meta_plan["phases"][seg_index]
             else:
-                recent_avg_rye = 0.6 * recent_avg_rye + 0.4 * seg_avg_rye
+                phase_cfg = meta_plan["phases"][-1]
 
-        segment_elapsed = 0.0
-        if segment_summaries:
-            meta = segment_summaries[-1].get("run_metadata")
-            if isinstance(meta, dict):
-                em = meta.get("elapsed_minutes")
-                if isinstance(em, (int, float)):
-                    segment_elapsed = float(em)
+            phase_name = phase_cfg.get("name", f"segment_{seg_index + 1}")
+            phase_mode = phase_cfg.get("mode", preferred_mode)
+            phase_profile = phase_cfg.get("runtime_profile")
 
-        if segment_elapsed <= 0.0:
-            segment_elapsed = effective_minutes
+            if runtime_profile_env and phase_profile is None:
+                phase_profile = runtime_profile_env
 
-        total_elapsed += segment_elapsed
+            effective_minutes, effective_stop_rye = _adjust_phase_from_stats(
+                phase_cfg=phase_cfg,
+                stats={"count": 0},
+                recent_avg_rye=recent_avg_rye,
+            )
 
-        print(f"[Meta] Segment {seg_index + 1} stats:")
-        print(f"        cycles/summaries: {seg_stats['count']}")
-        print(f"        avg RYE: {seg_stats['avg_rye']}")
-        print(f"        best RYE: {seg_stats['max_rye']}")
-        print(f"        stability: {seg_stats['stability']}")
-        print(f"        momentum: {seg_stats['momentum']}")
-        print(f"        smoothed recent RYE: {recent_avg_rye}")
+            if effective_minutes > time_left:
+                effective_minutes = time_left
+
+            effective_minutes = _clamp_minutes(effective_minutes, "meta.segment") or time_left
+
+            if stop_rye_env is not None:
+                effective_stop_rye = stop_rye_env
+
+            print("")
+            print(f"[Meta] Starting segment {seg_index + 1} / {meta_max_segments_int}")
+            print(f"[Meta] Phase: {phase_name}")
+            print(f"[Meta] Mode: {phase_mode}")
+            print(f"[Meta] Segment minutes (requested, clamped): {effective_minutes:.2f}")
+            print(
+                "[Meta] Time left after this segment (approx): "
+                f"{time_left - effective_minutes:.2f}"
+            )
+            print(
+                "[Meta] Segment stop RYE (auto/explicit): "
+                f"{effective_stop_rye if effective_stop_rye is not None else 'None'}"
+            )
+            print(
+                f"[Meta] Phase runtime profile: "
+                f"{phase_profile or 'preset default'}"
+            )
+            sys.stdout.flush()
+
+            if phase_mode == "swarm":
+                segment_summaries = agent.run_swarm_continuous(
+                    goal=goal,
+                    max_rounds=HARD_MAX_ROUNDS,
+                    stop_rye=effective_stop_rye,
+                    roles=roles_for_swarm,
+                    source_controls=source_controls,
+                    pdf_bytes=None,
+                    biomarker_snapshot=None,
+                    domain=domain,
+                    max_minutes=effective_minutes,
+                    forever=False,
+                    resume_from_checkpoint=resume,
+                    watchdog_interval_minutes=watchdog_minutes,
+                    runtime_profile=phase_profile,
+                )
+            else:
+                segment_summaries = agent.run_continuous(
+                    goal=goal,
+                    max_cycles=HARD_MAX_CYCLES,
+                    stop_rye=effective_stop_rye,
+                    role=os.getenv("WORKER_ROLE", "agent"),
+                    source_controls=source_controls,
+                    pdf_bytes=None,
+                    biomarker_snapshot=None,
+                    domain=domain,
+                    max_minutes=effective_minutes,
+                    forever=False,
+                    resume_from_checkpoint=resume,
+                    watchdog_interval_minutes=watchdog_minutes,
+                    runtime_profile=phase_profile,
+                )
+
+            segments_run.append(
+                {
+                    "phase": phase_name,
+                    "mode": phase_mode,
+                    "runtime_profile": phase_profile,
+                    "minutes_requested": effective_minutes,
+                    "summaries": segment_summaries,
+                }
+            )
+
+            seg_stats = _compute_segment_stats(segment_summaries)
+            seg_avg_rye = seg_stats["avg_rye"]
+            if seg_avg_rye is not None:
+                if recent_avg_rye is None:
+                    recent_avg_rye = seg_avg_rye
+                else:
+                    recent_avg_rye = 0.6 * recent_avg_rye + 0.4 * seg_avg_rye
+
+            segment_elapsed = 0.0
+            if segment_summaries:
+                meta = segment_summaries[-1].get("run_metadata")
+                if isinstance(meta, dict):
+                    em = meta.get("elapsed_minutes")
+                    if isinstance(em, (int, float)):
+                        segment_elapsed = float(em)
+
+            if segment_elapsed <= 0.0:
+                segment_elapsed = effective_minutes
+
+            total_elapsed += segment_elapsed
+
+            print(f"[Meta] Segment {seg_index + 1} stats:")
+            print(f"        cycles/summaries: {seg_stats['count']}")
+            print(f"        avg RYE: {seg_stats['avg_rye']}")
+            print(f"        best RYE: {seg_stats['max_rye']}")
+            print(f"        stability: {seg_stats['stability']}")
+            print(f"        momentum: {seg_stats['momentum']}")
+            print(f"        smoothed recent RYE: {recent_avg_rye}")
+            print(
+                "        total elapsed minutes: "
+                f"{total_elapsed:.2f} / {total_budget_minutes:.2f}"
+            )
+            sys.stdout.flush()
+
+            _log_milestone(
+                agent,
+                run_id=run_id,
+                goal=goal,
+                domain=domain,
+                label=f"meta_segment_{seg_index + 1}",
+                description=(
+                    f"Phase {phase_name} ({phase_mode}) finished with avg RYE "
+                    f"{seg_stats['avg_rye']} and stability {seg_stats['stability']}."
+                ),
+                level="info",
+                extra={
+                    "segment_index": seg_index + 1,
+                    "phase_mode": phase_mode,
+                    "runtime_profile": phase_profile,
+                    "minutes_requested": effective_minutes,
+                    "segment_stats": seg_stats,
+                },
+            )
+
+            _heartbeat(agent, label="worker_meta_segment", run_id=run_id)
+
+            if (
+                recent_avg_rye is not None
+                and recent_avg_rye < 0.01
+                and total_elapsed > total_budget_minutes * 0.6
+            ):
+                print("[Meta] RYE collapsed and most of the budget is used. Stopping early.")
+                break
+
+        _heartbeat(agent, label="worker_meta_finished", run_id=run_id)
+
+        total_segments = len(segments_run)
+        total_summaries = sum(len(seg["summaries"]) for seg in segments_run)
+        print("")
+        print("=== Meta controller run finished (finite) ===")
+        print(f"Segments executed: {total_segments}")
+        print(f"Total summaries across segments: {total_summaries}")
+        print(f"Final smoothed recent RYE: {recent_avg_rye}")
         print(
-            "        total elapsed minutes: "
+            "Total elapsed minutes (approx): "
             f"{total_elapsed:.2f} / {total_budget_minutes:.2f}"
         )
         sys.stdout.flush()
 
-        _log_milestone(
+        combined_history: List[Dict[str, Any]] = []
+        for seg in segments_run:
+            combined_history.extend(seg.get("summaries", []))
+
+        # Write aggregated cycle history and run_state snapshots for diagnostics panel
+        _write_cycles_and_run_state(
             agent,
             run_id=run_id,
+            mode="meta",
             goal=goal,
             domain=domain,
-            label=f"meta_segment_{seg_index + 1}",
-            description=(
-                f"Phase {phase_name} ({phase_mode}) finished with avg RYE "
-                f"{seg_stats['avg_rye']} and stability {seg_stats['stability']}."
-            ),
-            level="info",
-            extra={
-                "segment_index": seg_index + 1,
-                "phase_mode": phase_mode,
-                "runtime_profile": phase_profile,
-                "minutes_requested": effective_minutes,
-                "segment_stats": seg_stats,
-            },
+            cycles=_normalize_cycles_for_ui(combined_history),
+            diagnostics=None,
         )
 
-        _heartbeat(agent, label="worker_meta_segment", run_id=run_id)
-
-        if (
-            recent_avg_rye is not None
-            and recent_avg_rye < 0.01
-            and total_elapsed > total_budget_minutes * 0.6
-        ):
-            print("[Meta] RYE collapsed and most of the budget is used. Stopping early.")
-            break
-
-    _heartbeat(agent, label="worker_meta_finished", run_id=run_id)
-
-    total_segments = len(segments_run)
-    total_summaries = sum(len(seg["summaries"]) for seg in segments_run)
-    print("")
-    print("=== Meta controller run finished (finite) ===")
-    print(f"Segments executed: {total_segments}")
-    print(f"Total summaries across segments: {total_summaries}")
-    print(f"Final smoothed recent RYE: {recent_avg_rye}")
-    print(
-        "Total elapsed minutes (approx): "
-        f"{total_elapsed:.2f} / {total_budget_minutes:.2f}"
-    )
-    sys.stdout.flush()
-
-    combined_history: List[Dict[str, Any]] = []
-    for seg in segments_run:
-        combined_history.extend(seg.get("summaries", []))
-
-    # Write aggregated cycle history and run_state snapshots for diagnostics panel
-    _write_cycles_and_run_state(
-        agent,
-        run_id=run_id,
-        mode="meta",
-        goal=goal,
-        domain=domain,
-        cycles=_normalize_cycles_for_ui(combined_history),
-        diagnostics=None,
-    )
-
-    intelligence_info = _run_post_run_intelligence(
-        agent,
-        mode="meta",
-        goal=goal,
-        domain=domain,
-        run_id=run_id,
-        history=combined_history,
-    )
-
-    extra_segments = [
-        {
-            "phase": seg.get("phase"),
-            "mode": seg.get("mode"),
-            "runtime_profile": seg.get("runtime_profile"),
-            "minutes_requested": seg.get("minutes_requested"),
-            "segment_items": len(seg.get("summaries", [])),
-        }
-        for seg in segments_run
-    ]
-
-    extra_manifest: Dict[str, Any] = {
-        "engine": "meta",
-        "segments": extra_segments,
-        "experiment_fingerprint": experiment_fingerprint,
-        "prompt_details": prompt_details,
-    }
-    if intelligence_info:
-        extra_manifest["intelligence"] = intelligence_info
-
-    try:
-        _log_run_manifest(
+        intelligence_info = _run_post_run_intelligence(
             agent,
-            run_id,
             mode="meta",
-            domain=domain,
             goal=goal,
+            domain=domain,
+            run_id=run_id,
+            history=combined_history,
+        )
+
+        extra_segments = [
+            {
+                "phase": seg.get("phase"),
+                "mode": seg.get("mode"),
+                "runtime_profile": seg.get("runtime_profile"),
+                "minutes_requested": seg.get("minutes_requested"),
+                "segment_items": len(seg.get("summaries", [])),
+            }
+            for seg in segments_run
+        ]
+
+        extra_manifest: Dict[str, Any] = {
+            "engine": "meta",
+            "segments": extra_segments,
+            "experiment_fingerprint": experiment_fingerprint,
+            "prompt_details": prompt_details,
+        }
+        if intelligence_info:
+            extra_manifest["intelligence"] = intelligence_info
+
+        try:
+            _log_run_manifest(
+                agent,
+                run_id,
+                mode="meta",
+                domain=domain,
+                goal=goal,
+                runtime_profile=runtime_profile_env,
+                stop_rye=stop_rye_env,
+                max_minutes=total_budget_minutes,
+                summaries=combined_history,
+                extra=extra_manifest,
+            )
+        except Exception:
+            print("Manifest logging failed, see logs for details.")
+
+        _update_worker_state(
+            agent,
+            status="stopped",
+            mode="meta",
+            goal=goal,
+            domain=domain,
+            roles=list(roles_for_swarm),
             runtime_profile=runtime_profile_env,
             stop_rye=stop_rye_env,
             max_minutes=total_budget_minutes,
-            summaries=combined_history,
-            extra=extra_manifest,
+            run_id=run_id,
+            experiment_mode="meta_controller",
+            extra={
+                "experiment_fingerprint": experiment_fingerprint,
+                "final_recent_rye": recent_avg_rye,
+                "total_segments": total_segments,
+                "total_summaries": total_summaries,
+                "intelligence": intelligence_info if intelligence_info else None,
+                "prompt_details": prompt_details,
+            },
         )
-    except Exception:
-        print("Manifest logging failed, see logs for details.")
-
-    _update_worker_state(
-        agent,
-        status="stopped",
-        mode="meta",
-        goal=goal,
-        domain=domain,
-        roles=list(roles_for_swarm),
-        runtime_profile=runtime_profile_env,
-        stop_rye=stop_rye_env,
-        max_minutes=total_budget_minutes,
-        run_id=run_id,
-        experiment_mode="meta_controller",
-        extra={
-            "experiment_fingerprint": experiment_fingerprint,
-            "final_recent_rye": recent_avg_rye,
-            "total_segments": total_segments,
-            "total_summaries": total_summaries,
-            "intelligence": intelligence_info if intelligence_info else None,
-            "prompt_details": prompt_details,
-        },
-    )
+    finally:
+        if hb_stop is not None:
+            hb_stop.set()
 
 
 # ---------------------------------------------------------------------------
