@@ -42,6 +42,8 @@ class BrowserTool:
         - Safer logging encoding ("utf-8") and atomic-ish log writes guarded.
         - Better normalization of Tavily responses across SDK variants.
         - Fetch safety caps and content type normalization.
+        - Stub and error results are shaped so MemoryStore can treat them as tool errors
+          (snippet starts with "[stub]" or title contains "Tavily Search Error" and/or has error field).
     """
 
     TAVILY_ENDPOINT = "https://api.tavily.com/search"
@@ -431,8 +433,9 @@ class BrowserTool:
                     "source": "stub",
                     "title": f"Stubbed search result for: {q}",
                     "url": "https://example.com/stub",
+                    # Start with "[stub]" so MemoryStore.add_citation can down-rank/log as tool error
                     "snippet": (
-                        "Stubbed search. Configure TAVILY_API_KEY and "
+                        "[stub] Stubbed search. Configure TAVILY_API_KEY and "
                         "disable TAVILY_STUB_MODE/DISABLE_WEB_SEARCH (and set ENABLE_TAVILY=1) "
                         "to enable real web search."
                     ),
@@ -490,13 +493,16 @@ class BrowserTool:
                     "truncated": truncated,
                 }
             )
+            # Title is "Tavily Search Error" and we also include an "error" field
+            # so MemoryStore.add_citation can treat this as tool error if ever used as a citation.
             error_result = [
                 {
                     "source": "error",
-                    "title": "Search failed",
+                    "title": "Tavily Search Error",
                     "url": "",
-                    "snippet": data["error"],
+                    "snippet": str(data["error"]),
                     "score": None,
+                    "error": str(data["error"]),
                 }
             ]
             self._cache_set(cache_key, {"results": error_result})
@@ -560,7 +566,7 @@ class BrowserTool:
                         "title": f"Stubbed search result for: {q}",
                         "url": "https://example.com/stub",
                         "snippet": (
-                            "Stubbed search. Configure TAVILY_API_KEY and "
+                            "[stub] Stubbed search. Configure TAVILY_API_KEY and "
                             "disable TAVILY_STUB_MODE/DISABLE_WEB_SEARCH (and set ENABLE_TAVILY=1) "
                             "to enable real web search."
                         ),
@@ -600,10 +606,11 @@ class BrowserTool:
                 "results": [
                     {
                         "source": "error",
-                        "title": "Search failed",
+                        "title": "Tavily Search Error",
                         "url": "",
-                        "snippet": data["error"],
+                        "snippet": str(data["error"]),
                         "score": None,
+                        "error": str(data["error"]),
                     }
                 ],
             }
