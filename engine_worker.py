@@ -7,21 +7,33 @@ Background Worker or separate service.
 Key ideas:
 - Uses the same CoreAgent and MemoryStore as the Streamlit UI.
 - Can run in three styles:
-    1) Single agent engine mode (finite-only)
-    2) Swarm engine mode (finite-only)
+    1) Single agent engine mode
+    2) Swarm engine mode
     3) Meta-controller mode ("Option C") that plans multiple phases:
        - exploration
        - stabilization
        - refinement
-       and adapts using RYE and time used (also finite-only).
+       and adapts using RYE and time used.
 
-Finite-only mode:
-- "Forever" runs are disabled. All engines must have finite limits:
+Runtime safety and forever mode:
+- By default, runs are finite and guarded by hard caps:
   * Single agent: bounded by WORKER_MAX_CYCLES and/or WORKER_MAX_MINUTES
   * Swarm: bounded by WORKER_MAX_ROUNDS and/or WORKER_MAX_MINUTES
   * Meta controller: bounded by WORKER_MAX_MINUTES or derived budget
-- Runtime profiles are treated as hints for internal tuning only, not as
-  permission to run forever.
+- A global hard cap also exists:
+    WORKER_HARD_MAX_CYCLES   (default 10,000,000)
+    WORKER_HARD_MAX_ROUNDS   (default same as HARD_MAX_CYCLES)
+    WORKER_HARD_MAX_MINUTES  (default 129,600 minutes = 90 days)
+- You can disable the hard minute clamp entirely by setting:
+    WORKER_HARD_MAX_MINUTES=0
+- You can enable true "forever" mode (no time guard) by setting:
+    WORKER_FOREVER=1
+  or by setting "forever": true in an individual job config.
+  In forever mode:
+    * max_minutes is ignored (treated as None)
+    * the underlying agent engines are called with forever=True
+    * you are responsible for stopping the run or relying on RYE / crash
+      protection / external monitoring.
 
 Queue mode using agent/run_jobs.py:
     - When WORKER_MODE is unset or set to "queue", the worker runs in
@@ -38,12 +50,6 @@ You can start it with commands like:
 
 On Render:
     startCommand: python engine_worker.py
-
-Hard safety caps:
-- All requested cycles / rounds / minutes are clamped to hard maximums:
-    WORKER_HARD_MAX_CYCLES   (default 10,000,000)
-    WORKER_HARD_MAX_ROUNDS   (default same as HARD_MAX_CYCLES)
-    WORKER_HARD_MAX_MINUTES  (default 1,440 minutes = 24 hours)
 """
 
 from __future__ import annotations
@@ -111,7 +117,7 @@ except Exception:
 
 
 # ---------------------------------------------------------------------------
-# Hard safety caps (finite-only guard rails)
+# Hard safety caps + forever mode
 # ---------------------------------------------------------------------------
 
 
@@ -129,13 +135,23 @@ def _parse_int_env(name: str, default: int) -> int:
 
 
 def _parse_float_env(name: str, default: float) -> float:
+    """
+    Parse a float from env with support for "0 = disable clamp" for minutes.
+
+    For HARD_MAX_MINUTES:
+        - >0   -> that value is used as the hard cap.
+        - 0    -> clamp disabled (no upper bound from HARD_MAX_MINUTES).
+        - <0   -> ignored, default used.
+    For other callers, 0 is allowed and passed through unchanged.
+    """
     val = os.getenv(name)
-    if not val:
+    if val is None or val == "":
         return default
     try:
         v = float(val)
-        if v <= 0:
-            return default
+        # For caps, 0 can be used to mean "disabled", but we don't know
+        # here which variable is which. We pass it through and let the
+        # clamp logic interpret it.
         return v
     except Exception:
         return default
@@ -143,7 +159,9 @@ def _parse_float_env(name: str, default: float) -> float:
 
 HARD_MAX_CYCLES: int = _parse_int_env("WORKER_HARD_MAX_CYCLES", 10_000_000)
 HARD_MAX_ROUNDS: int = _parse_int_env("WORKER_HARD_MAX_ROUNDS", HARD_MAX_CYCLES)
-HARD_MAX_MINUTES: float = _parse_float_env("WORKER_HARD_MAX_MINUTES", 1440.0)
+# Default hard cap is now 90 days (129,600 minutes). Set WORKER_HARD_MAX_MINUTES=0
+# to disable the clamp entirely.
+HARD_MAX_MINUTES: float = _parse_float_env("WORKER_HARD_MAX_MINUTES", 129_600.0)
 
 
 def _clamp_int(value: int, hard_max: int, label: str) -> int:
@@ -162,8 +180,28 @@ def _clamp_int(value: int, hard_max: int, label: str) -> int:
 
 
 def _clamp_minutes(value: Optional[float], label: str) -> Optional[float]:
+    """
+    Clamp a minutes value against HARD_MAX_MINUTES unless the hard cap
+    is disabled.
+
+    Behavior:
+        - If value is None, returns None.
+        - If HARD_MAX_MINUTES == 0:
+              No upper bound; only checks that value > 0.
+        - Otherwise:
+              Enforces 0 < value <= HARD_MAX_MINUTES.
+    """
     if value is None:
         return None
+
+    # If the global hard max is 0, treat that as "no hard upper bound".
+    if HARD_MAX_MINUTES == 0:
+        if value <= 0:
+            print(f"[Safety] {label} minutes {value} is non-positive. Ignoring.")
+            sys.stdout.flush()
+            return None
+        return value
+
     if value > HARD_MAX_MINUTES:
         print(
             f"[Safety] {label} minutes {value} exceeds hard max {HARD_MAX_MINUTES}. "
@@ -420,7 +458,7 @@ def build_goal_and_domain() -> Tuple[str, str]:
 
 
 def _get_memory_store(agent: CoreAgent) -> Optional[MemoryStore]:
-    """Best effort accessor for the agents MemoryStore."""
+    """Best effort accessor for the agent's MemoryStore."""
     ms = getattr(agent, "memory_store", None)
     if isinstance(ms, MemoryStore):
         return ms
@@ -973,6 +1011,11 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     `job` may be:
       - A dict with keys: "run_id", "config", optional "meta"
       - An object with .run_id, .config, optional .meta attributes (e.g. RunJob)
+
+    Forever control:
+        - If config["forever"] is true, or WORKER_FOREVER=1 is set, the job
+          runs with max_minutes=None and forever=True passed into the core
+          engines. Hard minute clamps are not applied in that case.
     """
     _configure_tavily_from_env()
     agent, base_config = init_agent_from_config()
@@ -1047,6 +1090,11 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
     macro_total = max_rounds if mode == "swarm" else max_cycles
 
+    # Forever flag: either per-job config or global env.
+    forever_env = _env_bool("WORKER_FOREVER", default=False)
+    forever_cfg = bool(cfg.get("forever", False))
+    forever = forever_env or forever_cfg
+
     raw_max_minutes = cfg.get("max_minutes")
     if (mode == "single" and max_cycles_explicit) or (mode == "swarm" and max_rounds_explicit):
         max_minutes: Optional[float] = None
@@ -1059,7 +1107,11 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         else:
             max_minutes = None
 
-    max_minutes = _clamp_minutes(max_minutes, "job.max_minutes")
+    # In forever mode, ignore time guard completely.
+    if forever:
+        max_minutes = None
+    else:
+        max_minutes = _clamp_minutes(max_minutes, "job.max_minutes")
 
     stop_rye = cfg.get("stop_rye")
     if stop_rye is not None:
@@ -1091,7 +1143,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         "domain": domain,
         "mode": mode,
         "role": role,
-        "roles": roles_list,
+        "roles": roles_list if mode == "swarm" else [role],
         "runtime_profile": runtime_profile,
         "max_minutes": max_minutes,
         "max_cycles": max_cycles if mode == "single" else None,
@@ -1100,12 +1152,14 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         "resume": resume,
         "watchdog_minutes": watchdog_minutes,
         "source_controls": source_controls,
+        "forever": forever,
     }
 
     env_keys_for_fingerprint = [
         "WORKER_QUEUE_MODE",
         "WORKER_DOMAIN",
         "WORKER_GOAL",
+        "WORKER_FOREVER",
     ]
     experiment_fingerprint = _build_experiment_fingerprint(
         goal=goal,
@@ -1128,9 +1182,10 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     print(f"Max cycles (single, clamped): {max_cycles} (explicit: {max_cycles_explicit})")
     print(f"Max rounds (swarm, clamped): {max_rounds} (explicit: {max_rounds_explicit})")
     print(
-        "Max minutes guard (clamped): "
-        f"{max_minutes if max_minutes is not None else 'None (cycles/rounds driven)'}"
+        "Max minutes guard (clamped or None): "
+        f"{max_minutes if max_minutes is not None else 'None (time guard disabled)'}"
     )
+    print(f"Forever mode: {forever}")
     print(f"Stop RYE: {stop_rye if stop_rye is not None else 'None'}")
     print(f"Runtime profile: {runtime_profile or 'None'}")
     print(f"Resume: {resume}")
@@ -1196,7 +1251,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 biomarker_snapshot=None,
                 domain=domain,
                 max_minutes=max_minutes,
-                forever=False,
+                forever=forever,
                 resume_from_checkpoint=resume,
                 watchdog_interval_minutes=watchdog_minutes,
                 runtime_profile=runtime_profile,
@@ -1212,7 +1267,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 biomarker_snapshot=None,
                 domain=domain,
                 max_minutes=max_minutes,
-                forever=False,
+                forever=forever,
                 resume_from_checkpoint=resume,
                 watchdog_interval_minutes=watchdog_minutes,
                 runtime_profile=runtime_profile,
@@ -1307,6 +1362,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "max_cycles": max_cycles if mode == "single" else None,
             "max_rounds": max_rounds if mode == "swarm" else None,
             "stop_rye": stop_rye,
+            "forever": forever,
             "summaries": normalized_cycles,
             "cycles": normalized_cycles,
             "diagnostics": diag,
@@ -1366,6 +1422,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "max_minutes": max_minutes,
             "max_cycles": max_cycles if mode == "single" else None,
             "max_rounds": max_rounds if mode == "swarm" else None,
+            "forever": forever,
             "job_meta": job_meta,
             "job_config": cfg,
             "experiment_fingerprint": experiment_fingerprint,
@@ -1514,10 +1571,12 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         source_controls: optional explicit source controls dict
         resume: optional resume flag (default True)
         watchdog_minutes: optional watchdog interval
+        forever: optional bool, if true or if WORKER_FOREVER=1, time guard is
+                 disabled and engines run with forever=True.
 
     If explicit cycle or round limits are provided in the job config,
     the worker ignores max_minutes so the job runs until the specified
-    cycles or rounds complete (or stop_rye triggers).
+    cycles or rounds complete (or stop_rye triggers), unless forever=True.
     """
     start_ts = time.time()
 
@@ -1582,6 +1641,11 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
     macro_total = max_rounds if mode == "swarm" else max_cycles
 
+    # Forever flag for queue jobs.
+    forever_env = _env_bool("WORKER_FOREVER", default=False)
+    forever_cfg = bool(cfg.get("forever", False))
+    forever = forever_env or forever_cfg
+
     raw_max_minutes = cfg.get("max_minutes")
     if (mode == "single" and max_cycles_explicit) or (mode == "swarm" and max_rounds_explicit):
         max_minutes: Optional[float] = None
@@ -1594,7 +1658,10 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         else:
             max_minutes = None
 
-    max_minutes = _clamp_minutes(max_minutes, "job.max_minutes")
+    if forever:
+        max_minutes = None
+    else:
+        max_minutes = _clamp_minutes(max_minutes, "job.max_minutes")
 
     stop_rye = cfg.get("stop_rye")
     if stop_rye is not None:
@@ -1635,12 +1702,14 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         "resume": resume,
         "watchdog_minutes": watchdog_minutes,
         "source_controls": source_controls,
+        "forever": forever,
     }
 
     env_keys_for_fingerprint = [
         "WORKER_QUEUE_MODE",
         "WORKER_DOMAIN",
         "WORKER_GOAL",
+        "WORKER_FOREVER",
     ]
     experiment_fingerprint = _build_experiment_fingerprint(
         goal=goal,
@@ -1665,9 +1734,10 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     print(f"Max cycles (single, clamped): {max_cycles} (explicit: {max_cycles_explicit})")
     print(f"Max rounds (swarm, clamped): {max_rounds} (explicit: {max_rounds_explicit})")
     print(
-        "Max minutes guard (clamped): "
-        f"{max_minutes if max_minutes is not None else 'None (rounds driven)'}"
+        "Max minutes guard (clamped or None): "
+        f"{max_minutes if max_minutes is not None else 'None (time guard disabled)'}"
     )
+    print(f"Forever mode: {forever}")
     print(f"Stop RYE: {stop_rye if stop_rye is not None else 'None'}")
     print(f"Runtime profile: {runtime_profile or 'None'}")
     print(f"Resume: {resume}")
@@ -1810,6 +1880,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "max_rounds": max_rounds,
                 "stop_rye": stop_rye,
                 "source_controls": source_controls,
+                "forever": forever,
             }
             if mode == "swarm":
                 goal_config["roles"] = roles_list
@@ -1854,7 +1925,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                     biomarker_snapshot=None,
                     domain=domain,
                     max_minutes=max_minutes,
-                    forever=False,
+                    forever=forever,
                     resume_from_checkpoint=resume,
                     watchdog_interval_minutes=watchdog_minutes,
                     runtime_profile=runtime_profile,
@@ -1870,7 +1941,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                     biomarker_snapshot=None,
                     domain=domain,
                     max_minutes=max_minutes,
-                    forever=False,
+                    forever=forever,
                     resume_from_checkpoint=resume,
                     watchdog_interval_minutes=watchdog_minutes,
                     runtime_profile=runtime_profile,
@@ -2013,6 +2084,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "runtime_profile": runtime_profile,
                 "experiment_fingerprint": experiment_fingerprint,
                 "prompt_details": prompt_details,
+                "forever": forever,
             }
             result_obj.update(fr)
 
@@ -2030,6 +2102,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "max_cycles": max_cycles if mode == "single" else None,
                 "max_rounds": max_rounds if mode == "swarm" else None,
                 "stop_rye": stop_rye,
+                "forever": forever,
                 "summaries": normalized_cycles,
                 "cycles": normalized_cycles,
                 "diagnostics": diag,
@@ -2110,6 +2183,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             "max_minutes": max_minutes,
             "max_cycles": max_cycles if mode == "single" else None,
             "max_rounds": max_rounds if mode == "swarm" else None,
+            "forever": forever,
             "job_meta": job_meta,
             "job_config": cfg,
             "experiment_fingerprint": experiment_fingerprint,
@@ -2280,16 +2354,17 @@ def run_job_queue_worker() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Single and swarm engines
+# Single and swarm engines (direct, non-queue)
 # ---------------------------------------------------------------------------
 
 
 def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     """
-    Run a long continuous single agent session (finite-only).
+    Run a long continuous single agent session.
 
     Controlled by:
-    - WORKER_MAX_MINUTES (optional wall time guard)
+    - WORKER_MAX_MINUTES (optional wall time guard; clamped by HARD_MAX_MINUTES
+                          unless HARD_MAX_MINUTES=0)
     - WORKER_MAX_CYCLES (optional cycle guard; default very large finite)
     - WORKER_STOP_RYE (optional)
     - WORKER_RUNTIME_PROFILE (optional: hint only)
@@ -2297,14 +2372,21 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     - WORKER_SOURCES (optional, comma separated)
     - WORKER_RESUME (bool, default True)
     - WORKER_WATCHDOG_MINUTES (float, default 5.0)
+    - WORKER_FOREVER (bool, default False)
+         * If true, max_minutes is ignored and passed as None and the
+           underlying engine is called with forever=True.
 
-    Forever mode is disabled: the engine always runs with finite limits.
+    By default, runs are finite. Forever mode must be explicitly enabled.
     """
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
 
     max_minutes_env = _env_float("WORKER_MAX_MINUTES")
-    max_minutes = _clamp_minutes(max_minutes_env, "single.max_minutes")
+    forever = _env_bool("WORKER_FOREVER", default=False)
+    if forever:
+        max_minutes: Optional[float] = None
+    else:
+        max_minutes = _clamp_minutes(max_minutes_env, "single.max_minutes")
 
     stop_rye = _env_float("WORKER_STOP_RYE")
 
@@ -2325,7 +2407,6 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         requested_cycles = HARD_MAX_CYCLES
 
     max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "single.max_cycles")
-    forever = False
 
     config_for_sources = dict(config)
     if "default_source_controls" not in config_for_sources:
@@ -2349,6 +2430,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         "WORKER_SWARM_ROLES",
         "WORKER_DOMAIN",
         "WORKER_GOAL",
+        "WORKER_FOREVER",
     ]
     experiment_fingerprint = _build_experiment_fingerprint(
         goal=goal,
@@ -2375,9 +2457,10 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         "resume": resume,
         "watchdog_minutes": watchdog_minutes,
         "source_controls": source_controls,
+        "forever": forever,
     }
 
-    print("=== Autonomous Research Engine - Single Agent Mode (Finite Only) ===")
+    print("=== Autonomous Research Engine - Single Agent Mode ===")
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
     print(f"Role: {role}")
@@ -2388,15 +2471,15 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         f"{runtime_profile or 'None (engine default)'}"
     )
     print(
-        "Max minutes (explicit, clamped): "
-        f"{max_minutes if max_minutes is not None else 'None (cycles-only guard)'}"
+        "Max minutes (clamped or None): "
+        f"{max_minutes if max_minutes is not None else 'None (time guard disabled)'}"
     )
     print(f"Max cycles (clamped): {max_cycles}")
     print(
         "Stop RYE threshold (explicit): "
         f"{stop_rye if stop_rye is not None else 'None (preset/profile)'}"
     )
-    print(f"Forever mode (disabled in finite-only): {forever}")
+    print(f"Forever mode: {forever}")
     print(f"Resume from checkpoint: {resume}")
     print(f"Watchdog interval (min): {watchdog_minutes}")
     print(f"Source controls: {source_controls}")
@@ -2477,7 +2560,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
         _heartbeat(agent, label="worker_single_finished", run_id=run_id)
 
-        print("=== Continuous run finished cleanly (finite) ===")
+        print("=== Continuous run finished cleanly ===")
         print(f"Total completed cycles: {len(summaries)}")
         diag: Dict[str, Any] = {}
         try:
@@ -2570,11 +2653,12 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
 def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     """
-    Run a long continuous swarm session (finite-only).
+    Run a long continuous swarm session.
 
     Controlled by:
     - WORKER_SWARM_ROLES (comma separated, optional)
-    - WORKER_MAX_MINUTES (optional wall time guard)
+    - WORKER_MAX_MINUTES (optional wall time guard; clamped by HARD_MAX_MINUTES
+                          unless HARD_MAX_MINUTES=0)
     - WORKER_MAX_ROUNDS (optional round guard; default very large finite)
     - WORKER_STOP_RYE (optional)
     - WORKER_RUNTIME_PROFILE (optional hint)
@@ -2582,15 +2666,23 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     - WORKER_RESUME (bool, default True)
     - WORKER_WATCHDOG_MINUTES (float, default 5.0)
     - WORKER_SHIFT_MINUTES (optional, minutes per shift; enables shift mode if > 0)
-    - WORKER_REPEAT_SHIFTS (bool, default False; if True and shift minutes set, runs back to back shifts)
+    - WORKER_REPEAT_SHIFTS (bool, default False; if True and shift minutes set,
+                            runs back to back shifts)
+    - WORKER_FOREVER (bool, default False)
+         * If true and shift mode is not used, time guard is disabled (max_minutes=None)
+           and the swarm engine is called with forever=True.
 
-    Forever mode is disabled: swarm always runs with finite limits.
+    By default, runs are finite. Forever mode must be explicitly enabled.
     """
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
 
     max_minutes_env = _env_float("WORKER_MAX_MINUTES")
-    max_minutes = _clamp_minutes(max_minutes_env, "swarm.max_minutes")
+    forever = _env_bool("WORKER_FOREVER", default=False)
+    if forever:
+        max_minutes: Optional[float] = None
+    else:
+        max_minutes = _clamp_minutes(max_minutes_env, "swarm.max_minutes")
 
     stop_rye = _env_float("WORKER_STOP_RYE")
 
@@ -2622,8 +2714,6 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         except Exception:
             roles_list = ["agent"]
 
-    forever = False
-
     config_for_sources = dict(config)
     if "default_source_controls" not in config_for_sources:
         sc_preset = preset_cfg.get("source_controls")
@@ -2648,6 +2738,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         "WORKER_GOAL",
         "WORKER_SHIFT_MINUTES",
         "WORKER_REPEAT_SHIFTS",
+        "WORKER_FOREVER",
     ]
     experiment_fingerprint = _build_experiment_fingerprint(
         goal=goal,
@@ -2676,9 +2767,10 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         "source_controls": source_controls,
         "shift_minutes": shift_minutes,
         "repeat_shifts": repeat_shifts,
+        "forever": forever,
     }
 
-    print("=== Autonomous Research Engine - Swarm Mode (Finite Only) ===")
+    print("=== Autonomous Research Engine - Swarm Mode ===")
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
     print(f"Roles: {roles_list}")
@@ -2689,15 +2781,15 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         f"{runtime_profile or 'None (engine default)'}"
     )
     print(
-        "Max minutes (explicit, clamped): "
-        f"{max_minutes if max_minutes is not None else 'None (rounds-only guard)'}"
+        "Max minutes (clamped or None): "
+        f"{max_minutes if max_minutes is not None else 'None (time guard disabled)'}"
     )
     print(f"Max rounds (clamped): {max_rounds}")
     print(
         "Stop RYE threshold (explicit): "
         f"{stop_rye if stop_rye is not None else 'None (preset/profile)'}"
     )
-    print(f"Forever mode (disabled in finite-only): {forever}")
+    print(f"Forever mode: {forever}")
     print(f"Resume from checkpoint: {resume}")
     print(f"Watchdog interval (min): {watchdog_minutes}")
     print(f"Source controls: {source_controls}")
@@ -2764,6 +2856,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
         summaries_all: List[Dict[str, Any]] = []
 
+        # If shift mode is not used, we can honor forever mode directly.
         if not repeat_shifts or shift_minutes is None or shift_minutes <= 0:
             summaries_all = agent.run_swarm_continuous(
                 goal=goal,
@@ -2781,6 +2874,8 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 runtime_profile=runtime_profile,
             )
         else:
+            # Shift mode always uses time-bounded segments; forever flag is not
+            # applied inside each shift call.
             total_elapsed = 0.0
             shift_index = 0
 
@@ -2847,7 +2942,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
         _heartbeat(agent, label="worker_swarm_finished", run_id=run_id)
 
-        print("=== Swarm run finished cleanly (finite) ===")
+        print("=== Swarm run finished cleanly ===")
         print(
             "Total summaries produced across all roles and rounds: "
             f"{len(summaries)}"
@@ -2945,7 +3040,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Meta-controller engine (Option C)
+# Meta-controller engine (Option C) - still finite (macro budget)
 # ---------------------------------------------------------------------------
 
 
@@ -3021,12 +3116,12 @@ def _initial_meta_plan(
     The exact minutes per phase are distributed from total_budget_minutes.
     If no total budget is given, defaults to a 60 minute plan.
 
-    Note: this is also finite-only; there is always a macro budget.
+    Note: this is finite-only; there is always a macro budget for meta.
     """
     if total_budget_minutes is None or total_budget_minutes <= 0:
         total_budget_minutes = 60.0
 
-    # Apply hard clamp for macro budget
+    # Apply hard clamp for macro budget (unless disabled globally).
     total_budget_minutes = _clamp_minutes(total_budget_minutes, "meta.total_budget") or 60.0
 
     explore_min = max(5.0, total_budget_minutes * 0.4)
@@ -3156,11 +3251,14 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         - can stop early if time is almost exhausted or RYE has clearly collapsed
 
     Controlled by (finite-only):
-    - WORKER_MAX_MINUTES (overall macro budget; if not set, derived from presets)
+    - WORKER_MAX_MINUTES (overall macro budget; if not set, derived from presets,
+                          and clamped by HARD_MAX_MINUTES unless disabled)
     - WORKER_META_MAX_SEGMENTS (max number of segments, default 6)
     - WORKER_RUNTIME_PROFILE (hint for phase profiles only)
     - WORKER_MODE / WORKER_SWARM (preferred mode: single vs swarm)
     - WORKER_SOURCES etc as in single and swarm engines
+
+    Meta remains finite by design; forever mode is not applied here.
     """
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
@@ -3240,7 +3338,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
     print(
         "=== Autonomous Research Engine - Meta Controller Mode "
-        "(Option C, Finite Only) ==="
+        "(Option C, Finite Macro Budget) ==="
     )
     print(f"Goal: {goal}")
     print(f"Domain: {domain}")
@@ -3501,7 +3599,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         total_segments = len(segments_run)
         total_summaries = sum(len(seg["summaries"]) for seg in segments_run)
         print("")
-        print("=== Meta controller run finished (finite) ===")
+        print("=== Meta controller run finished ===")
         print(f"Segments executed: {total_segments}")
         print(f"Total summaries across segments: {total_summaries}")
         print(f"Final smoothed recent RYE: {recent_avg_rye}")
@@ -3627,11 +3725,17 @@ def main() -> None:
     2) Direct engines (no queue):
 
        - WORKER_QUEUE_MODE=0 and WORKER_MODE != "queue" -> direct engine behavior:
-           * WORKER_META=1          -> run meta controller (Option C, finite-only)
-           * WORKER_META=0 and WORKER_MODE=swarm or WORKER_SWARM=1 -> swarm engine (finite-only)
-           * otherwise             -> single agent engine (finite-only)
+           * WORKER_META=1          -> run meta controller (Option C, finite macro budget)
+           * WORKER_META=0 and WORKER_MODE=swarm or WORKER_SWARM=1 -> swarm engine
+           * otherwise             -> single agent engine
+
+    Forever / safety:
+       - HARD_MAX_CYCLES, HARD_MAX_ROUNDS, HARD_MAX_MINUTES still apply unless
+         disabled (HARD_MAX_MINUTES=0).
+       - WORKER_FOREVER=1 disables time guards in single/swarm/direct/queue
+         engines and passes forever=True into the underlying loops; use with care.
     """
-    print("Starting Autonomous Research Agent background engine (finite-only mode)...")
+    print("Starting Autonomous Research Agent background engine...")
     print(
         f"[Safety] HARD_MAX_CYCLES={HARD_MAX_CYCLES}, "
         f"HARD_MAX_ROUNDS={HARD_MAX_ROUNDS}, "
@@ -3665,8 +3769,8 @@ def main() -> None:
 
     use_swarm = _env_bool("WORKER_SWARM", default=False)
     mode = os.getenv("WORKER_MODE", "single").strip().lower()
-    # IMPORTANT: meta mode is now OFF by default. You must explicitly set
-    # WORKER_META=1 to enable the Option C meta-controller.
+    # Meta mode is OFF by default. You must explicitly set WORKER_META=1
+    # to enable the Option C meta-controller.
     use_meta = _env_bool("WORKER_META", default=False)
 
     try:
