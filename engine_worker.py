@@ -651,9 +651,16 @@ def _update_worker_state(
     max_minutes: Optional[float] = None,
     run_id: Optional[str] = None,
     experiment_mode: Optional[str] = None,
+    current: Optional[int] = None,
+    total: Optional[int] = None,
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Thin wrapper around MemoryStore.update_worker_state."""
+    """
+    Thin wrapper around MemoryStore.update_worker_state.
+
+    Adds optional current and total so the UI can show a live
+    current/total counter for cycles or rounds.
+    """
     ms = _get_memory_store(agent)
     if ms is None or not hasattr(ms, "update_worker_state"):
         return
@@ -669,6 +676,8 @@ def _update_worker_state(
             max_minutes=max_minutes,
             run_id=run_id,
             experiment_mode=experiment_mode,
+            current=current,
+            total=total,
             extra=extra,
         )
     except Exception:
@@ -1075,6 +1084,8 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="direct_job",
+        current=0,
+        total=max_rounds if mode == "swarm" else max_cycles,
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
@@ -1255,6 +1266,8 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             max_minutes=max_minutes,
             run_id=run_id,
             experiment_mode="direct_job",
+            current=len(normalized_cycles),
+            total=max_rounds if mode == "swarm" else max_cycles,
             extra={
                 "experiment_fingerprint": experiment_fingerprint,
                 "final_diagnostics": diag,
@@ -1317,6 +1330,8 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             max_minutes=max_minutes,
             run_id=run_id,
             experiment_mode="direct_job",
+            current=None,
+            total=max_rounds if mode == "swarm" else max_cycles,
             extra=error_payload,
         )
 
@@ -1604,6 +1619,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         max_minutes=max_minutes,
         run_id=job.run_id,
         experiment_mode="queue_worker",
+        current=0,
+        total=max_rounds if mode == "swarm" else max_cycles,
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
@@ -1685,6 +1702,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                         max_minutes=max_minutes,
                         run_id=job.run_id,
                         experiment_mode="queue_worker",
+                        current=cur_int,
+                        total=tot_int,
                         extra={
                             "experiment_fingerprint": experiment_fingerprint,
                             "job_meta": job_meta,
@@ -1959,6 +1978,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             max_minutes=max_minutes,
             run_id=job.run_id,
             experiment_mode="queue_worker",
+            current=len(normalized_cycles),
+            total=max_rounds if mode == "swarm" else max_cycles,
             extra={
                 "experiment_fingerprint": experiment_fingerprint,
                 "final_diagnostics": diag,
@@ -2044,6 +2065,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             max_minutes=max_minutes,
             run_id=job.run_id,
             experiment_mode="queue_worker",
+            current=None,
+            total=max_rounds if mode == "swarm" else max_cycles,
             extra=error_payload,
         )
     finally:
@@ -2298,6 +2321,8 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="single_engine",
+        current=0,
+        total=max_cycles,
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
@@ -2317,6 +2342,8 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="single_engine",
+        current=0,
+        total=max_cycles,
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
@@ -2427,6 +2454,8 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             max_minutes=max_minutes,
             run_id=run_id,
             experiment_mode="single_engine",
+            current=len(summaries),
+            total=max_cycles,
             extra={
                 "experiment_fingerprint": experiment_fingerprint,
                 "final_diagnostics": diag,
@@ -2592,6 +2621,8 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="swarm_engine",
+        current=0,
+        total=max_rounds,
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
@@ -2611,6 +2642,8 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=max_minutes,
         run_id=run_id,
         experiment_mode="swarm_engine",
+        current=0,
+        total=max_rounds,
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
@@ -2794,6 +2827,8 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             max_minutes=max_minutes,
             run_id=run_id,
             experiment_mode="swarm_engine",
+            current=len(summaries),
+            total=max_rounds,
             extra={
                 "experiment_fingerprint": experiment_fingerprint,
                 "final_diagnostics": diag,
@@ -3139,6 +3174,8 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=total_budget_minutes,
         run_id=run_id,
         experiment_mode="meta_controller",
+        current=0,
+        total=meta_max_segments_int,
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
@@ -3175,6 +3212,8 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         max_minutes=total_budget_minutes,
         run_id=run_id,
         experiment_mode="meta_controller",
+        current=0,
+        total=meta_max_segments_int,
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
@@ -3443,6 +3482,8 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             max_minutes=total_budget_minutes,
             run_id=run_id,
             experiment_mode="meta_controller",
+            current=total_segments,
+            total=meta_max_segments_int,
             extra={
                 "experiment_fingerprint": experiment_fingerprint,
                 "final_recent_rye": recent_avg_rye,
