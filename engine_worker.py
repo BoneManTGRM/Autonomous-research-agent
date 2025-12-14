@@ -249,6 +249,7 @@ def detect_tools() -> Dict[str, bool]:
     web_keys = {
         "web_search",
         "browser",
+        "browser_tool",
         "web",
         "internet",
         "tavily_search",
@@ -1333,6 +1334,11 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     finally:
         if hb_stop is not None:
             hb_stop.set()
+        if hb_thread is not None and hb_thread.is_alive():
+            try:
+                hb_thread.join(timeout=1.0)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -1381,7 +1387,7 @@ def _write_job_progress(
             "prompt_details": prompt_details or {},
         }
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf8") as f:
+        with path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
 
         # Explicit console log for progress including cycle fraction if known
@@ -1936,7 +1942,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 out_dir = BASE_DIR / "finished"
                 out_dir.mkdir(parents=True, exist_ok=True)
                 rp = out_dir / f"{job.run_id}.json"
-                with rp.open("w", encoding="utf8") as f:
+                with rp.open("w", encoding="utf-8") as f:
                     json.dump(result_obj, f, indent=2)
         except Exception:
             print("Failed to write result JSON for job, see logs for details.")
@@ -2007,7 +2013,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 err_dir = BASE_DIR / "error"
                 err_dir.mkdir(parents=True, exist_ok=True)
                 ep = err_dir / f"{job.run_id}.json"
-                with ep.open("w", encoding="utf8") as f:
+                with ep.open("w", encoding="utf-8") as f:
                     json.dump(error_payload, f, indent=2)
         except Exception:
             pass
@@ -2043,6 +2049,11 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     finally:
         if hb_stop is not None:
             hb_stop.set()
+        if hb_thread is not None and hb_thread.is_alive():
+            try:
+                hb_thread.join(timeout=1.0)
+            except Exception:
+                pass
 
 
 def run_job_queue_worker() -> None:
@@ -2426,6 +2437,11 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     finally:
         if hb_stop is not None:
             hb_stop.set()
+        if hb_thread is not None and hb_thread.is_alive():
+            try:
+                hb_thread.join(timeout=1.0)
+            except Exception:
+                pass
 
 
 def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
@@ -2788,6 +2804,11 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     finally:
         if hb_stop is not None:
             hb_stop.set()
+        if hb_thread is not None and hb_thread.is_alive():
+            try:
+                hb_thread.join(timeout=1.0)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -2795,7 +2816,10 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _compute_segment_stats(segment_summaries: List[Dict[str, Any]]) -> Dict[str, Any]:
+def _compute_segment_stats(
+    segment_summaries: List[Dict[str, Any]],
+    domain: Optional[str],
+) -> Dict[str, Any]:
     """
     Inspect a list of cycle or swarm summaries and compute stats for the meta-controller.
 
@@ -2822,7 +2846,8 @@ def _compute_segment_stats(segment_summaries: List[Dict[str, Any]]) -> Dict[str,
             "momentum": None,
         }
 
-    diag = build_run_diagnostics(history=segment_summaries, domain=None, window=10)
+    diag_domain = domain if domain is not None else "general"
+    diag = build_run_diagnostics(history=segment_summaries, domain=diag_domain, window=10)
     rye_vals: List[float] = [
         float(e["RYE"]) for e in segment_summaries if isinstance(e.get("RYE"), (int, float))
     ]
@@ -3267,7 +3292,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 }
             )
 
-            seg_stats = _compute_segment_stats(segment_summaries)
+            seg_stats = _compute_segment_stats(segment_summaries, domain=domain)
             seg_avg_rye = seg_stats["avg_rye"]
             if seg_avg_rye is not None:
                 if recent_avg_rye is None:
@@ -3430,6 +3455,11 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     finally:
         if hb_stop is not None:
             hb_stop.set()
+        if hb_thread is not None and hb_thread.is_alive():
+            try:
+                hb_thread.join(timeout=1.0)
+            except Exception:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -3464,7 +3494,8 @@ def main() -> None:
         print(f"[engine_worker] BASE_DIR (effective): {BASE_DIR}")
     sys.stdout.flush()
 
-    queue_mode = _env_bool("WORKER_QUEUE_MODE", default=True)
+    # Default queue_mode to False so direct engines can run when explicitly configured.
+    queue_mode = _env_bool("WORKER_QUEUE_MODE", default=False)
 
     if queue_mode:
         if RunJob is None or load_next_pending_job is None:
