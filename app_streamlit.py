@@ -617,7 +617,7 @@ def _extract_cycles_from_run_result(
     run_id: Optional[str] = None,
     default_timestamp: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
-    """Normalize cycles from a finished run result into history-style entries.
+    """Normalize cycles from a finished run result into history style entries.
 
     This is used as a fallback when MemoryStore.get_cycle_history() is empty,
     so the History / Citations panels can still populate directly from
@@ -1835,6 +1835,39 @@ def main() -> None:
     # Shared MemoryStore instance for diagnostics and history
     memory = init_memory_store()
 
+    # Small always visible sidebar cycle counter from worker_state
+    get_worker_state = getattr(memory, "get_worker_state", None)
+    if not callable(get_worker_state):
+        get_worker_state = getattr(memory, "read_worker_state", None)
+    if not callable(get_worker_state):
+        get_worker_state = getattr(memory, "load_worker_state", None)
+
+    try:
+        ws = get_worker_state() if callable(get_worker_state) else None
+    except Exception:
+        ws = None
+
+    if isinstance(ws, dict):
+        cur = ws.get("current")
+        tot = ws.get("total")
+        status_val = ws.get("status") or "unknown"
+        run_id_val = ws.get("run_id") or ws.get("job_id") or ""
+        if isinstance(cur, (int, float)) and isinstance(tot, (int, float)) and tot > 0:
+            try:
+                fraction = float(cur) / float(tot)
+            except Exception:
+                fraction = None
+            st.sidebar.caption(f"Current cycle: {int(cur)}/{int(tot)}")
+            if fraction is not None:
+                try:
+                    st.sidebar.progress(min(fraction, 1.0))
+                except Exception:
+                    pass
+        else:
+            st.sidebar.caption(f"Worker status: {status_val}")
+            if run_id_val:
+                st.sidebar.caption(f"Run: {run_id_val}")
+
     # Sidebar layout
     st.sidebar.title("Run configuration")
 
@@ -2086,7 +2119,7 @@ def main() -> None:
     cycles = st.number_input(
         "Number of TGRM cycles to request (manual mode)",
         min_value=1,
-        max_value=200,
+        max_value=1_000_000,
         value=3,
         step=1,
         help="Used when Run mode is Manual. There are no timed presets in this build.",
@@ -3398,15 +3431,15 @@ def main() -> None:
         st.markdown("**Worker state (engine queue)**")
 
         # Try several possible worker state methods for compatibility
-        get_worker_state = getattr(memory, "get_worker_state", None)
-        if not callable(get_worker_state):
-            get_worker_state = getattr(memory, "read_worker_state", None)
-        if not callable(get_worker_state):
-            get_worker_state = getattr(memory, "load_worker_state", None)
+        get_worker_state_diag = getattr(memory, "get_worker_state", None)
+        if not callable(get_worker_state_diag):
+            get_worker_state_diag = getattr(memory, "read_worker_state", None)
+        if not callable(get_worker_state_diag):
+            get_worker_state_diag = getattr(memory, "load_worker_state", None)
 
-        if callable(get_worker_state):
+        if callable(get_worker_state_diag):
             try:
-                worker_state = get_worker_state()
+                worker_state = get_worker_state_diag()
             except Exception:
                 worker_state = None
 
@@ -3503,7 +3536,7 @@ def main() -> None:
                 mime="text/markdown",
             )
             # Optional PDF from MemoryStore only; if it has no cycles this may be empty,
-            # but PDF generation still stays best-effort.
+            # but PDF generation still stays best effort.
             try:
                 pdf_path = generate_report_pdf(
                     memory_store=memory,
