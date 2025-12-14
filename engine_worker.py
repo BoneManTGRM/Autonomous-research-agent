@@ -269,12 +269,15 @@ def _configure_tavily_from_env() -> None:
     """
     Optional Tavily key configuration.
 
-    If WORKER_TAVILY_KEY is set, propagate it to TAVILY_API_KEY so the
-    same engine can be used headless without the Streamlit UI.
+    If WORKER_TAVILY_KEY is set and TAVILY_API_KEY is not already set,
+    propagate it so the engine can be used headless without the Streamlit UI.
+
+    This NEVER hard-wires a key in code; it only mirrors env -> env.
     """
-    key = os.getenv("WORKER_TAVILY_KEY")
-    if key:
-        os.environ["TAVILY_API_KEY"] = key
+    worker_key = os.getenv("WORKER_TAVILY_KEY")
+    existing = os.getenv("TAVILY_API_KEY")
+    if worker_key and not existing:
+        os.environ["TAVILY_API_KEY"] = worker_key
 
 
 def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
