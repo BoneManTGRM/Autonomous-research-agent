@@ -1905,7 +1905,15 @@ def main() -> None:
         layout="wide",
     )
 
-    st.title("ARA powered by Reparodynamics")
+    st.markdown(
+        """
+        <div style="margin-bottom: 0.5rem;">
+            <span style="font-size: 2.8rem; font-weight: 700;">ARA</span><br/>
+            <span style="font-size: 0.95rem; opacity: 0.85;">powered by Reparodynamics</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     st.caption(
         "Finite mode only • Queue based runs • Engine worker processes jobs from ARA_RUNS_DIR/pending.\n"
         "This UI never runs TGRM loops directly. It only queues jobs and visualizes finished artifacts."
@@ -2188,6 +2196,28 @@ def main() -> None:
         value=bool(sc_defaults.get("biomarkers", False)),
     )
 
+    # Snapshot configuration
+    st.sidebar.subheader("Snapshots")
+    enable_snapshots = st.sidebar.checkbox(
+        "Enable snapshot generation",
+        value=True,
+        help=(
+            "If enabled, the engine worker is allowed to write periodic snapshot JSON "
+            "files into logs/snapshots for the Snapshots and equilibrium tab."
+        ),
+    )
+    snapshot_interval = st.sidebar.number_input(
+        "Snapshot interval in cycles",
+        min_value=10,
+        max_value=1_000_000,
+        value=200,
+        step=10,
+        help=(
+            "Hint to the engine worker for how often to capture a snapshot. "
+            "The worker may adapt this based on its own safety rules."
+        ),
+    )
+
     # Run mode presets: finite only in this build
     run_mode = st.sidebar.radio(
         "Run mode",
@@ -2289,6 +2319,14 @@ def main() -> None:
                 "cycles_per_hour_estimate": CYCLES_PER_HOUR_ESTIMATE,
             }
 
+            # Snapshot configuration for the worker and Snapshots tab
+            snapshot_config: Dict[str, Any] = {
+                "enabled": bool(enable_snapshots),
+                "every_n_cycles": int(snapshot_interval),
+                "target_dir": str(REPO_ROOT / "logs" / "snapshots"),
+            }
+            runtime_hints["snapshot_config"] = snapshot_config
+
             # Swarm configuration for the worker
             if enable_swarm:
                 swarm_config: Dict[str, Any] = {
@@ -2341,6 +2379,8 @@ def main() -> None:
                 "runtime_hints": runtime_hints,
                 "swarm": swarm_config,
                 "longevity_config": longevity_config,
+                "snapshot_config": snapshot_config,
+                "snapshots_enabled": bool(enable_snapshots),
                 "use_biomarkers": bool(use_biomarkers),
                 "multi_agent_pair": bool(multi_agent),
                 "notes": (run_label or "experiment").strip(),
@@ -3115,7 +3155,7 @@ def main() -> None:
             snapshots = load_snapshots()
             if not snapshots:
                 st.info(
-                    "No snapshots found yet. The worker will create them when snapshot generation is enabled."
+                    "No snapshots found yet. The worker will create them when snapshot generation is enabled for a run."
                 )
             else:
                 labels = []
