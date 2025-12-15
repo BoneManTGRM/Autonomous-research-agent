@@ -2202,8 +2202,8 @@ def main() -> None:
         "Enable snapshot generation",
         value=True,
         help=(
-            "If enabled, the engine worker is allowed to write periodic snapshot JSON "
-            "files into logs/snapshots for the Snapshots and equilibrium tab."
+            "Snapshots and heartbeat are only useful for long runs (200+ cycles). "
+            "For tiny test runs you can leave this off."
         ),
     )
     snapshot_interval = st.sidebar.number_input(
