@@ -1,9 +1,11 @@
 import os
 import json
 import time
+import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
+from threading import Lock
 
 # Optional HTTP client
 try:
@@ -33,17 +35,11 @@ class BrowserTool:
     Web search plus lightweight browser fetch for the Autonomous Research Agent.
 
     Updates in this version:
-        - No hardwired Tavily key. Key is read from env at call time when needed.
-        - Stub mode obeys ENABLE_TAVILY, TAVILY_STUB_MODE, DISABLE_WEB_SEARCH.
-        - Cache key includes include_answer/include_raw_content/include_images/auto_parameters
-          so toggles cannot return mismatched cached results.
-        - Query clamp to stay under Tavily query limits.
-        - PubMed-safe term clamp helper to prevent 414 URI too long errors.
-        - Safer logging encoding ("utf-8") and atomic-ish log writes guarded.
-        - Better normalization of Tavily responses across SDK variants.
-        - Fetch safety caps and content type normalization.
-        - Stub and error results are shaped so MemoryStore can treat them as tool errors
-          (snippet starts with "[stub]" or title contains "Tavily Search Error" and/or has error field).
+        - Fix env bool parsing so TAVILY_STUB_MODE=0 and DISABLE_WEB_SEARCH=0 do not force stub.
+        - HTTP fallback includes api_key in JSON body (in addition to headers).
+        - Adds retries and backoff for 429 and transient 5xx.
+        - Optional light global rate limiting to reduce stampedes in swarm mode.
+        - Error payloads include status and response snippet for easier debugging.
     """
 
     TAVILY_ENDPOINT = "https://api.tavily.com/search"
@@ -56,11 +52,19 @@ class BrowserTool:
     _cache_ts: Dict[Tuple[Any, ...], float] = {}
     CACHE_TTL_SECONDS: float = 600.0
 
-    # Tavily hard limit is ~400 chars; keep margin
+    # Tavily hard limit is roughly 400 chars; keep margin
     MAX_TAVILY_QUERY_CHARS: int = 360
 
     # PubMed URLs break if term is huge (entire JSON config). Keep it short.
     MAX_PUBMED_TERM_CHARS: int = 300
+
+    # Basic retry policy
+    MAX_RETRIES: int = 5
+
+    # Optional global throttling (requests per second)
+    DEFAULT_TAVILY_RPS: float = 1.0
+    _RATE_LOCK: Lock = Lock()
+    _NEXT_OK_TS: float = 0.0
 
     def __init__(
         self,
@@ -76,7 +80,6 @@ class BrowserTool:
         Args:
             api_key:
                 Tavily API key. If omitted, TAVILY_API_KEY from environment is used.
-                Security note: key is never hardcoded here.
             endpoint:
                 Optional override of the Tavily endpoint.
             default_max_results:
@@ -90,8 +93,6 @@ class BrowserTool:
             force_stub:
                 If True, always run in stub mode even if a key is present.
         """
-        # Store the explicit key if passed, but do not require it.
-        # If not passed, we will read from env when needed.
         self.api_key = api_key
         self.endpoint = endpoint or self.TAVILY_ENDPOINT
         self.default_max_results = int(default_max_results)
@@ -110,16 +111,27 @@ class BrowserTool:
         else:
             self.cache_ttl_seconds = self.CACHE_TTL_SECONDS
 
+        # Rate limit (requests per second), set 0 to disable
+        env_rps = os.getenv("TAVILY_RPS", "").strip()
+        if env_rps:
+            try:
+                self.tavily_rps = float(env_rps)
+            except Exception:
+                self.tavily_rps = self.DEFAULT_TAVILY_RPS
+        else:
+            self.tavily_rps = self.DEFAULT_TAVILY_RPS
+
         # Stub / offline mode:
         # - Explicit argument wins
-        # - Otherwise check env flags
+        # - Otherwise check env flags correctly (so "0" is False)
         if force_stub is not None:
             self.force_stub = bool(force_stub)
         else:
-            self.force_stub = bool(
-                os.getenv("TAVILY_STUB_MODE")
-                or os.getenv("DISABLE_WEB_SEARCH")
-                or (os.getenv("ENABLE_TAVILY", "1").strip().lower() in ("0", "false", "no", "off"))
+            enable_tavily = not self._env_false("ENABLE_TAVILY", default_false=False)
+            self.force_stub = (
+                self._env_true("TAVILY_STUB_MODE")
+                or self._env_true("DISABLE_WEB_SEARCH")
+                or (not enable_tavily)
             )
 
         # Ensure log directory exists
@@ -127,6 +139,29 @@ class BrowserTool:
             self.LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Env parsing helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _env_true(name: str) -> bool:
+        v = os.getenv(name)
+        if v is None:
+            return False
+        v = v.strip().lower()
+        return v in ("1", "true", "yes", "on")
+
+    @staticmethod
+    def _env_false(name: str, default_false: bool = True) -> bool:
+        """
+        Returns True if env var explicitly disables a feature.
+        If not present, returns default_false.
+        """
+        v = os.getenv(name)
+        if v is None:
+            return default_false
+        v = v.strip().lower()
+        return v in ("0", "false", "no", "off")
 
     # ------------------------------------------------------------------
     # Key and status helpers
@@ -175,6 +210,10 @@ class BrowserTool:
             "log_path": str(self.LOG_PATH),
             "requests_available": requests is not None,
             "tavily_client_available": TavilyClient is not None,
+            "tavily_rps": self.tavily_rps,
+            "enable_tavily_env": not self._env_false("ENABLE_TAVILY", default_false=False),
+            "tavily_stub_mode_env": self._env_true("TAVILY_STUB_MODE"),
+            "disable_web_search_env": self._env_true("DISABLE_WEB_SEARCH"),
         }
 
     # ------------------------------------------------------------------
@@ -234,10 +273,8 @@ class BrowserTool:
         an entire JSON job config in the `term` URL parameter (which causes
         414 Request-URI Too Long errors).
         """
-        # If a dict is passed, pull out the human-meaningful fields
         if isinstance(raw, dict):
             pieces: List[str] = []
-
             for key in ("goal", "question", "domain", "topic", "hypothesis"):
                 v = raw.get(key)
                 if isinstance(v, str):
@@ -252,7 +289,6 @@ class BrowserTool:
                         pieces.append(r)
 
             if not pieces:
-                # Fall back to a compact JSON but still clamp
                 term = json.dumps(raw, separators=(",", ":"))
             else:
                 term = " ".join(pieces)
@@ -264,16 +300,44 @@ class BrowserTool:
             return term[: self.MAX_PUBMED_TERM_CHARS], True
         return term, False
 
-    # Expose a small helper that other modules can call directly.
     def build_pubmed_term(self, raw: Any) -> str:
-        """
-        Public wrapper for PubMed term building.
-
-        Use this in your PubMed tool code instead of dumping the full config
-        into the `term` parameter.
-        """
+        """Public wrapper for PubMed term building."""
         term, _ = self._clamp_pubmed_term(raw)
         return term
+
+    # ------------------------------------------------------------------
+    # Rate limiting and backoff
+    # ------------------------------------------------------------------
+    def _rate_wait(self) -> None:
+        """
+        Simple global rate limiter to reduce stampedes during swarm runs.
+        Set TAVILY_RPS=0 to disable.
+        """
+        rps = float(self.tavily_rps or 0.0)
+        if rps <= 0.0:
+            return
+
+        with self._RATE_LOCK:
+            now = time.time()
+            wait = max(0.0, self._NEXT_OK_TS - now)
+            step = 1.0 / max(rps, 0.1)
+            self._NEXT_OK_TS = max(self._NEXT_OK_TS, now) + step
+
+        if wait > 0:
+            time.sleep(wait)
+
+    @staticmethod
+    def _backoff_sleep(attempt: int) -> None:
+        # Exponential backoff with jitter
+        base = (2 ** attempt)
+        time.sleep(base + random.random())
+
+    @staticmethod
+    def _snip(text: str, limit: int = 500) -> str:
+        t = (text or "").strip()
+        if len(t) <= limit:
+            return t
+        return t[:limit] + "..."
 
     # ------------------------------------------------------------------
     # Internal HTTP or client helpers
@@ -283,70 +347,119 @@ class BrowserTool:
         Internal helper for Tavily POST over raw HTTP.
 
         Never raises. On any error it returns a dict with:
-            {"error": "..."}
+            {"error": "...", "status_code": int|None, "response_snippet": str|None}
         """
         api_key = self._effective_api_key()
         if not api_key:
-            return {"error": "No Tavily API key configured."}
+            return {"error": "No Tavily API key configured.", "status_code": None, "response_snippet": None}
 
         if requests is None:
-            return {"error": "requests library is not available."}
+            return {"error": "requests library is not available.", "status_code": None, "response_snippet": None}
 
-        try:
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "X-API-Key": api_key,
-                "Content-Type": "application/json",
-            }
-            resp = requests.post(
-                self.endpoint,
-                json=payload,
-                headers=headers,
-                timeout=self.timeout,
-                verify=self.verify_ssl,
-            )
-            resp.raise_for_status()
-            return resp.json()
-        except Exception as e:
-            return {"error": str(e)}
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "X-API-Key": api_key,
+            "Content-Type": "application/json",
+        }
+
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                self._rate_wait()
+
+                body = dict(payload)
+                # Important: include api_key in body for compatibility
+                body["api_key"] = api_key
+
+                resp = requests.post(
+                    self.endpoint,
+                    json=body,
+                    headers=headers,
+                    timeout=self.timeout,
+                    verify=self.verify_ssl,
+                )
+
+                # Retry on rate limit and transient server errors
+                if resp.status_code in (429, 500, 502, 503, 504):
+                    self._backoff_sleep(attempt)
+                    continue
+
+                resp.raise_for_status()
+                return resp.json()
+            except Exception as e:
+                if attempt < self.MAX_RETRIES - 1:
+                    self._backoff_sleep(attempt)
+                    continue
+                # Final failure
+                status_code = None
+                response_snippet = None
+                try:
+                    status_code = getattr(resp, "status_code", None)  # type: ignore[name-defined]
+                    response_snippet = self._snip(getattr(resp, "text", "") or "")  # type: ignore[name-defined]
+                except Exception:
+                    pass
+                return {
+                    "error": str(e),
+                    "status_code": status_code,
+                    "response_snippet": response_snippet,
+                }
+
+        return {"error": "Tavily HTTP retries exhausted.", "status_code": None, "response_snippet": None}
 
     def _tavily_client_search(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
         Use tavily-python client if available, otherwise fall back to HTTP helper.
+
+        Never raises. Returns dict, or {"error": "..."} on failure.
         """
         api_key = self._effective_api_key()
         if not api_key:
             return {"error": "No Tavily API key configured."}
 
+        # If no client, always use HTTP path
         if TavilyClient is None:
             return self._post_tavily_http(payload)
 
-        try:
-            client = TavilyClient(api_key=api_key)  # type: ignore[call-arg]
+        last_err: Optional[str] = None
+        for attempt in range(self.MAX_RETRIES):
             try:
-                resp = client.search(
-                    query=payload.get("query", ""),
-                    max_results=payload.get("max_results", self.default_max_results),
-                    topic=payload.get("topic", "general"),
-                    search_depth=payload.get("search_depth", "basic"),
-                    time_range=payload.get("time_range"),
-                    include_answer=payload.get("include_answer", False),
-                    include_raw_content=payload.get("include_raw_content", False),
-                    include_images=payload.get("include_images", False),
-                    auto_parameters=payload.get("auto_parameters", False),
-                )
-            except TypeError:
-                # Older/minimal SDKs
-                resp = client.search(
-                    query=payload.get("query", ""),
-                    max_results=payload.get("max_results", self.default_max_results),
-                )
+                self._rate_wait()
 
-            if isinstance(resp, dict):
-                return resp
-            return {"results": resp}
-        except Exception as e:
-            return {"error": str(e)}
+                client = TavilyClient(api_key=api_key)  # type: ignore[call-arg]
+                try:
+                    resp = client.search(
+                        query=payload.get("query", ""),
+                        max_results=payload.get("max_results", self.default_max_results),
+                        topic=payload.get("topic", "general"),
+                        search_depth=payload.get("search_depth", "basic"),
+                        time_range=payload.get("time_range"),
+                        include_answer=payload.get("include_answer", False),
+                        include_raw_content=payload.get("include_raw_content", False),
+                        include_images=payload.get("include_images", False),
+                        auto_parameters=payload.get("auto_parameters", False),
+                    )
+                except TypeError:
+                    # Older/minimal SDKs
+                    resp = client.search(
+                        query=payload.get("query", ""),
+                        max_results=payload.get("max_results", self.default_max_results),
+                    )
+
+                if isinstance(resp, dict):
+                    return resp
+                return {"results": resp}
+            except Exception as e:
+                last_err = str(e)
+                # Backoff and retry a few times, then fall back to HTTP
+                if attempt < self.MAX_RETRIES - 1:
+                    self._backoff_sleep(attempt)
+                    continue
+                break
+
+        # Fallback to HTTP after client failures
+        http_resp = self._post_tavily_http(payload)
+        if "error" in http_resp and last_err:
+            http_resp["client_error"] = last_err
+        return http_resp
 
     @staticmethod
     def _normalize_results(raw_results: Any) -> List[Dict[str, Any]]:
@@ -370,7 +483,6 @@ class BrowserTool:
             return []
 
         normalized: List[Dict[str, Any]] = []
-
         for item in raw_results:
             if not isinstance(item, dict):
                 continue
@@ -433,10 +545,9 @@ class BrowserTool:
                     "source": "stub",
                     "title": f"Stubbed search result for: {q}",
                     "url": "https://example.com/stub",
-                    # Start with "[stub]" so MemoryStore.add_citation can down-rank/log as tool error
                     "snippet": (
                         "[stub] Stubbed search. Configure TAVILY_API_KEY and "
-                        "disable TAVILY_STUB_MODE/DISABLE_WEB_SEARCH (and set ENABLE_TAVILY=1) "
+                        "set TAVILY_STUB_MODE=0, DISABLE_WEB_SEARCH=0, ENABLE_TAVILY=1 "
                         "to enable real web search."
                     ),
                     "score": None,
@@ -488,21 +599,25 @@ class BrowserTool:
                 {
                     "event": "search_error",
                     "query": q,
-                    "error": data["error"],
+                    "error": data.get("error"),
+                    "status_code": data.get("status_code"),
+                    "response_snippet": data.get("response_snippet"),
+                    "client_error": data.get("client_error"),
                     "elapsed_sec": elapsed,
                     "truncated": truncated,
                 }
             )
-            # Title is "Tavily Search Error" and we also include an "error" field
-            # so MemoryStore.add_citation can treat this as tool error if ever used as a citation.
             error_result = [
                 {
                     "source": "error",
                     "title": "Tavily Search Error",
                     "url": "",
-                    "snippet": str(data["error"]),
+                    "snippet": str(data.get("error") or "unknown_error"),
                     "score": None,
-                    "error": str(data["error"]),
+                    "error": str(data.get("error") or "unknown_error"),
+                    "status_code": data.get("status_code"),
+                    "response_snippet": data.get("response_snippet"),
+                    "client_error": data.get("client_error"),
                 }
             ]
             self._cache_set(cache_key, {"results": error_result})
@@ -548,7 +663,6 @@ class BrowserTool:
         if not q:
             return {"answer": None, "results": []}
 
-        # Stub when no key or forced stub
         if self.is_stub_mode():
             self._log_event(
                 {
@@ -567,7 +681,7 @@ class BrowserTool:
                         "url": "https://example.com/stub",
                         "snippet": (
                             "[stub] Stubbed search. Configure TAVILY_API_KEY and "
-                            "disable TAVILY_STUB_MODE/DISABLE_WEB_SEARCH (and set ENABLE_TAVILY=1) "
+                            "set TAVILY_STUB_MODE=0, DISABLE_WEB_SEARCH=0, ENABLE_TAVILY=1 "
                             "to enable real web search."
                         ),
                         "score": None,
@@ -596,7 +710,10 @@ class BrowserTool:
                 {
                     "event": "search_with_answer_error",
                     "query": q,
-                    "error": data["error"],
+                    "error": data.get("error"),
+                    "status_code": data.get("status_code"),
+                    "response_snippet": data.get("response_snippet"),
+                    "client_error": data.get("client_error"),
                     "elapsed_sec": elapsed,
                     "truncated": truncated,
                 }
@@ -608,9 +725,12 @@ class BrowserTool:
                         "source": "error",
                         "title": "Tavily Search Error",
                         "url": "",
-                        "snippet": str(data["error"]),
+                        "snippet": str(data.get("error") or "unknown_error"),
                         "score": None,
-                        "error": str(data["error"]),
+                        "error": str(data.get("error") or "unknown_error"),
+                        "status_code": data.get("status_code"),
+                        "response_snippet": data.get("response_snippet"),
+                        "client_error": data.get("client_error"),
                     }
                 ],
             }
@@ -647,7 +767,7 @@ class BrowserTool:
             {
                 "url": str,
                 "status": int or "error",
-                "content": str  (capped),
+                "content": str (capped),
                 "content_type": str or None,
             }
         """
@@ -677,7 +797,6 @@ class BrowserTool:
                 }
             )
 
-            # Safety cap: keep response lightweight
             return {
                 "url": url,
                 "status": r.status_code,
@@ -691,9 +810,6 @@ class BrowserTool:
     def fetch_page(self, url: str) -> BrowserPage:
         """
         Helper used by TGRM for deep single page inspection.
-
-        Wraps fetch_url and returns a BrowserPage object with:
-            url, text_snippet, status, content_type, error
         """
         result = self.fetch_url(url)
         status = result.get("status")
@@ -745,10 +861,6 @@ class BrowserTool:
             )
         return cites
 
-    # Small aliases so other parts of the agent can call more flexibly
+    # Small alias so other parts of the agent can call more flexibly
     def __call__(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
-        """
-        Allow BrowserTool instance to be called like a function:
-            results = browser("reparodynamics", max_results=5)
-        """
         return self.search(query=query, max_results=max_results)
