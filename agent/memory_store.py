@@ -1749,6 +1749,15 @@ class MemoryStore:
         except Exception:
             pass
 
+    def record_heartbeat(
+        self,
+        *,
+        label: str = "continuous_run",
+        run_id: Optional[str] = None,
+    ) -> None:
+        """Thin public alias for heartbeat for high frequency callers."""
+        self.heartbeat(label=label, run_id=run_id)
+
     def get_watchdog_info(self, label: str = "continuous_run") -> Dict[str, Any]:
         """Return watchdog data for a label.
 
@@ -1784,6 +1793,10 @@ class MemoryStore:
             "seconds_since_last": seconds_since_last,
             "run_id": run_id,
         }
+
+    def get_heartbeat_stats(self, label: str = "continuous_run") -> Dict[str, Any]:
+        """Public alias for get_watchdog_info used by workers and UIs."""
+        return self.get_watchdog_info(label=label)
 
     # File oriented helpers for watchdog
     def write_watchdog_heartbeat(self, label: str = "continuous_run", run_id: Optional[str] = None) -> None:
