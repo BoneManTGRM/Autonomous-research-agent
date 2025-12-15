@@ -108,6 +108,9 @@ Update notes:
       positive integers when possible, but no artificial upper cap is imposed.
       Very large values such as 1_000_000 are allowed; engine_worker is
       responsible for enforcing any global safety limits.
+    - A monitoring block is always present in config["monitoring"]. This is
+      where snapshot, heartbeat, and run state settings live. The UI and
+      engine worker can rely on this structure.
 """
 
 # Public exports (useful for type checkers and explicit imports)
@@ -122,6 +125,8 @@ __all__ = [
     "RunJob",
     "debug_print_layout",
     "_inject_run_id_into_config",
+    "_ensure_monitoring_block",
+    "MONITORING_DEFAULTS",
     "create_job",
     "load_job",
     "load_job_by_id",
@@ -163,6 +168,52 @@ def _log(*args: Any) -> None:
         sys.stdout.flush()
     except Exception:
         pass
+
+
+# Monitoring defaults
+#
+# This block is always present in the final job config under
+# config["monitoring"]. The UI and worker can rely on these keys.
+MONITORING_DEFAULTS: Dict[str, Any] = {
+    # Snapshots and equilibrium view
+    "snapshots_enabled": False,           # master toggle for snapshot writing
+    "snapshot_interval_cycles": None,     # take snapshot every N cycles (optional)
+    "snapshot_interval_minutes": None,    # or every N minutes (optional)
+    "snapshot_max_to_keep": 50,           # how many snapshots per run to retain
+
+    # Watchdog heartbeat for MemoryStore diagnostics
+    "heartbeat_enabled": True,
+    "heartbeat_interval_seconds": 60,     # seconds between heartbeat writes
+
+    # Run state saving for "Last saved run state" diagnostics
+    "run_state_enabled": True,
+}
+
+
+def _ensure_monitoring_block(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Ensure config["monitoring"] exists and contains the standard keys.
+
+    Any values already set by the UI or presets are preserved; only missing
+    keys are filled with MONITORING_DEFAULTS.
+
+    This function is intentionally idempotent so it can be called multiple
+    times safely.
+    """
+    try:
+        cfg: Dict[str, Any] = dict(config)
+    except Exception:
+        return config
+
+    monitoring = cfg.get("monitoring")
+    if not isinstance(monitoring, dict):
+        monitoring = {}
+
+    for key, default in MONITORING_DEFAULTS.items():
+        monitoring.setdefault(key, default)
+
+    cfg["monitoring"] = monitoring
+    return cfg
 
 
 # Base folder for all runs.
@@ -362,12 +413,15 @@ def _inject_run_id_into_config(run_id: str, config: Dict[str, Any]) -> Dict[str,
     queue and UI are using.
 
     This prevents divergence where the engine internally generates a new
-    run identifier and writes cycles under a different folder/key.
+    run identifier and writes cycles under a different folder or key.
 
-    We keep this very defensive so job creation never crashes.
+    Also ensures that config["monitoring"] exists and contains the standard
+    monitoring keys (snapshots, heartbeat, run state).
     """
     # First sanitize numeric limits to positive ints
     cfg = _sanitize_limits_in_config(config)
+    # Then ensure monitoring block is present
+    cfg = _ensure_monitoring_block(cfg)
 
     try:
         # Top level run_id hint
@@ -457,7 +511,7 @@ class RunJob:
         # Make sure required fields from original data are present
         run_id = str(data["run_id"])
         raw_config = dict(data["config"])
-        # Sanitize and inject run_id
+        # Sanitize, inject run_id, and ensure monitoring block
         sanitized_cfg = _sanitize_limits_in_config(raw_config)
         filtered["run_id"] = run_id
         filtered["config"] = _inject_run_id_into_config(run_id, sanitized_cfg)
@@ -549,11 +603,16 @@ def create_job(
         The run_id created here is injected into the config so that the
         engine and MemoryStore both write cycles and run state under this
         same identifier. The UI, worker, and reports all agree on run_id.
+
+    Monitoring note:
+        This function guarantees config["monitoring"] exists and includes
+        snapshot and heartbeat settings, either from the UI or defaults.
     """
     if run_id is None:
         run_id = str(uuid.uuid4())
 
-    # Sanitize numeric limits and inject run_id into config and common sections
+    # Sanitize numeric limits and inject run_id into config and common sections.
+    # This also ensures that the monitoring block is present.
     cfg_sanitized = _sanitize_limits_in_config(config)
     cfg = _inject_run_id_into_config(run_id, cfg_sanitized)
 
@@ -638,6 +697,34 @@ def create_job(
         )
         if experiment_fingerprint and "experiment_fingerprint" not in meta_with_id:
             meta_with_id["experiment_fingerprint"] = experiment_fingerprint
+
+        # Monitoring settings surfaced into meta for diagnostics panels
+        monitoring_cfg = cfg.get("monitoring") if isinstance(cfg.get("monitoring"), dict) else None
+        if isinstance(monitoring_cfg, dict):
+            if "snapshots_enabled" in monitoring_cfg and "snapshots_enabled" not in meta_with_id:
+                meta_with_id["snapshots_enabled"] = bool(monitoring_cfg.get("snapshots_enabled"))
+
+            if "heartbeat_enabled" in monitoring_cfg and "heartbeat_enabled" not in meta_with_id:
+                meta_with_id["heartbeat_enabled"] = bool(monitoring_cfg.get("heartbeat_enabled"))
+
+            if "run_state_enabled" in monitoring_cfg and "run_state_enabled" not in meta_with_id:
+                meta_with_id["run_state_enabled"] = bool(monitoring_cfg.get("run_state_enabled"))
+
+            # Numeric monitoring values (coerced to positive ints when present)
+            for key in (
+                "snapshot_interval_cycles",
+                "snapshot_interval_minutes",
+                "snapshot_max_to_keep",
+                "heartbeat_interval_seconds",
+            ):
+                if key in monitoring_cfg and key not in meta_with_id:
+                    val = monitoring_cfg.get(key)
+                    try:
+                        ival = int(val)
+                    except Exception:
+                        continue
+                    if ival > 0:
+                        meta_with_id[key] = ival
     except Exception:
         # Never fail job creation because of meta enrichment
         pass
