@@ -86,6 +86,20 @@ MAX_HYPOTHESIS_EVOLUTION = 5_000
 MAX_OPTION_C_DIAGNOSTICS = 5_000
 MAX_SWARM_CONTRACTS = 5_000
 
+# Snapshot settings for Streamlit timeline and long runs
+DEFAULT_SNAPSHOT_SECTIONS = [
+    "run_state",
+    "goal_index",
+    "learning_burst",
+    "cycles",
+    "discoveries",
+    "milestones",
+    "benchmarks",
+]
+
+# Hard cap per run so snapshot folders cannot explode
+MAX_SNAPSHOTS_PER_RUN = 200
+
 
 def _utc_now_iso() -> str:
     """Return current UTC time in ISO 8601 with Z suffix."""
@@ -206,6 +220,13 @@ class MemoryStore:
         self.run_state_path = os.path.join(self.base_dir, "run_state.json")
         self.watchdog_path = os.path.join(self.base_dir, "watchdog.json")
         self.worker_state_path = os.path.join(self.base_dir, "worker_state.json")
+
+        # Snapshots directory for run specific snapshots
+        self.snapshot_root = os.path.join(self.base_dir, "snapshots")
+        try:
+            os.makedirs(self.snapshot_root, exist_ok=True)
+        except Exception:
+            pass
 
         # Ensure the directory exists (supports plain filenames like "memory.json")
         dirpath = os.path.dirname(self.memory_file)
@@ -477,6 +498,132 @@ class MemoryStore:
             return path
 
         return path
+
+    def write_snapshot(
+        self,
+        *,
+        run_id: str,
+        label: Optional[str] = None,
+        cycle_index: Optional[int] = None,
+        reason: str = "interval",
+        include_sections: Optional[List[str]] = None,
+        max_snapshots_per_run: Optional[int] = None,
+    ) -> Optional[str]:
+        """Write a compact snapshot for a specific run_id.
+
+        This is the method engine_worker should call when snapshot_config
+        says it is time to record a snapshot.
+        """
+        if not run_id:
+            return None
+
+        sections = include_sections or list(DEFAULT_SNAPSHOT_SECTIONS)
+        now = _utc_now_iso()
+
+        # Build payload with only the requested sections
+        snapshot_sections: Dict[str, Any] = {}
+        for key in sections:
+            if key in self._data:
+                try:
+                    value = self._data.get(key)
+                    if isinstance(value, (dict, list)):
+                        snapshot_sections[key] = json.loads(json.dumps(value))
+                    else:
+                        snapshot_sections[key] = value
+                except Exception:
+                    # If something cannot be serialized, skip that section
+                    continue
+
+        payload: Dict[str, Any] = {
+            "schema_version": MEMORY_SCHEMA_VERSION,
+            "created_at": now,
+            "run_id": run_id,
+            "label": label,
+            "cycle_index": cycle_index,
+            "reason": reason,
+            "sections": sections,
+            "data": snapshot_sections,
+        }
+
+        # Per run directory under snapshot_root
+        run_dir = os.path.join(self.snapshot_root, run_id)
+        try:
+            os.makedirs(run_dir, exist_ok=True)
+        except Exception:
+            return None
+
+        # File name encodes timestamp and cycle index
+        cycle_tag = f"c{cycle_index}" if cycle_index is not None else "cNA"
+        filename = f"snapshot-{now.replace(':', '').replace('-', '')}-{cycle_tag}.json"
+        path = os.path.join(run_dir, filename)
+
+        # Use the same atomic write pattern as _write_json_file
+        try:
+            self._write_json_file(path, payload)
+        except Exception:
+            return None
+
+        # Optional simple pruning inside the run folder
+        cap = (
+            max_snapshots_per_run
+            if isinstance(max_snapshots_per_run, int) and max_snapshots_per_run > 0
+            else MAX_SNAPSHOTS_PER_RUN
+        )
+        try:
+            files = sorted(
+                [
+                    f
+                    for f in os.listdir(run_dir)
+                    if f.startswith("snapshot-") and f.endswith(".json")
+                ]
+            )
+            if len(files) > cap:
+                excess = len(files) - cap
+                for old_name in files[:excess]:
+                    try:
+                        os.remove(os.path.join(run_dir, old_name))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        return path
+
+    def maybe_write_snapshot_from_config(
+        self,
+        *,
+        run_id: str,
+        cycle_index: Optional[int],
+        snapshot_config: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        """Helper that reads a simple snapshot_config dict.
+
+        Expected keys in snapshot_config:
+            enabled: bool
+            interval_cycles: Optional[int]
+            include_sections: Optional[List[str]]
+            max_snapshots_per_run: Optional[int]
+            label: Optional[str]
+        """
+        if not snapshot_config or not snapshot_config.get("enabled"):
+            return None
+
+        interval = snapshot_config.get("interval_cycles")
+        if isinstance(interval, int) and interval > 0 and cycle_index is not None:
+            if cycle_index <= 0 or cycle_index % interval != 0:
+                return None
+
+        include_sections = snapshot_config.get("include_sections")
+        max_snapshots = snapshot_config.get("max_snapshots_per_run")
+
+        return self.write_snapshot(
+            run_id=run_id,
+            label=snapshot_config.get("label"),
+            cycle_index=cycle_index,
+            reason="interval",
+            include_sections=include_sections,
+            max_snapshots_per_run=max_snapshots,
+        )
 
     # Simple schema and file info for UI or engine_worker dashboards
     def get_schema_info(self) -> Dict[str, Any]:
