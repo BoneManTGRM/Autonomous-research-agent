@@ -2136,7 +2136,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             final_current = macro_total
             final_total = macro_total
 
-        # Final progress write (macro scale)
+        # Final progress write (macro scale) – this will also delete the progress file
+        # because status="finished".
         _write_job_progress(
             job.run_id,
             status="finished",
@@ -2324,6 +2325,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         except Exception:
             print("Failed to write result JSON for job, see logs for details.")
 
+        # Final worker_state: always mark this job as no longer running
         _update_worker_state(
             agent,
             status="idle",
@@ -2353,7 +2355,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         print(tb)
         sys.stdout.flush()
 
-        # Progress -> error
+        # Progress -> error (also cleans up the progress file).
         _write_job_progress(
             job.run_id,
             status="error",
