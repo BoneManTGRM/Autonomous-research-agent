@@ -1635,6 +1635,9 @@ def _write_job_progress(
 
     This version also writes a console log line including a cycles counter
     like 3/100 or 76/1000 whenever current and total are available.
+
+    When status is "finished" or "error", the progress file is cleaned up
+    so it no longer appears under the active runs listing.
     """
     if progress_path is None:
         return
@@ -1672,6 +1675,16 @@ def _write_job_progress(
             parts.append(f"note={note}")
         print(" ".join(parts))
         sys.stdout.flush()
+
+        # Cleanup: once a job is finished or errored, remove the progress file
+        # so it no longer shows up under "active" in the UI debug panel.
+        if status.lower() in {"finished", "error", "stopped"}:
+            try:
+                if path.exists():
+                    path.unlink()
+            except Exception:
+                # Never crash on cleanup
+                pass
 
     except Exception:
         # Progress should never crash the worker
