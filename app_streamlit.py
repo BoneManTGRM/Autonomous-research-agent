@@ -1905,7 +1905,7 @@ def main() -> None:
         layout="wide",
     )
 
-    st.title("Autonomous Research Agent")
+    st.title("ARA powered by Reparodynamics")
     st.caption(
         "Finite mode only • Queue based runs • Engine worker processes jobs from ARA_RUNS_DIR/pending.\n"
         "This UI never runs TGRM loops directly. It only queues jobs and visualizes finished artifacts."
