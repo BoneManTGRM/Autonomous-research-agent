@@ -864,6 +864,81 @@ def _write_cycles_and_run_state(
         pass
 
 
+def _write_snapshot(
+    agent: CoreAgent,
+    *,
+    run_id: str,
+    mode: str,
+    goal: str,
+    domain: str,
+    snapshot_cfg: Dict[str, Any],
+    current_cycle: Optional[int] = None,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Best effort snapshot writer.
+
+    This is intentionally tolerant:
+      - If MemoryStore exposes a write_snapshot-style API, use it.
+      - Otherwise, it falls back to storing snapshots into a generic
+        `snapshots[run_id]` list on the underlying data structure.
+
+    Snapshot behavior (enabled flag) is controlled by:
+      - snapshot_cfg["enabled"] (bool)
+    """
+    if not snapshot_cfg or not snapshot_cfg.get("enabled", False):
+        return
+
+    ms = _get_memory_store(agent)
+    if ms is None:
+        return
+
+    ts = datetime.utcnow().isoformat() + "Z"
+    payload: Dict[str, Any] = {
+        "run_id": run_id,
+        "mode": mode,
+        "goal": goal,
+        "domain": domain,
+        "current_cycle": current_cycle,
+        "config": dict(snapshot_cfg),
+        "diagnostics": diagnostics or {},
+        "created_utc": ts,
+    }
+
+    try:
+        if hasattr(ms, "write_snapshot"):
+            fn = getattr(ms, "write_snapshot")
+            try:
+                # Common pattern: (run_id, snapshot)
+                fn(run_id, payload)  # type: ignore[arg-type]
+            except TypeError:
+                try:
+                    # Alternative: named arguments
+                    fn(run_id=run_id, snapshot=payload)  # type: ignore[arg-type]
+                except TypeError:
+                    # Fallback: single snapshot arg
+                    fn(snapshot=payload)  # type: ignore[arg-type]
+        else:
+            # Fallback into generic data map
+            data_attr = getattr(ms, "data", getattr(ms, "_data", None))
+            if isinstance(data_attr, dict):
+                snaps = data_attr.setdefault("snapshots", {})
+                lst = snaps.setdefault(run_id, [])
+                lst.append(payload)
+    except Exception:
+        # Snapshots must never crash the worker
+        pass
+    finally:
+        # Try to flush store to disk so snapshot appears quickly
+        try:
+            if hasattr(ms, "save"):
+                ms.save()  # type: ignore[call-arg]
+            elif hasattr(ms, "_save"):
+                ms._save()  # type: ignore[call-arg]
+        except Exception:
+            pass
+
+
 def _run_post_run_intelligence(
     agent: CoreAgent,
     *,
@@ -1041,6 +1116,17 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         preset_cfg.get("default_runtime_profile"),
     )
 
+    # Snapshot configuration: merge preset snapshot with job overrides
+    snapshot_cfg: Dict[str, Any] = {}
+    preset_snapshot = preset_cfg.get("snapshot")
+    if isinstance(preset_snapshot, dict):
+        snapshot_cfg.update(preset_snapshot)
+    job_snapshot = cfg.get("snapshot")
+    if isinstance(job_snapshot, dict):
+        snapshot_cfg.update(job_snapshot)
+    snapshot_enabled = bool(cfg.get("snapshot_enabled", snapshot_cfg.get("enabled", False)))
+    snapshot_cfg["enabled"] = snapshot_enabled
+
     mode = str(cfg.get("mode", cfg.get("engine_mode", "single"))).lower()
     role = str(cfg.get("role", "agent"))
     roles_list: Optional[List[str]] = None
@@ -1153,6 +1239,8 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         "watchdog_minutes": watchdog_minutes,
         "source_controls": source_controls,
         "forever": forever,
+        "snapshot_enabled": snapshot_enabled,
+        "snapshot": snapshot_cfg,
     }
 
     env_keys_for_fingerprint = [
@@ -1193,6 +1281,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     print(f"Source controls: {source_controls}")
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     print(f"Experiment fingerprint: {experiment_fingerprint}")
+    print(f"Snapshot enabled: {snapshot_enabled} cfg={snapshot_cfg}")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -1303,6 +1392,22 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             diagnostics=diag,
         )
 
+        # Final snapshot at end of direct job (if enabled)
+        if snapshot_enabled:
+            try:
+                _write_snapshot(
+                    agent,
+                    run_id=run_id,
+                    mode=mode,
+                    goal=goal,
+                    domain=domain,
+                    snapshot_cfg=snapshot_cfg,
+                    current_cycle=len(normalized_cycles),
+                    diagnostics=diag,
+                )
+            except Exception:
+                pass
+
         intelligence_info = _run_post_run_intelligence(
             agent,
             mode=mode,
@@ -1371,6 +1476,8 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "job_meta": job_meta,
             "job_config": cfg,
             "prompt_details": prompt_details,
+            "snapshot_enabled": snapshot_enabled,
+            "snapshot": snapshot_cfg,
         }
         if overall_summary:
             result_obj["summary"] = overall_summary
@@ -1427,7 +1534,25 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "job_config": cfg,
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
+            "snapshot_enabled": snapshot_enabled,
+            "snapshot": snapshot_cfg,
         }
+
+        # Best-effort snapshot of partial state if enabled
+        if snapshot_enabled:
+            try:
+                _write_snapshot(
+                    agent,
+                    run_id=run_id,
+                    mode=mode,
+                    goal=goal,
+                    domain=domain,
+                    snapshot_cfg=snapshot_cfg,
+                    current_cycle=None,
+                    diagnostics=None,
+                )
+            except Exception:
+                pass
 
         try:
             # Log a milestone so the UI can see prompt and error context
@@ -1592,6 +1717,17 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         preset_cfg.get("default_runtime_profile"),
     )
 
+    # Snapshot configuration: preset + job overrides
+    snapshot_cfg: Dict[str, Any] = {}
+    preset_snapshot = preset_cfg.get("snapshot")
+    if isinstance(preset_snapshot, dict):
+        snapshot_cfg.update(preset_snapshot)
+    job_snapshot = cfg.get("snapshot")
+    if isinstance(job_snapshot, dict):
+        snapshot_cfg.update(job_snapshot)
+    snapshot_enabled = bool(cfg.get("snapshot_enabled", snapshot_cfg.get("enabled", False)))
+    snapshot_cfg["enabled"] = snapshot_enabled
+
     mode = str(cfg.get("mode", cfg.get("engine_mode", "single"))).lower()
     role = str(cfg.get("role", "agent"))
     roles_list: Optional[List[str]] = None
@@ -1703,6 +1839,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         "watchdog_minutes": watchdog_minutes,
         "source_controls": source_controls,
         "forever": forever,
+        "snapshot_enabled": snapshot_enabled,
+        "snapshot": snapshot_cfg,
     }
 
     env_keys_for_fingerprint = [
@@ -1745,6 +1883,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     print(f"Source controls: {source_controls}")
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     print(f"Experiment fingerprint: {experiment_fingerprint}")
+    print(f"Snapshot enabled: {snapshot_enabled} cfg={snapshot_cfg}")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -1825,6 +1964,29 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                     last_progress_current = cur_int
                 if tot_int is not None:
                     last_progress_total = tot_int
+
+                # Snapshot hook on interval if enabled
+                if snapshot_enabled and cur_int is not None:
+                    try:
+                        interval = int(
+                            snapshot_cfg.get(
+                                "interval_cycles",
+                                snapshot_cfg.get("interval", 25),
+                            )
+                        )
+                    except Exception:
+                        interval = 25
+                    if interval > 0 and cur_int % interval == 0:
+                        _write_snapshot(
+                            agent,
+                            run_id=job.run_id,
+                            mode=mode,
+                            goal=goal,
+                            domain=domain,
+                            snapshot_cfg=snapshot_cfg,
+                            current_cycle=cur_int,
+                            diagnostics=None,
+                        )
 
                 _write_job_progress(
                     job.run_id,
@@ -1999,6 +2161,22 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             diagnostics=diag,
         )
 
+        # Final snapshot at the end of the job (if enabled)
+        if snapshot_enabled:
+            try:
+                _write_snapshot(
+                    agent,
+                    run_id=job.run_id,
+                    mode=mode,
+                    goal=goal,
+                    domain=domain,
+                    snapshot_cfg=snapshot_cfg,
+                    current_cycle=final_current,
+                    diagnostics=diag,
+                )
+            except Exception:
+                pass
+
         intelligence_info = _run_post_run_intelligence(
             agent,
             mode=mode,
@@ -2085,6 +2263,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "experiment_fingerprint": experiment_fingerprint,
                 "prompt_details": prompt_details,
                 "forever": forever,
+                "snapshot_enabled": snapshot_enabled,
+                "snapshot": snapshot_cfg,
             }
             result_obj.update(fr)
 
@@ -2111,6 +2291,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "job_meta": job_meta,
                 "job_config": cfg,
                 "prompt_details": prompt_details,
+                "snapshot_enabled": snapshot_enabled,
+                "snapshot": snapshot_cfg,
             }
             result_obj = _attach_top_level_defaults(result_obj, normalized_cycles, diag)
 
@@ -2188,7 +2370,25 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             "job_config": cfg,
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
+            "snapshot_enabled": snapshot_enabled,
+            "snapshot": snapshot_cfg,
         }
+
+        # Best-effort error snapshot if enabled
+        if snapshot_enabled:
+            try:
+                _write_snapshot(
+                    agent,
+                    run_id=job.run_id,
+                    mode=mode,
+                    goal=goal,
+                    domain=domain,
+                    snapshot_cfg=snapshot_cfg,
+                    current_cycle=None,
+                    diagnostics=None,
+                )
+            except Exception:
+                pass
 
         try:
             if mark_job_error is not None:
