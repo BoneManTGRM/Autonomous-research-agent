@@ -34,7 +34,7 @@ from typing import Dict, Any, List, Optional
 import copy
 
 # Simple version tag so the app and UI can display which preset set is loaded.
-PRESETS_VERSION: str = "2025-12-13-finite-only-v2"
+PRESETS_VERSION: str = "2025-12-14-finite-snapshots-v1"
 
 # ---------------------------------------------------------------------
 # Global Runtime Profiles (applies for all presets)
@@ -197,6 +197,32 @@ DEFAULT_ADVANCED_RYE_EXPECTATIONS: Dict[str, Any] = {
     "stability_index_target": 0.6,       # 0 to 1 scale
     "recovery_momentum_target": 0.1,     # positive values show recovery after perturbation
     "max_oscillation_std": 0.25,
+}
+
+# ---------------------------------------------------------------------
+# Global snapshot defaults
+#
+# This is the simple config block that should always be present in the
+# job config. The engine and MemoryStore can read these keys directly.
+#
+# Presets can override any of these fields, e.g. longevity can turn
+# snapshots on by default while others stay off.
+# ---------------------------------------------------------------------
+SNAPSHOT_CONFIG_TEMPLATE: Dict[str, Any] = {
+    # Master toggle for run snapshots
+    "enabled": False,
+    # Take a snapshot every N outer cycles / rounds
+    "interval_cycles": 25,
+    # Keep at most this many snapshot files per run
+    "max_files": 40,
+    # What to include
+    "include_memory": True,
+    "include_run_state": True,
+    "include_discoveries": True,
+    "include_rye_metrics": True,
+    "include_swarm_state": True,
+    # Optional note that can be written into the snapshot metadata
+    "note": None,
 }
 
 # ---------------------------------------------------------------------
@@ -659,6 +685,15 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             },
         },
 
+        # Snapshot defaults (off by default for general preset)
+        # Both the block and the top-level boolean are present so job
+        # configs always have a simple, predictable shape.
+        "snapshot": {
+            **SNAPSHOT_CONFIG_TEMPLATE,
+            "enabled": False,
+        },
+        "snapshot_enabled": False,
+
         # Learning hints that combine memory and advanced RYE metrics
         "learning_hints": {
             "use_advanced_rye_metrics": True,
@@ -1023,6 +1058,19 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                 "reinforce_high_value_notes": True,
             },
         },
+
+        # Snapshot defaults (ON by default for longevity so you do not
+        # have to toggle it every run)
+        "snapshot": {
+            **SNAPSHOT_CONFIG_TEMPLATE,
+            "enabled": True,
+            # Slightly tighter interval and more files for long health runs
+            "interval_cycles": 20,
+            "max_files": 80,
+            "include_biomarkers": True,
+        },
+        # Redundant top-level flag for compatibility with job builders
+        "snapshot_enabled": True,
 
         # Biomarker intelligence (maxed out)
         "biomarker_intelligence": {
@@ -1516,6 +1564,13 @@ PRESETS: Dict[str, Dict[str, Any]] = {
                 "reinforce_high_value_notes": True,
             },
         },
+
+        # Snapshot defaults (off by default for math)
+        "snapshot": {
+            **SNAPSHOT_CONFIG_TEMPLATE,
+            "enabled": False,
+        },
+        "snapshot_enabled": False,
 
         # Biomarker intelligence stays off for math
         "biomarker_intelligence": {
