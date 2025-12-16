@@ -4,7 +4,7 @@ Enhanced Streamlit interface for the Autonomous Research Agent.
 
 Features:
 - Finite mode only with manual cycle budgets (no timed presets in this build)
-- Researcher + Critic multi agent mode
+- Researcher plus Critic multi agent mode
 - Swarm mode with up to dozens of mini agents
 - Domain presets (General, Longevity, Math)
 - PubMed / Semantic Scholar ingestion controls
@@ -2575,7 +2575,13 @@ def main() -> None:
         if not active_jobs:
             st.info("No active runs detected by run_jobs.")
         else:
+            # Deduplicate active jobs by run_id in case backend reports both stale and current
+            seen_ids: set[str] = set()
             for job in active_jobs:
+                jid = _get_job_id(job)
+                if jid in seen_ids:
+                    continue
+                seen_ids.add(jid)
                 with st.container():
                     render_job_summary(job)
                     st.caption("Engine worker is currently processing this run.")
