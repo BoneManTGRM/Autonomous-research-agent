@@ -1612,6 +1612,32 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _cleanup_active_job_files(run_id: str) -> None:
+    """
+    Best-effort cleanup for active job descriptors once a job is finished
+    or errors so the UI and queue do not think the job is still active.
+
+    Only touches files inside BASE_DIR / "active" and never deletes
+    anything from finished or error folders.
+    """
+    try:
+        active_dir = BASE_DIR / "active"
+        if not active_dir.exists():
+            return
+
+        patterns = [
+            f"{run_id}_job.json",   # preferred naming
+            f"{run_id}.json",       # legacy naming, if it was ever used
+        ]
+        for pattern in patterns:
+            p = active_dir / pattern
+            if p.exists():
+                p.unlink()
+    except Exception:
+        # Never crash the worker because cleanup failed
+        return
+
+
 def _write_job_progress(
     run_id: str,
     status: str,
@@ -1637,7 +1663,8 @@ def _write_job_progress(
     like 3/100 or 76/1000 whenever current and total are available.
 
     When status is "finished" or "error", the progress file is cleaned up
-    so it no longer appears under the active runs listing.
+    so it no longer appears under the active runs listing, and active job
+    descriptors are also cleaned up in BASE_DIR / "active".
     """
     if progress_path is None:
         return
@@ -1677,7 +1704,7 @@ def _write_job_progress(
         sys.stdout.flush()
 
         # Cleanup: once a job is finished or errored, remove the progress file
-        # so it no longer shows up under "active" in the UI debug panel.
+        # and any active job descriptor so it no longer shows up as active.
         if status.lower() in {"finished", "error", "stopped"}:
             try:
                 if path.exists():
@@ -1685,6 +1712,9 @@ def _write_job_progress(
             except Exception:
                 # Never crash on cleanup
                 pass
+            # New: best-effort removal of active job file so only the current
+            # job shows as active in the UI.
+            _cleanup_active_job_files(run_id)
 
     except Exception:
         # Progress should never crash the worker
@@ -2137,7 +2167,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             final_total = macro_total
 
         # Final progress write (macro scale) – this will also delete the progress file
-        # because status="finished".
+        # because status="finished", and clean any active job descriptor.
         _write_job_progress(
             job.run_id,
             status="finished",
@@ -2355,7 +2385,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         print(tb)
         sys.stdout.flush()
 
-        # Progress -> error (also cleans up the progress file).
+        # Progress -> error (also cleans up the progress file and active job file).
         _write_job_progress(
             job.run_id,
             status="error",
