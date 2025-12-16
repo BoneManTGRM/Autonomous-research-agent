@@ -456,15 +456,21 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
                     st.write(f"• {h}")
 
     # Citations
-    if cycle_summary.get("citations"):
+    if cycle_summary.get("citations") or cycle_summary.get("sources") or cycle_summary.get("source_list"):
         with st.expander("Citations for this cycle"):
-            for c in cycle_summary["citations"]:
+            cites = (
+                cycle_summary.get("citations")
+                or cycle_summary.get("sources")
+                or cycle_summary.get("source_list")
+                or []
+            )
+            for c in cites:
                 if not isinstance(c, dict):
                     st.write(f"- {c}")
                     continue
-                src = c.get("source", "")
+                src = c.get("source", "") or c.get("provider", "")
                 title = c.get("title", "")
-                url = c.get("url", "")
+                url = c.get("url", "") or c.get("link", "")
                 st.write(f"- [{src}] {title} - {url}")
 
 
@@ -1274,13 +1280,56 @@ def load_discovery_log() -> List[Dict[str, Any]]:
 
 
 def load_snapshots() -> List[Dict[str, Any]]:
-    """Load snapshot JSON files as a list of {name, timestamp, data}."""
-    snapshot_dir_candidates = [
+    """Load snapshot JSON files as a list of {name, timestamp, data}.
+
+    Looks in legacy logs paths and also under run specific snapshot
+    directories such as <runs_root>/<run_id>/snapshots when present.
+    """
+    snapshot_dir_candidates: List[Path] = [
         REPO_ROOT / "logs" / "snapshots",
         REPO_ROOT / "logs" / "snapshot",
     ]
+
+    # Also look under the runs root for per run snapshot folders
+    try:
+        runs_root_path = Path(get_runs_root())
+        if runs_root_path.exists() and runs_root_path.is_dir():
+            for run_dir in runs_root_path.iterdir():
+                if not run_dir.is_dir():
+                    continue
+                snap_dir = run_dir / "snapshots"
+                if snap_dir.exists() and snap_dir.is_dir():
+                    snapshot_dir_candidates.append(snap_dir)
+    except Exception:
+        pass
+
+    # If RUNS_FINISHED_DIR is configured, check for snapshots inside each run folder there too
+    if isinstance(RUNS_FINISHED_DIR, Path):
+        try:
+            for run_dir in RUNS_FINISHED_DIR.iterdir():
+                if not run_dir.is_dir():
+                    continue
+                snap_dir = run_dir / "snapshots"
+                if snap_dir.exists() and snap_dir.is_dir():
+                    snapshot_dir_candidates.append(snap_dir)
+        except Exception:
+            pass
+
+    # Deduplicate directories
+    seen_dirs: set[str] = set()
+    unique_snapshot_dirs: List[Path] = []
+    for d in snapshot_dir_candidates:
+        try:
+            key = str(d.resolve())
+        except Exception:
+            key = str(d)
+        if key in seen_dirs:
+            continue
+        seen_dirs.add(key)
+        unique_snapshot_dirs.append(d)
+
     snapshots: List[Dict[str, Any]] = []
-    for base in snapshot_dir_candidates:
+    for base in unique_snapshot_dirs:
         if not base.exists() or not base.is_dir():
             continue
         for path in sorted(base.glob("*.json")):
@@ -1341,17 +1390,43 @@ def extract_hypotheses_from_history(history: List[Dict[str, Any]]) -> List[Dict[
 
 
 def extract_citations_from_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Flatten citations across all cycles into a list with cycle info for the citation viewer."""
+    """Flatten citations across all cycles into a list with cycle info for the citation viewer.
+
+    Supports both classic per cycle 'citations' lists and alternate
+    fields like 'sources' or 'source_list' that some workers use.
+    """
     results: List[Dict[str, Any]] = []
     for entry in history:
         cycle_idx = entry.get("cycle")
         role = entry.get("role", "agent")
         domain = entry.get("domain", "general")
         ts = entry.get("timestamp")
-        cites = entry.get("citations") or []
-        for c in cites:
+
+        raw_cites = (
+            entry.get("citations")
+            or entry.get("sources")
+            or entry.get("source_list")
+            or []
+        )
+
+        for c in raw_cites:
+            # Allow simple string citations such as plain URLs
             if not isinstance(c, dict):
+                url = str(c)
+                results.append(
+                    {
+                        "cycle": cycle_idx,
+                        "role": role,
+                        "domain": domain,
+                        "timestamp": ts,
+                        "source": "",
+                        "title": url,
+                        "url": url,
+                        "snippet": "",
+                    }
+                )
                 continue
+
             source = c.get("source") or c.get("provider") or ""
             title = c.get("title") or ""
             url = c.get("url") or c.get("link") or ""
@@ -1731,7 +1806,22 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
         if isinstance(cites, list):
             for c in cites:
                 if not isinstance(c, dict):
+                    # treat plain strings as URLs or labels
+                    url = str(c)
+                    top_level_citations.append(
+                        {
+                            "cycle": None,
+                            "role": "run",
+                            "domain": base.get("domain") or "general",
+                            "timestamp": default_ts,
+                            "source": "",
+                            "title": url,
+                            "url": url,
+                            "snippet": "",
+                        }
+                    )
                     continue
+
                 source = c.get("source") or c.get("provider") or ""
                 title = c.get("title") or ""
                 url = c.get("url") or c.get("link") or ""
