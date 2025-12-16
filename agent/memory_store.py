@@ -66,9 +66,11 @@ except Exception:  # pragma: no cover
 # ----------------------------------------------------------------------
 MEMORY_SCHEMA_VERSION = 4
 
-# Hard but generous caps for 24 to 90 day or long runs
-# These mirror the events and discoveries bounding you already had.
-# They are global caps; older items are dropped first.
+# Hard but generous caps for long runs.
+# Important: these caps bound how much history is retained inside memory.json.
+# They do NOT limit how many cycles the engine can actually execute.
+# When a list exceeds its cap, the oldest entries are dropped and new
+# cycles or events continue to be logged normally.
 MAX_NOTES = 50_000
 MAX_CYCLES = 50_000
 MAX_HYPOTHESES = 20_000
@@ -644,6 +646,56 @@ class MemoryStore:
     def get_last_save_error(self) -> Optional[str]:
         """Return the last save error (if any) for debugging."""
         return self._last_save_error
+
+    def get_memory_overview(self) -> Dict[str, Any]:
+        """Return a compact overview of memory contents for diagnostics.
+
+        This is a low cost way for UIs or controllers to see how large the
+        main collections are and whether the caps are being approached.
+        """
+        overview: Dict[str, Any] = {
+            "schema_version": int(self._data.get("schema_version", MEMORY_SCHEMA_VERSION)),
+            "file_path": os.path.abspath(self.memory_file),
+            "base_dir": self.base_dir,
+            "counts": {
+                "notes": len(self._data.get("notes", [])),
+                "cycles": len(self._data.get("cycles", [])),
+                "hypotheses": len(self._data.get("hypotheses", [])),
+                "citations": len(self._data.get("citations", [])),
+                "biomarkers": len(self._data.get("biomarkers", [])),
+                "events": len(self._data.get("events", [])),
+                "discoveries": len(self._data.get("discoveries", [])),
+                "tool_events": len(self._data.get("tool_events", [])),
+                "milestones": len(self._data.get("milestones", [])),
+                "hypothesis_evolution": len(self._data.get("hypothesis_evolution", [])),
+                "option_c_diagnostics": len(self._data.get("option_c_diagnostics", [])),
+                "swarm_contracts": len(self._data.get("swarm_contracts", [])),
+                "benchmarks": len(self._data.get("benchmarks", [])),
+                "run_manifests": len(self._data.get("run_manifests", {})),
+            },
+            "caps": {
+                "MAX_NOTES": MAX_NOTES,
+                "MAX_CYCLES": MAX_CYCLES,
+                "MAX_HYPOTHESES": MAX_HYPOTHESES,
+                "MAX_CITATIONS": MAX_CITATIONS,
+                "MAX_BIOMARKERS": MAX_BIOMARKERS,
+                "MAX_EVENTS": MAX_EVENTS,
+                "MAX_DISCOVERIES": MAX_DISCOVERIES,
+                "MAX_TOOL_EVENTS": MAX_TOOL_EVENTS,
+                "MAX_RUN_MANIFESTS": MAX_RUN_MANIFESTS,
+                "MAX_MILESTONES": MAX_MILESTONES,
+                "MAX_HYPOTHESIS_EVOLUTION": MAX_HYPOTHESIS_EVOLUTION,
+                "MAX_OPTION_C_DIAGNOSTICS": MAX_OPTION_C_DIAGNOSTICS,
+                "MAX_SWARM_CONTRACTS": MAX_SWARM_CONTRACTS,
+                "MAX_BENCHMARKS": MAX_BENCHMARKS,
+            },
+            "last_save_error": self._last_save_error,
+        }
+        try:
+            overview["file_size_bytes"] = os.path.getsize(self.memory_file)
+        except Exception:
+            overview["file_size_bytes"] = None
+        return overview
 
     # Optional hard reset for dev and testing
     def reset_memory(self, keep_run_state: bool = False) -> None:
