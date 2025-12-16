@@ -1764,7 +1764,7 @@ class TGRMLoop:
         List[str],
         List[Dict[str, Any]],
         Dict[str, Any],
-    ]]:
+    ]:
         """Apply repairs to address detected issues."""
         repair_actions: List[Dict[str, str]] = []
         notes_added: List[str] = []
@@ -2965,6 +2965,7 @@ class TGRMLoop:
         returning the list of cycle summaries plus a tiny aggregate view.
         """
         goals_list = list(goals) or [""]
+
         cycles: List[Dict[str, Any]] = []
 
         for i in range(total_cycles):
