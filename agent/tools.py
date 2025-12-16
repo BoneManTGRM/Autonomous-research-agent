@@ -59,26 +59,29 @@ try:
 except Exception:
     sqlalchemy = None  # type: ignore
 
-# EXTREME MODE real web research tool (optional external search + truncation + caching)
+# Tavily based web search / fetch tool (tools_web.BrowserTool)
 try:
-    from .web_search import WebResearchTool  # type: ignore
+    from .tools_web import BrowserTool as TavilyBrowserTool  # type: ignore
 except Exception:
-    WebResearchTool = None  # type: ignore
-
+    TavilyBrowserTool = None  # type: ignore
 
 # Singleton instance for module level web_search bridge
-_WEB_RESEARCH_INSTANCE: Optional["WebResearchTool"] = None  # type: ignore
+_WEB_RESEARCH_INSTANCE: Optional[Any] = None
 
 
-def _get_web_research_instance() -> Optional["WebResearchTool"]:  # type: ignore
-    """Lazily construct a shared WebResearchTool instance."""
+def _get_web_research_instance() -> Optional[Any]:
+    """
+    Lazily construct a shared TavilyBrowserTool instance.
+
+    This is the backing implementation for web_search when available.
+    """
     global _WEB_RESEARCH_INSTANCE
     if _WEB_RESEARCH_INSTANCE is not None:
         return _WEB_RESEARCH_INSTANCE
-    if WebResearchTool is None:
+    if TavilyBrowserTool is None:
         return None
     try:
-        _WEB_RESEARCH_INSTANCE = WebResearchTool()
+        _WEB_RESEARCH_INSTANCE = TavilyBrowserTool()
     except Exception:
         _WEB_RESEARCH_INSTANCE = None
     return _WEB_RESEARCH_INSTANCE
@@ -181,7 +184,7 @@ class ToolUsage:
 
 
 # ----------------------------------------------------------
-# Browser tools
+# Browser tools (Playwright/requests scraper)
 # ----------------------------------------------------------
 
 
@@ -218,20 +221,11 @@ class BrowserAutomationResult:
 
 class BrowserTool:
     """
-    Headless browser and scraper hybrid.
+    Headless browser and scraper hybrid (Playwright + requests).
 
-    It tries to use Playwright if available.
-    If not, it falls back to simple HTTP GET plus BeautifulSoup parsing.
-
-    For serious automation, use run_actions with a list of steps like:
-        [
-            {"op": "goto", "url": "..."},
-            {"op": "click", "selector": "#login"},
-            {"op": "fill", "selector": "#email", "value": "user@example.com"},
-            {"op": "fill", "selector": "#password", "value": "secret"},
-            {"op": "click", "selector": "button[type=submit"},
-            {"op": "wait_for", "selector": "#dashboard", "timeout_ms": 10000},
-        ]
+    This is focused on navigation, scraping, and simple automation.
+    High level web search is handled via the TavilyBrowserTool bridge
+    in web_search().
     """
 
     def __init__(self, user_agent: Optional[str] = None, timeout: float = 20.0) -> None:
@@ -1148,7 +1142,7 @@ class DataPipelines:
 
 
 # ----------------------------------------------------------
-# EXTREME MODE web search bridge
+# Tavily based web search bridge
 # ----------------------------------------------------------
 
 
@@ -1164,12 +1158,12 @@ def web_search(
     """
     Unified web search entry point for the agent.
 
-    This is a bridge into WebResearchTool (EXTREME MODE external search module).
+    This is a bridge into the Tavily based BrowserTool in tools_web.
     It also maintains the classic signature expected by CoreAgent / engine_worker.
 
     - Records tool_usage.web_calls
-    - Uses external search with query length clamping when available
-    - Falls back to a browser stub if WebResearchTool is missing
+    - Uses external search when available
+    - Falls back to a browser stub if Tavily is missing or disabled
     """
     if tool_usage is not None:
         tool_usage.record_web_call(query)
@@ -1192,36 +1186,42 @@ def web_search(
 
     tool = _get_web_research_instance()
 
-    # Map search_depth to WebResearchTool level
+    # Map search_depth to something sensible for TavilyBrowserTool
     depth_norm = (search_depth or "advanced").strip().lower()
     if depth_norm in {"basic", "shallow", "cheap"}:
-        level = 1
+        mapped_depth = "basic"
     elif depth_norm in {"deep", "deepdive", "max"}:
-        level = 3
+        mapped_depth = "advanced"
     else:
-        level = 2
+        mapped_depth = "advanced"
 
-    # Optional swarm metadata
-    agent_role = extra.get("agent_role")
-    swarm_id = extra.get("swarm_id")
-
-    # If EXTREME MODE search is available, delegate
     if tool is not None:
         started = time.time()
         results = tool.search(
             query=query,
-            level=level,
             max_results=max_results,
+            search_depth=mapped_depth,
+            include_answer=False,
+            include_raw_content=False,
             topic=topic,
-            agent_role=agent_role,
-            swarm_id=swarm_id,
+            time_range=extra.get("time_range"),
+            auto_parameters=bool(extra.get("auto_parameters", False)),
+            include_images=bool(extra.get("include_images", False)),
         )
         elapsed = time.time() - started
 
-        caps = tool.describe_capabilities()
-        stubbed = bool(caps.get("stub_mode", False))
-
-        search_energy = tool.estimate_energy_cost(level=level, max_results=max_results)
+        caps = {}
+        try:
+            caps = tool.describe_capabilities()
+        except Exception:
+            caps = {}
+        # tools_web.BrowserTool.describe_capabilities exposes stub_mode and mode
+        stubbed = bool(
+            caps.get(
+                "stub_mode",
+                True if caps.get("mode") not in {None, "real"} else False,
+            )
+        )
 
         return {
             "query": query,
@@ -1230,7 +1230,7 @@ def web_search(
             "response_time": elapsed,
             "request_id": None,
             "info_gain": None,
-            "search_energy": search_energy,
+            "search_energy": None,
             "difficulty": None,
             "semantic_diversity": None,
         }
@@ -1243,7 +1243,7 @@ def web_search(
     return {
         "query": query,
         "stubbed": True,
-        "error": page.error or "WebResearchTool module not available",
+        "error": page.error or "TavilyBrowserTool not available",
         "results": [
             {
                 "title": page.title or "",
@@ -1319,7 +1319,7 @@ class Toolbelt:
         self.browser = BrowserTool()
         self.sandbox = CodeSandbox()
         self.data = DataPipelines()
-        # Expose WebResearchTool instance for UIs or diagnostics if needed
+        # Expose Tavily based search instance for UIs or diagnostics if needed
         self.web_research = _get_web_research_instance()
 
     def new_usage_tracker(self) -> ToolUsage:
@@ -1338,13 +1338,13 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "kind": "web",
         "class": BrowserTool,
         "description": "HTTP/HTML browser and scraper (Playwright plus requests fallback).",
-        # Unified search helper (EXTREME MODE bridge)
+        # Unified search helper (Tavily bridge)
         "fn": web_search_tool,
     },
     "web_search": {
         "kind": "web",
         "class": BrowserTool,
-        "description": "Alias for web/browser capability plus EXTREME search module when available.",
+        "description": "Alias for web/browser capability plus Tavily search module when available.",
         "fn": web_search_tool,
     },
     "tavily_search": {
