@@ -33,6 +33,19 @@ services:
       - key: ARA_RUNS_DIR
         value: /opt/render/project/src/runs
 
+      # Browser / Tavily controls
+      - key: ENABLE_TAVILY
+        value: "1"
+      - key: TAVILY_STUB_MODE
+        value: "0"
+      - key: DISABLE_WEB_SEARCH
+        value: "0"
+      # Optional: tune request rate and cache TTL for swarm runs
+      - key: TAVILY_RPS
+        value: "1.0"
+      - key: BROWSER_CACHE_TTL_SECONDS
+        value: "600"
+
       - key: OPENAI_API_KEY
         sync: false
 
@@ -74,6 +87,18 @@ services:
 
       - key: WORKER_QUEUE_MODE
         value: "1"
+
+      # Browser / Tavily controls (same as web service)
+      - key: ENABLE_TAVILY
+        value: "1"
+      - key: TAVILY_STUB_MODE
+        value: "0"
+      - key: DISABLE_WEB_SEARCH
+        value: "0"
+      - key: TAVILY_RPS
+        value: "1.0"
+      - key: BROWSER_CACHE_TTL_SECONDS
+        value: "600"
 
       - key: OPENAI_API_KEY
         sync: false
