@@ -667,6 +667,10 @@ class MemoryStore:
             "schema_version": int(self._data.get("schema_version", MEMORY_SCHEMA_VERSION)),
             "file_path": os.path.abspath(self.memory_file),
             "base_dir": self.base_dir,
+            "snapshot_root": self.snapshot_root,
+            "run_state_path": self.run_state_path,
+            "worker_state_path": self.worker_state_path,
+            "watchdog_path": self.watchdog_path,
             "counts": {
                 "notes": len(self._data.get("notes", [])),
                 "cycles": len(self._data.get("cycles", [])),
@@ -743,6 +747,21 @@ class MemoryStore:
             "schema_version": MEMORY_SCHEMA_VERSION,
         }
         self._save()
+
+        # Also clear lightweight external state files so dashboards and workers
+        # do not see stale status after a reset.
+        try:
+            self._write_json_file(self.run_state_path, {})
+        except Exception:
+            pass
+        try:
+            self._write_json_file(self.worker_state_path, {})
+        except Exception:
+            pass
+        try:
+            self._write_json_file(self.watchdog_path, {})
+        except Exception:
+            pass
 
     def prune_all(self) -> None:
         """Apply caps to all bounded collections and save.
