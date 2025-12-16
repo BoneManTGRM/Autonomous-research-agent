@@ -1921,6 +1921,32 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
 
     job_meta = getattr(job, "meta", None)
 
+    # New: concise, high signal job start logs with prompt details
+    enabled_sources = ",".join([k for k, v in source_controls.items() if v])
+    print("")
+    print(
+        "[Queue][JobStart] "
+        f"run_id={job.run_id} mode={mode} domain={domain} "
+        f"goal={goal!r} max_cycles={prompt_details['max_cycles']} "
+        f"max_rounds={prompt_details['max_rounds']} max_minutes={max_minutes} "
+        f"forever={forever} runtime_profile={runtime_profile or 'None'} "
+        f"roles={roles_list if mode == 'swarm' else [role]} "
+        f"sources={enabled_sources}"
+    )
+    if job_meta:
+        print(f"[Queue][JobMeta] {job_meta}")
+    if cfg:
+        try:
+            print(f"[Queue][JobConfigKeys] {list(cfg.keys())}")
+        except Exception:
+            pass
+    try:
+        print("[Queue][PromptDetails]")
+        print(json.dumps(prompt_details, indent=2, ensure_ascii=False))
+    except Exception:
+        print("[Queue][PromptDetails] (failed to serialize)")
+    sys.stdout.flush()
+
     print("")
     print("=== Queue worker: starting job ===")
     print(f"Run id: {job.run_id}")
@@ -2203,6 +2229,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         _heartbeat(agent, label="queue_job_finished", run_id=job.run_id)
 
         print(f"=== Queue worker: job {job.run_id} finished cleanly ===")
+        print(f"Goal: {goal}")
+        print(f"Domain: {domain}")
         print(f"Total summaries: {len(summaries)}")
 
         # Decide final macro X/Y
@@ -2429,6 +2457,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
 
     except Exception as e:
         print(f"Fatal error while running job {job.run_id}: {e}")
+        print(f"[Queue][JobError] run_id={job.run_id} error={e}")
         tb = traceback.format_exc()
         print(tb)
         sys.stdout.flush()
