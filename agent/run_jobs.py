@@ -6,6 +6,7 @@ import json
 import time
 import uuid
 import os
+import logging
 from dataclasses import dataclass, asdict, fields, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -138,6 +139,7 @@ __all__ = [
     "_ensure_monitoring_block",
     "MONITORING_DEFAULTS",
     "create_job",
+    "enqueue_job",
     "load_job",
     "load_job_by_id",
     "move_job",
@@ -178,6 +180,26 @@ def _log(*args: Any) -> None:
         sys.stdout.flush()
     except Exception:
         pass
+
+
+def _queue_log(*parts: Any) -> None:
+    """
+    Queue level logger that always shows up in Render logs.
+
+    Uses the standard logging subsystem when available, with a
+    "[Queue]" prefix, and falls back to stdout.
+    """
+    msg = " ".join(str(p) for p in parts)
+    full = f"[Queue] {msg}"
+    try:
+        logging.getLogger("queue").info(full)
+    except Exception:
+        print(full)
+        try:
+            import sys
+            sys.stdout.flush()
+        except Exception:
+            pass
 
 
 # Monitoring defaults
@@ -762,7 +784,7 @@ def create_job(
     )
 
     # Save into the canonical pending folder
-    job.save_to(PENDING_DIR)
+    pending_path = job.save_to(PENDING_DIR)
 
     # Shadow copy to queue folder for compatibility with any older watchers
     try:
@@ -772,6 +794,12 @@ def create_job(
         pass
 
     _log("Created job", run_id, "status=queued", "BASE_DIR:", BASE_DIR)
+    _queue_log(
+        "Enqueued job",
+        f"run_id={run_id}",
+        f"status=queued",
+        f"pending_path={pending_path}",
+    )
     try:
         import sys
 
@@ -780,6 +808,20 @@ def create_job(
         pass
 
     return run_id
+
+
+def enqueue_job(
+    config: Dict[str, Any],
+    meta: Optional[Dict[str, Any]] = None,
+    run_id: Optional[str] = None,
+) -> str:
+    """
+    Thin alias around create_job for UIs.
+
+    Streamlit code can call enqueue_job(...) without worrying about
+    queue internals.
+    """
+    return create_job(config=config, meta=meta, run_id=run_id)
 
 
 def load_job(path: Path) -> RunJob:
@@ -1030,10 +1072,17 @@ def get_next_queued_job() -> Optional[RunJob]:
     queued = list_jobs(status="queued", limit=1000)
     if not queued:
         _log("get_next_queued_job: no queued jobs found")
+        _queue_log("get_next_queued_job:", "no queued jobs found")
         return None
     # list_jobs returns newest first; for FIFO we take the last (oldest)
     job = queued[-1]
     _log("get_next_queued_job: selected", job.run_id, "created_at", job.created_at)
+    _queue_log(
+        "get_next_queued_job:",
+        f"selected run_id={job.run_id}",
+        f"created_at={job.created_at}",
+        f"queued_count={len(queued)}",
+    )
     return job
 
 
@@ -1056,6 +1105,7 @@ def _claim_job_atomic(job: RunJob) -> Optional[RunJob]:
         src = src_legacy
     else:
         _log("claim_job_atomic: no metadata file found for", run_id)
+        _queue_log("claim_job_atomic:", f"no metadata file found for run_id={run_id}")
         return None
 
     # Preserve the file name when moving into ACTIVE_DIR so both
@@ -1066,6 +1116,7 @@ def _claim_job_atomic(job: RunJob) -> Optional[RunJob]:
         os.replace(str(src), str(dst_active))
     except Exception as e:
         _log("claim_job_atomic: os.replace failed for", run_id, "error:", repr(e))
+        _queue_log("claim_job_atomic:", f"os.replace failed for run_id={run_id}", f"error={repr(e)}")
         # If another worker won the race and already created dst_active,
         # treat that as a successful claim elsewhere.
         if dst_active.exists():
@@ -1084,6 +1135,7 @@ def _claim_job_atomic(job: RunJob) -> Optional[RunJob]:
         claimed.updated_at = time.time()
         _atomic_write_json(dst_active, claimed.to_dict())
         _log("claim_job_atomic: claimed", run_id, "at", dst_active)
+        _queue_log("claim_job_atomic:", f"claimed run_id={run_id}", f"path={dst_active}")
         return claimed
     except Exception:
         # Best effort fallback if JSON is malformed
@@ -1094,9 +1146,15 @@ def _claim_job_atomic(job: RunJob) -> Optional[RunJob]:
             data["updated_at"] = time.time()
             _atomic_write_json(dst_active, data)
             _log("claim_job_atomic: claimed with raw JSON for", run_id)
+            _queue_log("claim_job_atomic:", f"claimed (raw JSON) run_id={run_id}", f"path={dst_active}")
             return RunJob.from_dict(data)
         except Exception as e:
             _log("claim_job_atomic: failed to finalize claim for", run_id, "error:", repr(e))
+            _queue_log(
+                "claim_job_atomic:",
+                f"failed to finalize claim for run_id={run_id}",
+                f"error={repr(e)}",
+            )
             return job
 
 
@@ -1114,6 +1172,7 @@ def claim_next_job() -> Optional[RunJob]:
     queued = list_jobs(status="queued", limit=2000)
     if not queued:
         _log("claim_next_job: no queued jobs")
+        _queue_log("claim_next_job:", "no queued jobs")
         return None
 
     # Oldest first
@@ -1123,9 +1182,11 @@ def claim_next_job() -> Optional[RunJob]:
         claimed = _claim_job_atomic(job)
         if claimed is not None:
             _log("claim_next_job: claimed job", claimed.run_id)
+            _queue_log("claim_next_job:", f"claimed run_id={claimed.run_id}")
             return claimed
 
     _log("claim_next_job: could not claim any queued job")
+    _queue_log("claim_next_job:", "could not claim any queued job")
     return None
 
 
@@ -1178,8 +1239,10 @@ def load_next_pending_job() -> Optional[RunJob]:
     job = claim_next_job()
     if job is None:
         _log("load_next_pending_job: no job claimed")
+        _queue_log("load_next_pending_job:", "no job claimed")
     else:
         _log("load_next_pending_job: returning job", job.run_id)
+        _queue_log("load_next_pending_job:", f"returning run_id={job.run_id}")
     return job
 
 
@@ -1219,10 +1282,15 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
             _safe_unlink(folder / f"{job.run_id}.json")
             _safe_unlink(folder / f"{job.run_id}_job.json")
         _log("save_job_result: marked finished", job.run_id)
+        _queue_log("save_job_result:", f"marked finished run_id={job.run_id}", f"result_path={rp}")
         return
 
     # Fallback
     _log("save_job_result: active metadata not found, using update_job_status for", job.run_id)
+    _queue_log(
+        "save_job_result:",
+        f"active metadata not found for run_id={job.run_id}, using update_job_status",
+    )
     update_job_status(job.run_id, "finished")
 
 
@@ -1260,9 +1328,14 @@ def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
             _safe_unlink(folder / f"{job.run_id}.json")
             _safe_unlink(folder / f"{job.run_id}_job.json")
         _log("mark_job_error: marked error", job.run_id)
+        _queue_log("mark_job_error:", f"marked error run_id={job.run_id}", f"error_path={ep}")
         return
 
     _log("mark_job_error: active metadata not found, using update_job_status for", job.run_id)
+    _queue_log(
+        "mark_job_error:",
+        f"active metadata not found for run_id={job.run_id}, using update_job_status",
+    )
     update_job_status(job.run_id, "error")
 
 
