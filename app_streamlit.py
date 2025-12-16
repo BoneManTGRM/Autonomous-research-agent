@@ -1905,26 +1905,57 @@ def main() -> None:
         layout="wide",
     )
 
-    st.markdown(
-        """
+    # Circular status badge that sits next to the ARA header
+    circle_html = """
+    <div style="display: flex; align-items: center; justify-content: center; height: 100%;">
         <div style="
-            margin-bottom: 0.75rem;
-            padding: 0.85rem 1.1rem;
-            border-radius: 0.9rem;
-            background: radial-gradient(circle at top left, #f7f7ff 0, #ececfb 40, #e4f2ff 80);
-            border: 1px solid rgba(0,0,0,0.06);
-            box-shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
+            width: 96px;
+            height: 96px;
+            border-radius: 999px;
+            border: 3px solid rgba(15, 23, 42, 0.18);
+            box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.25);
+            background: radial-gradient(circle at 30% 20%, #f5f9ff 0, #dbeafe 40%, #bfdbfe 80%);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: #111827;
+            line-height: 1.2;
         ">
-            <div style="font-size: 2.9rem; font-weight: 800; letter-spacing: 0.03em;">
-                ARA
-            </div>
-            <div style="font-size: 1rem; opacity: 0.9;">
-                powered by <span style="font-weight: 600;">Reparodynamics</span>
-            </div>
+            Finite<br/>mode
         </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    </div>
+    """
+
+    header_left, header_right = st.columns([4, 1])
+
+    with header_left:
+        st.markdown(
+            """
+            <div style="
+                margin-bottom: 0.75rem;
+                padding: 0.85rem 1.1rem;
+                border-radius: 0.9rem;
+                background: radial-gradient(circle at top left, #f7f7ff 0, #ececfb 40, #e4f2ff 80);
+                border: 1px solid rgba(0,0,0,0.06);
+                box-shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
+            ">
+                <div style="font-size: 2.9rem; font-weight: 800; letter-spacing: 0.03em;">
+                    ARA
+                </div>
+                <div style="font-size: 1rem; opacity: 0.9;">
+                    powered by <span style="font-weight: 600;">Reparodynamics</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with header_right:
+        st.markdown(circle_html, unsafe_allow_html=True)
+
     st.caption(
         "Finite mode only • Queue based runs • Engine worker processes jobs from ARA_RUNS_DIR/pending for *_job.json files.\n"
         "This UI never runs TGRM loops directly. It only queues jobs and visualizes finished artifacts."
