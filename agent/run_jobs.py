@@ -955,6 +955,11 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
 
         For pending and active it only considers "*_job.json" metadata files.
         Legacy "<run_id>.json" jobs are still supported if no job files exist.
+
+    Resolution rule:
+        If multiple metadata files for the same run_id exist across folders
+        (for example due to a stale active copy and a newer finished copy),
+        the record with the newer updated_at timestamp wins.
     """
     jobs_by_id: Dict[str, RunJob] = {}
 
@@ -981,8 +986,14 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
                     continue
 
                 existing = jobs_by_id.get(job.run_id)
-                if existing is None or job.created_at > existing.created_at:
+                if existing is None:
                     jobs_by_id[job.run_id] = job
+                else:
+                    # Prefer the entry with the newer updated_at timestamp
+                    existing_updated = getattr(existing, "updated_at", existing.created_at)
+                    job_updated = getattr(job, "updated_at", job.created_at)
+                    if job_updated >= existing_updated:
+                        jobs_by_id[job.run_id] = job
 
     if status is None:
         # Search all status folders plus legacy queue dir
@@ -1004,7 +1015,7 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
             collect(ERROR_DIR)
 
     jobs: List[RunJob] = list(jobs_by_id.values())
-    # Sort by created_at descending (newest first)
+    # Sort by created_at descending (newest first for UI)
     jobs.sort(key=lambda j: j.created_at, reverse=True)
     return jobs[:limit]
 
