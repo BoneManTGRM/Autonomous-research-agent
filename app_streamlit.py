@@ -3061,13 +3061,14 @@ def main() -> None:
                     & citations_df["source"].astype(str).isin(citations_source_filter)
                 ].copy()
 
-                # Apply search filter if provided
+                # Apply search filter if provided (fixed to operate on filtered_df)
                 if search_query:
                     search_lower = search_query.lower()
-                    filtered_df = filtered_df[
-                        citations_df["title"].astype(str).str.lower().str.contains(search_lower, na=False)
-                        | citations_df["snippet"].astype(str).str.lower().str.contains(search_lower, na=False)
-                    ]
+                    mask = (
+                        filtered_df["title"].astype(str).str.lower().str.contains(search_lower, na=False)
+                        | filtered_df["snippet"].astype(str).str.lower().str.contains(search_lower, na=False)
+                    )
+                    filtered_df = filtered_df[mask]
 
                 # Show grouping if selected
                 if group_by_option == "Cycle":
