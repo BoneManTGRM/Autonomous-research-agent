@@ -2522,50 +2522,61 @@ def run_job_queue_worker() -> None:
     debug_pending = _env_bool("WORKER_QUEUE_DEBUG_PENDING", default=False)
 
     while True:
-        # Optional debug listing of pending files, gated by env
-        if debug_pending:
-            try:
-                if pending_dir.exists():
-                    pending_files = sorted(pending_dir.glob("*.json"))
-                    if pending_files:
-                        print(
-                            f"[Queue] Pending .json files visible to worker: "
-                            f"{[p.name for p in pending_files]}"
-                        )
+        try:
+            # Optional debug listing of pending files, gated by env
+            if debug_pending:
+                try:
+                    if pending_dir.exists():
+                        pending_files = sorted(pending_dir.glob("*.json"))
+                        if pending_files:
+                            print(
+                                f"[Queue] Pending .json files visible to worker: "
+                                f"{[p.name for p in pending_files]}"
+                            )
+                        else:
+                            print("[Queue] No pending .json files visible to worker.")
                     else:
-                        print("[Queue] No pending .json files visible to worker.")
-                else:
-                    try:
-                        print(f"[Queue] Pending dir does not exist: {pending_dir.resolve()}")
-                    except Exception:
-                        print(f"[Queue] Pending dir does not exist: {pending_dir}")
+                        try:
+                            print(f"[Queue] Pending dir does not exist: {pending_dir.resolve()}")
+                        except Exception:
+                            print(f"[Queue] Pending dir does not exist: {pending_dir}")
+                except Exception as e:
+                    print(f"[Queue] Error listing pending dir: {e}")
+                sys.stdout.flush()
+
+            try:
+                job = load_next_pending_job()
             except Exception as e:
-                print(f"[Queue] Error listing pending dir: {e}")
+                print(f"[Queue] load_next_pending_job() raised an exception: {e}")
+                print(traceback.format_exc())
+                sys.stdout.flush()
+                _heartbeat(agent, label="queue_error")
+                time.sleep(5.0)
+                continue
+
+            if job is None:
+                idle_loops += 1
+                print("[Queue] No runnable job returned by load_next_pending_job().")
+                sys.stdout.flush()
+                _heartbeat(agent, label="queue_idle")
+                time.sleep(5.0)
+                continue
+
+            print(f"[Queue] Loaded job from queue: {getattr(job, 'run_id', 'unknown')}")
             sys.stdout.flush()
 
-        try:
-            job = load_next_pending_job()
-        except Exception as e:
-            print(f"[Queue] load_next_pending_job() raised an exception: {e}")
+            _process_single_job(agent, config, job)
+            print(f"[Queue] Finished job {getattr(job, 'run_id', 'unknown')}, returning to poll loop.")
+            sys.stdout.flush()
+            time.sleep(1.0)
+        except Exception as loop_err:
+            # New: safety net so a random unhandled error in this loop
+            # does not kill the worker after a successful run.
+            print(f"[Queue] Unexpected error in main loop: {loop_err}")
             print(traceback.format_exc())
             sys.stdout.flush()
-            _heartbeat(agent, label="queue_error")
+            _heartbeat(agent, label="queue_loop_error")
             time.sleep(5.0)
-            continue
-
-        if job is None:
-            idle_loops += 1
-            print("[Queue] No runnable job returned by load_next_pending_job().")
-            sys.stdout.flush()
-            _heartbeat(agent, label="queue_idle")
-            time.sleep(5.0)
-            continue
-
-        print(f"[Queue] Loaded job from queue: {getattr(job, 'run_id', 'unknown')}")
-        sys.stdout.flush()
-
-        _process_single_job(agent, config, job)
-        time.sleep(1.0)
 
 
 # ---------------------------------------------------------------------------
