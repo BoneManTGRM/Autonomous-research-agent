@@ -1905,78 +1905,55 @@ def main() -> None:
         layout="wide",
     )
 
-    # Circular status badge that sits next to the ARA header
-    circle_html = """
-    <div style="display: flex; align-items: center; justify-content: center; height: 100%;">
-        <div style="
-            width: 96px;
-            height: 96px;
-            border-radius: 999px;
-            border: 3px solid rgba(15, 23, 42, 0.18);
-            box-shadow: 0 0 0 4px rgba(59, 130, 246, 0.25);
-            background: radial-gradient(circle at 30% 20%, #f5f9ff 0, #dbeafe 40%, #bfdbfe 80%);
+    # Header: ARA with yellow orange red gradient and powered by Reparodynamics pill
+    st.markdown(
+        """
+        <style>
+        .ara-header {
             display: flex;
             align-items: center;
-            justify-content: center;
-            text-align: center;
-            font-size: 0.78rem;
+            gap: 0.75rem;
+            margin-bottom: 1.5rem;
+        }
+        .ara-logo-text {
+            font-size: 2.6rem;
+            font-weight: 900;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            background: linear-gradient(90deg, #FFD93B, #FF9A1F, #FF3B3B);
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+        .ara-powered-pill {
+            padding: 0.35rem 0.9rem;
+            border-radius: 999px;
+            border: 1px solid rgba(255,255,255,0.25);
+            background: rgba(10, 10, 20, 0.6);
+            font-size: 0.85rem;
+            font-weight: 500;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.25rem;
+        }
+        .ara-powered-pill span.label {
+            opacity: 0.8;
+        }
+        .ara-powered-pill span.brand {
             font-weight: 600;
-            color: #111827;
-            line-height: 1.2;
-        ">
-            Finite<br/>mode
-        </div>
-    </div>
-    """
-
-    header_left, header_right = st.columns([4, 1])
-
-    with header_left:
-        st.markdown(
-            """
-            <div style="
-                margin-bottom: 0.75rem;
-                padding: 0.85rem 1.1rem;
-                border-radius: 0.9rem;
-                background: radial-gradient(circle at top left, #050816 0, #020617 45, #000000 100);
-                border: 1px solid rgba(148,163,184,0.35);
-                box-shadow: 0 10px 25px rgba(15, 23, 42, 0.85);
-                display: flex;
-                align-items: baseline;
-                gap: 0.6rem;
-                flex-wrap: wrap;
-            ">
-                <div style="
-                    font-size: 3.6rem;
-                    font-weight: 800;
-                    letter-spacing: 0.06em;
-                    line-height: 1;
-                    background: linear-gradient(120deg, #f97316, #ec4899, #6366f1);
-                    -webkit-background-clip: text;
-                    background-clip: text;
-                    color: transparent;
-                ">
-                    ARA
-                </div>
-                <div style="
-                    font-size: 1rem;
-                    font-weight: 600;
-                    opacity: 0.95;
-                    padding: 0.15rem 0.7rem;
-                    border-radius: 999px;
-                    border: 1px solid rgba(148,163,184,0.6);
-                    background: rgba(15,23,42,0.9);
-                    white-space: nowrap;
-                ">
-                    powered by <span style="font-weight: 700; color: #e5e7eb;">Reparodynamics</span>
-                </div>
+            opacity: 1.0;
+        }
+        </style>
+        <div class="ara-header">
+            <div class="ara-logo-text">ARA</div>
+            <div class="ara-powered-pill">
+                <span class="label">powered by</span>
+                <span class="brand">Reparodynamics</span>
             </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with header_right:
-        st.markdown(circle_html, unsafe_allow_html=True)
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.caption(
         "Finite mode only • Queue based runs • Engine worker processes jobs from ARA_RUNS_DIR/pending for *_job.json files.\n"
@@ -2266,19 +2243,19 @@ def main() -> None:
         "Enable snapshot generation",
         value=True,
         help=(
-            "Snapshots and heartbeat are only useful for long runs (200+ cycles). "
-            "For tiny test runs you can leave this off."
+            "Snapshots and heartbeat are most useful for long runs (for example 200+ cycles). "
+            "For small test runs you can still set this to a low value like 1."
         ),
     )
     snapshot_interval = st.sidebar.number_input(
         "Snapshot interval in cycles",
-        min_value=10,
+        min_value=1,
         max_value=1_000_000,
-        value=200,
-        step=10,
+        value=1,
+        step=1,
         help=(
             "Hint to the engine worker for how often to capture a snapshot. "
-            "The worker may adapt this based on its own safety rules."
+            "Use small values such as 1 to 10 for tests and higher values for long runs."
         ),
     )
 
@@ -2691,6 +2668,68 @@ def main() -> None:
                         st.caption("Energy per cycle (approximate effort cost).")
                 else:
                     st.info("No cycle indices available for charting yet.")
+
+            # Snapshot timeline over cycles (display only, no hard minimum interval)
+            st.markdown("### Snapshot timeline")
+
+            if history:
+                max_cycle = max(int(e.get("cycle", 0) or 0) for e in history)
+                if max_cycle < 1:
+                    st.info("No cycles to snapshot yet.")
+                else:
+                    default_interval = max(1, max_cycle // 50)
+                    snapshot_interval_display = st.number_input(
+                        "Display a snapshot every N cycles",
+                        min_value=1,
+                        max_value=max_cycle,
+                        value=default_interval,
+                        step=1,
+                        help=(
+                            "This controls how densely cycles are sampled for the snapshot chart. "
+                            "It does not affect the engine worker."
+                        ),
+                        key="history_snapshot_interval",
+                    )
+
+                    snapshot_points: List[Dict[str, Any]] = []
+                    for e in history:
+                        c_num = int(e.get("cycle", 0) or 0)
+                        if c_num <= 0:
+                            continue
+                        if (
+                            c_num == 1
+                            or c_num == max_cycle
+                            or c_num % snapshot_interval_display == 0
+                        ):
+                            snapshot_points.append(e)
+
+                    if len(snapshot_points) > MAX_POINTS_FOR_CHARTS:
+                        snapshot_points = snapshot_points[-MAX_POINTS_FOR_CHARTS:]
+
+                    st.caption(
+                        f"Showing {len(snapshot_points)} snapshot points out of {max_cycle} cycles "
+                        f"(interval {snapshot_interval_display})."
+                    )
+
+                    snapshot_cycles: List[int] = []
+                    snapshot_rye: List[Any] = []
+                    for e in snapshot_points:
+                        snapshot_cycles.append(int(e.get("cycle", 0) or 0))
+                        v = e.get("RYE")
+                        if not isinstance(v, (int, float)):
+                            v = e.get("rye")
+                        snapshot_rye.append(v)
+
+                    if any(v is not None for v in snapshot_rye):
+                        df_snap = pd.DataFrame(
+                            {"cycle": snapshot_cycles, "RYE": snapshot_rye}
+                        ).set_index("cycle")
+                        st.line_chart(df_snap)
+                        st.caption("Snapshot view of RYE across the run.")
+                    else:
+                        st.info("No RYE values available for snapshot chart.")
+            else:
+                st.info("No history available yet for snapshot timeline.")
 
             # Advanced RYE diagnostics using rye_metrics build_run_diagnostics
             st.markdown("### Advanced RYE diagnostics")
