@@ -661,9 +661,11 @@ def _log_run_manifest(
         "stop_rye": stop_rye,
         "max_minutes": max_minutes,
         "total_items": len(summaries),
-        "rye_avg": diag.get("rye_avg"),
-        "rye_median": diag.get("rye_median"),
-        "rye_last": diag.get("rye_last"),
+        "rye_basic": {
+            "avg": diag.get("rye_avg"),
+            "median": diag.get("rye_median"),
+            "last": diag.get("rye_last"),
+        },
         "stability_index": diag.get("stability_index"),
         "recovery_momentum": diag.get("recovery_momentum"),
     }
