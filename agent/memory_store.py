@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Memory storage for the autonomous research agent.
 
 This module provides a JSON based persistent storage layer. It stores:
