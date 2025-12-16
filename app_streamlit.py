@@ -2470,6 +2470,9 @@ def main() -> None:
     # Debug view of what the UI actually sees on disk for the queue
     runs_root = get_runs_root()
     st.caption(f"DEBUG runs root: `{runs_root}`")
+    st.caption(
+        "DEBUG view of queue directories. Active can include stale files if a worker stopped before cleaning up."
+    )
 
     def _debug_list_dir(label: str, specific: Optional[Path]) -> None:
         if isinstance(specific, Path):
@@ -2488,6 +2491,11 @@ def main() -> None:
     _debug_list_dir("finished", RUNS_FINISHED_DIR)
     _debug_list_dir("error", RUNS_ERROR_DIR)
 
+    # Initialize job lists so they always exist
+    finished_jobs: List[Any] = []
+    pending_jobs: List[Any] = []
+    active_jobs: List[Any] = []
+
     if list_run_jobs is not None:
         # Finished jobs
         try:
@@ -2499,7 +2507,6 @@ def main() -> None:
             finished_jobs = []
 
         # Pending or queued jobs (support both status names)
-        pending_jobs: List[Any] = []
         try:
             pending_jobs = list_run_jobs(status="queued")
             if not pending_jobs:
@@ -2509,9 +2516,14 @@ def main() -> None:
             pending_jobs = []
         except Exception:
             pending_jobs = []
-    else:
-        finished_jobs = []
-    pending_jobs = pending_jobs if 'pending_jobs' in locals() else []
+
+        # Active jobs if the backend supports that status
+        try:
+            active_jobs = list_run_jobs(status="active")
+        except TypeError:
+            active_jobs = []
+        except Exception:
+            active_jobs = []
 
     col_runs_left, col_runs_right = st.columns([2, 1])
 
@@ -2551,7 +2563,7 @@ def main() -> None:
                     render_result_details(result)
 
     with col_runs_right:
-        st.markdown("#### Queued runs")
+        st.markdown("#### Active runs")
 
         # Show the canonical pending directory used by run_jobs
         if isinstance(RUNS_PENDING_DIR, Path):
@@ -2560,6 +2572,16 @@ def main() -> None:
             runs_root = get_runs_root()
             pending_dir = os.path.join(runs_root, "pending")
 
+        if not active_jobs:
+            st.info("No active runs detected by run_jobs.")
+        else:
+            for job in active_jobs:
+                with st.container():
+                    render_job_summary(job)
+                    st.caption("Engine worker is currently processing this run.")
+                    st.markdown("---")
+
+        st.markdown("#### Queued runs")
         st.caption(f"Queue directory: `{pending_dir}`")
 
         # Clear queue button (file based jobs under ARA_RUNS_DIR/pending)
@@ -3061,7 +3083,7 @@ def main() -> None:
                     & citations_df["source"].astype(str).isin(citations_source_filter)
                 ].copy()
 
-                # Apply search filter if provided (fixed to operate on filtered_df)
+                # Apply search filter if provided
                 if search_query:
                     search_lower = search_query.lower()
                     mask = (
