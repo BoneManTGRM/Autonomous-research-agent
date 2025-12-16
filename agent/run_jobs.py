@@ -123,9 +123,10 @@ Update notes:
       (and common sub-config sections) so the engine and MemoryStore use the
       exact same run_id that the UI uses when generating reports.
     - list_jobs now derives the effective job.status from the folder it was
-      loaded from (queued/active/finished/error), so finished jobs can’t
-      incorrectly appear as active in the UI even if a stale status is stored
-      inside the JSON.
+      loaded from (queued/active/finished/error), and in conflicts a higher
+      priority status (finished, error) will override a lower one (active,
+      queued). Finished jobs can not incorrectly appear as active in the UI
+      even if stale copies exist.
 """
 
 # Public exports (useful for type checkers and explicit imports)
@@ -295,6 +296,15 @@ for folder in [BASE_DIR, PENDING_DIR, ACTIVE_DIR, FINISHED_DIR, ERROR_DIR, LEGAC
 
 _log("Initialized BASE_DIR:", BASE_DIR)
 _log("PENDING_DIR:", PENDING_DIR, "ACTIVE_DIR:", ACTIVE_DIR, "FINISHED_DIR:", FINISHED_DIR)
+
+# Status priority for conflict resolution in list_jobs
+# Higher number wins when the same run_id appears in multiple folders.
+STATUS_PRIORITY: Dict[str, int] = {
+    "queued": 0,
+    "active": 1,
+    "finished": 2,
+    "error": 3,
+}
 
 
 # Optional helper you can call from Streamlit to debug the layout
@@ -843,7 +853,7 @@ def load_job_by_id(run_id: str) -> Optional[RunJob]:
     Returns None if not found.
     """
     # Finished metadata uses "_job.json" and is separate from results
-    finished_meta = FINISHED_DIR / f"{run_id}_job.json"
+    finished_meta = FINISHED_DIR / f"{run_id}_job.json}"
     if finished_meta.exists():
         return load_job(finished_meta)
 
@@ -1014,8 +1024,12 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
     Resolution rule:
         If multiple metadata files for the same run_id exist across folders
         (for example due to a stale active copy and a newer finished copy),
-        the record with the newer updated_at timestamp wins, but its status
-        is still forced to match the folder it came from.
+        the record with the higher status priority wins:
+
+            error > finished > active > queued
+
+        If the priority is the same, the record with the newer updated_at
+        timestamp wins.
     """
     jobs_by_id: Dict[str, RunJob] = {}
 
@@ -1049,11 +1063,16 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
                 if existing is None:
                     jobs_by_id[job.run_id] = job
                 else:
-                    # Prefer the entry with the newer updated_at timestamp
-                    existing_updated = getattr(existing, "updated_at", existing.created_at)
-                    job_updated = getattr(job, "updated_at", job.created_at)
-                    if job_updated >= existing_updated:
+                    existing_prio = STATUS_PRIORITY.get(existing.status, 0)
+                    new_prio = STATUS_PRIORITY.get(job.status, 0)
+
+                    if new_prio > existing_prio:
                         jobs_by_id[job.run_id] = job
+                    elif new_prio == existing_prio:
+                        existing_updated = getattr(existing, "updated_at", existing.created_at)
+                        job_updated = getattr(job, "updated_at", job.created_at)
+                        if job_updated >= existing_updated:
+                            jobs_by_id[job.run_id] = job
 
     if status is None:
         # Search all status folders plus legacy queue dir
