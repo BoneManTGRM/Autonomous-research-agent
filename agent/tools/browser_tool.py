@@ -41,6 +41,8 @@ class BrowserTool:
         - Optional light global rate limiting to reduce stampedes in swarm mode.
         - Error payloads include status and response snippet for easier debugging.
         - describe_capabilities() helper for diagnostics and UIs.
+        - Auto fallback to stub mode when Tavily returns a PubStub error.
+        - status_summary() alias for UIs that expect that name.
     """
 
     TAVILY_ENDPOINT = "https://api.tavily.com/search"
@@ -217,6 +219,12 @@ class BrowserTool:
             "disable_web_search_env": self._env_true("DISABLE_WEB_SEARCH"),
         }
 
+    def status_summary(self) -> Dict[str, Any]:
+        """
+        Alias for status(), for UIs that expect a status_summary() method.
+        """
+        return self.status()
+
     def describe_capabilities(self) -> Dict[str, Any]:
         """
         Lightweight capabilities summary for diagnostics and higher level tools.
@@ -251,6 +259,7 @@ class BrowserTool:
                     data = []
             else:
                 data = []
+
             data.append(event_full)
             with self.LOG_PATH.open("w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -557,6 +566,49 @@ class BrowserTool:
         return normalized
 
     # ------------------------------------------------------------------
+    # Stub helper
+    # ------------------------------------------------------------------
+    def _make_stub_results(
+        self,
+        query: str,
+        max_results: int,
+        truncated: bool,
+        reason: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Build a standard stub result list used in explicit stub mode
+        and when falling back after a PubStub error.
+        """
+        snippet = (
+            "[stub] Stubbed search. Configure TAVILY_API_KEY and set "
+            "TAVILY_STUB_MODE=0, DISABLE_WEB_SEARCH=0, ENABLE_TAVILY=1 "
+            "to enable real web search."
+        )
+        if reason:
+            snippet = f"{reason} {snippet}"
+
+        stub = [
+            {
+                "source": "stub",
+                "title": f"Stubbed search result for: {query}",
+                "url": "https://example.com/stub",
+                "snippet": snippet,
+                "score": None,
+            }
+        ]
+
+        self._log_event(
+            {
+                "event": "stub_search",
+                "query": query,
+                "max_results": max_results,
+                "truncated": truncated,
+                "reason": reason,
+            }
+        )
+        return stub
+
+    # ------------------------------------------------------------------
     # Public API - search
     # ------------------------------------------------------------------
     def search(
@@ -586,28 +638,12 @@ class BrowserTool:
 
         # Stub when no key or forced stub
         if self.is_stub_mode():
-            stub = [
-                {
-                    "source": "stub",
-                    "title": f"Stubbed search result for: {q}",
-                    "url": "https://example.com/stub",
-                    "snippet": (
-                        "[stub] Stubbed search. Configure TAVILY_API_KEY and "
-                        "set TAVILY_STUB_MODE=0, DISABLE_WEB_SEARCH=0, ENABLE_TAVILY=1 "
-                        "to enable real web search."
-                    ),
-                    "score": None,
-                }
-            ]
-            self._log_event(
-                {
-                    "event": "stub_search",
-                    "query": q,
-                    "max_results": max_results,
-                    "truncated": truncated,
-                }
+            return self._make_stub_results(
+                query=q,
+                max_results=max_results,
+                truncated=truncated,
+                reason=None,
             )
-            return stub
 
         cache_key: Tuple[Any, ...] = (
             q,
@@ -641,6 +677,7 @@ class BrowserTool:
         elapsed = time.time() - start
 
         if "error" in data:
+            pubstub_flag = bool(data.get("pubstub"))
             self._log_event(
                 {
                     "event": "search_error",
@@ -651,8 +688,27 @@ class BrowserTool:
                     "client_error": data.get("client_error"),
                     "elapsed_sec": elapsed,
                     "truncated": truncated,
+                    "pubstub": pubstub_flag,
                 }
             )
+
+            # On PubStub, flip into stub mode for the rest of the run
+            if pubstub_flag:
+                self.force_stub = True
+                stub_results = self._make_stub_results(
+                    query=q,
+                    max_results=max_results,
+                    truncated=truncated,
+                    reason="Tavily PubStub error encountered; switched to stub mode mid-run.",
+                )
+                # Append original error text to the first stub snippet for debugging
+                if stub_results:
+                    orig_err = str(data.get("error") or "unknown_error")
+                    stub_results[0]["snippet"] += f" Original Tavily error: {orig_err}"
+                self._cache_set(cache_key, {"results": stub_results})
+                return stub_results
+
+            # Non-PubStub error: keep previous behavior
             error_result = [
                 {
                     "source": "error",
@@ -711,29 +767,14 @@ class BrowserTool:
             return {"answer": None, "results": []}
 
         if self.is_stub_mode():
-            self._log_event(
-                {
-                    "event": "stub_search_with_answer",
-                    "query": q,
-                    "max_results": max_results,
-                    "truncated": truncated,
-                }
-            )
             return {
                 "answer": None,
-                "results": [
-                    {
-                        "source": "stub",
-                        "title": f"Stubbed search result for: {q}",
-                        "url": "https://example.com/stub",
-                        "snippet": (
-                            "[stub] Stubbed search. Configure TAVILY_API_KEY and "
-                            "set TAVILY_STUB_MODE=0, DISABLE_WEB_SEARCH=0, ENABLE_TAVILY=1 "
-                            "to enable real web search."
-                        ),
-                        "score": None,
-                    }
-                ],
+                "results": self._make_stub_results(
+                    query=q,
+                    max_results=max_results,
+                    truncated=truncated,
+                    reason=None,
+                ),
             }
 
         payload: Dict[str, Any] = {
@@ -753,6 +794,7 @@ class BrowserTool:
         elapsed = time.time() - start
 
         if "error" in data:
+            pubstub_flag = bool(data.get("pubstub"))
             self._log_event(
                 {
                     "event": "search_with_answer_error",
@@ -763,8 +805,24 @@ class BrowserTool:
                     "client_error": data.get("client_error"),
                     "elapsed_sec": elapsed,
                     "truncated": truncated,
+                    "pubstub": pubstub_flag,
                 }
             )
+
+            if pubstub_flag:
+                # Switch to stub mode for future calls
+                self.force_stub = True
+                stub_results = self._make_stub_results(
+                    query=q,
+                    max_results=max_results,
+                    truncated=truncated,
+                    reason="Tavily PubStub error encountered; switched to stub mode mid-run.",
+                )
+                if stub_results:
+                    orig_err = str(data.get("error") or "unknown_error")
+                    stub_results[0]["snippet"] += f" Original Tavily error: {orig_err}"
+                return {"answer": None, "results": stub_results}
+
             return {
                 "answer": None,
                 "results": [
