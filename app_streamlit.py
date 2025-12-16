@@ -1900,22 +1900,33 @@ def safe_json_preview(
 # -------------------------------------------------------------------
 def main() -> None:
     st.set_page_config(
-        page_title="Autonomous Research Agent (Finite queue mode)",
+        page_title="ARA powered by Reparodynamics",
         page_icon="🧪",
         layout="wide",
     )
 
     st.markdown(
         """
-        <div style="margin-bottom: 0.5rem;">
-            <span style="font-size: 2.8rem; font-weight: 700;">ARA</span><br/>
-            <span style="font-size: 0.95rem; opacity: 0.85;">powered by Reparodynamics</span>
+        <div style="
+            margin-bottom: 0.75rem;
+            padding: 0.85rem 1.1rem;
+            border-radius: 0.9rem;
+            background: radial-gradient(circle at top left, #f7f7ff 0, #ececfb 40, #e4f2ff 80);
+            border: 1px solid rgba(0,0,0,0.06);
+            box-shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
+        ">
+            <div style="font-size: 2.9rem; font-weight: 800; letter-spacing: 0.03em;">
+                ARA
+            </div>
+            <div style="font-size: 1rem; opacity: 0.9;">
+                powered by <span style="font-weight: 600;">Reparodynamics</span>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
     st.caption(
-        "Finite mode only • Queue based runs • Engine worker processes jobs from ARA_RUNS_DIR/pending.\n"
+        "Finite mode only • Queue based runs • Engine worker processes jobs from ARA_RUNS_DIR/pending for *_job.json files.\n"
         "This UI never runs TGRM loops directly. It only queues jobs and visualizes finished artifacts."
     )
 
@@ -2413,11 +2424,11 @@ def main() -> None:
 
             st.success(f"Run request queued with run id `{run_id}`.")
             if RUNS_PENDING_DIR is not None:
-                st.caption(f"Pending job written to `{RUNS_PENDING_DIR / (str(run_id) + '.json')}`")
+                st.caption(f"Pending job written to `{RUNS_PENDING_DIR / (str(run_id) + '_job.json')}`")
             else:
                 st.caption(
                     "Job was queued via run_jobs.create_job. "
-                    "The engine worker should watch ARA_RUNS_DIR/pending for new jobs."
+                    "The engine worker should watch ARA_RUNS_DIR/pending for new *_job.json files."
                 )
 
     # ------------------------------
@@ -2436,7 +2447,8 @@ def main() -> None:
         else:
             base = Path(runs_root) / label
         try:
-            items = sorted(p.name for p in base.glob("*.json"))
+            pattern = "*_job.json" if label in ("pending", "active") else "*.json"
+            items = sorted(p.name for p in base.glob(pattern))
         except Exception as e:
             items = [f"error: {e}"]
         st.text(f"DEBUG {label}: {items}")
@@ -2522,7 +2534,7 @@ def main() -> None:
 
         # Clear queue button (file based jobs under ARA_RUNS_DIR/pending)
         if st.button("🧹 Clear job queue", key="clear_queue_btn"):
-            pattern = os.path.join(pending_dir, "*.json")
+            pattern = os.path.join(pending_dir, "*_job.json")
             removed = 0
             for fp in glob.glob(pattern):
                 try:
