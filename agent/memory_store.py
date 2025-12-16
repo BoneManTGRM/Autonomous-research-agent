@@ -71,26 +71,28 @@ MEMORY_SCHEMA_VERSION = 4
 # They do NOT limit how many cycles the engine can actually execute.
 # When a list exceeds its cap, the oldest entries are dropped and new
 # cycles or events continue to be logged normally.
-MAX_NOTES = 50_000
-MAX_CYCLES = 50_000
-MAX_HYPOTHESES = 20_000
-MAX_CITATIONS = 20_000
-MAX_BIOMARKERS = 20_000
-MAX_EVENTS = 5_000
-MAX_DISCOVERIES = 2_000
-MAX_TOOL_EVENTS = 20_000
-MAX_RUN_MANIFESTS = 2_000
-MAX_MILESTONES = 5_000
-MAX_BENCHMARKS = 50_000
+MAX_NOTES = 200_000
+MAX_CYCLES = 300_000
+MAX_HYPOTHESES = 100_000
+MAX_CITATIONS = 100_000
+MAX_BIOMARKERS = 50_000
+MAX_EVENTS = 20_000
+MAX_DISCOVERIES = 10_000
+MAX_TOOL_EVENTS = 100_000
+MAX_RUN_MANIFESTS = 10_000
+MAX_MILESTONES = 20_000
+MAX_BENCHMARKS = 100_000
 
 # Explicit caps for evolution and frontier diagnostics
-MAX_HYPOTHESIS_EVOLUTION = 5_000
-MAX_OPTION_C_DIAGNOSTICS = 5_000
-MAX_SWARM_CONTRACTS = 5_000
+MAX_HYPOTHESIS_EVOLUTION = 20_000
+MAX_OPTION_C_DIAGNOSTICS = 20_000
+MAX_SWARM_CONTRACTS = 20_000
 
 # Snapshot settings for Streamlit timeline and long runs
 DEFAULT_SNAPSHOT_SECTIONS = [
     "run_state",
+    "worker_state",
+    "watchdog",
     "goal_index",
     "learning_burst",
     "cycles",
