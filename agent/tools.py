@@ -1174,6 +1174,22 @@ def web_search(
     if tool_usage is not None:
         tool_usage.record_web_call(query)
 
+    # Global disable flag for fully offline or analysis only runs
+    disable_flag = str(os.getenv("DISABLE_WEB_SEARCH", "")).strip().lower()
+    if disable_flag in {"1", "true", "yes", "on"}:
+        return {
+            "query": query,
+            "stubbed": True,
+            "error": "Web search is disabled by DISABLE_WEB_SEARCH environment variable",
+            "results": [],
+            "response_time": None,
+            "request_id": None,
+            "info_gain": None,
+            "search_energy": None,
+            "difficulty": None,
+            "semantic_diversity": None,
+        }
+
     tool = _get_web_research_instance()
 
     # Map search_depth to WebResearchTool level
