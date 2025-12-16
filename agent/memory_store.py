@@ -288,6 +288,14 @@ class MemoryStore:
         """Return the resolved base directory for this MemoryStore."""
         return self.base_dir
 
+    def has_vector_memory(self) -> bool:
+        """Return True if an optional VectorMemory backend is attached."""
+        return self.vector_memory is not None
+
+    def has_advanced_rye_metrics(self) -> bool:
+        """Return True if optional advanced RYE metrics module is available."""
+        return _rye_metrics is not None
+
     # ------------------------------------------------------------------
     # Internal JSON persistence
     # ------------------------------------------------------------------
