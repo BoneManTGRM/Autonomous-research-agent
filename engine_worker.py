@@ -1443,7 +1443,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "prompt_details": prompt_details,
         }
         if diag:
-            extra_manifest["diagnostics_snapshot"] = diag
+            extra_manifest["diagnostics"] = diag
         if intelligence_info:
             extra_manifest["intelligence"] = intelligence_info
 
@@ -2330,7 +2330,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             "prompt_details": prompt_details,
         }
         if diag:
-            extra_manifest["diagnostics_snapshot"] = diag
+            extra_manifest["diagnostics"] = diag
         if intelligence_info:
             extra_manifest["intelligence"] = intelligence_info
 
@@ -2934,7 +2934,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             "prompt_details": prompt_details,
         }
         if diag:
-            extra_manifest["diagnostics_snapshot"] = diag
+            extra_manifest["diagnostics"] = diag
         if intelligence_info:
             extra_manifest["intelligence"] = intelligence_info
 
@@ -3322,7 +3322,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             "prompt_details": prompt_details,
         }
         if diag:
-            extra_manifest["diagnostics_snapshot"] = diag
+            extra_manifest["diagnostics"] = diag
         if intelligence_info:
             extra_manifest["intelligence"] = intelligence_info
 
@@ -3443,7 +3443,9 @@ def _initial_meta_plan(
     total_budget_minutes: Optional[float],
 ) -> Dict[str, Any]:
     """
-    Create an initial meta plan with three conceptual phases:
+    Create an
+
+ initial meta plan with three conceptual phases:
         1) exploration (usually swarm)
         2) stabilization (usually single)
         3) refinement (small targeted segment)
