@@ -853,7 +853,7 @@ def load_job_by_id(run_id: str) -> Optional[RunJob]:
     Returns None if not found.
     """
     # Finished metadata uses "_job.json" and is separate from results
-    finished_meta = FINISHED_DIR / f"{run_id}_job.json}"
+    finished_meta = FINISHED_DIR / f"{run_id}_job.json"
     if finished_meta.exists():
         return load_job(finished_meta)
 
