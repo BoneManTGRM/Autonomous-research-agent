@@ -51,6 +51,46 @@ do
 done
 
 # -------------------------------------------------------------------
+# Tavily and web search env defaults
+# These only set sane defaults if not already provided by Render env.
+# BrowserTool will honor these flags.
+# -------------------------------------------------------------------
+if [ -z "${ENABLE_TAVILY:-}" ]; then
+  export ENABLE_TAVILY=1
+  echo "[start_unified] ENABLE_TAVILY not set, defaulting to 1 (enabled)"
+else
+  echo "[start_unified] ENABLE_TAVILY already set to ${ENABLE_TAVILY}"
+fi
+
+if [ -z "${TAVILY_STUB_MODE:-}" ]; then
+  export TAVILY_STUB_MODE=0
+  echo "[start_unified] TAVILY_STUB_MODE not set, defaulting to 0 (real search if key present)"
+else
+  echo "[start_unified] TAVILY_STUB_MODE already set to ${TAVILY_STUB_MODE}"
+fi
+
+if [ -z "${DISABLE_WEB_SEARCH:-}" ]; then
+  export DISABLE_WEB_SEARCH=0
+  echo "[start_unified] DISABLE_WEB_SEARCH not set, defaulting to 0"
+else
+  echo "[start_unified] DISABLE_WEB_SEARCH already set to ${DISABLE_WEB_SEARCH}"
+fi
+
+if [ -z "${TAVILY_RPS:-}" ]; then
+  # leave unset so BrowserTool falls back to its default rate
+  echo "[start_unified] TAVILY_RPS not set, BrowserTool will use its internal default"
+else
+  echo "[start_unified] TAVILY_RPS already set to ${TAVILY_RPS}"
+fi
+
+# Do not echo the full key for safety
+if [ -n "${TAVILY_API_KEY:-}" ]; then
+  echo "[start_unified] Tavily key detected (tail: ${TAVILY_API_KEY: -4})"
+else
+  echo "[start_unified] No Tavily API key detected, BrowserTool will run in stub mode"
+fi
+
+# -------------------------------------------------------------------
 # Environment for worker
 # -------------------------------------------------------------------
 export PYTHONUNBUFFERED=1
@@ -60,14 +100,13 @@ export WORKER_MODE="queue"
 export WORKER_QUEUE_MODE="1"
 
 echo "[start_unified] Python binary: $(which python || echo 'python not found')"
-
-# Optional sanity check: what does agent.run_jobs think BASE_DIR is
 python - << 'EOF' || echo "[start_unified] Warning: sanity check failed"
-import os
+import os, sys
+print("[start_unified] Python version:", sys.version.replace("\n", " "))
+print("[start_unified] Sanity check: ARA_RUNS_DIR env =", os.getenv("ARA_RUNS_DIR"))
 try:
     from agent import run_jobs
     print("[start_unified] Sanity check: run_jobs.BASE_DIR =", run_jobs.BASE_DIR)
-    print("[start_unified] Sanity check: ARA_RUNS_DIR env  =", os.getenv("ARA_RUNS_DIR"))
 except Exception as e:
     print("[start_unified] Sanity check: could not import agent.run_jobs:", e)
 EOF
@@ -79,6 +118,7 @@ cleanup() {
   if [ "${WORKER_PID-}" != "" ]; then
     echo "[start_unified] Stopping engine worker PID $WORKER_PID"
     kill "$WORKER_PID" 2>/dev/null || true
+    wait "$WORKER_PID" 2>/dev/null || true
   fi
 }
 trap cleanup EXIT INT TERM
@@ -93,7 +133,7 @@ echo "[start_unified] Engine worker PID: $WORKER_PID"
 
 # -------------------------------------------------------------------
 # Start Streamlit UI in foreground
-# Render provides \$PORT, but default to 8501 if missing
+# Render provides $PORT, but default to 8501 if missing
 # -------------------------------------------------------------------
 PORT="${PORT:-8501}"
 echo "[start_unified] Starting Streamlit UI on port $PORT"
