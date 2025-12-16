@@ -1938,15 +1938,37 @@ def main() -> None:
                 margin-bottom: 0.75rem;
                 padding: 0.85rem 1.1rem;
                 border-radius: 0.9rem;
-                background: radial-gradient(circle at top left, #f7f7ff 0, #ececfb 40, #e4f2ff 80);
-                border: 1px solid rgba(0,0,0,0.06);
-                box-shadow: 0 10px 25px rgba(15, 23, 42, 0.08);
+                background: radial-gradient(circle at top left, #050816 0, #020617 45, #000000 100);
+                border: 1px solid rgba(148,163,184,0.35);
+                box-shadow: 0 10px 25px rgba(15, 23, 42, 0.85);
+                display: flex;
+                align-items: baseline;
+                gap: 0.6rem;
+                flex-wrap: wrap;
             ">
-                <div style="font-size: 2.9rem; font-weight: 800; letter-spacing: 0.03em;">
+                <div style="
+                    font-size: 3.6rem;
+                    font-weight: 800;
+                    letter-spacing: 0.06em;
+                    line-height: 1;
+                    background: linear-gradient(120deg, #f97316, #ec4899, #6366f1);
+                    -webkit-background-clip: text;
+                    background-clip: text;
+                    color: transparent;
+                ">
                     ARA
                 </div>
-                <div style="font-size: 1rem; opacity: 0.9;">
-                    powered by <span style="font-weight: 600;">Reparodynamics</span>
+                <div style="
+                    font-size: 1rem;
+                    font-weight: 600;
+                    opacity: 0.95;
+                    padding: 0.15rem 0.7rem;
+                    border-radius: 999px;
+                    border: 1px solid rgba(148,163,184,0.6);
+                    background: rgba(15,23,42,0.9);
+                    white-space: nowrap;
+                ">
+                    powered by <span style="font-weight: 700; color: #e5e7eb;">Reparodynamics</span>
                 </div>
             </div>
             """,
@@ -2512,7 +2534,7 @@ def main() -> None:
             pending_jobs = []
     else:
         finished_jobs = []
-        pending_jobs = []
+    pending_jobs = pending_jobs if 'pending_jobs' in locals() else []
 
     col_runs_left, col_runs_right = st.columns([2, 1])
 
@@ -3004,8 +3026,8 @@ def main() -> None:
                 if search_query:
                     search_lower = search_query.lower()
                     filtered_df = filtered_df[
-                        filtered_df["title"].astype(str).str.lower().str.contains(search_lower, na=False)
-                        | filtered_df["snippet"].astype(str).str.lower().str.contains(search_lower, na=False)
+                        citations_df["title"].astype(str).str.lower().str.contains(search_lower, na=False)
+                        | citations_df["snippet"].astype(str).str.lower().str.contains(search_lower, na=False)
                     ]
 
                 # Show grouping if selected
