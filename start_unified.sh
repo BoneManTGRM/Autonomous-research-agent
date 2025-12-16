@@ -77,10 +77,16 @@ else
 fi
 
 if [ -z "${TAVILY_RPS:-}" ]; then
-  # leave unset so BrowserTool falls back to its default rate
   echo "[start_unified] TAVILY_RPS not set, BrowserTool will use its internal default"
 else
   echo "[start_unified] TAVILY_RPS already set to ${TAVILY_RPS}"
+fi
+
+if [ -z "${BROWSER_CACHE_TTL_SECONDS:-}" ]; then
+  export BROWSER_CACHE_TTL_SECONDS=600
+  echo "[start_unified] BROWSER_CACHE_TTL_SECONDS not set, defaulting to 600"
+else
+  echo "[start_unified] BROWSER_CACHE_TTL_SECONDS already set to ${BROWSER_CACHE_TTL_SECONDS}"
 fi
 
 # Do not echo the full key for safety
@@ -133,7 +139,7 @@ echo "[start_unified] Engine worker PID: $WORKER_PID"
 
 # -------------------------------------------------------------------
 # Start Streamlit UI in foreground
-# Render provides $PORT, but default to 8501 if missing
+# Render provides \$PORT, but default to 8501 if missing
 # -------------------------------------------------------------------
 PORT="${PORT:-8501}"
 echo "[start_unified] Starting Streamlit UI on port $PORT"
