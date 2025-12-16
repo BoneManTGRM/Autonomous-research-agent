@@ -97,6 +97,7 @@ are missing or misconfigured.
 
 from __future__ import annotations
 
+import os
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Sequence
@@ -1634,6 +1635,7 @@ class TGRMLoop:
         else:
             for note in notes:
                 content: str = note.get("content", "")
+                content_lower = content.lower()
                 if "?" in content:
                     issues.append("question_mark")
                     descriptions.append("Unanswered question detected in notes.")
@@ -1642,7 +1644,7 @@ class TGRMLoop:
                     descriptions.append(
                         "TODO item detected in notes; missing information."
                     )
-                if "CONTRADICTION" in content:
+                if "CONTRADICTION" in content or "contradiction" in content_lower:
                     issues.append("contradiction")
                     descriptions.append(
                         "Marked contradiction in notes; needs resolution."
@@ -1762,7 +1764,7 @@ class TGRMLoop:
         List[str],
         List[Dict[str, Any]],
         Dict[str, Any],
-    ]:
+    ]]:
         """Apply repairs to address detected issues."""
         repair_actions: List[Dict[str, str]] = []
         notes_added: List[str] = []
@@ -2040,6 +2042,11 @@ class TGRMLoop:
         This is a cheap gate driven by the current search_energy so that
         heavily saturated phases do not waste Tavily credits.
         """
+        # Hard kill switch via env if needed
+        disable_env = os.getenv("DISABLE_WEB_SEARCH", "").strip().lower()
+        if disable_env in {"1", "true", "yes", "on"}:
+            return False
+
         try:
             energy_val = float(getattr(self, "search_energy", 1.0))
         except Exception:
@@ -2992,7 +2999,11 @@ class TGRMLoop:
             for c in cycles
             if isinstance(c.get("RYE"), (int, float))
         ]
-        avg_rye = sum(float(v) for v in rye_values) / len(rye_values) if rye_values else None
+        avg_rye = (
+            sum(float(v) for v in rye_values) / len(rye_values)
+            if rye_values
+            else None
+        )
 
         return {
             "goals": goals_list,
