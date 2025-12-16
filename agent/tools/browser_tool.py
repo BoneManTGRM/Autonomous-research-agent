@@ -40,6 +40,7 @@ class BrowserTool:
         - Adds retries and backoff for 429 and transient 5xx.
         - Optional light global rate limiting to reduce stampedes in swarm mode.
         - Error payloads include status and response snippet for easier debugging.
+        - describe_capabilities() helper for diagnostics and UIs.
     """
 
     TAVILY_ENDPOINT = "https://api.tavily.com/search"
@@ -216,6 +217,21 @@ class BrowserTool:
             "disable_web_search_env": self._env_true("DISABLE_WEB_SEARCH"),
         }
 
+    def describe_capabilities(self) -> Dict[str, Any]:
+        """
+        Lightweight capabilities summary for diagnostics and higher level tools.
+        """
+        st = self.status()
+        return {
+            "stub_mode": st.get("mode") != "real",
+            "has_key": st.get("has_key", False),
+            "key_tail": st.get("key_tail"),
+            "endpoint": st.get("endpoint"),
+            "tavily_rps": st.get("tavily_rps"),
+            "cache_ttl_seconds": st.get("cache_ttl_seconds"),
+            "stub_reason": st.get("stub_reason"),
+        }
+
     # ------------------------------------------------------------------
     # Logging and caching
     # ------------------------------------------------------------------
@@ -351,10 +367,18 @@ class BrowserTool:
         """
         api_key = self._effective_api_key()
         if not api_key:
-            return {"error": "No Tavily API key configured.", "status_code": None, "response_snippet": None}
+            return {
+                "error": "No Tavily API key configured.",
+                "status_code": None,
+                "response_snippet": None,
+            }
 
         if requests is None:
-            return {"error": "requests library is not available.", "status_code": None, "response_snippet": None}
+            return {
+                "error": "requests library is not available.",
+                "status_code": None,
+                "response_snippet": None,
+            }
 
         headers = {
             "Authorization": f"Bearer {api_key}",
@@ -397,13 +421,35 @@ class BrowserTool:
                     response_snippet = self._snip(getattr(resp, "text", "") or "")  # type: ignore[name-defined]
                 except Exception:
                     pass
-                return {
-                    "error": str(e),
+
+                err_str = str(e)
+                pubstub_flag = False
+                if response_snippet and "PubStub" in response_snippet:
+                    pubstub_flag = True
+                if "PubStub" in err_str:
+                    pubstub_flag = True
+
+                if pubstub_flag:
+                    err_str = (
+                        "Tavily PubStub error. Check your API key, plan, and Tavily account "
+                        "configuration. The original error text is in response_snippet."
+                    )
+
+                result: Dict[str, Any] = {
+                    "error": err_str,
                     "status_code": status_code,
                     "response_snippet": response_snippet,
                 }
+                if pubstub_flag:
+                    result["pubstub"] = True
+                    result["raw_error"] = str(e)
+                return result
 
-        return {"error": "Tavily HTTP retries exhausted.", "status_code": None, "response_snippet": None}
+        return {
+            "error": "Tavily HTTP retries exhausted.",
+            "status_code": None,
+            "response_snippet": None,
+        }
 
     def _tavily_client_search(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -438,7 +484,7 @@ class BrowserTool:
                         auto_parameters=payload.get("auto_parameters", False),
                     )
                 except TypeError:
-                    # Older/minimal SDKs
+                    # Older or minimal SDKs
                     resp = client.search(
                         query=payload.get("query", ""),
                         max_results=payload.get("max_results", self.default_max_results),
@@ -618,6 +664,7 @@ class BrowserTool:
                     "status_code": data.get("status_code"),
                     "response_snippet": data.get("response_snippet"),
                     "client_error": data.get("client_error"),
+                    "pubstub": data.get("pubstub", False),
                 }
             ]
             self._cache_set(cache_key, {"results": error_result})
@@ -731,6 +778,7 @@ class BrowserTool:
                         "status_code": data.get("status_code"),
                         "response_snippet": data.get("response_snippet"),
                         "client_error": data.get("client_error"),
+                        "pubstub": data.get("pubstub", False),
                     }
                 ],
             }
