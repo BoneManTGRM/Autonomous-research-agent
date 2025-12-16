@@ -116,12 +116,16 @@ Update notes:
       active, finished, and error folders. Finished results stay at
       finished/<run_id>.json, with an optional finished/<run_id>_results.json
       alias on read.
-    - load_next_pending_job, claim_next_job and list_jobs prefer *_job.json
-      and ignore non metadata JSON like *_progress.json.
+    - load_next_pending_job, claim_next_job and list_jobs prefer "*_job.json"
+      and ignore non metadata JSON like "*_progress.json".
     - Backward compatibility is preserved for older "<run_id>.json" jobs.
     - create_job and RunJob.from_dict inject the run_id into the config
       (and common sub-config sections) so the engine and MemoryStore use the
       exact same run_id that the UI uses when generating reports.
+    - list_jobs now derives the effective job.status from the folder it was
+      loaded from (queued/active/finished/error), so finished jobs can’t
+      incorrectly appear as active in the UI even if a stale status is stored
+      inside the JSON.
 """
 
 # Public exports (useful for type checkers and explicit imports)
@@ -992,8 +996,17 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
         error       : jobs in runs/error
 
     NOTE:
-        This function does not filter based on the internal job.status string,
-        it simply reads metadata files from the correct folder(s).
+        This function does not rely on the internal status stored in the JSON
+        to decide what a job "is". The effective job.status is derived from the
+        folder it was loaded from:
+
+            - pending/ or legacy queue -> "queued"
+            - active/                  -> "active"
+            - finished/                -> "finished"
+            - error/                   -> "error"
+
+        This avoids cases where a job that has been moved to finished/ still
+        carries an old "active" status in the JSON and appears wrong in the UI.
 
         For pending and active it only considers "*_job.json" metadata files.
         Legacy "<run_id>.json" jobs are still supported if no job files exist.
@@ -1001,11 +1014,12 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
     Resolution rule:
         If multiple metadata files for the same run_id exist across folders
         (for example due to a stale active copy and a newer finished copy),
-        the record with the newer updated_at timestamp wins.
+        the record with the newer updated_at timestamp wins, but its status
+        is still forced to match the folder it came from.
     """
     jobs_by_id: Dict[str, RunJob] = {}
 
-    def collect(folder: Path, finished: bool = False) -> None:
+    def collect(folder: Path, folder_status: Optional[str] = None, finished: bool = False) -> None:
         if not folder.exists():
             return
 
@@ -1027,6 +1041,10 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
                 except Exception:
                     continue
 
+                # Force effective status from folder if provided
+                if folder_status is not None:
+                    job.status = folder_status
+
                 existing = jobs_by_id.get(job.run_id)
                 if existing is None:
                     jobs_by_id[job.run_id] = job
@@ -1039,22 +1057,22 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
 
     if status is None:
         # Search all status folders plus legacy queue dir
-        collect(PENDING_DIR)
-        collect(LEGACY_QUEUE_DIR)
-        collect(ACTIVE_DIR)
-        collect(FINISHED_DIR, finished=True)
-        collect(ERROR_DIR)
+        collect(PENDING_DIR, folder_status="queued")
+        collect(LEGACY_QUEUE_DIR, folder_status="queued")
+        collect(ACTIVE_DIR, folder_status="active")
+        collect(FINISHED_DIR, folder_status="finished", finished=True)
+        collect(ERROR_DIR, folder_status="error")
     else:
         norm = status.lower()
         if norm in ("pending", "queued"):
-            collect(PENDING_DIR)
-            collect(LEGACY_QUEUE_DIR)
+            collect(PENDING_DIR, folder_status="queued")
+            collect(LEGACY_QUEUE_DIR, folder_status="queued")
         elif norm in ("running", "active"):
-            collect(ACTIVE_DIR)
+            collect(ACTIVE_DIR, folder_status="active")
         elif norm == "finished":
-            collect(FINISHED_DIR, finished=True)
+            collect(FINISHED_DIR, folder_status="finished", finished=True)
         elif norm == "error":
-            collect(ERROR_DIR)
+            collect(ERROR_DIR, folder_status="error")
 
     jobs: List[RunJob] = list(jobs_by_id.values())
     # Sort by created_at descending (newest first for UI)
