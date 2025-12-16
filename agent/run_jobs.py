@@ -71,7 +71,21 @@ What is verified here:
 
     This is the expected behavior for queue mode.
 
-3. What actually drives the cycles table in the UI
+3. File naming invariants
+
+    For new jobs the canonical naming is:
+
+        pending/<run_id>_job.json
+        active/<run_id>_job.json
+        active/<run_id>_progress.json
+        finished/<run_id>.json          (result payload)
+        finished/<run_id>_job.json      (finished metadata for job lists)
+
+    load_next_pending_job and list_jobs only treat *_job.json as runnable
+    metadata files. Older jobs that used bare "<run_id>.json" are still
+    supported through compatibility helpers.
+
+4. What actually drives the cycles table in the UI
 
     The cycles / citations / discoveries table in Streamlit depends on:
 
@@ -97,20 +111,16 @@ Bottom line:
     in app_streamlit.py, not on this queue layer.
 
 Update notes:
-    - claim_next_job is upgraded to be atomic and safe for multiple workers
-      by using os.replace to move a pending JSON into active. This prevents
-      double pickup when two workers race on the same queued job.
-    - create_job and RunJob.from_dict now inject the run_id into the config
+    - Canonical job metadata filenames now end in "_job.json" in pending,
+      active, finished, and error folders. Finished results stay at
+      finished/<run_id>.json, with an optional finished/<run_id>_results.json
+      alias on read.
+    - load_next_pending_job, claim_next_job and list_jobs prefer *_job.json
+      and ignore non metadata JSON like *_progress.json.
+    - Backward compatibility is preserved for older "<run_id>.json" jobs.
+    - create_job and RunJob.from_dict inject the run_id into the config
       (and common sub-config sections) so the engine and MemoryStore use the
-      exact same run_id that the UI uses when generating reports. This closes
-      the common "job id vs run id vs cycles folder id" divergence.
-    - Limits (max_cycles, max_rounds, max_minutes) are sanitized into clean
-      positive integers when possible, but no artificial upper cap is imposed.
-      Very large values such as 1_000_000 are allowed; engine_worker is
-      responsible for enforcing any global safety limits.
-    - A monitoring block is always present in config["monitoring"]. This is
-      where snapshot, heartbeat, and run state settings live. The UI and
-      engine worker can rely on this structure.
+      exact same run_id that the UI uses when generating reports.
 """
 
 # Public exports (useful for type checkers and explicit imports)
@@ -284,12 +294,12 @@ def debug_print_layout() -> None:
     print("[run_jobs] ERROR_DIR:", ERROR_DIR)
     print("[run_jobs] LEGACY_QUEUE_DIR:", LEGACY_QUEUE_DIR)
     try:
-        pending_list = sorted(p.name for p in PENDING_DIR.glob("*.json"))
+        pending_list = sorted(p.name for p in PENDING_DIR.glob("*_job.json"))
     except Exception:
         pending_list = []
     print("[run_jobs] Pending jobs visible:", pending_list)
     try:
-        active_list = sorted(p.name for p in ACTIVE_DIR.glob("*.json"))
+        active_list = sorted(p.name for p in ACTIVE_DIR.glob("*_job.json"))
     except Exception:
         active_list = []
     print("[run_jobs] Active jobs visible:", active_list)
@@ -299,12 +309,12 @@ def debug_print_layout() -> None:
         finished_list = []
     print("[run_jobs] Finished job metadata visible:", finished_list)
     try:
-        error_list = sorted(p.name for p in ERROR_DIR.glob("*.json"))
+        error_list = sorted(p.name for p in ERROR_DIR.glob("*_job.json"))
     except Exception:
         error_list = []
     print("[run_jobs] Error jobs visible:", error_list)
     try:
-        legacy_list = sorted(p.name for p in LEGACY_QUEUE_DIR.glob("*.json"))
+        legacy_list = sorted(p.name for p in LEGACY_QUEUE_DIR.glob("*_job.json"))
     except Exception:
         legacy_list = []
     print("[run_jobs] Legacy queue jobs visible:", legacy_list)
@@ -444,13 +454,13 @@ def _find_meta_in_folder(run_id: str, folder: Path) -> Optional[Path]:
     """
     Find a job metadata file for this run_id in a folder.
 
-    Supports both the canonical "{run_id}.json" and the alternative
-    "{run_id}_job.json" naming so that older runs and newer runs can coexist.
+    Supports both the canonical "{run_id}_job.json" and the legacy
+    "{run_id}.json" naming so that older runs and newer runs can coexist.
     """
-    primary = folder / f"{run_id}.json"
+    primary = folder / f"{run_id}_job.json"
     if primary.exists():
         return primary
-    alt = folder / f"{run_id}_job.json"
+    alt = folder / f"{run_id}.json"
     if alt.exists():
         return alt
     return None
@@ -550,12 +560,11 @@ class RunJob:
 
         filename:
             Optional override for the file name. When not provided it defaults
-            to "{run_id}.json". For finished metadata this lets us use
-            "{run_id}_job.json".
+            to "{run_id}_job.json".
         """
         self.updated_at = time.time()
         if filename is None:
-            filename = f"{self.run_id}.json"
+            filename = f"{self.run_id}_job.json"
         path = folder / filename
         _atomic_write_json(path, self.to_dict())
         return path
@@ -576,23 +585,21 @@ def _job_path_for_status(run_id: str, status: str) -> Path:
     Important:
         For finished jobs we store metadata separately from the result JSON.
         Metadata: runs/finished/{run_id}_job.json
-        Result:   runs/finished/{run_id}.json
+        Result:   runs/finished/{run_id}.json (or {run_id}_results.json alias)
     """
     norm = status.lower()
     if norm in ("queued", "pending"):
         base = PENDING_DIR
-        filename = f"{run_id}.json"
     elif norm in ("running", "active"):
         base = ACTIVE_DIR
-        filename = f"{run_id}.json"
     elif norm == "finished":
         base = FINISHED_DIR
-        filename = f"{run_id}_job.json"
     elif norm == "error":
         base = ERROR_DIR
-        filename = f"{run_id}.json"
     else:
         raise ValueError(f"Unknown job status: {status}")
+
+    filename = f"{run_id}_job.json"
     return base / filename
 
 
@@ -794,7 +801,7 @@ def load_job_by_id(run_id: str) -> Optional[RunJob]:
     if finished_meta.exists():
         return load_job(finished_meta)
 
-    # Other statuses: support both "{run_id}.json" and "{run_id}_job.json"
+    # Other statuses: support both "{run_id}_job.json" and "{run_id}.json"
     for folder in [PENDING_DIR, LEGACY_QUEUE_DIR, ACTIVE_DIR, ERROR_DIR]:
         path = _find_meta_in_folder(run_id, folder)
         if path is not None and path.exists():
@@ -847,9 +854,12 @@ def move_job(run_id: str, from_status: str, to_status: str) -> Tuple[Optional[Ru
 
     # Remove old file(s) and save new one
     _safe_unlink(src_path)
-    # Also remove from queue folder if it exists (prevent duplicates)
-    legacy_src = LEGACY_QUEUE_DIR / f"{run_id}.json"
-    _safe_unlink(legacy_src)
+
+    # Also remove any shadows in queue folders under both naming schemes
+    for folder in (PENDING_DIR, LEGACY_QUEUE_DIR):
+        _safe_unlink(folder / f"{run_id}.json")
+        _safe_unlink(folder / f"{run_id}_job.json")
+
     job.save_to(dst_path.parent, filename=dst_path.name)
     return job, dst_path
 
@@ -902,22 +912,26 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
         job.updated_at = time.time()
         dst_path = _job_path_for_status(run_id, norm_new)
         _safe_unlink(src_path)
-        # remove any stale file in queue dir
-        legacy_src = LEGACY_QUEUE_DIR / f"{run_id}.json"
-        _safe_unlink(legacy_src)
+
+        # remove any stale file in queue dir under both naming schemes
+        for folder in (PENDING_DIR, LEGACY_QUEUE_DIR):
+            _safe_unlink(folder / f"{run_id}.json")
+            _safe_unlink(folder / f"{run_id}_job.json")
+
         job.save_to(dst_path.parent, filename=dst_path.name)
         return job
 
-    # Also check queue dir if not found by status loop above
-    legacy_path = LEGACY_QUEUE_DIR / f"{run_id}.json"
-    if legacy_path.exists():
-        job = load_job(legacy_path)
-        job.status = norm_new
-        job.updated_at = time.time()
-        _safe_unlink(legacy_path)
-        dst_path = _job_path_for_status(run_id, norm_new)
-        job.save_to(dst_path.parent, filename=dst_path.name)
-        return job
+    # Also check legacy queue dir directly if not found above
+    for legacy_name in (f"{run_id}_job.json", f"{run_id}.json"):
+        legacy_path = LEGACY_QUEUE_DIR / legacy_name
+        if legacy_path.exists():
+            job = load_job(legacy_path)
+            job.status = norm_new
+            job.updated_at = time.time()
+            _safe_unlink(legacy_path)
+            dst_path = _job_path_for_status(run_id, norm_new)
+            job.save_to(dst_path.parent, filename=dst_path.name)
+            return job
 
     return None
 
@@ -938,6 +952,9 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
     NOTE:
         This function does not filter based on the internal job.status string,
         it simply reads metadata files from the correct folder(s).
+
+        For pending and active it only considers "*_job.json" metadata files.
+        Legacy "<run_id>.json" jobs are still supported if no job files exist.
     """
     jobs_by_id: Dict[str, RunJob] = {}
 
@@ -945,20 +962,27 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
         if not folder.exists():
             return
 
-        pattern = "*_job.json" if finished else "*.json"
+        if finished:
+            patterns = ["*_job.json"]
+        else:
+            # Prefer the canonical "*_job.json". If none exist, fall back
+            # to "*.json" for older jobs, while still skipping progress files.
+            has_job_files = any(folder.glob("*_job.json"))
+            patterns = ["*_job.json"] if has_job_files else ["*.json"]
 
-        for path in sorted(folder.glob(pattern)):
-            # skip progress and non metadata files
-            if path.name.endswith("_progress.json"):
-                continue
-            try:
-                job = load_job(path)
-            except Exception:
-                continue
+        for pattern in patterns:
+            for path in sorted(folder.glob(pattern)):
+                # Skip progress and other non metadata files
+                if not finished and path.name.endswith("_progress.json"):
+                    continue
+                try:
+                    job = load_job(path)
+                except Exception:
+                    continue
 
-            existing = jobs_by_id.get(job.run_id)
-            if existing is None or job.created_at > existing.created_at:
-                jobs_by_id[job.run_id] = job
+                existing = jobs_by_id.get(job.run_id)
+                if existing is None or job.created_at > existing.created_at:
+                    jobs_by_id[job.run_id] = job
 
     if status is None:
         # Search all status folders plus legacy queue dir
@@ -1037,9 +1061,10 @@ def _claim_job_atomic(job: RunJob) -> Optional[RunJob]:
             return None
         return None
 
-    # Remove any duplicate shadows
-    _safe_unlink(PENDING_DIR / f"{run_id}.json")
-    _safe_unlink(LEGACY_QUEUE_DIR / f"{run_id}.json")
+    # Remove any duplicate shadows in queue folders
+    for folder in (PENDING_DIR, LEGACY_QUEUE_DIR):
+        _safe_unlink(folder / f"{run_id}.json")
+        _safe_unlink(folder / f"{run_id}_job.json")
 
     # Normalize status inside the job file to "active"
     try:
@@ -1164,8 +1189,8 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
 
     # Prefer moving the active metadata into finished metadata
     active_meta_candidates = [
-        ACTIVE_DIR / f"{job.run_id}.json",
         ACTIVE_DIR / f"{job.run_id}_job.json",
+        ACTIVE_DIR / f"{job.run_id}.json",  # legacy
     ]
     for active_meta in active_meta_candidates:
         if not active_meta.exists():
@@ -1179,8 +1204,9 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
         _safe_unlink(active_meta)
         j.save_to(FINISHED_DIR, filename=f"{job.run_id}_job.json")
         # Also remove any lingering legacy queue copy
-        _safe_unlink(LEGACY_QUEUE_DIR / f"{job.run_id}.json")
-        _safe_unlink(PENDING_DIR / f"{job.run_id}.json")
+        for folder in (LEGACY_QUEUE_DIR, PENDING_DIR):
+            _safe_unlink(folder / f"{job.run_id}.json")
+            _safe_unlink(folder / f"{job.run_id}_job.json")
         _log("save_job_result: marked finished", job.run_id)
         return
 
@@ -1205,8 +1231,8 @@ def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
 
     # Prefer moving the active metadata into error
     active_meta_candidates = [
-        ACTIVE_DIR / f"{job.run_id}.json",
         ACTIVE_DIR / f"{job.run_id}_job.json",
+        ACTIVE_DIR / f"{job.run_id}.json",  # legacy
     ]
     for active_meta in active_meta_candidates:
         if not active_meta.exists():
@@ -1218,9 +1244,10 @@ def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
         j.status = "error"
         j.updated_at = time.time()
         _safe_unlink(active_meta)
-        j.save_to(ERROR_DIR, filename=f"{job.run_id}.json")
-        _safe_unlink(LEGACY_QUEUE_DIR / f"{job.run_id}.json")
-        _safe_unlink(PENDING_DIR / f"{job.run_id}.json")
+        j.save_to(ERROR_DIR, filename=f"{job.run_id}_job.json")
+        for folder in (LEGACY_QUEUE_DIR, PENDING_DIR):
+            _safe_unlink(folder / f"{job.run_id}.json")
+            _safe_unlink(folder / f"{job.run_id}_job.json")
         _log("mark_job_error: marked error", job.run_id)
         return
 
@@ -1236,10 +1263,12 @@ def load_job_result(run_id: str) -> Optional[Dict[str, Any]]:
     """
     Convenience helper: load the final result JSON for a finished job.
 
-    Returns:
-        dict with result payload, or None if the result file does not exist.
+    Accepts either finished/<run_id>.json or finished/<run_id>_results.json
+    as the result payload file.
     """
-    rp = result_path(run_id)
+    rp_main = FINISHED_DIR / f"{run_id}.json"
+    rp_alt = FINISHED_DIR / f"{run_id}_results.json"
+    rp = rp_main if rp_main.exists() else rp_alt
     if not rp.exists():
         return None
     try:
