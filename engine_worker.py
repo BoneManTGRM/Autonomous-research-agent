@@ -755,6 +755,11 @@ def _update_worker_state(
         return
 
 
+def _WRITE_TRUNCATED_WARNING() -> None:
+    # Helper kept for backward compatibility if needed later
+    return
+
+
 def _write_cycles_and_run_state(
     agent: CoreAgent,
     *,
@@ -2003,15 +2008,46 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             print("[Queue] Using CoreAgent.run_goal for structured result bundle.")
             sys.stdout.flush()
 
+            def _to_int(value: Any) -> Optional[int]:
+                if isinstance(value, (int, float)):
+                    return int(value)
+                if isinstance(value, str):
+                    v = value.strip()
+                    if v.isdigit():
+                        try:
+                            return int(v)
+                        except Exception:
+                            return None
+                return None
+
             def _progress_cb(update: Dict[str, Any]) -> None:
                 # Live progress from CoreAgent into progress file plus heartbeat plus worker_state
                 status_local = str(update.get("status", "active"))
-                current_local = update.get("current_cycle")
-                total_local = update.get("total_cycles")
-                note_local = update.get("notes", "")
 
-                cur_int = int(current_local) if isinstance(current_local, (int, float)) else None
-                tot_int = int(total_local) if isinstance(total_local, (int, float)) else None
+                # Accept multiple possible field names for current / total
+                current_local = (
+                    update.get("current_cycle")
+                    or update.get("current")
+                    or update.get("cycle")
+                    or update.get("round")
+                    or update.get("step")
+                )
+                total_local = (
+                    update.get("total_cycles")
+                    or update.get("total")
+                    or update.get("max_cycles")
+                    or update.get("max_rounds")
+                    or update.get("target_cycles")
+                )
+
+                cur_int = _to_int(current_local)
+                tot_int = _to_int(total_local)
+
+                # Fall back to macro_total if total not provided
+                if tot_int is None:
+                    tot_int = macro_total
+
+                note_local = update.get("notes", "")
 
                 # Remember last seen values so the final X/Y matches macro progress
                 nonlocal last_progress_current, last_progress_total
