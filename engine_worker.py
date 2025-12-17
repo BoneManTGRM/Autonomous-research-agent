@@ -149,9 +149,6 @@ def _parse_float_env(name: str, default: float) -> float:
         return default
     try:
         v = float(val)
-        # For caps, 0 can be used to mean "disabled", but we don't know
-        # here which variable is which. We pass it through and let the
-        # clamp logic interpret it.
         return v
     except Exception:
         return default
@@ -217,32 +214,8 @@ def _clamp_minutes(value: Optional[float], label: str) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
-# Config and environment helpers
+# Logging helpers
 # ---------------------------------------------------------------------------
-
-
-def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
-    """Load YAML settings file into a dictionary."""
-    path = Path(config_path)
-    if not path.exists():
-        return {}
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f) or {}
-            if not isinstance(data, dict):
-                return {}
-            return data
-    except Exception:
-        # Never crash the worker because of a bad config file
-        return {}
-
-
-def ensure_directories() -> None:
-    """Ensure that log directories exist, same pattern as the Streamlit app."""
-    logs_path = Path("logs")
-    sessions_path = logs_path / "sessions"
-    logs_path.mkdir(exist_ok=True)
-    sessions_path.mkdir(exist_ok=True)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -252,6 +225,72 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return default
     val = val.strip().lower()
     return val in {"1", "true", "yes", "y", "on"}
+
+
+VERBOSE_LOGS: bool = _env_bool("WORKER_VERBOSE_LOGS", default=True)
+
+
+def _log(msg: str) -> None:
+    """High signal log line with timestamp."""
+    try:
+        ts = datetime.utcnow().isoformat() + "Z"
+        print(f"[engine_worker] {ts} {msg}")
+        sys.stdout.flush()
+    except Exception:
+        # Last resort logging, never crash on log
+        try:
+            print(f"[engine_worker] {msg}")
+            sys.stdout.flush()
+        except Exception:
+            pass
+
+
+def _vlog(msg: str) -> None:
+    """Very verbose log, gated by WORKER_VERBOSE_LOGS."""
+    if not VERBOSE_LOGS:
+        return
+    _log(msg)
+
+
+# ---------------------------------------------------------------------------
+# Config and environment helpers
+# ---------------------------------------------------------------------------
+
+
+def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
+    """Load YAML settings file into a dictionary."""
+    path = Path(config_path)
+    if not path.exists():
+        _log(f"[config] settings file not found at {path}, using empty config.")
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+            if not isinstance(data, dict):
+                _log("[config] settings file did not contain a dict, using empty config.")
+                return {}
+            _vlog(f"[config] loaded settings from {path} with keys: {list(data.keys())}")
+            return data
+    except Exception as e:
+        _log(f"[config] failed to load {path}: {e}")
+        traceback.print_exc()
+        sys.stdout.flush()
+        return {}
+
+
+def ensure_directories() -> None:
+    """Ensure that log directories exist, same pattern as the Streamlit app."""
+    logs_path = Path("logs")
+    sessions_path = logs_path / "sessions"
+    logs_path.mkdir(exist_ok=True)
+    sessions_path.mkdir(exist_ok=True)
+    try:
+        _vlog(
+            f"[paths] ensured logs dir at {logs_path.resolve()} and sessions dir at "
+            f"{sessions_path.resolve()}"
+        )
+    except Exception:
+        _vlog("[paths] ensured logs and sessions directories.")
 
 
 def _env_float(name: str) -> Optional[float]:
@@ -284,6 +323,7 @@ def detect_tools() -> Dict[str, bool]:
     - Option C web wrapper: extreme_web_search (if you registered it with that name)
     """
     if not isinstance(TOOL_REGISTRY, dict):
+        _log("[tools] TOOL_REGISTRY is not a dict, assuming no tools.")
         return {"web": False, "sandbox": False}
 
     web_keys = {
@@ -300,6 +340,12 @@ def detect_tools() -> Dict[str, bool]:
     has_web = any(k in TOOL_REGISTRY for k in web_keys)
     has_sandbox = any(k in TOOL_REGISTRY for k in sandbox_keys)
 
+    try:
+        _vlog(f"[tools] TOOL_REGISTRY keys: {list(TOOL_REGISTRY.keys())}")
+    except Exception:
+        _vlog("[tools] could not list TOOL_REGISTRY keys.")
+
+    _log(f"[tools] detected web={has_web}, sandbox={has_sandbox}")
     return {"web": has_web, "sandbox": has_sandbox}
 
 
@@ -316,6 +362,12 @@ def _configure_tavily_from_env() -> None:
     existing = os.getenv("TAVILY_API_KEY")
     if worker_key and not existing:
         os.environ["TAVILY_API_KEY"] = worker_key
+        _log("[tavily] WORKER_TAVILY_KEY found, TAVILY_API_KEY set for worker.")
+    else:
+        _vlog(
+            "[tavily] no worker key set or TAVILY_API_KEY already present; "
+            "leaving Tavily env as is."
+        )
 
 
 def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
@@ -351,6 +403,7 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
         for k, v in cfg_sc.items():
             merged[str(k)] = bool(v)
         defaults = merged
+    _vlog(f"[sources] defaults after config merge: {defaults}")
 
     env_sources = _env_list("WORKER_SOURCES")
     if env_sources is not None:
@@ -358,6 +411,7 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
         sc: Dict[str, bool] = {}
         for key in defaults.keys():
             sc[key] = key.lower() in allowed
+        _log(f"[sources] WORKER_SOURCES override active: {env_sources}")
     else:
         sc = defaults.copy()
 
@@ -365,6 +419,7 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
         raw = os.getenv(env_name)
         if raw is not None:
             sc[key] = _env_bool(env_name, default=sc.get(key, False))
+            _vlog(f"[sources] override {key} from {env_name}={raw} -> {sc[key]}")
 
     _override_bool("web", "WORKER_WEB")
     _override_bool("pubmed", "WORKER_PUBMED")
@@ -376,12 +431,14 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
     flags = detect_tools()
     if not flags["sandbox"]:
         sc["sandbox"] = False
+        _vlog("[sources] sandbox disabled because sandbox tools are not available.")
 
     if not flags["web"]:
-        # If no browser tool AND no Tavily key, disable web fully
         if not os.getenv("TAVILY_API_KEY"):
             sc["web"] = False
+            _log("[sources] web disabled because no browser tool and no Tavily key.")
 
+    _log(f"[sources] final source controls: {sc}")
     return sc
 
 
@@ -402,12 +459,16 @@ def init_agent_from_config() -> Tuple[CoreAgent, Dict[str, Any]]:
     memory_path = Path(memory_file)
     memory_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Debug so you can confirm worker and UI are using the same memory file
-    print(f"[engine_worker] Using memory file: {memory_path}")
-    sys.stdout.flush()
+    _log(f"[engine_worker] Using memory file: {memory_path}")
 
     memory = MemoryStore(str(memory_path))
     agent = CoreAgent(memory_store=memory, config=config)
+
+    try:
+        roles = getattr(agent, "get_agent_roles", lambda: [])()
+        _vlog(f"[agent] initialized CoreAgent with roles: {roles}")
+    except Exception:
+        _vlog("[agent] initialized CoreAgent, but get_agent_roles failed or not present.")
     return agent, config
 
 
@@ -430,8 +491,10 @@ def build_goal_and_domain() -> Tuple[str, str]:
     env_goal = os.getenv("WORKER_GOAL")
     if env_goal:
         goal = env_goal
+        _log(f"[goal] Using WORKER_GOAL from env: {goal}")
     elif isinstance(config.get("default_worker_goal"), str):
         goal = config["default_worker_goal"]
+        _log(f"[goal] Using default_worker_goal from config: {goal}")
     else:
         if "longevity" in PRESETS:
             longevity_preset = get_preset("longevity")
@@ -439,20 +502,25 @@ def build_goal_and_domain() -> Tuple[str, str]:
                 "default_goal",
                 "Long run autonomous research on anti aging, longevity, and reparodynamics.",
             )
+            _log("[goal] Using longevity preset default goal.")
         else:
             general_preset = get_preset("general")
             goal = general_preset.get(
                 "default_goal",
                 "Long run autonomous research on reparodynamics, RYE, TGRM, and related stability frameworks.",
             )
+            _log("[goal] Using general preset default goal.")
 
     env_domain = os.getenv("WORKER_DOMAIN")
     if env_domain:
         domain = env_domain
+        _log(f"[goal] Using WORKER_DOMAIN from env: {domain}")
     elif isinstance(config.get("default_worker_domain"), str):
         domain = config["default_worker_domain"]
+        _log(f"[goal] Using default_worker_domain from config: {domain}")
     else:
         domain = "longevity" if "longevity" in PRESETS else "general"
+        _log(f"[goal] Using fallback domain: {domain}")
 
     return goal, domain
 
@@ -462,6 +530,7 @@ def _get_memory_store(agent: CoreAgent) -> Optional[MemoryStore]:
     ms = getattr(agent, "memory_store", None)
     if isinstance(ms, MemoryStore):
         return ms
+    _vlog("[memory] CoreAgent has no MemoryStore attribute or it is not a MemoryStore.")
     return None
 
 
@@ -476,7 +545,9 @@ def _current_run_id(mode: str) -> str:
     base = os.getenv("WORKER_RUN_ID")
     if base:
         return base
-    return f"{mode}-{os.getpid()}"
+    rid = f"{mode}-{os.getpid()}"
+    _vlog(f"[run_id] Generated run id {rid} for mode={mode}")
+    return rid
 
 
 def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> None:
@@ -489,10 +560,9 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
     record into the underlying store so the diagnostics panel can still
     see last beat, count, and seconds since last beat.
     """
-    # Console log for heartbeat timing
     try:
         ts = datetime.utcnow().isoformat() + "Z"
-        rid = run_id or "n/a"
+        rid = run_id or "n_a"
         print(f"[HB] {ts} label={label} run_id={rid}")
         sys.stdout.flush()
     except Exception:
@@ -500,9 +570,9 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
 
     ms = _get_memory_store(agent)
     if ms is None:
+        _vlog(f"[heartbeat] No MemoryStore available for label={label}.")
         return
 
-    # Preferred path, use MemoryStore.heartbeat if present
     try:
         if hasattr(ms, "heartbeat"):
             hb = getattr(ms, "heartbeat")
@@ -511,11 +581,14 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
                     hb(label=label, run_id=run_id)  # type: ignore[call-arg]
                 else:
                     hb(label=label)
+                _vlog(f"[heartbeat] ms.heartbeat called with label={label}, run_id={run_id}.")
             except TypeError:
-                # Older signature that only accepts label
                 hb(label=label)
+                _vlog(
+                    f"[heartbeat] ms.heartbeat called with legacy signature "
+                    f"label={label}, run_id ignored."
+                )
         else:
-            # Fallback path, write watchdog info directly
             data_attr = getattr(ms, "data", getattr(ms, "_data", None))
             if isinstance(data_attr, dict):
                 now = datetime.utcnow().isoformat() + "Z"
@@ -530,16 +603,19 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
                     current = 0
                 wd["heartbeat_count"] = current + 1
                 wd["last_heartbeat_ts"] = time.time()
-    except Exception:
-        # Never let heartbeat crash the worker
-        return
+                _vlog(
+                    f"[heartbeat] watchdog updated: label={label}, "
+                    f"count={wd['heartbeat_count']}"
+                )
+    except Exception as e:
+        _log(f"[heartbeat] error while recording heartbeat: {e}")
     finally:
-        # Try to flush store to disk so diagnostics can see it quickly
         try:
             if hasattr(ms, "save"):
                 ms.save()  # type: ignore[call-arg]
             elif hasattr(ms, "_save"):
                 ms._save()  # type: ignore[call-arg]
+            _vlog("[heartbeat] MemoryStore flushed to disk after heartbeat.")
         except Exception:
             pass
 
@@ -560,9 +636,11 @@ def _start_heartbeat_loop(
     stop_event = threading.Event()
 
     def _loop() -> None:
+        _log(f"[heartbeat_loop] starting heartbeat loop for run_id={run_id}")
         while not stop_event.is_set():
             _heartbeat(agent, label=label, run_id=run_id)
             stop_event.wait(interval_seconds)
+        _log(f"[heartbeat_loop] stopping heartbeat loop for run_id={run_id}")
 
     t = threading.Thread(target=_loop, daemon=True)
     t.start()
@@ -578,10 +656,15 @@ def _safe_agent_hook(agent: CoreAgent, hook_name: str, **kwargs: Any) -> Optiona
     """
     fn = getattr(agent, hook_name, None)
     if not callable(fn):
+        _vlog(f"[hook] CoreAgent has no hook named {hook_name}, skipping.")
         return None
     try:
+        _vlog(f"[hook] calling CoreAgent.{hook_name} with keys {list(kwargs.keys())}")
         return fn(**kwargs)
-    except Exception:
+    except Exception as e:
+        _log(f"[hook] CoreAgent.{hook_name} raised {e}, ignoring.")
+        traceback.print_exc()
+        sys.stdout.flush()
         return None
 
 
@@ -622,8 +705,11 @@ def _build_experiment_fingerprint(
 
     try:
         data = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
-        return hashlib.sha256(data).hexdigest()
-    except Exception:
+        fp = hashlib.sha256(data).hexdigest()
+        _vlog(f"[fingerprint] computed fingerprint {fp} for mode={mode}")
+        return fp
+    except Exception as e:
+        _log(f"[fingerprint] failed to compute fingerprint: {e}")
         return "unknown"
 
 
@@ -645,11 +731,13 @@ def _log_run_manifest(
     """
     ms = _get_memory_store(agent)
     if ms is None or not hasattr(ms, "log_run_manifest"):
+        _vlog("[manifest] MemoryStore has no log_run_manifest, skipping manifest write.")
         return
 
     try:
         diag = build_run_diagnostics(history=summaries, domain=domain, window=10)
-    except Exception:
+    except Exception as e:
+        _log(f"[manifest] diagnostics computation failed for manifest: {e}")
         diag = {}
 
     manifest: Dict[str, Any] = {
@@ -674,8 +762,12 @@ def _log_run_manifest(
 
     try:
         ms.log_run_manifest(run_id, manifest)
-    except Exception:
-        return
+        _log(
+            f"[manifest] run manifest logged for run_id={run_id}, "
+            f"mode={mode}, items={len(summaries)}"
+        )
+    except Exception as e:
+        _log(f"[manifest] failed to log run manifest: {e}")
 
 
 def _log_milestone(
@@ -694,6 +786,7 @@ def _log_milestone(
     """Best effort helper to write milestones for long runs and meta segments."""
     ms = _get_memory_store(agent)
     if ms is None or not hasattr(ms, "log_milestone"):
+        _vlog(f"[milestone] MemoryStore has no log_milestone, skipping {label}.")
         return
     try:
         ms.log_milestone(
@@ -707,8 +800,12 @@ def _log_milestone(
             cycle_index=cycle_index,
             extra=extra,
         )
-    except Exception:
-        return
+        _log(
+            f"[milestone] recorded milestone label={label}, level={level}, "
+            f"run_id={run_id}, cycle_index={cycle_index}"
+        )
+    except Exception as e:
+        _log(f"[milestone] failed to log milestone {label}: {e}")
 
 
 def _update_worker_state(
@@ -736,6 +833,7 @@ def _update_worker_state(
     """
     ms = _get_memory_store(agent)
     if ms is None or not hasattr(ms, "update_worker_state"):
+        _vlog("[worker_state] MemoryStore has no update_worker_state, skipping.")
         return
     try:
         ms.update_worker_state(
@@ -753,8 +851,12 @@ def _update_worker_state(
             total=total,
             extra=extra,
         )
-    except Exception:
-        return
+        _vlog(
+            f"[worker_state] status={status}, mode={mode}, domain={domain}, "
+            f"run_id={run_id}, current={current}, total={total}, experiment_mode={experiment_mode}"
+        )
+    except Exception as e:
+        _log(f"[worker_state] failed to update worker state: {e}")
 
 
 def _WRITE_TRUNCATED_WARNING() -> None:
@@ -783,8 +885,13 @@ def _write_cycles_and_run_state(
     structure so the diagnostics panel has something to read even if the
     helper methods are missing.
     """
+    _log(
+        f"[cycles] writing cycle history for run_id={run_id}, mode={mode}, "
+        f"items={len(cycles)}"
+    )
     ms = _get_memory_store(agent)
     if ms is None:
+        _vlog("[cycles] no MemoryStore, skipping cycle history write.")
         return
 
     diag_local = diagnostics or {}
@@ -793,27 +900,29 @@ def _write_cycles_and_run_state(
     try:
         if hasattr(ms, "write_cycle_history"):
             ms.write_cycle_history(run_id, cycles)  # type: ignore[arg-type]
+            _vlog("[cycles] wrote cycles via write_cycle_history.")
         elif hasattr(ms, "append_cycle_log"):
             for idx, c in enumerate(cycles):
                 try:
                     ms.append_cycle_log(run_id, c, index=idx)  # type: ignore[arg-type]
                 except TypeError:
                     ms.append_cycle_log(run_id, c)  # type: ignore[arg-type]
+            _vlog("[cycles] wrote cycles via append_cycle_log.")
         elif hasattr(ms, "append_cycle_history"):
             for idx, c in enumerate(cycles):
                 try:
                     ms.append_cycle_history(run_id, c, index=idx)  # type: ignore[arg-type]
                 except TypeError:
                     ms.append_cycle_history(run_id, c)  # type: ignore[arg-type]
+            _vlog("[cycles] wrote cycles via append_cycle_history.")
         else:
-            # Direct write fallback into data or _data
             data_attr = getattr(ms, "data", getattr(ms, "_data", None))
             if isinstance(data_attr, dict):
                 hist = data_attr.setdefault("cycle_history", {})
                 hist[run_id] = list(cycles)
-    except Exception:
-        # Never break the worker from logging issues
-        pass
+                _vlog("[cycles] wrote cycles into MemoryStore.data['cycle_history'].")
+    except Exception as e:
+        _log(f"[cycles] error while writing cycle history: {e}")
 
     # Run state snapshot
     try:
@@ -852,23 +961,28 @@ def _write_cycles_and_run_state(
                 wrote_via_api = True
 
         if not wrote_via_api:
-            # Direct write fallback into run_state map
             data_attr = getattr(ms, "data", getattr(ms, "_data", None))
             if isinstance(data_attr, dict):
                 rs = data_attr.setdefault("run_state", {})
                 rs[run_id] = state
+                _vlog("[cycles] wrote run_state into MemoryStore.data['run_state'].")
 
-        # Try flushing to disk
         try:
             if hasattr(ms, "save"):
                 ms.save()  # type: ignore[call-arg]
             elif hasattr(ms, "_save"):
                 ms._save()  # type: ignore[call-arg]
+            _vlog("[cycles] MemoryStore flushed after run_state write.")
         except Exception:
             pass
 
-    except Exception:
-        pass
+        _log(
+            f"[cycles] run_state snapshot written for run_id={run_id}, "
+            f"mode={mode}, total_cycles={len(cycles)}"
+        )
+
+    except Exception as e:
+        _log(f"[cycles] error while writing run_state: {e}")
 
 
 def _write_snapshot(
@@ -894,10 +1008,15 @@ def _write_snapshot(
       - snapshot_cfg["enabled"] (bool)
     """
     if not snapshot_cfg or not snapshot_cfg.get("enabled", False):
+        _vlog(
+            f"[snapshot] snapshot disabled for run_id={run_id}, mode={mode}, "
+            "skipping write."
+        )
         return
 
     ms = _get_memory_store(agent)
     if ms is None:
+        _vlog("[snapshot] no MemoryStore, skipping snapshot write.")
         return
 
     ts = datetime.utcnow().isoformat() + "Z"
@@ -912,36 +1031,40 @@ def _write_snapshot(
         "created_utc": ts,
     }
 
+    _log(
+        f"[snapshot] writing snapshot for run_id={run_id}, mode={mode}, "
+        f"current_cycle={current_cycle}"
+    )
+
     try:
         if hasattr(ms, "write_snapshot"):
             fn = getattr(ms, "write_snapshot")
             try:
-                # Common pattern: (run_id, snapshot)
                 fn(run_id, payload)  # type: ignore[arg-type]
+                _vlog("[snapshot] written via write_snapshot(run_id, payload).")
             except TypeError:
                 try:
-                    # Alternative: named arguments
                     fn(run_id=run_id, snapshot=payload)  # type: ignore[arg-type]
+                    _vlog("[snapshot] written via write_snapshot(run_id=, snapshot=).")
                 except TypeError:
-                    # Fallback: single snapshot arg
                     fn(snapshot=payload)  # type: ignore[arg-type]
+                    _vlog("[snapshot] written via write_snapshot(snapshot=payload).")
         else:
-            # Fallback into generic data map
             data_attr = getattr(ms, "data", getattr(ms, "_data", None))
             if isinstance(data_attr, dict):
                 snaps = data_attr.setdefault("snapshots", {})
                 lst = snaps.setdefault(run_id, [])
                 lst.append(payload)
-    except Exception:
-        # Snapshots must never crash the worker
-        pass
+                _vlog("[snapshot] written into MemoryStore.data['snapshots'].")
+    except Exception as e:
+        _log(f"[snapshot] failed to write snapshot: {e}")
     finally:
-        # Try to flush store to disk so snapshot appears quickly
         try:
             if hasattr(ms, "save"):
                 ms.save()  # type: ignore[call-arg]
             elif hasattr(ms, "_save"):
                 ms._save()  # type: ignore[call-arg]
+            _vlog("[snapshot] MemoryStore flushed after snapshot write.")
         except Exception:
             pass
 
@@ -971,6 +1094,7 @@ def _run_post_run_intelligence(
     ]
 
     for hook_name, label in hooks:
+        _vlog(f"[post_run] attempting hook {hook_name} for run_id={run_id}")
         result = _safe_agent_hook(
             agent,
             hook_name,
@@ -982,6 +1106,10 @@ def _run_post_run_intelligence(
         )
         if result is not None:
             info[label] = result
+            _log(
+                f"[post_run] hook {hook_name} returned non-empty result "
+                f"for label={label}"
+            )
 
     if info:
         try:
@@ -995,8 +1123,8 @@ def _run_post_run_intelligence(
                 level="info",
                 extra={"intelligence": info},
             )
-        except Exception:
-            pass
+        except Exception as e:
+            _log(f"[post_run] milestone logging failed: {e}")
 
     return info
 
@@ -1024,6 +1152,10 @@ def _normalize_cycles_for_ui(cycles_list: List[Any]) -> List[Dict[str, Any]]:
         c.setdefault("discoveries", [])
         c.setdefault("sources", [])
         normalized.append(c)
+    _vlog(
+        f"[normalize] normalized {len(cycles_list)} entries into "
+        f"{len(normalized)} normalized cycles."
+    )
     return normalized
 
 
@@ -1039,6 +1171,10 @@ def _aggregate_from_cycles(
         val = c.get(key)
         if isinstance(val, list):
             out.extend(val)
+    _vlog(
+        f"[aggregate] aggregated key='{key}' from {len(cycles)} cycles, "
+        f"total items={len(out)}"
+    )
     return out
 
 
@@ -1073,6 +1209,12 @@ def _attach_top_level_defaults(
     result_obj.setdefault("diagnostics", diagnostics)
     result_obj.setdefault("rye_metrics", diagnostics)
 
+    _vlog(
+        "[result] attached defaults: "
+        f"cycles={len(cycles)}, citations={len(citations)}, "
+        f"discoveries={len(discoveries)}, sources={len(sources)}"
+    )
+
     return result_obj
 
 
@@ -1099,6 +1241,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
           runs with max_minutes=None and forever=True passed into the core
           engines. Hard minute clamps are not applied in that case.
     """
+    _log("[direct_job] starting run_engine_job call.")
     _configure_tavily_from_env()
     agent, base_config = init_agent_from_config()
 
@@ -1111,6 +1254,8 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         cfg = dict(getattr(job, "config", {}) or {})
         run_id = str(getattr(job, "run_id", f"job-{int(time.time())}"))
         job_meta = getattr(job, "meta", None)
+
+    _vlog(f"[direct_job] incoming job run_id={run_id}, cfg keys={list(cfg.keys())}")
 
     base_goal, base_domain = build_goal_and_domain()
 
@@ -1191,6 +1336,10 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     raw_max_minutes = cfg.get("max_minutes")
     if (mode == "single" and max_cycles_explicit) or (mode == "swarm" and max_rounds_explicit):
         max_minutes: Optional[float] = None
+        _vlog(
+            "[direct_job] explicit max_cycles or max_rounds provided, "
+            "ignoring max_minutes guard."
+        )
     else:
         if raw_max_minutes is not None:
             try:
@@ -1203,6 +1352,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     # In forever mode, ignore time guard completely.
     if forever:
         max_minutes = None
+        _log("[direct_job] forever=True, disabling time guard.")
     else:
         max_minutes = _clamp_minutes(max_minutes, "job.max_minutes")
 
@@ -1227,6 +1377,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         override_sc = cfg["source_controls"]
         for k, v in override_sc.items():
             source_controls[str(k)] = bool(v)
+    _vlog(f"[direct_job] final source_controls for run_id={run_id}: {source_controls}")
 
     tool_flags = detect_tools()
 
@@ -1329,6 +1480,11 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         except Exception:
             hb_stop = None
             hb_thread = None
+
+        _log(
+            f"[direct_job] invoking CoreAgent engine, "
+            f"mode={mode}, run_id={run_id}, max_cycles={max_cycles}, max_rounds={max_rounds}"
+        )
 
         if mode == "swarm":
             if roles_list is None:
@@ -1516,6 +1672,11 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             },
         )
 
+        _log(
+            f"[direct_job] completed run_id={run_id} with {len(normalized_cycles)} "
+            "cycles and diagnostics attached."
+        )
+
         return result_obj
 
     except Exception as e:
@@ -1593,6 +1754,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             extra=error_payload,
         )
 
+        _log(f"[direct_job] returning error payload for run_id={run_id}")
         return {
             "status": "error",
             "run_id": run_id,
@@ -1633,29 +1795,29 @@ def _cleanup_active_job_files(run_id: str) -> None:
     try:
         active_dir = BASE_DIR / "active"
         if not active_dir.exists():
+            _vlog("[cleanup] active dir does not exist, skipping cleanup.")
             return
 
+        removed = []
         for p in active_dir.glob("*.json"):
             try:
                 stem = p.stem
-                # Common patterns:
-                #   run_id.json
-                #   run_id_job.json
-                #   run_id_progress.json
-                #   job_run_id.json
-                #   anything where run_id is the first or last token
                 if (
                     stem == run_id
                     or stem.startswith(f"{run_id}_")
                     or stem.endswith(f"_{run_id}")
                 ):
                     p.unlink()
+                    removed.append(p.name)
             except Exception:
-                # Never crash because of a bad file
                 continue
-    except Exception:
-        # Never crash the worker because cleanup failed
-        return
+
+        if removed:
+            _log(f"[cleanup] removed active job descriptors for run_id={run_id}: {removed}")
+        else:
+            _vlog(f"[cleanup] no active job descriptors matched run_id={run_id}.")
+    except Exception as e:
+        _log(f"[cleanup] error while cleaning active job files: {e}")
 
 
 def _write_job_progress(
@@ -1687,6 +1849,7 @@ def _write_job_progress(
     any active job descriptors are also cleaned up in BASE_DIR / "active".
     """
     if progress_path is None:
+        _vlog("[progress] progress_path is None, skipping write.")
         return
     try:
         path = progress_path(run_id)
@@ -1723,21 +1886,17 @@ def _write_job_progress(
         print(" ".join(parts))
         sys.stdout.flush()
 
-        # Cleanup: once a job is finished or errored, remove the progress file
-        # and any active job descriptor so it no longer shows up as active.
         if status.lower() in {"finished", "error", "stopped"}:
             try:
                 if path.exists():
                     path.unlink()
+                    _vlog(f"[progress] removed progress file for run_id={run_id}.")
             except Exception:
-                # Never crash on cleanup
                 pass
-            # Best-effort removal of any active job files for this run_id
             _cleanup_active_job_files(run_id)
 
-    except Exception:
-        # Progress should never crash the worker
-        return
+    except Exception as e:
+        _log(f"[progress] error while writing progress file: {e}")
 
 
 def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJob) -> None:
@@ -1847,6 +2006,10 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     raw_max_minutes = cfg.get("max_minutes")
     if (mode == "single" and max_cycles_explicit) or (mode == "swarm" and max_rounds_explicit):
         max_minutes: Optional[float] = None
+        _vlog(
+            "[queue_job] explicit max_cycles or max_rounds set, ignoring "
+            "max_minutes for this job."
+        )
     else:
         if raw_max_minutes is not None:
             try:
@@ -1858,6 +2021,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
 
     if forever:
         max_minutes = None
+        _log(f"[queue_job] forever=True for run_id={job.run_id}, disabling time guard.")
     else:
         max_minutes = _clamp_minutes(max_minutes, "job.max_minutes")
 
@@ -2175,7 +2339,6 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                     progress_callback=_progress_cb,
                 )
             except TypeError:
-                # Fallback if run_goal does not accept progress_callback
                 full_result = agent.run_goal(goal=goal, config=goal_config)  # type: ignore[arg-type]
 
             if isinstance(full_result, dict):
@@ -2189,6 +2352,10 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
 
         # If no run_goal or it failed, fall back to legacy continuous engines.
         if not summaries and full_result is None:
+            _log(
+                f"[queue_job] falling back to legacy continuous engine for run_id={job.run_id}, "
+                f"mode={mode}"
+            )
             if mode == "swarm":
                 if roles_list is None:
                     try:
@@ -2240,12 +2407,10 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             final_current = last_progress_current
             final_total = last_progress_total
         else:
-            # Fallback: mark as fully completed macros so you see 2/2, 4/4, etc.
             final_current = macro_total
             final_total = macro_total
 
-        # Final progress write (macro scale) – this will also delete the progress file
-        # because status="finished", and clean any active job descriptor.
+        # Final progress write (macro scale)
         _write_job_progress(
             job.run_id,
             status="finished",
@@ -2324,10 +2489,10 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
 
         extra_manifest: Dict[str, Any] = {
             "engine": f"queue_{mode}",
-            "experiment_fingerprint": experiment_fingerprint,
             "job_meta": job_meta,
             "job_config": cfg,
             "prompt_details": prompt_details,
+            "experiment_fingerprint": experiment_fingerprint,
         }
         if diag:
             extra_manifest["diagnostics"] = diag
@@ -2354,10 +2519,8 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
 
         # Build final result bundle.
         if isinstance(full_result, dict):
-            # Ensure both "cycles" and "summaries" keys are present for the UI.
             fr = dict(full_result)
 
-            # Prefer whatever the agent returned, but fall back to our normalized list.
             cycles_src = fr.get("cycles") or fr.get("summaries") or normalized_cycles
             if not isinstance(cycles_src, list):
                 cycles_src = normalized_cycles
@@ -2367,7 +2530,6 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             fr["cycles"] = norm_fr_cycles
             fr.setdefault("summaries", norm_fr_cycles)
 
-            # Add overall summary if missing.
             if "summary" not in fr and overall_summary:
                 fr["summary"] = overall_summary
 
@@ -2430,8 +2592,10 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 rp = out_dir / f"{job.run_id}.json"
                 with rp.open("w", encoding="utf-8") as f:
                     json.dump(result_obj, f, indent=2)
-        except Exception:
+            _log(f"[queue_job] saved result for run_id={job.run_id}")
+        except Exception as e:
             print("Failed to write result JSON for job, see logs for details.")
+            _log(f"[queue_job] error while writing result JSON: {e}")
 
         # Final worker_state: always mark this job as no longer running
         _update_worker_state(
@@ -2455,6 +2619,12 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 "job_config": cfg,
                 "prompt_details": prompt_details,
             },
+        )
+
+        _log(
+            f"[queue_job] finished run_id={job.run_id}, "
+            f"summaries={len(normalized_cycles)}, final_current={final_current}, "
+            f"final_total={final_total}"
         )
 
     except Exception as e:
@@ -2516,7 +2686,6 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
 
         try:
             if mark_job_error is not None:
-                # Save full context including prompt and config into error record
                 mark_job_error(job, error_payload)
             else:
                 err_dir = BASE_DIR / "error"
@@ -2557,6 +2726,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             total=macro_total,
             extra=error_payload,
         )
+        _log(f"[queue_job] recorded error state for run_id={job.run_id}")
     finally:
         if hb_stop is not None:
             hb_stop.set()
@@ -2679,8 +2849,6 @@ def run_job_queue_worker() -> None:
             sys.stdout.flush()
             time.sleep(1.0)
         except Exception as loop_err:
-            # Safety net so a random unhandled error in this loop
-            # does not kill the worker after a successful run.
             print(f"[Queue] Unexpected error in main loop: {loop_err}")
             print(traceback.format_exc())
             sys.stdout.flush()
@@ -2877,6 +3045,11 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             hb_stop = None
             hb_thread = None
 
+        _log(
+            f"[single_engine] starting run_continuous for run_id={run_id}, "
+            f"max_cycles={max_cycles}, max_minutes={max_minutes}, forever={forever}"
+        )
+
         summaries = agent.run_continuous(
             goal=goal,
             max_cycles=max_cycles,
@@ -2975,6 +3148,10 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 "intelligence": intelligence_info if intelligence_info else None,
                 "prompt_details": prompt_details,
             },
+        )
+        _log(
+            f"[single_engine] run_id={run_id} finished with {len(summaries)} cycles "
+            "and worker_state set to stopped."
         )
     finally:
         if hb_stop is not None:
@@ -3193,6 +3370,10 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
         # If shift mode is not used, we can honor forever mode directly.
         if not repeat_shifts or shift_minutes is None or shift_minutes <= 0:
+            _log(
+                f"[swarm_engine] starting single swarm run for run_id={run_id}, "
+                f"max_rounds={max_rounds}, max_minutes={max_minutes}, forever={forever}"
+            )
             summaries_all = agent.run_swarm_continuous(
                 goal=goal,
                 max_rounds=max_rounds,
@@ -3209,8 +3390,6 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 runtime_profile=runtime_profile,
             )
         else:
-            # Shift mode always uses time-bounded segments; forever flag is not
-            # applied inside each shift call.
             total_elapsed = 0.0
             shift_index = 0
 
@@ -3230,7 +3409,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 )
                 sys.stdout.flush()
 
-                shift_summaries = agent.run_swarm_continuous(
+                summaries_for_shift = agent.run_swarm_continuous(
                     goal=goal,
                     max_rounds=max_rounds,
                     stop_rye=stop_rye,
@@ -3246,10 +3425,10 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     runtime_profile=runtime_profile,
                 )
 
-                if not shift_summaries:
+                if not summaries_for_shift:
                     used = this_shift_minutes
                 else:
-                    last_meta = shift_summaries[-1].get("run_metadata")
+                    last_meta = summaries_for_shift[-1].get("run_metadata")
                     em = None
                     if isinstance(last_meta, dict):
                         em = last_meta.get("elapsed_minutes")
@@ -3259,7 +3438,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         used = this_shift_minutes
 
                 total_elapsed += used
-                summaries_all.extend(shift_summaries)
+                summaries_all.extend(summaries_for_shift)
 
                 print(
                     f"--- Swarm shift {shift_index} finished, "
@@ -3364,6 +3543,10 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 "prompt_details": prompt_details,
             },
         )
+        _log(
+            f"[swarm_engine] run_id={run_id} finished with {len(summaries)} summaries, "
+            "worker_state set to stopped."
+        )
     finally:
         if hb_stop is not None:
             hb_stop.set()
@@ -3399,6 +3582,7 @@ def _compute_segment_stats(
         }
     """
     if not segment_summaries:
+        _vlog("[meta_stats] empty segment_summaries, returning zeros.")
         return {
             "count": 0,
             "avg_rye": None,
@@ -3410,11 +3594,19 @@ def _compute_segment_stats(
         }
 
     diag_domain = domain if domain is not None else "general"
-    diag = build_run_diagnostics(history=segment_summaries, domain=diag_domain, window=10)
+    try:
+        diag = build_run_diagnostics(history=segment_summaries, domain=diag_domain, window=10)
+    except Exception as e:
+        _log(f"[meta_stats] diagnostics computation failed for segment: {e}")
+        diag = {}
+
     rye_vals: List[float] = [
         float(e["RYE"]) for e in segment_summaries if isinstance(e.get("RYE"), (int, float))
     ]
     if not rye_vals:
+        _vlog(
+            "[meta_stats] segment has no numeric RYE entries, using diagnostics only."
+        )
         return {
             "count": len(segment_summaries),
             "avg_rye": diag.get("rye_avg"),
@@ -3425,7 +3617,7 @@ def _compute_segment_stats(
             "momentum": diag.get("recovery_momentum"),
         }
 
-    return {
+    stats = {
         "count": len(segment_summaries),
         "avg_rye": diag.get("rye_avg"),
         "max_rye": max(rye_vals),
@@ -3434,6 +3626,12 @@ def _compute_segment_stats(
         "stability": diag.get("stability_index"),
         "momentum": diag.get("recovery_momentum"),
     }
+    _vlog(
+        f"[meta_stats] computed segment stats: count={stats['count']}, "
+        f"avg_rye={stats['avg_rye']}, max_rye={stats['max_rye']}, "
+        f"stability={stats['stability']}, momentum={stats['momentum']}"
+    )
+    return stats
 
 
 def _initial_meta_plan(
@@ -3443,9 +3641,7 @@ def _initial_meta_plan(
     total_budget_minutes: Optional[float],
 ) -> Dict[str, Any]:
     """
-    Create an
-
- initial meta plan with three conceptual phases:
+    Create an initial meta plan with three conceptual phases:
         1) exploration (usually swarm)
         2) stabilization (usually single)
         3) refinement (small targeted segment)
@@ -3458,7 +3654,6 @@ def _initial_meta_plan(
     if total_budget_minutes is None or total_budget_minutes <= 0:
         total_budget_minutes = 60.0
 
-    # Apply hard clamp for macro budget (unless disabled globally).
     total_budget_minutes = _clamp_minutes(total_budget_minutes, "meta.total_budget") or 60.0
 
     explore_min = max(5.0, total_budget_minutes * 0.4)
@@ -3521,6 +3716,7 @@ def _initial_meta_plan(
             },
         ],
     }
+    _vlog(f"[meta_plan] initial meta plan built: {plan}")
     return plan
 
 
@@ -3538,6 +3734,10 @@ def _adjust_phase_from_stats(
         - If RYE is very low or trending down, shorten the next segment and lower stop_rye.
         - If RYE is healthy or trending up, keep or extend the next segment and raise stop_rye a bit.
     """
+    _vlog(
+        f"[meta_adjust] adjusting phase from stats. "
+        f"recent_avg_rye={recent_avg_rye}, phase_cfg={phase_cfg}, stats={stats}"
+    )
     _ = stats
     base_target = float(phase_cfg.get("target_minutes", 20.0))
     min_minutes = float(phase_cfg.get("min_minutes", 5.0))
@@ -3568,6 +3768,11 @@ def _adjust_phase_from_stats(
         effective_minutes = max_minutes_phase
 
     effective_minutes = _clamp_minutes(effective_minutes, "meta.segment") or min_minutes
+
+    _vlog(
+        f"[meta_adjust] effective_minutes={effective_minutes}, "
+        f"effective_stop_rye={effective_stop_rye}"
+    )
 
     return effective_minutes, effective_stop_rye
 
@@ -4029,6 +4234,10 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 "prompt_details": prompt_details,
             },
         )
+        _log(
+            f"[meta_engine] run_id={run_id} finished with segments={total_segments}, "
+            f"summaries={total_summaries}."
+        )
     finally:
         if hb_stop is not None:
             hb_stop.set()
@@ -4078,6 +4287,7 @@ def main() -> None:
         f"HARD_MAX_ROUNDS={HARD_MAX_ROUNDS}, "
         f"HARD_MAX_MINUTES={HARD_MAX_MINUTES}"
     )
+    print(f"[engine_worker] VERBOSE_LOGS={VERBOSE_LOGS}")
     # Extra debug: show effective runs directory for this worker instance
     print(f"[engine_worker] ARA_RUNS_DIR env: {os.getenv('ARA_RUNS_DIR')!r}")
     try:
@@ -4109,6 +4319,11 @@ def main() -> None:
     # Meta mode is OFF by default. You must explicitly set WORKER_META=1
     # to enable the Option C meta-controller.
     use_meta = _env_bool("WORKER_META", default=False)
+
+    _log(
+        f"[main] effective mode={mode}, use_swarm={use_swarm}, use_meta={use_meta}, "
+        f"queue_mode={queue_mode}"
+    )
 
     try:
         if use_meta:
