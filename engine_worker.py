@@ -97,23 +97,44 @@ except Exception:
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
-# Base folder for runs for worker logs and queue fallbacks.
-# This must match agent.run_jobs BASE_DIR which also respects ARA_RUNS_DIR.
-BASE_DIR = Path(os.environ.get("ARA_RUNS_DIR", "runs"))
 
-# If agent.run_jobs defines its own BASE_DIR, prefer that so the worker,
-# Streamlit app, and queue layer are guaranteed to point at the same place.
-try:
-    import agent.run_jobs as _run_jobs_mod  # type: ignore[import]
+def _resolve_base_dir() -> Path:
+    """
+    Base folder for runs for worker logs and queue fallbacks.
 
-    _rj_base_dir = getattr(_run_jobs_mod, "BASE_DIR", None)
-    if _rj_base_dir is not None:
-        BASE_DIR = _rj_base_dir  # type: ignore[assignment]
-except Exception:
-    pass
+    This must match agent.run_jobs BASE_DIR which also respects ARA_RUNS_DIR.
+    We prefer agent.run_jobs.BASE_DIR when available so worker, Streamlit,
+    and queue layer always point at the same place.
+    """
+    raw = os.getenv("ARA_RUNS_DIR")
+    env_val = raw.strip() if isinstance(raw, str) and raw.strip() else None
+    base: Path = Path(env_val) if env_val else Path("runs")
 
-# NOTE: BASE_DIR is now always derived from agent.run_jobs.BASE_DIR when available,
-# so engine_worker, Streamlit, and the queue see the same runs directory tree.
+    try:
+        import agent.run_jobs as _run_jobs_mod  # type: ignore[import]
+
+        rj_base = getattr(_run_jobs_mod, "BASE_DIR", None)
+        if rj_base is not None:
+            base = Path(rj_base)
+    except Exception:
+        pass
+
+    try:
+        base = base.expanduser().resolve()
+    except Exception:
+        base = Path(str(base))
+
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    return base
+
+
+# This must match agent.run_jobs BASE_DIR resolution so engine_worker,
+# Streamlit, and the queue see the same runs directory tree.
+BASE_DIR: Path = _resolve_base_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -306,7 +327,7 @@ def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
         _log(f"[config] settings file not found at {path}, using empty config.")
         return {}
     try:
-        with path.open("r", encoding="utf 8") as f:
+        with path.open("r", encoding="utf-8") as f:
             data = yaml.safe_load(f) or {}
             if not isinstance(data, dict):
                 _log("[config] settings file did not contain a dict, using empty config.")
@@ -336,6 +357,13 @@ def ensure_directories() -> None:
         )
     except Exception:
         _vlog("[paths] ensured logs and sessions directories.")
+
+    # Also ensure BASE_DIR exists for runs and queue integration
+    try:
+        BASE_DIR.mkdir(parents=True, exist_ok=True)
+        _vlog(f"[paths] ensured runs BASE_DIR exists at {BASE_DIR}")
+    except Exception:
+        pass
 
 
 def _env_float(name: str) -> Optional[float]:
@@ -403,6 +431,13 @@ def _configure_tavily_from_env() -> None:
 
     This never hard wires a key in code; it only mirrors env to env.
     """
+    # Respect explicit web disable toggles
+    if _env_bool("DISABLE_WEB_SEARCH", default=False) or _env_bool(
+        "WORKER_DISABLE_WEB", default=False
+    ):
+        _vlog("[tavily] web disabled by env, not configuring Tavily key.")
+        return
+
     worker_key = os.getenv("WORKER_TAVILY_KEY")
     existing = os.getenv("TAVILY_API_KEY")
     if worker_key and not existing:
@@ -430,8 +465,7 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
     4. Optional per source overrides:
        WORKER_WEB, WORKER_PUBMED, WORKER_SEMANTIC, WORKER_PDF,
        WORKER_BIOMARKERS, WORKER_SANDBOX.
-    5. Final clamp based on TOOL_REGISTRY detection: if sandbox tool is not
-       present, sandbox is forced to False.
+    5. Final clamp based on TOOL_REGISTRY detection and global disables.
     """
     defaults: Dict[str, bool] = {
         "web": True,
@@ -473,13 +507,21 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
     _override_bool("biomarkers", "WORKER_BIOMARKERS")
     _override_bool("sandbox", "WORKER_SANDBOX")
 
+    # Global and worker level web disable flags
+    if _env_bool("DISABLE_WEB_SEARCH", default=False) or _env_bool(
+        "WORKER_DISABLE_WEB", default=False
+    ):
+        sc["web"] = False
+        _log("[sources] web disabled by env (DISABLE_WEB_SEARCH or WORKER_DISABLE_WEB).")
+
     flags = detect_tools()
     if not flags["sandbox"]:
         sc["sandbox"] = False
         _vlog("[sources] sandbox disabled because sandbox tools are not available.")
 
-    if not flags["web"]:
-        if not os.getenv("TAVILY_API_KEY"):
+    # If web is currently enabled, make sure there is a tool or a Tavily key
+    if sc.get("web", False):
+        if not flags["web"] and not os.getenv("TAVILY_API_KEY"):
             sc["web"] = False
             _log("[sources] web disabled because no browser tool and no Tavily key.")
 
@@ -496,6 +538,8 @@ def init_agent_from_config() -> Tuple[CoreAgent, Dict[str, Any]]:
     """Create a CoreAgent and MemoryStore from config/settings.yaml."""
     _log_startup_config()
     ensure_directories()
+    _configure_tavily_from_env()
+
     config = load_settings(CONFIG_PATH_DEFAULT)
 
     memory_file = os.getenv(
@@ -750,7 +794,7 @@ def _build_experiment_fingerprint(
         payload["env"] = env_sample
 
     try:
-        data = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf 8")
+        data = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
         fp = hashlib.sha256(data).hexdigest()
         _vlog(f"[fingerprint] computed fingerprint {fp} for mode={mode}")
         return fp
@@ -1063,6 +1107,10 @@ def _write_snapshot(
 
     Snapshot behavior (enabled flag) is controlled by:
       - snapshot_cfg["enabled"] (bool)
+
+    Optional snapshot_cfg keys:
+      - keep_last_n: int (default 25)
+      - tag: str (optional)
     """
     if not snapshot_cfg or not snapshot_cfg.get("enabled", False):
         _vlog(
@@ -1073,57 +1121,93 @@ def _write_snapshot(
 
     ms = _get_memory_store(agent)
     if ms is None:
-        _vlog("[snapshot] no MemoryStore, skipping snapshot write.")
+        _vlog("[snapshot] no MemoryStore available, skipping snapshot write.")
         return
 
-    ts = datetime.utcnow().isoformat() + "Z"
-    payload: Dict[str, Any] = {
-        "run_id": run_id,
-        "mode": mode,
-        "goal": goal,
-        "domain": domain,
-        "current_cycle": current_cycle,
-        "config": dict(snapshot_cfg),
-        "diagnostics": diagnostics or {},
-        "created_utc": ts,
-    }
-
-    _log(
-        f"[snapshot] writing snapshot for run_id={run_id}, mode={mode}, "
-        f"current_cycle={current_cycle}"
-    )
-
     try:
-        if hasattr(ms, "write_snapshot"):
-            fn = getattr(ms, "write_snapshot")
-            try:
-                fn(run_id, payload)  # type: ignore[arg-type]
-                _vlog("[snapshot] written via write_snapshot(run_id, payload).")
-            except TypeError:
+        keep_last_n_raw = snapshot_cfg.get("keep_last_n", 25)
+        try:
+            keep_last_n = int(keep_last_n_raw)
+        except Exception:
+            keep_last_n = 25
+        if keep_last_n <= 0:
+            keep_last_n = 25
+
+        tag = snapshot_cfg.get("tag")
+        tag_str = str(tag) if isinstance(tag, (str, int, float)) else None
+
+        snap: Dict[str, Any] = {
+            "run_id": run_id,
+            "mode": mode,
+            "goal": goal,
+            "domain": domain,
+            "utc": datetime.utcnow().isoformat() + "Z",
+            "ts": time.time(),
+            "current_cycle": current_cycle,
+            "diagnostics": diagnostics or {},
+        }
+        if tag_str:
+            snap["tag"] = tag_str
+
+        wrote = False
+
+        # Prefer explicit MemoryStore APIs if present
+        for api_name in ("write_snapshot", "log_snapshot", "append_snapshot", "save_snapshot"):
+            fn = getattr(ms, api_name, None)
+            if callable(fn):
                 try:
-                    fn(run_id=run_id, snapshot=payload)  # type: ignore[arg-type]
-                    _vlog("[snapshot] written via write_snapshot(run_id=, snapshot=).")
+                    fn(run_id, snap)  # type: ignore[misc]
+                    wrote = True
+                    _vlog(f"[snapshot] wrote via MemoryStore.{api_name}")
+                    break
                 except TypeError:
-                    fn(snapshot=payload)  # type: ignore[arg-type]
-                    _vlog("[snapshot] written via write_snapshot(snapshot=payload).")
-        else:
+                    # Some implementations may use keyword args
+                    try:
+                        fn(run_id=run_id, snapshot=snap)  # type: ignore[misc]
+                        wrote = True
+                        _vlog(f"[snapshot] wrote via MemoryStore.{api_name} (kw)")
+                        break
+                    except Exception:
+                        pass
+                except Exception as e:
+                    _vlog(f"[snapshot] MemoryStore.{api_name} failed: {e}")
+
+        if not wrote:
             data_attr = getattr(ms, "data", getattr(ms, "_data", None))
             if isinstance(data_attr, dict):
-                snaps = data_attr.setdefault("snapshots", {})
-                lst = snaps.setdefault(run_id, [])
-                lst.append(payload)
-                _vlog("[snapshot] written into MemoryStore.data['snapshots'].")
+                all_snaps = data_attr.setdefault("snapshots", {})
+                run_snaps = all_snaps.setdefault(run_id, [])
+                if isinstance(run_snaps, list):
+                    run_snaps.append(snap)
+                    # Trim to last N
+                    if len(run_snaps) > keep_last_n:
+                        del run_snaps[:-keep_last_n]
+                    wrote = True
+                    _vlog(
+                        f"[snapshot] wrote fallback snapshot to MemoryStore.data['snapshots'] "
+                        f"keep_last_n={keep_last_n}"
+                    )
+
+        # Flush if we wrote
+        if wrote:
+            try:
+                if hasattr(ms, "save"):
+                    ms.save()  # type: ignore[call-arg]
+                elif hasattr(ms, "_save"):
+                    ms._save()  # type: ignore[call-arg]
+            except Exception:
+                pass
+            _log(
+                f"[snapshot] snapshot recorded run_id={run_id}, mode={mode}, "
+                f"current_cycle={current_cycle}"
+            )
+        else:
+            _vlog("[snapshot] could not write snapshot (no APIs and no writable backing store).")
+
     except Exception as e:
-        _log(f"[snapshot] failed to write snapshot: {e}")
-    finally:
-        try:
-            if hasattr(ms, "save"):
-                ms.save()  # type: ignore[call-arg]
-            elif hasattr(ms, "_save"):
-                ms._save()  # type: ignore[call-arg]
-            _vlog("[snapshot] MemoryStore flushed after snapshot write.")
-        except Exception:
-            pass
+        _log(f"[snapshot] error while writing snapshot: {e}")
+        traceback.print_exc()
+        sys.stdout.flush()
 
 
 def _run_post_run_intelligence(
@@ -1350,7 +1434,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             except Exception:
                 roles_list = ["agent"]
 
-    # ------------------------------------------------------------------
+      # ------------------------------------------------------------------
     # Safe extraction of cycles and rounds (never int(None))
     # ------------------------------------------------------------------
     max_cycles_explicit = (
@@ -1924,7 +2008,7 @@ def _write_job_progress(
             "prompt_details": prompt_details or {},
         }
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf 8") as f:
+        with path.open("w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
 
         # Explicit console log for progress including cycle fraction if known
@@ -2114,7 +2198,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         "domain": domain,
         "mode": mode,
         "role": role,
-        "roles": roles_list,
+        "roles": roles_list if mode == "swarm" else [role],
         "runtime_profile": runtime_profile,
         "max_minutes": max_minutes,
         "max_cycles": max_cycles if mode == "single" else None,
@@ -2649,7 +2733,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 out_dir = BASE_DIR / "finished"
                 out_dir.mkdir(parents=True, exist_ok=True)
                 rp = out_dir / f"{job.run_id}.json"
-                with rp.open("w", encoding="utf 8") as f:
+                with rp.open("w", encoding="utf-8") as f:
                     json.dump(result_obj, f, indent=2)
             _log(f"[queue_job] saved result for run_id={job.run_id}")
         except Exception as e:
@@ -2750,7 +2834,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 err_dir = BASE_DIR / "error"
                 err_dir.mkdir(parents=True, exist_ok=True)
                 ep = err_dir / f"{job.run_id}.json"
-                with ep.open("w", encoding="utf 8") as f:
+                with ep.open("w", encoding="utf-8") as f:
                     json.dump(error_payload, f, indent=2)
         except Exception:
             pass
@@ -2920,7 +3004,7 @@ def run_job_queue_worker() -> None:
             sys.stdout.flush()
             _heartbeat(agent, label="queue_loop_error")
             time.sleep(5.0)
-
+            
 
 # ---------------------------------------------------------------------------
 # Single and swarm engines (direct, non queue)
@@ -2950,6 +3034,14 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     _log_startup_config()
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
+
+    # Snapshot configuration: preset only for single engine
+    snapshot_cfg: Dict[str, Any] = {}
+    preset_snapshot = preset_cfg.get("snapshot")
+    if isinstance(preset_snapshot, dict):
+        snapshot_cfg.update(preset_snapshot)
+    snapshot_enabled = bool(snapshot_cfg.get("enabled", False))
+    snapshot_cfg["enabled"] = snapshot_enabled
 
     max_minutes_env = _env_float("WORKER_MAX_MINUTES")
     forever = _env_bool("WORKER_FOREVER", default=False)
@@ -3028,6 +3120,8 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         "watchdog_minutes": watchdog_minutes,
         "source_controls": source_controls,
         "forever": forever,
+        "snapshot_enabled": snapshot_enabled,
+        "snapshot": snapshot_cfg,
     }
 
     print("=== Autonomous Research Engine - Single Agent Mode ===")
@@ -3055,6 +3149,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Source controls: {source_controls}")
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     print(f"Experiment fingerprint: {experiment_fingerprint}")
+    print(f"Snapshot enabled: {snapshot_enabled} cfg={snapshot_cfg}")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -3074,6 +3169,8 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
+            "snapshot_enabled": snapshot_enabled,
+            "snapshot": snapshot_cfg,
         },
     )
     _heartbeat(agent, label="worker_single_start", run_id=run_id)
@@ -3095,6 +3192,8 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
+            "snapshot_enabled": snapshot_enabled,
+            "snapshot": snapshot_cfg,
         },
     )
 
@@ -3148,6 +3247,9 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         except Exception:
             print("Diagnostics computation failed, see logs for details.")
 
+        # Normalize cycles for UI and intelligence
+        normalized_cycles: List[Dict[str, Any]] = _normalize_cycles_for_ui(summaries)
+
         # Write cycle history and run_state snapshots for diagnostics panel
         _write_cycles_and_run_state(
             agent,
@@ -3155,9 +3257,25 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             mode="single",
             goal=goal,
             domain=domain,
-            cycles=_normalize_cycles_for_ui(summaries),
+            cycles=normalized_cycles,
             diagnostics=diag,
         )
+
+        # Final snapshot at end of single engine (if enabled)
+        if snapshot_enabled:
+            try:
+                _write_snapshot(
+                    agent,
+                    run_id=run_id,
+                    mode="single",
+                    goal=goal,
+                    domain=domain,
+                    snapshot_cfg=snapshot_cfg,
+                    current_cycle=len(normalized_cycles),
+                    diagnostics=diag,
+                )
+            except Exception:
+                pass
 
         intelligence_info = _run_post_run_intelligence(
             agent,
@@ -3165,7 +3283,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             goal=goal,
             domain=domain,
             run_id=run_id,
-            history=summaries,
+            history=normalized_cycles,
         )
 
         extra_manifest: Dict[str, Any] = {
@@ -3188,7 +3306,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 runtime_profile=runtime_profile,
                 stop_rye=stop_rye,
                 max_minutes=max_minutes,
-                summaries=summaries,
+                summaries=normalized_cycles,
                 extra=extra_manifest,
             )
         except Exception:
@@ -3207,17 +3325,19 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             max_minutes=max_minutes,
             run_id=run_id,
             experiment_mode="single_engine",
-            current=len(summaries),
+            current=len(normalized_cycles),
             total=max_cycles,
             extra={
                 "experiment_fingerprint": experiment_fingerprint,
                 "final_diagnostics": diag,
                 "intelligence": intelligence_info if intelligence_info else None,
                 "prompt_details": prompt_details,
+                "snapshot_enabled": snapshot_enabled,
+                "snapshot": snapshot_cfg,
             },
         )
         _log(
-            f"[single_engine] run_id={run_id} finished with {len(summaries)} cycles "
+            f"[single_engine] run_id={run_id} finished with {len(normalized_cycles)} cycles "
             "and worker_state set to stopped."
         )
     finally:
@@ -3256,6 +3376,14 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     _log_startup_config()
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
+
+    # Snapshot configuration: preset only for swarm engine
+    snapshot_cfg: Dict[str, Any] = {}
+    preset_snapshot = preset_cfg.get("snapshot")
+    if isinstance(preset_snapshot, dict):
+        snapshot_cfg.update(preset_snapshot)
+    snapshot_enabled = bool(snapshot_cfg.get("enabled", False))
+    snapshot_cfg["enabled"] = snapshot_enabled
 
     max_minutes_env = _env_float("WORKER_MAX_MINUTES")
     forever = _env_bool("WORKER_FOREVER", default=False)
@@ -3348,6 +3476,8 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         "shift_minutes": shift_minutes,
         "repeat_shifts": repeat_shifts,
         "forever": forever,
+        "snapshot_enabled": snapshot_enabled,
+        "snapshot": snapshot_cfg,
     }
 
     print("=== Autonomous Research Engine - Swarm Mode ===")
@@ -3377,6 +3507,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Shift minutes (clamped): {shift_minutes if shift_minutes is not None else 'None'}")
     print(f"Repeat shifts: {repeat_shifts}")
     print(f"Experiment fingerprint: {experiment_fingerprint}")
+    print(f"Snapshot enabled: {snapshot_enabled} cfg={snapshot_cfg}")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -3396,6 +3527,8 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
+            "snapshot_enabled": snapshot_enabled,
+            "snapshot": snapshot_cfg,
         },
     )
     _heartbeat(agent, label="worker_swarm_start", run_id=run_id)
@@ -3417,6 +3550,8 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
+            "snapshot_enabled": snapshot_enabled,
+            "snapshot": snapshot_cfg,
         },
     )
 
@@ -3540,6 +3675,9 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         except Exception:
             print("Diagnostics computation failed, see logs for details.")
 
+        # Normalize cycles for UI and intelligence
+        normalized_cycles: List[Dict[str, Any]] = _normalize_cycles_for_ui(summaries)
+
         # Write cycle history and run_state snapshots for diagnostics panel
         _write_cycles_and_run_state(
             agent,
@@ -3547,9 +3685,25 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             mode="swarm",
             goal=goal,
             domain=domain,
-            cycles=_normalize_cycles_for_ui(summaries),
+            cycles=normalized_cycles,
             diagnostics=diag,
         )
+
+        # Final snapshot at end of swarm engine (if enabled)
+        if snapshot_enabled:
+            try:
+                _write_snapshot(
+                    agent,
+                    run_id=run_id,
+                    mode="swarm",
+                    goal=goal,
+                    domain=domain,
+                    snapshot_cfg=snapshot_cfg,
+                    current_cycle=len(normalized_cycles),
+                    diagnostics=diag,
+                )
+            except Exception:
+                pass
 
         intelligence_info = _run_post_run_intelligence(
             agent,
@@ -3557,7 +3711,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             goal=goal,
             domain=domain,
             run_id=run_id,
-            history=summaries,
+            history=normalized_cycles,
         )
 
         extra_manifest: Dict[str, Any] = {
@@ -3583,7 +3737,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 runtime_profile=runtime_profile,
                 stop_rye=stop_rye,
                 max_minutes=max_minutes,
-                summaries=summaries,
+                summaries=normalized_cycles,
                 extra=extra_manifest,
             )
         except Exception:
@@ -3602,17 +3756,19 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             max_minutes=max_minutes,
             run_id=run_id,
             experiment_mode="swarm_engine",
-            current=len(summaries),
+            current=len(normalized_cycles),
             total=max_rounds,
             extra={
                 "experiment_fingerprint": experiment_fingerprint,
                 "final_diagnostics": diag,
                 "intelligence": intelligence_info if intelligence_info else None,
                 "prompt_details": prompt_details,
+                "snapshot_enabled": snapshot_enabled,
+                "snapshot": snapshot_cfg,
             },
         )
         _log(
-            f"[swarm_engine] run_id={run_id} finished with {len(summaries)} summaries, "
+            f"[swarm_engine] run_id={run_id} finished with {len(normalized_cycles)} summaries, "
             "worker_state set to stopped."
         )
     finally:
@@ -3874,6 +4030,14 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
 
+    # Snapshot configuration: preset only for meta engine
+    snapshot_cfg: Dict[str, Any] = {}
+    preset_snapshot = preset_cfg.get("snapshot")
+    if isinstance(preset_snapshot, dict):
+        snapshot_cfg.update(preset_snapshot)
+    snapshot_enabled = bool(snapshot_cfg.get("enabled", False))
+    snapshot_cfg["enabled"] = snapshot_enabled
+
     total_budget_minutes_env = _env_float("WORKER_MAX_MINUTES")
     if total_budget_minutes_env is None:
         total_budget_minutes_env = float(preset_cfg.get("runtime_minutes", 60.0))
@@ -3945,6 +4109,8 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         "source_controls": source_controls,
         "meta_max_segments": meta_max_segments_int,
         "preferred_mode": preferred_mode,
+        "snapshot_enabled": snapshot_enabled,
+        "snapshot": snapshot_cfg,
     }
 
     print(
@@ -3967,6 +4133,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     print(f"Source controls: {source_controls}")
     print(f"Tool flags: web={tool_flags['web']}, sandbox={tool_flags['sandbox']}")
     print(f"Experiment fingerprint: {experiment_fingerprint}")
+    print(f"Snapshot enabled: {snapshot_enabled} cfg={snapshot_cfg}")
     sys.stdout.flush()
 
     _update_worker_state(
@@ -3986,6 +4153,8 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
+            "snapshot_enabled": snapshot_enabled,
+            "snapshot": snapshot_cfg,
         },
     )
     _heartbeat(agent, label="worker_meta_start", run_id=run_id)
@@ -4027,6 +4196,8 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         extra={
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
+            "snapshot_enabled": snapshot_enabled,
+            "snapshot": snapshot_cfg,
         },
     )
 
@@ -4246,6 +4417,22 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             diagnostics=diag,
         )
 
+        # Final snapshot at end of meta engine (if enabled)
+        if snapshot_enabled:
+            try:
+                _write_snapshot(
+                    agent,
+                    run_id=run_id,
+                    mode="meta",
+                    goal=goal,
+                    domain=domain,
+                    snapshot_cfg=snapshot_cfg,
+                    current_cycle=len(normalized_cycles),
+                    diagnostics=diag,
+                )
+            except Exception:
+                pass
+
         intelligence_info = _run_post_run_intelligence(
             agent,
             mode="meta",
@@ -4316,6 +4503,8 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 "final_diagnostics": diag,
                 "intelligence": intelligence_info if intelligence_info else None,
                 "prompt_details": prompt_details,
+                "snapshot_enabled": snapshot_enabled,
+                "snapshot": snapshot_cfg,
             },
         )
         _log(
