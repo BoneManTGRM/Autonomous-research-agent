@@ -3954,106 +3954,88 @@ def main() -> None:
                 )
 
         if st.button("Full Option C learning speed report", key="option_c_report_btn"):
-            if used_fallback_history and history_for_reports:
-                # When we only have synthetic history, reuse the breakthrough report
-                # as a proxy for a learning speed snapshot.
-                discoveries_for_option = load_discovery_log()
-                if not discoveries_for_option:
-                    discoveries_for_option = load_discoveries_from_finished_runs()
-                option_md = build_breakthrough_report(
-                    history_for_reports,
-                    discoveries_for_option,
-                )
+            if not history_for_reports:
+                st.info("No cycles recorded yet for an Option C learning speed report.")
             else:
-                option_md = build_agent_report(
-                    memory_store=memory,
-                    goal=None,
-                    domain=None,
-                    hours_run_so_far=hours_run_for_reports,
-                    swarm_stats=None,
-                    intelligence_profile=msil_profile_for_reports,
-                    biomarker_snapshot=None,
+                discoveries_for_report = load_discovery_log()
+                if not discoveries_for_report:
+                    discoveries_for_report = load_discoveries_from_finished_runs()
+                report_md = build_breakthrough_report(
+                    history=history_for_reports,
+                    discoveries=discoveries_for_report,
                 )
-            st.markdown(option_md)
-            st.download_button(
-                "Download Option C report (Markdown)",
-                data=option_md,
-                file_name="autonomous_option_c_report.md",
-                mime="text/markdown",
-            )
+                st.markdown(report_md)
+                st.download_button(
+                    "Download Option C report (Markdown)",
+                    data=report_md,
+                    file_name="option_c_learning_report.md",
+                    mime="text/markdown",
+                )
 
     with col_rep2:
-        if st.button("Outcome focused summary"):
-            outcome_md = build_outcome_summary(
-                history_for_reports if history_for_reports else []
-            )
-            st.markdown(outcome_md)
-            st.download_button(
-                "Download outcome summary",
-                data=outcome_md,
-                file_name="autonomous_outcome_summary.md",
-                mime="text/markdown",
-            )
-
-    with col_rep3:
-        if st.button("Findings report (cures, treatments)"):
+        if st.button("Findings report", key="findings_report_btn"):
             if used_fallback_history and history_for_reports:
-                # When MemoryStore has no cycles but we reconstructed history
-                # directly from finished runs, build a findings report from that
-                # synthetic history instead of returning the empty default text.
-                findings_md = build_findings_report_from_history(history_for_reports)
+                report_md = build_findings_report_from_history(history_for_reports)
             else:
-                findings_md = generate_findings_report(memory_store=memory, goal=None)
+                report_md = generate_findings_report(memory_store=memory, goal=None)
 
-            st.markdown(findings_md)
+            st.markdown(report_md)
             st.download_button(
                 "Download findings report (Markdown)",
-                data=findings_md,
-                file_name="autonomous_findings_report.md",
+                data=report_md,
+                file_name="findings_report.md",
                 mime="text/markdown",
             )
-            # Optional PDF
             try:
                 pdf_path = generate_findings_report_pdf(
                     memory_store=memory,
                     goal=None,
-                    output_path="autonomous_agent_findings_report.pdf",
+                    output_path="findings_report.pdf",
                 )
+                with open(pdf_path, "rb") as f:
+                    st.download_button(
+                        "Download findings report (PDF)",
+                        data=f,
+                        file_name="findings_report.pdf",
+                        mime="application/pdf",
+                    )
             except RuntimeError as e:
-                pdf_path = None
                 st.info(str(e))
             except Exception:
-                pdf_path = None
                 st.info(
-                    "PDF generation failed unexpectedly. Check server logs for details."
+                    "PDF generation for findings report failed unexpectedly. "
+                    "Check server logs for details."
                 )
-            if pdf_path is not None:
-                try:
-                    with open(pdf_path, "rb") as f:
-                        st.download_button(
-                            "Download findings report (PDF)",
-                            data=f,
-                            file_name="autonomous_agent_findings_report.pdf",
-                            mime="application/pdf",
-                        )
-                except Exception:
-                    st.info("PDF file not available after generation attempt.")
 
-        if st.button("Breakthrough snapshot report"):
-            discoveries = load_discovery_log()
-            if not discoveries:
-                discoveries = load_discoveries_from_finished_runs()
-            breakthrough_md = build_breakthrough_report(
-                history_for_reports if history_for_reports else [],
-                discoveries,
-            )
-            st.markdown(breakthrough_md)
-            st.download_button(
-                "Download breakthrough snapshot",
-                data=breakthrough_md,
-                file_name="autonomous_breakthrough_snapshot.md",
-                mime="text/markdown",
-            )
+    with col_rep3:
+        if st.button("Agent competence profile", key="agent_profile_btn"):
+            if not history_for_reports:
+                st.info("No cycles recorded yet for an agent profile report.")
+            else:
+                try:
+                    profile_md = build_agent_report(
+                        memory_store=memory,
+                        history=history_for_reports,
+                        msil_profile=msil_profile_for_reports,
+                        hours_run=hours_run_for_reports,
+                    )
+                except TypeError:
+                    # Fallback for older signatures
+                    try:
+                        profile_md = build_agent_report(memory_store=memory)
+                    except Exception:
+                        profile_md = (
+                            "# Agent profile report\n\n"
+                            "build_agent_report is not compatible with this build."
+                        )
+
+                st.markdown(profile_md)
+                st.download_button(
+                    "Download agent profile report (Markdown)",
+                    data=profile_md,
+                    file_name="agent_profile_report.md",
+                    mime="text/markdown",
+                )
 
 
 if __name__ == "__main__":
