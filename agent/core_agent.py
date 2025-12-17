@@ -618,6 +618,15 @@ class CoreAgent:
         if self.rye_mode not in {"v2", "v3", "v4"}:
             self.rye_mode = "v3"
 
+        # Minimum windows before RYE based early stop is allowed to trigger
+        self.min_cycles_for_rye_stop: int = int(self.config.get("min_cycles_for_rye_stop", 3))
+        if self.min_cycles_for_rye_stop < 1:
+            self.min_cycles_for_rye_stop = 1
+
+        self.min_rounds_for_rye_stop: int = int(self.config.get("min_rounds_for_rye_stop", 3))
+        if self.min_rounds_for_rye_stop < 1:
+            self.min_rounds_for_rye_stop = 1
+
         self._meta_state: Dict[str, Any] = {
             "speed_mode": self.speed_mode,
             "last_update_ts": time.time(),
@@ -2137,7 +2146,8 @@ class CoreAgent:
                     stop_reason = "stability_guard"
                     break
 
-            if stop_rye is not None and recent_rye:
+            # RYE based early stop only after a minimum window of cycles
+            if stop_rye is not None and recent_rye and (i + 1) >= self.min_cycles_for_rye_stop:
                 avg_rye = sum(recent_rye) / len(recent_rye)
                 if avg_rye < stop_rye:
                     stop_reason = "rye_threshold"
@@ -2485,7 +2495,8 @@ class CoreAgent:
                     stop_reason = "stability_guard"
                     break
 
-            if stop_rye is not None and recent_round_rye:
+            # RYE based early stop only after a minimum number of rounds
+            if stop_rye is not None and recent_round_rye and (round_idx + 1) >= self.min_rounds_for_rye_stop:
                 avg_recent = sum(recent_round_rye) / len(recent_round_rye)
                 if avg_recent < stop_rye:
                     stop_reason = "rye_threshold"
