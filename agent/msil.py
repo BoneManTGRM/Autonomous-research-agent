@@ -354,7 +354,13 @@ class MetaSkillIntelligenceLayer:
         total_cycles = len(history)
 
         # If MemoryStore has not yet recorded this cycle, append it
-        if not history or history[-1].get("cycle") != cycle_log.get("cycle"):
+        if history:
+            last_idx = history[-1].get("cycle_index", history[-1].get("cycle"))
+            current_idx = cycle_log.get("cycle_index", cycle_log.get("cycle"))
+            if last_idx != current_idx:
+                history.append(cycle_log)
+                total_cycles = len(history)
+        else:
             history.append(cycle_log)
             total_cycles = len(history)
 
@@ -400,7 +406,7 @@ class MetaSkillIntelligenceLayer:
             "min_rye_for_goal": min_rye_goal,
             "max_rye_for_goal": max_rye_goal,
             "replay_stats": replay_stats,
-            "last_cycle_index": cycle_log.get("cycle"),
+            "last_cycle_index": cycle_log.get("cycle_index", cycle_log.get("cycle")),
             "last_cycle_rye": cycle_log.get("RYE"),
             "last_cycle_breakthrough_score": (
                 cycle_log.get("breakthrough") or {}
@@ -660,8 +666,18 @@ class MetaSkillIntelligenceLayer:
 
         for row in history:
             rye_vals.append(_safe_float(row.get("RYE")))
-            delta_vals.append(_safe_float(row.get("delta_R")))
-            energy_vals.append(_safe_float(row.get("energy_E") or row.get("Energy")))
+            delta_vals.append(
+                _safe_float(
+                    row.get("delta_r") or row.get("delta_R")
+                )
+            )
+            energy_vals.append(
+                _safe_float(
+                    row.get("energy_e")
+                    or row.get("energy_E")
+                    or row.get("Energy")
+                )
+            )
             br = row.get("breakthrough") or {}
             breakthrough_vals.append(_safe_float(br.get("breakthrough_score")))
 
@@ -863,8 +879,18 @@ class MetaSkillIntelligenceLayer:
                 rye_vals.append(_safe_float(r.get("RYE")))
                 br = r.get("breakthrough") or {}
                 breakthrough_vals.append(_safe_float(br.get("breakthrough_score")))
-                energy_vals.append(_safe_float(r.get("energy_E") or r.get("Energy")))
-                delta_vals.append(_safe_float(r.get("delta_R")))
+                energy_vals.append(
+                    _safe_float(
+                        r.get("energy_e")
+                        or r.get("energy_E")
+                        or r.get("Energy")
+                    )
+                )
+                delta_vals.append(
+                    _safe_float(
+                        r.get("delta_r") or r.get("delta_R")
+                    )
+                )
 
             rye_series = [v for v in rye_vals if v > 0]
             median_rye = statistics.median(rye_series) if rye_series else None
@@ -961,7 +987,13 @@ class MetaSkillIntelligenceLayer:
         tokens_all: List[int] = []
 
         for row in history:
-            energy_vals.append(_safe_float(row.get("energy_E") or row.get("Energy")))
+            energy_vals.append(
+                _safe_float(
+                    row.get("energy_e")
+                    or row.get("energy_E")
+                    or row.get("Energy")
+                )
+            )
             stats_block = row.get("stats") or {}
             web_calls_all.append(_safe_int(stats_block.get("web_calls")))
             pubmed_calls_all.append(_safe_int(stats_block.get("pubmed_calls")))
