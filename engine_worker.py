@@ -4380,27 +4380,57 @@ def main() -> None:
         - run_meta_engine
         - run_job_queue_worker
     """
-    mode = _resolve_mode_from_env_and_args()
-    _log(f"[main] resolved worker mode: {mode}")
+    import traceback
 
-    # Queue mode owns its own agent and config, do not pre init here.
-    if mode == "queue":
-        run_job_queue_worker()
+    try:
+        mode_raw = _resolve_mode_from_env_and_args()
+        mode = str(mode_raw).strip().lower() if mode_raw is not None else "queue"
+
+        # Normalize common aliases so small config mistakes do not break startup.
+        mode_aliases = {
+            "jobqueue": "queue",
+            "job_queue": "queue",
+            "worker": "queue",
+            "swarm_worker": "swarm",
+            "single_agent": "single",
+        }
+        mode = mode_aliases.get(mode, mode)
+
+        _log(f"[main] resolved worker mode: {mode!r}")
+
+        # Queue mode owns its own agent and config, do not pre init here.
+        if mode == "queue":
+            run_job_queue_worker()
+            return
+
+        if mode not in ("single", "swarm", "meta"):
+            _log(f"[main] unknown mode {mode!r}, falling back to queue worker.")
+            run_job_queue_worker()
+            return
+
+        # Only non queue modes need Tavily setup and an agent pre init.
+        try:
+            _configure_tavily_from_env()
+        except Exception as e:
+            _log(f"[main] tavily env setup failed: {e!r}")
+            _log(traceback.format_exc())
+
+        agent, config = init_agent_from_config()
+
+        if mode == "single":
+            run_single_agent_engine(agent, config)
+        elif mode == "swarm":
+            run_swarm_engine(agent, config)
+        else:  # mode == "meta"
+            run_meta_engine(agent, config)
+
+    except KeyboardInterrupt:
+        _log("[main] keyboard interrupt, exiting cleanly.")
         return
-
-    _configure_tavily_from_env()
-    agent, config = init_agent_from_config()
-
-    if mode == "single":
-        run_single_agent_engine(agent, config)
-    elif mode == "swarm":
-        run_swarm_engine(agent, config)
-    elif mode == "meta":
-        run_meta_engine(agent, config)
-    else:
-        # Fallback to queue if an unknown mode sneaks through.
-        _log(f"[main] unknown mode {mode!r}, falling back to queue worker.")
-        run_job_queue_worker()
+    except Exception as e:
+        _log(f"[main] fatal error: {e!r}")
+        _log(traceback.format_exc())
+        raise
 
 
 if __name__ == "__main__":
