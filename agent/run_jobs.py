@@ -33,42 +33,62 @@ What is verified here:
         else:
             BASE_DIR = (REPO_ROOT / "runs").resolve()
 
-    Subfolders:
+    Queue root:
 
-        PENDING_DIR  = BASE_DIR / "pending"
-        ACTIVE_DIR   = BASE_DIR / "active"
-        FINISHED_DIR = BASE_DIR / "finished"
-        ERROR_DIR    = BASE_DIR / "error"
-        QUEUE_DIR    = PENDING_DIR
-        LEGACY_QUEUE_DIR = BASE_DIR / "queue"
+        If ARA_QUEUE_ROOT is set, it is used as the root for the file based
+        queue layout (pending / active / finished / error). This matches
+        start_unified.sh, which typically exports:
 
-    All are created at import time. This matches start_unified.sh, which sets
-    ARA_RUNS_DIR="/opt/render/project/src/runs", so the queue layout is
-    consistent across:
+            ARA_QUEUE_ROOT="$ARA_RUNS_DIR/queue"
 
-        - start_unified.sh
-        - agent/run_jobs.py
-        - engine_worker.py (when it imports this module)
+        If ARA_QUEUE_ROOT is not set, we fall back to:
+
+            QUEUE_ROOT = BASE_DIR / "queue"
+
+    Primary queue layout (under QUEUE_ROOT):
+
+        PENDING_DIR   = QUEUE_ROOT / "pending"
+        ACTIVE_DIR    = QUEUE_ROOT / "active"
+        FINISHED_DIR  = QUEUE_ROOT / "finished"
+        ERROR_DIR     = QUEUE_ROOT / "error"
+        QUEUE_DIR     = PENDING_DIR        (canonical queue folder)
+        LEGACY_QUEUE_DIR = QUEUE_ROOT      (root alias for older watchers)
+
+    Legacy layout support:
+
+        For backward compatibility with older runs that wrote directly under
+        BASE_DIR, we also define:
+
+        LEGACY_PENDING_DIR  = BASE_DIR / "pending"
+        LEGACY_ACTIVE_DIR   = BASE_DIR / "active"
+        LEGACY_FINISHED_DIR = BASE_DIR / "finished"
+        LEGACY_ERROR_DIR    = BASE_DIR / "error"
+
+        list_jobs, load_job_by_id, and the status update helpers will read
+        from both the primary QUEUE_ROOT layout and these legacy folders.
+        New jobs are always written into QUEUE_ROOT.
 
 2. Job lifecycle and queue behavior
 
     The key functions for engine workers are:
 
         - create_job:
-            writes metadata JSON into runs/pending and a shadow copy into runs/queue
+            writes metadata JSON into QUEUE_ROOT/pending and a shadow copy
+            into QUEUE_ROOT (for older watchers that monitor the root)
 
         - get_next_queued_job:
             returns the oldest queued job using list_jobs(status="queued")
 
         - claim_next_job:
-            marks the next queued job as active and moves it into runs/active
+            marks the next queued job as active and moves it into
+            QUEUE_ROOT/active
 
         - load_next_pending_job:
             wrapper around claim_next_job for workers
 
         - save_job_result:
-            writes final result JSON to runs/finished/{run_id}.json
-            and moves metadata to runs/finished/{run_id}_job.json
+            writes final result JSON to QUEUE_ROOT/finished/{run_id}.json
+            and moves metadata to QUEUE_ROOT/finished/{run_id}_job.json
 
     This is the expected behavior for queue mode.
 
@@ -132,6 +152,7 @@ Update notes:
 # Public exports (useful for type checkers and explicit imports)
 __all__ = [
     "BASE_DIR",
+    "QUEUE_ROOT",
     "PENDING_DIR",
     "ACTIVE_DIR",
     "FINISHED_DIR",
@@ -272,30 +293,58 @@ if _env_runs:
 else:
     BASE_DIR = (REPO_ROOT / "runs").resolve()
 
-# Job layout used by the engine worker:
-#   - runs/pending/   : file based queue of pending jobs (canonical queue)
-#   - runs/active/    : in progress metadata and optional progress JSON
-#   - runs/finished/  : final result JSON and finished job metadata
-#   - runs/error/     : failed job metadata and optional traceback
-PENDING_DIR = BASE_DIR / "pending"
-ACTIVE_DIR = BASE_DIR / "active"
-FINISHED_DIR = BASE_DIR / "finished"
-ERROR_DIR = BASE_DIR / "error"
+# Queue root: honor ARA_QUEUE_ROOT if provided, otherwise default
+# to BASE_DIR / "queue". This keeps start_unified.sh, engine_worker,
+# and Streamlit in sync when they all share the same env.
+_env_queue_raw = os.getenv("ARA_QUEUE_ROOT")
+_env_queue = _env_queue_raw.strip() if isinstance(_env_queue_raw, str) else None
 
-# Backwards compatible alias for old name "queue".
-# Many older scripts import QUEUE_DIR from this module.
-# QUEUE_DIR now points at the canonical pending folder.
+if _env_queue:
+    QUEUE_ROOT = Path(_env_queue).resolve()
+else:
+    QUEUE_ROOT = (BASE_DIR / "queue").resolve()
+
+# Primary job layout used by the engine worker:
+#   - QUEUE_ROOT/pending/   : file based queue of pending jobs (canonical queue)
+#   - QUEUE_ROOT/active/    : in progress metadata and optional progress JSON
+#   - QUEUE_ROOT/finished/  : final result JSON and finished job metadata
+#   - QUEUE_ROOT/error/     : failed job metadata and optional traceback
+PENDING_DIR = QUEUE_ROOT / "pending"
+ACTIVE_DIR = QUEUE_ROOT / "active"
+FINISHED_DIR = QUEUE_ROOT / "finished"
+ERROR_DIR = QUEUE_ROOT / "error"
+
+# Canonical queue folder for UIs
 QUEUE_DIR = PENDING_DIR
 
-# Optional "queue" folder support (older jobs may still live here).
-# Workers that watch runs/queue directly will look here.
-LEGACY_QUEUE_DIR = BASE_DIR / "queue"
+# Legacy layout support (older versions wrote directly under BASE_DIR)
+LEGACY_QUEUE_DIR = QUEUE_ROOT  # alias for older watchers expecting "queue" root
+LEGACY_PENDING_DIR = BASE_DIR / "pending"
+LEGACY_ACTIVE_DIR = BASE_DIR / "active"
+LEGACY_FINISHED_DIR = BASE_DIR / "finished"
+LEGACY_ERROR_DIR = BASE_DIR / "error"
 
 # Make sure directories exist at import time
-for folder in [BASE_DIR, PENDING_DIR, ACTIVE_DIR, FINISHED_DIR, ERROR_DIR, LEGACY_QUEUE_DIR]:
-    folder.mkdir(parents=True, exist_ok=True)
+for folder in [
+    BASE_DIR,
+    QUEUE_ROOT,
+    PENDING_DIR,
+    ACTIVE_DIR,
+    FINISHED_DIR,
+    ERROR_DIR,
+    LEGACY_QUEUE_DIR,
+    LEGACY_PENDING_DIR,
+    LEGACY_ACTIVE_DIR,
+    LEGACY_FINISHED_DIR,
+    LEGACY_ERROR_DIR,
+]:
+    try:
+        folder.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
 
 _log("Initialized BASE_DIR:", BASE_DIR)
+_log("QUEUE_ROOT:", QUEUE_ROOT)
 _log("PENDING_DIR:", PENDING_DIR, "ACTIVE_DIR:", ACTIVE_DIR, "FINISHED_DIR:", FINISHED_DIR)
 
 # Status priority for conflict resolution in list_jobs
@@ -317,6 +366,7 @@ def debug_print_layout() -> None:
     and the worker really point at the same physical directories.
     """
     env_val = os.environ.get("ARA_RUNS_DIR")
+    env_queue_val = os.environ.get("ARA_QUEUE_ROOT")
     try:
         base_resolved = BASE_DIR.resolve()
     except Exception:
@@ -324,12 +374,18 @@ def debug_print_layout() -> None:
 
     print("[run_jobs] ARA_RUNS_DIR env (raw):", repr(env_val))
     print("[run_jobs] ARA_RUNS_DIR env (stripped):", repr(_env_runs))
+    print("[run_jobs] ARA_QUEUE_ROOT env (raw):", repr(env_queue_val))
+    print("[run_jobs] QUEUE_ROOT:", QUEUE_ROOT)
     print("[run_jobs] BASE_DIR:", base_resolved)
     print("[run_jobs] PENDING_DIR:", PENDING_DIR)
     print("[run_jobs] ACTIVE_DIR:", ACTIVE_DIR)
     print("[run_jobs] FINISHED_DIR:", FINISHED_DIR)
     print("[run_jobs] ERROR_DIR:", ERROR_DIR)
     print("[run_jobs] LEGACY_QUEUE_DIR:", LEGACY_QUEUE_DIR)
+    print("[run_jobs] LEGACY_PENDING_DIR:", LEGACY_PENDING_DIR)
+    print("[run_jobs] LEGACY_ACTIVE_DIR:", LEGACY_ACTIVE_DIR)
+    print("[run_jobs] LEGACY_FINISHED_DIR:", LEGACY_FINISHED_DIR)
+    print("[run_jobs] LEGACY_ERROR_DIR:", LEGACY_ERROR_DIR)
     try:
         pending_list = sorted(p.name for p in PENDING_DIR.glob("*_job.json"))
     except Exception:
@@ -621,8 +677,8 @@ def _job_path_for_status(run_id: str, status: str) -> Path:
 
     Important:
         For finished jobs we store metadata separately from the result JSON.
-        Metadata: runs/finished/{run_id}_job.json
-        Result:   runs/finished/{run_id}.json (or {run_id}_results.json alias)
+        Metadata: finished/{run_id}_job.json
+        Result:   finished/{run_id}.json (or {run_id}_results.json alias)
     """
     norm = status.lower()
     if norm in ("queued", "pending"):
@@ -801,14 +857,14 @@ def create_job(
     # Save into the canonical pending folder
     pending_path = job.save_to(PENDING_DIR)
 
-    # Shadow copy to queue folder for compatibility with any older watchers
+    # Shadow copy to queue root for compatibility with any older watchers
     try:
         job.save_to(LEGACY_QUEUE_DIR)
     except Exception:
         # Compatibility should never crash job creation.
         pass
 
-    _log("Created job", run_id, "status=queued", "BASE_DIR:", BASE_DIR)
+    _log("Created job", run_id, "status=queued", "QUEUE_ROOT:", QUEUE_ROOT)
     _queue_log(
         "Enqueued job",
         f"run_id={run_id}",
@@ -858,8 +914,22 @@ def load_job_by_id(run_id: str) -> Optional[RunJob]:
     if finished_meta.exists():
         return load_job(finished_meta)
 
+    # Check legacy finished dir as well
+    legacy_finished_meta = LEGACY_FINISHED_DIR / f"{run_id}_job.json"
+    if legacy_finished_meta.exists():
+        return load_job(legacy_finished_meta)
+
     # Other statuses: support both "{run_id}_job.json" and "{run_id}.json"
-    for folder in [PENDING_DIR, LEGACY_QUEUE_DIR, ACTIVE_DIR, ERROR_DIR]:
+    search_folders = [
+        PENDING_DIR,
+        LEGACY_QUEUE_DIR,
+        LEGACY_PENDING_DIR,
+        ACTIVE_DIR,
+        LEGACY_ACTIVE_DIR,
+        ERROR_DIR,
+        LEGACY_ERROR_DIR,
+    ]
+    for folder in search_folders:
         path = _find_meta_in_folder(run_id, folder)
         if path is not None and path.exists():
             return load_job(path)
@@ -879,11 +949,11 @@ def move_job(run_id: str, from_status: str, to_status: str) -> Tuple[Optional[Ru
         norm_from = from_status.lower()
         candidate_folders: List[Path] = []
         if norm_from in ("queued", "pending"):
-            candidate_folders = [PENDING_DIR, LEGACY_QUEUE_DIR]
+            candidate_folders = [PENDING_DIR, LEGACY_QUEUE_DIR, LEGACY_PENDING_DIR]
         elif norm_from in ("running", "active"):
-            candidate_folders = [ACTIVE_DIR]
+            candidate_folders = [ACTIVE_DIR, LEGACY_ACTIVE_DIR]
         elif norm_from == "error":
-            candidate_folders = [ERROR_DIR]
+            candidate_folders = [ERROR_DIR, LEGACY_ERROR_DIR]
 
         src_path = None
         for folder in candidate_folders:
@@ -912,9 +982,9 @@ def move_job(run_id: str, from_status: str, to_status: str) -> Tuple[Optional[Ru
     # Remove old file(s) and save new one
     _safe_unlink(src_path)
 
-    # Also remove any shadows in queue folders under both naming schemes
-    for folder in (PENDING_DIR, LEGACY_QUEUE_DIR):
-        _safe_unlink(folder / f"{run_id}.json")
+    # Also remove any shadows in queue root and legacy pending under both naming schemes
+    for folder in (PENDING_DIR, LEGACY_QUEUE_DIR, LEGACY_PENDING_DIR):
+        _safe_unlink(folder / f"{run_id}.json}")
         _safe_unlink(folder / f"{run_id}_job.json")
 
     job.save_to(dst_path.parent, filename=dst_path.name)
@@ -934,7 +1004,7 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
     elif norm_new in ("running", "active"):
         norm_new = "active"
 
-    # First check finished metadata path for this id
+    # First check finished metadata path for this id (primary then legacy)
     finished_meta = FINISHED_DIR / f"{run_id}_job.json"
     if finished_meta.exists() and norm_new == "finished":
         job = load_job(finished_meta)
@@ -945,21 +1015,42 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
         job.save_to(dst_path.parent, filename=dst_path.name)
         return job
 
+    legacy_finished_meta = LEGACY_FINISHED_DIR / f"{run_id}_job.json"
+    if legacy_finished_meta.exists() and norm_new == "finished":
+        job = load_job(legacy_finished_meta)
+        job.status = "finished"
+        job.updated_at = time.time()
+        dst_path = _job_path_for_status(run_id, "finished")
+        _safe_unlink(legacy_finished_meta)
+        job.save_to(dst_path.parent, filename=dst_path.name)
+        return job
+
     # Check other status folders
     for status in ["queued", "pending", "running", "active", "finished", "error"]:
         src_path: Optional[Path] = None
         norm_status = status.lower()
         if norm_status in ("queued", "pending"):
             # Pending or legacy queue
-            src_path = _find_meta_in_folder(run_id, PENDING_DIR)
-            if src_path is None:
-                src_path = _find_meta_in_folder(run_id, LEGACY_QUEUE_DIR)
+            for folder in (PENDING_DIR, LEGACY_QUEUE_DIR, LEGACY_PENDING_DIR):
+                src_path = _find_meta_in_folder(run_id, folder)
+                if src_path is not None and src_path.exists():
+                    break
         elif norm_status in ("running", "active"):
-            src_path = _find_meta_in_folder(run_id, ACTIVE_DIR)
+            for folder in (ACTIVE_DIR, LEGACY_ACTIVE_DIR):
+                src_path = _find_meta_in_folder(run_id, folder)
+                if src_path is not None and src_path.exists():
+                    break
         elif norm_status == "finished":
-            src_path = FINISHED_DIR / f"{run_id}_job.json"
+            for folder in (FINISHED_DIR, LEGACY_FINISHED_DIR):
+                candidate = folder / f"{run_id}_job.json"
+                if candidate.exists():
+                    src_path = candidate
+                    break
         elif norm_status == "error":
-            src_path = _find_meta_in_folder(run_id, ERROR_DIR)
+            for folder in (ERROR_DIR, LEGACY_ERROR_DIR):
+                src_path = _find_meta_in_folder(run_id, folder)
+                if src_path is not None and src_path.exists():
+                    break
 
         if src_path is None or not src_path.exists():
             continue
@@ -970,15 +1061,15 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
         dst_path = _job_path_for_status(run_id, norm_new)
         _safe_unlink(src_path)
 
-        # remove any stale file in queue dir under both naming schemes
-        for folder in (PENDING_DIR, LEGACY_QUEUE_DIR):
+        # remove any stale file in queue dirs under both naming schemes
+        for folder in (PENDING_DIR, LEGACY_QUEUE_DIR, LEGACY_PENDING_DIR):
             _safe_unlink(folder / f"{run_id}.json")
             _safe_unlink(folder / f"{run_id}_job.json")
 
         job.save_to(dst_path.parent, filename=dst_path.name)
         return job
 
-    # Also check legacy queue dir directly if not found above
+    # Also check legacy queue root directly if not found above
     for legacy_name in (f"{run_id}_job.json", f"{run_id}.json"):
         legacy_path = LEGACY_QUEUE_DIR / legacy_name
         if legacy_path.exists():
@@ -999,12 +1090,12 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
 
     status:
         None        : search all statuses
-        queued      : jobs in runs/pending (canonical queue status)
+        queued      : jobs in pending (canonical queue status)
         pending     : alias for queued
         running     : alias for active
-        active      : jobs in runs/active
-        finished    : jobs in runs/finished (metadata files only)
-        error       : jobs in runs/error
+        active      : jobs in active
+        finished    : jobs in finished (metadata files only)
+        error       : jobs in error
 
     NOTE:
         This function does not rely on the internal status stored in the JSON
@@ -1076,23 +1167,31 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
                             jobs_by_id[job.run_id] = job
 
     if status is None:
-        # Search all status folders plus legacy queue dir
+        # Search all status folders plus legacy queue and legacy layout dirs
         collect(PENDING_DIR, folder_status="queued")
         collect(LEGACY_QUEUE_DIR, folder_status="queued")
+        collect(LEGACY_PENDING_DIR, folder_status="queued")
         collect(ACTIVE_DIR, folder_status="active")
+        collect(LEGACY_ACTIVE_DIR, folder_status="active")
         collect(FINISHED_DIR, folder_status="finished", finished=True)
+        collect(LEGACY_FINISHED_DIR, folder_status="finished", finished=True)
         collect(ERROR_DIR, folder_status="error")
+        collect(LEGACY_ERROR_DIR, folder_status="error")
     else:
         norm = status.lower()
         if norm in ("pending", "queued"):
             collect(PENDING_DIR, folder_status="queued")
             collect(LEGACY_QUEUE_DIR, folder_status="queued")
+            collect(LEGACY_PENDING_DIR, folder_status="queued")
         elif norm in ("running", "active"):
             collect(ACTIVE_DIR, folder_status="active")
+            collect(LEGACY_ACTIVE_DIR, folder_status="active")
         elif norm == "finished":
             collect(FINISHED_DIR, folder_status="finished", finished=True)
+            collect(LEGACY_FINISHED_DIR, folder_status="finished", finished=True)
         elif norm == "error":
             collect(ERROR_DIR, folder_status="error")
+            collect(LEGACY_ERROR_DIR, folder_status="error")
 
     jobs: List[RunJob] = list(jobs_by_id.values())
     # Sort by created_at descending (newest first for UI)
@@ -1133,15 +1232,18 @@ def _claim_job_atomic(job: RunJob) -> Optional[RunJob]:
     """
     run_id = job.run_id
 
-    src_pending = _find_meta_in_folder(run_id, PENDING_DIR)
-    src_legacy = _find_meta_in_folder(run_id, LEGACY_QUEUE_DIR)
-
+    src_candidates = [
+        _find_meta_in_folder(run_id, PENDING_DIR),
+        _find_meta_in_folder(run_id, LEGACY_QUEUE_DIR),
+        _find_meta_in_folder(run_id, LEGACY_PENDING_DIR),
+    ]
     src: Optional[Path] = None
-    if src_pending is not None and src_pending.exists():
-        src = src_pending
-    elif src_legacy is not None and src_legacy.exists():
-        src = src_legacy
-    else:
+    for cand in src_candidates:
+        if cand is not None and cand.exists():
+            src = cand
+            break
+
+    if src is None:
         _log("claim_job_atomic: no metadata file found for", run_id)
         _queue_log("claim_job_atomic:", f"no metadata file found for run_id={run_id}")
         return None
@@ -1162,8 +1264,8 @@ def _claim_job_atomic(job: RunJob) -> Optional[RunJob]:
         return None
 
     # Remove any duplicate shadows in queue folders
-    for folder in (PENDING_DIR, LEGACY_QUEUE_DIR):
-        _safe_unlink(folder / f"{run_id}.json")
+    for folder in (PENDING_DIR, LEGACY_QUEUE_DIR, LEGACY_PENDING_DIR):
+        _safe_unlink(folder / f"{run_id}.json}")
         _safe_unlink(folder / f"{run_id}_job.json")
 
     # Normalize status inside the job file to "active"
@@ -1249,11 +1351,11 @@ def result_path(run_id: str) -> Path:
     """
     Path where the worker should write final result JSON for a run.
 
-    This returns runs/finished/{run_id}.json.
+    This returns finished/{run_id}.json.
 
     Finished jobs now have two files:
-        - runs/finished/{run_id}_job.json   (job metadata, used by list_jobs)
-        - runs/finished/{run_id}.json       (final result payload, used by UI)
+        - finished/{run_id}_job.json   (job metadata, used by list_jobs)
+        - finished/{run_id}.json       (final result payload, used by UI)
     """
     return FINISHED_DIR / f"{run_id}.json"
 
@@ -1303,6 +1405,8 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
     active_meta_candidates = [
         ACTIVE_DIR / f"{job.run_id}_job.json",
         ACTIVE_DIR / f"{job.run_id}.json",  # legacy
+        LEGACY_ACTIVE_DIR / f"{job.run_id}_job.json",
+        LEGACY_ACTIVE_DIR / f"{job.run_id}.json",
     ]
     for active_meta in active_meta_candidates:
         if not active_meta.exists():
@@ -1316,7 +1420,7 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
         _safe_unlink(active_meta)
         j.save_to(FINISHED_DIR, filename=f"{job.run_id}_job.json")
         # Also remove any lingering legacy queue copy
-        for folder in (LEGACY_QUEUE_DIR, PENDING_DIR):
+        for folder in (LEGACY_QUEUE_DIR, PENDING_DIR, LEGACY_PENDING_DIR):
             _safe_unlink(folder / f"{job.run_id}.json")
             _safe_unlink(folder / f"{job.run_id}_job.json")
         _log("save_job_result: marked finished", job.run_id)
@@ -1350,6 +1454,8 @@ def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
     active_meta_candidates = [
         ACTIVE_DIR / f"{job.run_id}_job.json",
         ACTIVE_DIR / f"{job.run_id}.json",  # legacy
+        LEGACY_ACTIVE_DIR / f"{job.run_id}_job.json",
+        LEGACY_ACTIVE_DIR / f"{job.run_id}.json",
     ]
     for active_meta in active_meta_candidates:
         if not active_meta.exists():
@@ -1362,7 +1468,7 @@ def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
         j.updated_at = time.time()
         _safe_unlink(active_meta)
         j.save_to(ERROR_DIR, filename=f"{job.run_id}_job.json")
-        for folder in (LEGACY_QUEUE_DIR, PENDING_DIR):
+        for folder in (LEGACY_QUEUE_DIR, PENDING_DIR, LEGACY_PENDING_DIR):
             _safe_unlink(folder / f"{job.run_id}.json")
             _safe_unlink(folder / f"{job.run_id}_job.json")
         _log("mark_job_error: marked error", job.run_id)
@@ -1386,12 +1492,20 @@ def load_job_result(run_id: str) -> Optional[Dict[str, Any]]:
     Convenience helper: load the final result JSON for a finished job.
 
     Accepts either finished/<run_id>.json or finished/<run_id>_results.json
-    as the result payload file.
+    as the result payload file. Also supports legacy finished/ layout.
     """
     rp_main = FINISHED_DIR / f"{run_id}.json"
     rp_alt = FINISHED_DIR / f"{run_id}_results.json"
-    rp = rp_main if rp_main.exists() else rp_alt
-    if not rp.exists():
+    rp_legacy_main = LEGACY_FINISHED_DIR / f"{run_id}.json"
+    rp_legacy_alt = LEGACY_FINISHED_DIR / f"{run_id}_results.json"
+
+    rp = None
+    for candidate in (rp_main, rp_alt, rp_legacy_main, rp_legacy_alt):
+        if candidate.exists():
+            rp = candidate
+            break
+
+    if rp is None or not rp.exists():
         return None
     try:
         with rp.open("r", encoding="utf8") as f:
