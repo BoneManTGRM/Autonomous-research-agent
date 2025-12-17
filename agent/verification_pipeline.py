@@ -114,7 +114,20 @@ class VerificationPipeline:
         """
         goal = cycle_log.get("goal", "")
         domain = cycle_log.get("domain", "general")
-        rye_value = float(cycle_log.get("RYE") or 0.0)
+
+        # Flexible RYE extraction to match other modules (DiscoveryManager etc)
+        rye_raw = cycle_log.get("RYE")
+        if rye_raw is None:
+            rye_raw = (
+                cycle_log.get("rye_value")
+                or cycle_log.get("rye_after")
+                or cycle_log.get("rye")
+            )
+        try:
+            rye_value = float(rye_raw) if rye_raw is not None else 0.0
+        except Exception:
+            rye_value = 0.0
+
         hypotheses = cycle_log.get("hypotheses", []) or []
         citations = cycle_log.get("citations", []) or []
         candidate_interventions = cycle_log.get("candidate_interventions", []) or []
@@ -230,13 +243,30 @@ class VerificationPipeline:
     # ------------------------------------------------------------------
     # Citation analysis
     # ------------------------------------------------------------------
+    def _normalize_citation_list(self, raw: Any) -> List[Dict[str, Any]]:
+        """Normalize citation structures from mixed types into list of dicts."""
+        if raw is None:
+            return []
+        if isinstance(raw, list):
+            out: List[Dict[str, Any]] = []
+            for item in raw:
+                if isinstance(item, dict):
+                    out.append(item)
+                elif isinstance(item, str):
+                    out.append({"raw": item})
+            return out
+        if isinstance(raw, dict):
+            return [raw]
+        return [{"raw": str(raw)}]
+
     def _analyze_citations(
         self,
-        citations: List[Dict[str, Any]],
+        citations: Any,
         history: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Compute citation quality and redundancy profile."""
-        total = len(citations)
+        citations_list = self._normalize_citation_list(citations)
+        total = len(citations_list)
         if total == 0:
             return {
                 "total": 0,
@@ -252,7 +282,7 @@ class VerificationPipeline:
         source_pairs = set()
         urls = set()
         missing_urls = 0
-        for c in citations:
+        for c in citations_list:
             src = c.get("source")
             url = c.get("url")
             source_pairs.add((src, url))
@@ -272,7 +302,8 @@ class VerificationPipeline:
         # Overlap with historical urls
         hist_urls = set()
         for row in history:
-            for c in row.get("citations", []) or []:
+            row_cites = self._normalize_citation_list(row.get("citations", []))
+            for c in row_cites:
                 url = c.get("url")
                 if url:
                     hist_urls.add(url)
@@ -314,8 +345,8 @@ class VerificationPipeline:
                 "short_text_set": [],
             }
 
-        confs = []
-        short_texts = []
+        confs: List[float] = []
+        short_texts: List[str] = []
         for h in hypotheses:
             c = h.get("confidence")
             if isinstance(c, (int, float)):
@@ -336,6 +367,8 @@ class VerificationPipeline:
         hist_titles = set()
         for row in history:
             for h in row.get("hypotheses", []) or []:
+                if not isinstance(h, dict):
+                    continue
                 title = (h.get("title") or h.get("text") or "").strip()
                 if title:
                     if len(title) > 160:
@@ -369,7 +402,12 @@ class VerificationPipeline:
         if len(hypotheses) < 2:
             return flags
 
-        texts = [(h.get("title") or h.get("text") or "").lower() for h in hypotheses]
+        texts = []
+        for h in hypotheses:
+            if isinstance(h, dict):
+                texts.append((h.get("title") or h.get("text") or "").lower())
+            else:
+                texts.append(str(h).lower())
 
         neg_words = ["reduces", "decreases", "suppresses"]
         pos_words = ["increases", "boosts", "enhances"]
@@ -391,11 +429,14 @@ class VerificationPipeline:
 
     def _same_target(self, a: str, b: str) -> bool:
         """Heuristic target matching."""
-        if "mtor" in a or "mtor" in b:
-            return ("mtor" in b) or ("mtor" in a)
-        if "nad" in a or "nad" in b:
-            return ("nad" in b) or ("nad" in a)
-        if "senescence" in a and "senescence" in b:
+        a_low = a.lower()
+        b_low = b.lower()
+
+        if "mtor" in a_low and "mtor" in b_low:
+            return True
+        if "nad" in a_low and "nad" in b_low:
+            return True
+        if "senescence" in a_low and "senescence" in b_low:
             return True
         return False
 
@@ -417,6 +458,8 @@ class VerificationPipeline:
         motifs: List[Dict[str, Any]] = []
 
         for h in hypotheses:
+            if not isinstance(h, dict):
+                continue
             text = (h.get("title") or h.get("text") or "").strip()
             if not text:
                 continue
@@ -435,6 +478,8 @@ class VerificationPipeline:
             )
 
         for iv in candidate_interventions:
+            if not isinstance(iv, dict):
+                continue
             label = iv.get("label") or iv.get("title")
             if not label:
                 continue
@@ -560,6 +605,8 @@ class VerificationPipeline:
         # Hypothesis novelty
         current_hyp = set()
         for h in hypotheses:
+            if not isinstance(h, dict):
+                continue
             txt = (h.get("title") or h.get("text") or "").strip()
             if txt:
                 if len(txt) > 160:
@@ -569,6 +616,8 @@ class VerificationPipeline:
         hist_hyp = set()
         for row in history:
             for h in row.get("hypotheses", []) or []:
+                if not isinstance(h, dict):
+                    continue
                 txt = (h.get("title") or h.get("text") or "").strip()
                 if txt:
                     if len(txt) > 160:
@@ -581,10 +630,12 @@ class VerificationPipeline:
             hyp_novel = 1.0 - (overlap / float(len(current_hyp)))
 
         # Citation novelty
-        current_urls = set(c.get("url") for c in citations if c.get("url"))
+        citations_list = self._normalize_citation_list(citations)
+        current_urls = set(c.get("url") for c in citations_list if c.get("url"))
         hist_urls = set()
         for row in history:
-            for c in row.get("citations", []) or []:
+            row_cites = self._normalize_citation_list(row.get("citations", []))
+            for c in row_cites:
                 url = c.get("url")
                 if url:
                     hist_urls.add(url)
@@ -648,12 +699,15 @@ class VerificationPipeline:
 
         for m in motifs:
             try:
+                text = m.get("text") or m.get("label")
+                if not text:
+                    continue
                 item = {
                     "goal": goal,
                     "domain": domain,
                     "hallmark": hallmark,
                     "kind": m.get("kind"),
-                    "text": m.get("text") or m.get("label"),
+                    "text": text,
                     "rye_score": rye_value,
                     "tags": [
                         "verified_motif",
