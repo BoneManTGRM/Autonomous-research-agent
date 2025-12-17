@@ -3889,7 +3889,7 @@ def main() -> None:
         else:
             st.write("Worker state method is not available in this MemoryStore build.")
 
-    # ------------------------------
+       # ------------------------------
     # Report generation
     # ------------------------------
     st.markdown("---")
@@ -3918,131 +3918,169 @@ def main() -> None:
         compute_msil_profile(history_for_reports) if history_for_reports else None
     )
 
+    # Discovery data for Option C and breakthrough reports
+    discoveries_for_reports = load_discovery_log()
+    if not discoveries_for_reports:
+        discoveries_for_reports = load_discoveries_from_finished_runs()
+
     col_rep1, col_rep2, col_rep3 = st.columns(3)
 
+    # Full history and Option C combo
     with col_rep1:
-        if st.button("Full history report"):
-            if used_fallback_history and history_for_reports:
-                # When MemoryStore has no cycles but finished runs do,
-                # fall back to an outcome style report instead of the
-                # empty "No cycles logged" MemoryStore report.
-                report_md = build_outcome_summary(history_for_reports)
+        if st.button("Full history report", key="full_history_report_btn"):
+            if not history_for_reports:
+                st.info("No cycles logged yet, nothing to report.")
             else:
-                report_md = generate_report(memory_store=memory, goal=None)
+                if used_fallback_history:
+                    # When MemoryStore has no cycles but finished runs do,
+                    # fall back to an outcome style report instead of an empty one.
+                    report_md = build_outcome_summary(history_for_reports)
+                else:
+                    report_md = generate_report(memory_store=memory, goal=None)
 
-            st.markdown(report_md)
-            st.download_button(
-                "Download full report (Markdown)",
-                data=report_md,
-                file_name="autonomous_research_report.md",
-                mime="text/markdown",
-            )
-            # Optional PDF from MemoryStore only; if it has no cycles this may be empty,
-            # but PDF generation still stays best effort.
-            try:
-                pdf_path = generate_report_pdf(
-                    memory_store=memory,
-                    goal=None,
-                    output_path="autonomous_research_report.pdf",
+                st.markdown(report_md)
+                st.download_button(
+                    "Download full report (Markdown)",
+                    data=report_md,
+                    file_name="autonomous_research_report.md",
+                    mime="text/markdown",
                 )
-                with open(pdf_path, "rb") as f:
-                    st.download_button(
-                        "Download full report (PDF)",
-                        data=f,
-                        file_name="autonomous_research_report.pdf",
-                        mime="application/pdf",
-                    )
-            except RuntimeError as e:
-                st.info(str(e))
-            except Exception:
-                st.info(
-                    "PDF generation failed unexpectedly. Check server logs for details."
-                )
+
+                # Optional PDF from MemoryStore only (if it has cycles)
+                if not used_fallback_history:
+                    try:
+                        pdf_path = generate_report_pdf(
+                            memory_store=memory,
+                            goal=None,
+                            output_path="autonomous_research_report.pdf",
+                        )
+                        with open(pdf_path, "rb") as f:
+                            st.download_button(
+                                "Download full report (PDF)",
+                                data=f,
+                                file_name="autonomous_research_report.pdf",
+                                mime="application/pdf",
+                            )
+                    except RuntimeError as e:
+                        st.info(str(e))
+                    except Exception:
+                        st.info(
+                            "PDF generation failed unexpectedly. Check server logs for details."
+                        )
 
         if st.button("Full Option C learning speed report", key="option_c_report_btn"):
             if not history_for_reports:
-                st.info("No cycles recorded yet for an Option C learning speed report.")
+                st.info("No cycles logged yet, Option C learning report is empty.")
             else:
-                discoveries_for_report = load_discovery_log()
-                if not discoveries_for_report:
-                    discoveries_for_report = load_discoveries_from_finished_runs()
-                report_md = build_breakthrough_report(
-                    history=history_for_reports,
-                    discoveries=discoveries_for_report,
-                )
-                st.markdown(report_md)
+                # Combine outcome summary, breakthrough snapshot, and optional MSIL profile
+                parts: List[str] = []
+
+                # Outcome view
+                parts.append(build_outcome_summary(history_for_reports))
+                parts.append("\n\n---\n\n")
+
+                # Breakthrough and high impact cycles
+                parts.append(build_breakthrough_report(history_for_reports, discoveries_for_reports))
+
+                # Optional MSIL profile snapshot
+                if msil_profile_for_reports:
+                    parts.append("\n\n---\n\n")
+                    parts.append("# MSIL meta skill profile snapshot\n\n")
+                    try:
+                        msil_json = json.dumps(msil_profile_for_reports, indent=2)
+                    except Exception:
+                        msil_json = str(msil_profile_for_reports)
+                    parts.append("```json\n")
+                    parts.append(msil_json)
+                    parts.append("\n```")
+
+                # Optional hours run hint
+                if isinstance(hours_run_for_reports, (int, float)):
+                    parts.append(
+                        f"\n\n_Approximate hours between first and last recorded cycle: {hours_run_for_reports:.2f}_\n"
+                    )
+
+                option_c_md = "".join(parts)
+                st.markdown(option_c_md)
                 st.download_button(
-                    "Download Option C report (Markdown)",
-                    data=report_md,
+                    "Download Option C learning report (Markdown)",
+                    data=option_c_md,
                     file_name="option_c_learning_report.md",
                     mime="text/markdown",
                 )
 
+    # Findings and cure style report
     with col_rep2:
-        if st.button("Findings report", key="findings_report_btn"):
-            if used_fallback_history and history_for_reports:
-                report_md = build_findings_report_from_history(history_for_reports)
-            else:
-                report_md = generate_findings_report(memory_store=memory, goal=None)
-
-            st.markdown(report_md)
-            st.download_button(
-                "Download findings report (Markdown)",
-                data=report_md,
-                file_name="findings_report.md",
-                mime="text/markdown",
-            )
-            try:
-                pdf_path = generate_findings_report_pdf(
-                    memory_store=memory,
-                    goal=None,
-                    output_path="findings_report.pdf",
-                )
-                with open(pdf_path, "rb") as f:
-                    st.download_button(
-                        "Download findings report (PDF)",
-                        data=f,
-                        file_name="findings_report.pdf",
-                        mime="application/pdf",
-                    )
-            except RuntimeError as e:
-                st.info(str(e))
-            except Exception:
-                st.info(
-                    "PDF generation for findings report failed unexpectedly. "
-                    "Check server logs for details."
-                )
-
-    with col_rep3:
-        if st.button("Agent competence profile", key="agent_profile_btn"):
+        if st.button("Findings report (cures, mechanisms, treatments)", key="findings_report_btn"):
             if not history_for_reports:
-                st.info("No cycles recorded yet for an agent profile report.")
+                st.info("No cycles logged yet, findings report is empty.")
             else:
-                try:
-                    profile_md = build_agent_report(
-                        memory_store=memory,
-                        history=history_for_reports,
-                        msil_profile=msil_profile_for_reports,
-                        hours_run=hours_run_for_reports,
-                    )
-                except TypeError:
-                    # Fallback for older signatures
-                    try:
-                        profile_md = build_agent_report(memory_store=memory)
-                    except Exception:
-                        profile_md = (
-                            "# Agent profile report\n\n"
-                            "build_agent_report is not compatible with this build."
-                        )
+                if used_fallback_history:
+                    # Build directly from synthetic history when MemoryStore has no cycles
+                    findings_md = build_findings_report_from_history(history_for_reports)
+                else:
+                    findings_md = generate_findings_report(memory_store=memory, goal=None)
 
-                st.markdown(profile_md)
+                st.markdown(findings_md)
                 st.download_button(
-                    "Download agent profile report (Markdown)",
-                    data=profile_md,
-                    file_name="agent_profile_report.md",
+                    "Download findings report (Markdown)",
+                    data=findings_md,
+                    file_name="findings_report.md",
                     mime="text/markdown",
                 )
 
+                # Optional PDF using MemoryStore based findings report
+                if not used_fallback_history:
+                    try:
+                        pdf_path_f = generate_findings_report_pdf(
+                            memory_store=memory,
+                            goal=None,
+                            output_path="findings_report.pdf",
+                        )
+                        with open(pdf_path_f, "rb") as f:
+                            st.download_button(
+                                "Download findings report (PDF)",
+                                data=f,
+                                file_name="findings_report.pdf",
+                                mime="application/pdf",
+                            )
+                    except RuntimeError as e:
+                        st.info(str(e))
+                    except Exception:
+                        st.info(
+                            "PDF generation for findings report failed unexpectedly. Check server logs for details."
+                        )
 
+    # Breakthrough snapshot and raw history export
+    with col_rep3:
+        if st.button("Breakthrough snapshot report", key="breakthrough_snapshot_btn"):
+            if not history_for_reports:
+                st.info("No cycles logged yet, breakthrough snapshot is empty.")
+            else:
+                br_md = build_breakthrough_report(history_for_reports, discoveries_for_reports)
+                st.markdown(br_md)
+                st.download_button(
+                    "Download breakthrough snapshot (Markdown)",
+                    data=br_md,
+                    file_name="breakthrough_snapshot_report.md",
+                    mime="text/markdown",
+                )
+
+        # Raw JSON export for external analysis
+        if history_for_reports:
+            history_json_str, note_hist = safe_json_preview(
+                history_for_reports, max_chars=500_000, max_items=None
+            )
+            if history_json_str is not None:
+                st.download_button(
+                    "Download full cycle history as JSON",
+                    data=history_json_str,
+                    file_name="cycle_history.json",
+                    mime="application/json",
+                    key="history_json_export_btn",
+                )
+
+    # End of main()
+    # Streamlit entry point
 if __name__ == "__main__":
     main()
