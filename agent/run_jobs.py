@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 import json
-import time
-import uuid
-import os
 import logging
-from dataclasses import dataclass, asdict, fields, field
+import os
+import socket
+import time
+import traceback
+import uuid
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -190,6 +193,42 @@ REPO_ROOT = _THIS_FILE_DIR.parent
 # Debug toggle (optional, controlled via env var)
 DEBUG_RUN_JOBS = os.getenv("ARA_DEBUG_RUNJOBS", "").strip().lower() in ("1", "true", "yes", "on")
 
+# Internal loggers
+_LOGGER = logging.getLogger(__name__)
+_QUEUE_LOGGER = logging.getLogger("ara.queue")
+
+
+def _configure_queue_logger_if_needed() -> None:
+    """
+    Ensure queue logs have a reasonable chance of showing up even if the
+    application didn't configure logging (common in simple workers).
+
+    This avoids surprises where queue events disappear due to a missing
+    handler or an INFO-level drop.
+    """
+    try:
+        root = logging.getLogger()
+        if _QUEUE_LOGGER.handlers:
+            return
+        if root.handlers:
+            # Let the application's logging config handle it.
+            return
+
+        import sys
+
+        handler = logging.StreamHandler(stream=sys.stdout)
+        fmt = logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s")
+        handler.setFormatter(fmt)
+        _QUEUE_LOGGER.addHandler(handler)
+        _QUEUE_LOGGER.setLevel(logging.INFO)
+        _QUEUE_LOGGER.propagate = False
+    except Exception:
+        # Never fail module import due to logging configuration.
+        pass
+
+
+_configure_queue_logger_if_needed()
+
 
 def _log(*args: Any) -> None:
     """
@@ -200,30 +239,34 @@ def _log(*args: Any) -> None:
     """
     if not DEBUG_RUN_JOBS:
         return
-    print("[run_jobs]", *args)
+    msg = " ".join(str(a) for a in args)
     try:
-        import sys
-
-        sys.stdout.flush()
+        _LOGGER.debug(msg)
     except Exception:
-        pass
+        print("[run_jobs]", msg)
+        try:
+            import sys
+
+            sys.stdout.flush()
+        except Exception:
+            pass
 
 
-def _queue_log(*parts: Any) -> None:
+def _queue_log(*parts: Any, level: int = logging.INFO) -> None:
     """
-    Queue level logger that always shows up in Render logs.
+    Queue level logger intended for operational visibility.
 
-    Uses the standard logging subsystem when available, with a
-    "[Queue]" prefix, and falls back to stdout.
+    Uses the standard logging subsystem and falls back to stdout on failure.
     """
     msg = " ".join(str(p) for p in parts)
     full = f"[Queue] {msg}"
     try:
-        logging.getLogger("queue").info(full)
+        _QUEUE_LOGGER.log(level, full)
     except Exception:
         print(full)
         try:
             import sys
+
             sys.stdout.flush()
         except Exception:
             pass
@@ -235,15 +278,13 @@ def _queue_log(*parts: Any) -> None:
 # config["monitoring"]. The UI and worker can rely on these keys.
 MONITORING_DEFAULTS: Dict[str, Any] = {
     # Snapshots and equilibrium view
-    "snapshots_enabled": False,           # master toggle for snapshot writing
-    "snapshot_interval_cycles": None,     # take snapshot every N cycles (optional)
-    "snapshot_interval_minutes": None,    # or every N minutes (optional)
-    "snapshot_max_to_keep": 50,           # how many snapshots per run to retain
-
+    "snapshots_enabled": False,  # master toggle for snapshot writing
+    "snapshot_interval_cycles": None,  # take snapshot every N cycles (optional)
+    "snapshot_interval_minutes": None,  # or every N minutes (optional)
+    "snapshot_max_to_keep": 50,  # how many snapshots per run to retain
     # Watchdog heartbeat for MemoryStore diagnostics
     "heartbeat_enabled": True,
-    "heartbeat_interval_seconds": 60,     # seconds between heartbeat writes
-
+    "heartbeat_interval_seconds": 60,  # seconds between heartbeat writes
     # Run state saving for "Last saved run state" diagnostics
     "run_state_enabled": True,
 }
@@ -259,10 +300,10 @@ def _ensure_monitoring_block(config: Dict[str, Any]) -> Dict[str, Any]:
     This function is intentionally idempotent so it can be called multiple
     times safely.
     """
-    try:
-        cfg: Dict[str, Any] = dict(config)
-    except Exception:
+    if not isinstance(config, dict):
         return config
+
+    cfg: Dict[str, Any] = dict(config)
 
     monitoring = cfg.get("monitoring")
     if not isinstance(monitoring, dict):
@@ -324,6 +365,9 @@ LEGACY_ACTIVE_DIR = BASE_DIR / "active"
 LEGACY_FINISHED_DIR = BASE_DIR / "finished"
 LEGACY_ERROR_DIR = BASE_DIR / "error"
 
+# Internal lock directory used to claim jobs safely across multiple workers
+_LOCKS_DIR = QUEUE_ROOT / ".locks"
+
 # Make sure directories exist at import time
 for folder in [
     BASE_DIR,
@@ -337,6 +381,7 @@ for folder in [
     LEGACY_ACTIVE_DIR,
     LEGACY_FINISHED_DIR,
     LEGACY_ERROR_DIR,
+    _LOCKS_DIR,
 ]:
     try:
         folder.mkdir(parents=True, exist_ok=True)
@@ -386,53 +431,117 @@ def debug_print_layout() -> None:
     print("[run_jobs] LEGACY_ACTIVE_DIR:", LEGACY_ACTIVE_DIR)
     print("[run_jobs] LEGACY_FINISHED_DIR:", LEGACY_FINISHED_DIR)
     print("[run_jobs] LEGACY_ERROR_DIR:", LEGACY_ERROR_DIR)
-    try:
-        pending_list = sorted(p.name for p in PENDING_DIR.glob("*_job.json"))
-    except Exception:
-        pending_list = []
-    print("[run_jobs] Pending jobs visible:", pending_list)
-    try:
-        active_list = sorted(p.name for p in ACTIVE_DIR.glob("*_job.json"))
-    except Exception:
-        active_list = []
-    print("[run_jobs] Active jobs visible:", active_list)
-    try:
-        finished_list = sorted(p.name for p in FINISHED_DIR.glob("*_job.json"))
-    except Exception:
-        finished_list = []
-    print("[run_jobs] Finished job metadata visible:", finished_list)
-    try:
-        error_list = sorted(p.name for p in ERROR_DIR.glob("*_job.json"))
-    except Exception:
-        error_list = []
-    print("[run_jobs] Error jobs visible:", error_list)
-    try:
-        legacy_list = sorted(p.name for p in LEGACY_QUEUE_DIR.glob("*_job.json"))
-    except Exception:
-        legacy_list = []
-    print("[run_jobs] Legacy queue jobs visible:", legacy_list)
-    import sys
+    print("[run_jobs] LOCKS_DIR:", _LOCKS_DIR)
 
-    sys.stdout.flush()
+    def _names(glob_iter):
+        try:
+            return sorted(p.name for p in glob_iter)
+        except Exception:
+            return []
+
+    print("[run_jobs] Pending jobs visible:", _names(PENDING_DIR.glob("*_job.json")))
+    print("[run_jobs] Active jobs visible:", _names(ACTIVE_DIR.glob("*_job.json")))
+    print("[run_jobs] Finished job metadata visible:", _names(FINISHED_DIR.glob("*_job.json")))
+    print("[run_jobs] Error jobs visible:", _names(ERROR_DIR.glob("*_job.json")))
+    print("[run_jobs] Legacy queue jobs visible:", _names(LEGACY_QUEUE_DIR.glob("*_job.json")))
+
+    try:
+        import sys
+
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def _json_default(obj: Any) -> Any:
+    """
+    Best-effort JSON encoder for non-serializable objects.
+
+    This is intentionally conservative: it prefers stable string forms
+    and avoids raising during job/result persistence.
+    """
+    try:
+        if isinstance(obj, Path):
+            return str(obj)
+        if isinstance(obj, (uuid.UUID,)):
+            return str(obj)
+        if isinstance(obj, (bytes, bytearray, memoryview)):
+            b = bytes(obj)
+            # Avoid accidental huge binary dumps in JSON. Encode.
+            return {"__bytes_b64__": base64.b64encode(b).decode("ascii")}
+        if isinstance(obj, Exception):
+            return {"__exception__": obj.__class__.__name__, "message": str(obj)}
+    except Exception:
+        pass
+
+    # As a last resort, try common patterns, then string.
+    for attr in ("to_dict", "dict", "as_dict"):
+        try:
+            fn = getattr(obj, attr, None)
+            if callable(fn):
+                return fn()
+        except Exception:
+            continue
+    try:
+        return repr(obj)
+    except Exception:
+        return str(type(obj))
 
 
 def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
     """
     Write JSON atomically so workers do not see partially written files.
+
+    Uses a unique temp file name per write to avoid cross-process races.
     """
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tmp_path.open("w", encoding="utf8") as f:
-        json.dump(payload, f, indent=2)
-        f.flush()
+    tmp_name = f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    tmp_path = path.with_name(tmp_name)
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False, default=_json_default)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp_path, path)
+    finally:
+        # Clean up temp file on failures.
         try:
-            os.fsync(f.fileno())
+            if tmp_path.exists():
+                tmp_path.unlink()
         except Exception:
             pass
-    os.replace(tmp_path, path)
 
 
-def _safe_unlink(path: Path) -> None:
+def _atomic_write_text(path: Path, text: str) -> None:
+    """
+    Write text atomically.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_name = f".{path.name}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+    tmp_path = path.with_name(tmp_name)
+    try:
+        with tmp_path.open("w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            if tmp_path.exists():
+                tmp_path.unlink()
+        except Exception:
+            pass
+
+
+def _safe_unlink(path: Optional[Path]) -> None:
+    if path is None:
+        return
     try:
         path.unlink(missing_ok=True)
     except Exception:
@@ -478,10 +587,9 @@ def _sanitize_limits_in_config(config: Dict[str, Any]) -> Dict[str, Any]:
     No upper cap is enforced here; extremely large values are allowed.
     Global safety limits (if any) should be enforced in engine_worker.py.
     """
-    try:
-        cfg: Dict[str, Any] = dict(config)
-    except Exception:
+    if not isinstance(config, dict):
         return config
+    cfg: Dict[str, Any] = dict(config)
 
     # Helper to apply coercion in multiple nested dicts
     def sanitize_key(obj: Dict[str, Any], key: str) -> None:
@@ -522,25 +630,64 @@ def _inject_run_id_into_config(run_id: str, config: Dict[str, Any]) -> Dict[str,
     monitoring keys (snapshots, heartbeat, run state).
     """
     # First sanitize numeric limits to positive ints
-    cfg = _sanitize_limits_in_config(config)
+    cfg = _sanitize_limits_in_config(config if isinstance(config, dict) else {})
     # Then ensure monitoring block is present
     cfg = _ensure_monitoring_block(cfg)
 
+    # Always force run_id at the top level and common nested sections.
     try:
-        # Top level run_id hint
-        cfg.setdefault("run_id", run_id)
+        cfg["run_id"] = run_id
 
-        # Common nested sections that may carry their own run_id
         for key in ("engine", "runtime", "run", "agent", "controller"):
             sub = cfg.get(key)
             if isinstance(sub, dict):
-                sub.setdefault("run_id", run_id)
+                sub["run_id"] = run_id
                 cfg[key] = sub
     except Exception:
         # Never crash job creation because of config munging
         return cfg
 
     return cfg
+
+
+def _is_safe_run_id(run_id: str) -> bool:
+    if not run_id:
+        return False
+    if "\x00" in run_id:
+        return False
+    if os.sep in run_id:
+        return False
+    if os.altsep and os.altsep in run_id:
+        return False
+    return True
+
+
+def _sanitize_run_id_for_filename(run_id: Any, fallback: str = "unknown") -> str:
+    """
+    Convert an arbitrary run_id-like value into a safe single path component.
+
+    This prevents accidental path traversal if a caller passes a malformed run_id.
+    It does not guarantee the returned id exists on disk; it is intended only
+    for constructing filenames safely.
+    """
+    try:
+        s = str(run_id).strip()
+    except Exception:
+        s = ""
+    if not s:
+        s = fallback
+    if "\x00" in s:
+        s = s.replace("\x00", "")
+    try:
+        s = s.replace(os.sep, "_")
+    except Exception:
+        pass
+    if os.altsep:
+        try:
+            s = s.replace(os.altsep, "_")
+        except Exception:
+            pass
+    return s or fallback
 
 
 def _find_meta_in_folder(run_id: str, folder: Path) -> Optional[Path]:
@@ -557,6 +704,13 @@ def _find_meta_in_folder(run_id: str, folder: Path) -> Optional[Path]:
     if alt.exists():
         return alt
     return None
+
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
 
 
 @dataclass
@@ -598,48 +752,49 @@ class RunJob:
         This allows older job files (or hand edited JSON) to be loaded
         without crashing due to unexpected keys. Also normalizes status.
         """
-        field_names = {f.name for f in fields(cls)}
-        filtered: Dict[str, Any] = {k: v for k, v in data.items() if k in field_names}
+        if not isinstance(data, dict):
+            raise ValueError("RunJob.from_dict expects a dict")
 
-        # Ensure required fields exist; raise a clear error if not.
-        required = {"run_id", "config"}
-        missing_required: List[str] = []
-        for req in required:
-            if req not in data or data.get(req) is None:
-                missing_required.append(req)
-        if missing_required:
-            raise ValueError(f"RunJob.from_dict missing required fields: {missing_required}")
+        run_id_raw = data.get("run_id")
+        if run_id_raw is None:
+            raise ValueError("RunJob.from_dict missing required field: run_id")
+        run_id = str(run_id_raw).strip()
+        if not _is_safe_run_id(run_id):
+            raise ValueError(f"RunJob.from_dict invalid run_id: {run_id!r}")
 
-        # Fill in optional fields if missing
+        cfg_raw = data.get("config")
+        if cfg_raw is None:
+            raise ValueError("RunJob.from_dict missing required field: config")
+        if not isinstance(cfg_raw, dict):
+            # Defensive: tolerate non-dict config by coercing to dict if possible.
+            try:
+                cfg_raw = dict(cfg_raw)  # type: ignore[arg-type]
+            except Exception:
+                cfg_raw = {}
+
         now = time.time()
-        status = str(filtered.get("status") or data.get("status") or "queued").lower()
-        if status in ("pending", "queued"):
-            filtered["status"] = "queued"
-        elif status in ("running", "active"):
-            filtered["status"] = "active"
-        elif status not in ("active", "finished", "error"):
-            filtered["status"] = "queued"
+        created_at = _safe_float(data.get("created_at"), now)
+        updated_at = _safe_float(data.get("updated_at"), now)
 
-        if "created_at" not in filtered:
-            filtered["created_at"] = float(data.get("created_at", now))
-        if "updated_at" not in filtered:
-            filtered["updated_at"] = float(data.get("updated_at", now))
-        if "meta" not in filtered:
-            filtered["meta"] = data.get("meta", None)
+        status = _normalize_status(data.get("status"))
 
-        # Make sure required fields from original data are present
-        run_id = str(data["run_id"])
-        raw_config = dict(data["config"])
-        # Sanitize, inject run_id, and ensure monitoring block
-        sanitized_cfg = _sanitize_limits_in_config(raw_config)
-        filtered["run_id"] = run_id
-        filtered["config"] = _inject_run_id_into_config(run_id, sanitized_cfg)
-
-        # Ensure meta exists and has run_id for UI convenience
-        meta = filtered.get("meta")
+        meta = data.get("meta", None)
         if not isinstance(meta, dict):
             meta = {}
         meta.setdefault("run_id", run_id)
+
+        # Sanitize, inject run_id, and ensure monitoring block
+        sanitized_cfg = _sanitize_limits_in_config(cfg_raw)
+        injected_cfg = _inject_run_id_into_config(run_id, sanitized_cfg)
+
+        # Filter to known dataclass fields, but fill required explicitly.
+        field_names = {f.name for f in fields(cls)}
+        filtered: Dict[str, Any] = {k: v for k, v in data.items() if k in field_names}
+        filtered["run_id"] = run_id
+        filtered["config"] = injected_cfg
+        filtered["status"] = status
+        filtered["created_at"] = created_at
+        filtered["updated_at"] = updated_at
         filtered["meta"] = meta
 
         return cls(**filtered)
@@ -696,6 +851,37 @@ def _job_path_for_status(run_id: str, status: str) -> Path:
     return base / filename
 
 
+def _run_id_exists(run_id: str) -> bool:
+    """
+    Check whether any known metadata or result file for this run_id already exists.
+    Used to avoid clobbering an existing run when run_id is supplied.
+    """
+    if not run_id:
+        return False
+    candidates = [
+        # Canonical metadata
+        PENDING_DIR / f"{run_id}_job.json",
+        ACTIVE_DIR / f"{run_id}_job.json",
+        FINISHED_DIR / f"{run_id}_job.json",
+        ERROR_DIR / f"{run_id}_job.json",
+        # Canonical result
+        FINISHED_DIR / f"{run_id}.json",
+        FINISHED_DIR / f"{run_id}_results.json",
+        # Legacy metadata and result layout
+        LEGACY_QUEUE_DIR / f"{run_id}_job.json",
+        LEGACY_QUEUE_DIR / f"{run_id}.json",
+        LEGACY_PENDING_DIR / f"{run_id}_job.json",
+        LEGACY_PENDING_DIR / f"{run_id}.json",
+        LEGACY_ACTIVE_DIR / f"{run_id}_job.json",
+        LEGACY_ACTIVE_DIR / f"{run_id}.json",
+        LEGACY_FINISHED_DIR / f"{run_id}_job.json",
+        LEGACY_FINISHED_DIR / f"{run_id}.json",
+        LEGACY_ERROR_DIR / f"{run_id}_job.json",
+        LEGACY_ERROR_DIR / f"{run_id}.json",
+    ]
+    return any(p.exists() for p in candidates)
+
+
 def create_job(
     config: Dict[str, Any],
     meta: Optional[Dict[str, Any]] = None,
@@ -724,8 +910,44 @@ def create_job(
         This function guarantees config["monitoring"] exists and includes
         snapshot and heartbeat settings, either from the UI or defaults.
     """
+    if not isinstance(config, dict):
+        try:
+            config = dict(config)  # type: ignore[arg-type]
+        except Exception:
+            config = {}
+
+    requested_run_id: Optional[str] = None
     if run_id is None:
         run_id = str(uuid.uuid4())
+    else:
+        requested_run_id = str(run_id).strip()
+        run_id = requested_run_id
+
+    if not _is_safe_run_id(run_id):
+        _queue_log(
+            "create_job:",
+            f"unsafe run_id provided, generating new run_id (provided={run_id!r})",
+            level=logging.WARNING,
+        )
+        requested_run_id = run_id
+        run_id = str(uuid.uuid4())
+
+    # Avoid clobbering existing runs if a caller supplies a run_id.
+    if _run_id_exists(run_id):
+        _queue_log(
+            "create_job:",
+            f"run_id already exists, generating new run_id (existing={run_id})",
+            level=logging.WARNING,
+        )
+        requested_run_id = requested_run_id or run_id
+        for _ in range(5):
+            candidate = str(uuid.uuid4())
+            if not _run_id_exists(candidate):
+                run_id = candidate
+                break
+        else:
+            # Extremely unlikely; fall back to time-based unique id.
+            run_id = f"{int(time.time())}-{uuid.uuid4()}"
 
     # Sanitize numeric limits and inject run_id into config and common sections.
     # This also ensures that the monitoring block is present.
@@ -739,36 +961,28 @@ def create_job(
     if isinstance(meta, dict):
         meta_with_id.update(meta)
     meta_with_id.setdefault("run_id", run_id)
+    if requested_run_id and requested_run_id != run_id:
+        meta_with_id.setdefault("requested_run_id", requested_run_id)
 
     try:
         # Goal
-        goal = (
-            cfg.get("goal")
-            or cfg.get("problem")
-            or cfg.get("objective")
-            or cfg.get("task")
-        )
+        goal = cfg.get("goal") or cfg.get("problem") or cfg.get("objective") or cfg.get("task")
         if goal and "goal" not in meta_with_id:
             meta_with_id["goal"] = goal
 
         # Domain
-        domain = (cfg.get("domain") or cfg.get("topic") or cfg.get("field"))
+        domain = cfg.get("domain") or cfg.get("topic") or cfg.get("field")
         if domain and "domain" not in meta_with_id:
             meta_with_id["domain"] = domain
 
         # Mode (single, swarm, option_c, etc)
-        mode = (
-            cfg.get("mode")
-            or (isinstance(cfg.get("engine"), dict) and cfg["engine"].get("mode"))
-            or None
-        )
+        mode = cfg.get("mode") or (isinstance(cfg.get("engine"), dict) and cfg["engine"].get("mode")) or None
         if mode and "mode" not in meta_with_id:
             meta_with_id["mode"] = mode
 
         # Runtime profile
-        runtime_profile = (
-            cfg.get("runtime_profile")
-            or (isinstance(cfg.get("engine"), dict) and cfg["engine"].get("runtime_profile"))
+        runtime_profile = cfg.get("runtime_profile") or (
+            isinstance(cfg.get("engine"), dict) and cfg["engine"].get("runtime_profile")
         )
         if runtime_profile and "runtime_profile" not in meta_with_id:
             meta_with_id["runtime_profile"] = runtime_profile
@@ -779,28 +993,19 @@ def create_job(
         runtime_cfg = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
 
         max_cycles = (
-            cfg.get("max_cycles")
-            or limits.get("max_cycles")
-            or engine_cfg.get("max_cycles")
-            or runtime_cfg.get("max_cycles")
+            cfg.get("max_cycles") or limits.get("max_cycles") or engine_cfg.get("max_cycles") or runtime_cfg.get("max_cycles")
         )
         if max_cycles is not None and "max_cycles" not in meta_with_id:
             meta_with_id["max_cycles"] = max_cycles
 
         max_rounds = (
-            cfg.get("max_rounds")
-            or limits.get("max_rounds")
-            or engine_cfg.get("max_rounds")
-            or runtime_cfg.get("max_rounds")
+            cfg.get("max_rounds") or limits.get("max_rounds") or engine_cfg.get("max_rounds") or runtime_cfg.get("max_rounds")
         )
         if max_rounds is not None and "max_rounds" not in meta_with_id:
             meta_with_id["max_rounds"] = max_rounds
 
         max_minutes = (
-            cfg.get("max_minutes")
-            or limits.get("max_minutes")
-            or engine_cfg.get("max_minutes")
-            or runtime_cfg.get("max_minutes")
+            cfg.get("max_minutes") or limits.get("max_minutes") or engine_cfg.get("max_minutes") or runtime_cfg.get("max_minutes")
         )
         if max_minutes is not None and "max_minutes" not in meta_with_id:
             meta_with_id["max_minutes"] = max_minutes
@@ -857,20 +1062,16 @@ def create_job(
     # Save into the canonical pending folder
     pending_path = job.save_to(PENDING_DIR)
 
-    # Shadow copy to queue root for compatibility with any older watchers
+    # Shadow copy to queue root for compatibility with any older watchers.
+    # Best-effort only: failure here should not prevent enqueue.
     try:
         job.save_to(LEGACY_QUEUE_DIR)
-    except Exception:
-        # Compatibility should never crash job creation.
-        pass
+    except Exception as e:
+        _log("create_job: failed to write shadow copy to LEGACY_QUEUE_DIR:", repr(e))
 
     _log("Created job", run_id, "status=queued", "QUEUE_ROOT:", QUEUE_ROOT)
-    _queue_log(
-        "Enqueued job",
-        f"run_id={run_id}",
-        f"status=queued",
-        f"pending_path={pending_path}",
-    )
+    _queue_log("Enqueued job", f"run_id={run_id}", "status=queued", f"pending_path={pending_path}", level=logging.INFO)
+
     try:
         import sys
 
@@ -899,7 +1100,7 @@ def load_job(path: Path) -> RunJob:
     """
     Load a job from a specific metadata JSON path.
     """
-    with path.open("r", encoding="utf8") as f:
+    with path.open("r", encoding="utf-8") as f:
         data = json.load(f)
     return RunJob.from_dict(data)
 
@@ -908,16 +1109,29 @@ def load_job_by_id(run_id: str) -> Optional[RunJob]:
     """
     Try to load a job by id from any status folder.
     Returns None if not found.
+
+    Security note:
+        run_id is treated as an identifier, not a path. Unsafe values are rejected.
     """
+    run_id = str(run_id).strip()
+    if not _is_safe_run_id(run_id):
+        return None
+
     # Finished metadata uses "_job.json" and is separate from results
     finished_meta = FINISHED_DIR / f"{run_id}_job.json"
     if finished_meta.exists():
-        return load_job(finished_meta)
+        try:
+            return load_job(finished_meta)
+        except Exception:
+            return None
 
     # Check legacy finished dir as well
     legacy_finished_meta = LEGACY_FINISHED_DIR / f"{run_id}_job.json"
     if legacy_finished_meta.exists():
-        return load_job(legacy_finished_meta)
+        try:
+            return load_job(legacy_finished_meta)
+        except Exception:
+            return None
 
     # Other statuses: support both "{run_id}_job.json" and "{run_id}.json"
     search_folders = [
@@ -932,8 +1146,21 @@ def load_job_by_id(run_id: str) -> Optional[RunJob]:
     for folder in search_folders:
         path = _find_meta_in_folder(run_id, folder)
         if path is not None and path.exists():
-            return load_job(path)
+            try:
+                return load_job(path)
+            except Exception:
+                continue
     return None
+
+
+def _cleanup_queued_copies(run_id: str) -> None:
+    """
+    Remove any queued metadata copies for this run_id (canonical pending and legacy queue).
+    This is safe to call multiple times.
+    """
+    for folder in (PENDING_DIR, LEGACY_QUEUE_DIR, LEGACY_PENDING_DIR):
+        _safe_unlink(folder / f"{run_id}_job.json")
+        _safe_unlink(folder / f"{run_id}.json")
 
 
 def move_job(run_id: str, from_status: str, to_status: str) -> Tuple[Optional[RunJob], Optional[Path]]:
@@ -943,51 +1170,95 @@ def move_job(run_id: str, from_status: str, to_status: str) -> Tuple[Optional[Ru
     Returns (job, new_path) or (None, None) if job was not found
     in the expected source folder.
     """
-    src_path = _job_path_for_status(run_id, from_status)
-    if not src_path.exists():
-        # Fallback for mixed naming in older runs
-        norm_from = from_status.lower()
+    run_id = str(run_id).strip()
+    if not _is_safe_run_id(run_id):
+        return None, None
+
+    norm_from = from_status.lower()
+    norm_to = to_status.lower()
+
+    # Locate source file robustly (supports legacy naming and legacy folders).
+    src: Optional[Path] = None
+
+    # Canonical expected path first
+    expected_src = _job_path_for_status(run_id, norm_from)
+    if expected_src.exists():
+        src = expected_src
+    else:
         candidate_folders: List[Path] = []
         if norm_from in ("queued", "pending"):
             candidate_folders = [PENDING_DIR, LEGACY_QUEUE_DIR, LEGACY_PENDING_DIR]
         elif norm_from in ("running", "active"):
             candidate_folders = [ACTIVE_DIR, LEGACY_ACTIVE_DIR]
+        elif norm_from == "finished":
+            candidate_folders = [FINISHED_DIR, LEGACY_FINISHED_DIR]
         elif norm_from == "error":
             candidate_folders = [ERROR_DIR, LEGACY_ERROR_DIR]
 
-        src_path = None
         for folder in candidate_folders:
-            maybe = _find_meta_in_folder(run_id, folder)
+            if norm_from == "finished":
+                maybe = folder / f"{run_id}_job.json"
+            else:
+                maybe = _find_meta_in_folder(run_id, folder)
             if maybe is not None and maybe.exists():
-                src_path = maybe
+                src = maybe
                 break
 
-        if src_path is None:
-            return None, None
+    if src is None or not src.exists():
+        return None, None
 
-    job = load_job(src_path)
+    try:
+        job = load_job(src)
+    except Exception as e:
+        _queue_log("move_job:", f"failed to load job run_id={run_id} from {src}: {repr(e)}", level=logging.WARNING)
+        return None, None
 
-    norm_to = to_status.lower()
+    # Normalize destination status
     if norm_to in ("pending", "queued"):
         job.status = "queued"
     elif norm_to in ("running", "active"):
         job.status = "active"
-    else:
+    elif norm_to in ("finished", "error"):
         job.status = norm_to
+    else:
+        job.status = "queued"
 
     job.updated_at = time.time()
 
     dst_path = _job_path_for_status(run_id, job.status)
 
-    # Remove old file(s) and save new one
-    _safe_unlink(src_path)
-
-    # Also remove any shadows in queue root and legacy pending under both naming schemes
-    for folder in (PENDING_DIR, LEGACY_QUEUE_DIR, LEGACY_PENDING_DIR):
-        _safe_unlink(folder / f"{run_id}.json}")
-        _safe_unlink(folder / f"{run_id}_job.json")
+    # Write destination first, then clean up source (safer on crashes).
+    # If the job is already in the destination path, update it in-place and do not unlink.
+    try:
+        same_path = src.resolve() == dst_path.resolve()
+    except Exception:
+        same_path = (src == dst_path)
 
     job.save_to(dst_path.parent, filename=dst_path.name)
+
+    # For backward compatibility with older watchers, queued jobs may also be mirrored into
+    # the queue root. This is best-effort and must not fail the move.
+    if job.status == "queued":
+        try:
+            job.save_to(LEGACY_QUEUE_DIR, filename=f"{run_id}_job.json")
+        except Exception:
+            pass
+
+    if same_path:
+        # Still clean queued shadows when moving out of queued.
+        if job.status != "queued":
+            _cleanup_queued_copies(run_id)
+            if job.status in ("finished", "error"):
+                _cleanup_claim_lock(run_id)
+        return job, dst_path
+
+    # Remove source and any stale queued shadows.
+    _safe_unlink(src)
+    if job.status != "queued":
+        _cleanup_queued_copies(run_id)
+        if job.status in ("finished", "error"):
+            _cleanup_claim_lock(run_id)
+
     return job, dst_path
 
 
@@ -998,90 +1269,80 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
     It searches all folders for run_id, then moves it to the requested status.
     Returns the updated job or None if not found.
     """
-    norm_new = new_status.lower()
-    if norm_new in ("pending", "queued"):
-        norm_new = "queued"
-    elif norm_new in ("running", "active"):
-        norm_new = "active"
+    run_id = str(run_id).strip()
+    if not _is_safe_run_id(run_id):
+        return None
 
-    # First check finished metadata path for this id (primary then legacy)
-    finished_meta = FINISHED_DIR / f"{run_id}_job.json"
-    if finished_meta.exists() and norm_new == "finished":
-        job = load_job(finished_meta)
-        job.status = "finished"
-        job.updated_at = time.time()
-        dst_path = _job_path_for_status(run_id, "finished")
-        _safe_unlink(finished_meta)
-        job.save_to(dst_path.parent, filename=dst_path.name)
-        return job
+    norm_new = _normalize_status(new_status)
 
-    legacy_finished_meta = LEGACY_FINISHED_DIR / f"{run_id}_job.json"
-    if legacy_finished_meta.exists() and norm_new == "finished":
-        job = load_job(legacy_finished_meta)
-        job.status = "finished"
-        job.updated_at = time.time()
-        dst_path = _job_path_for_status(run_id, "finished")
-        _safe_unlink(legacy_finished_meta)
-        job.save_to(dst_path.parent, filename=dst_path.name)
-        return job
+    # Find existing job metadata in any folder.
+    # Finished metadata uses a dedicated "{run_id}_job.json".
+    search: List[Tuple[Path, bool]] = [
+        (FINISHED_DIR, True),
+        (LEGACY_FINISHED_DIR, True),
+        (ACTIVE_DIR, False),
+        (LEGACY_ACTIVE_DIR, False),
+        (ERROR_DIR, False),
+        (LEGACY_ERROR_DIR, False),
+        (PENDING_DIR, False),
+        (LEGACY_PENDING_DIR, False),
+        (LEGACY_QUEUE_DIR, False),
+    ]
 
-    # Check other status folders
-    for status in ["queued", "pending", "running", "active", "finished", "error"]:
-        src_path: Optional[Path] = None
-        norm_status = status.lower()
-        if norm_status in ("queued", "pending"):
-            # Pending or legacy queue
-            for folder in (PENDING_DIR, LEGACY_QUEUE_DIR, LEGACY_PENDING_DIR):
-                src_path = _find_meta_in_folder(run_id, folder)
-                if src_path is not None and src_path.exists():
-                    break
-        elif norm_status in ("running", "active"):
-            for folder in (ACTIVE_DIR, LEGACY_ACTIVE_DIR):
-                src_path = _find_meta_in_folder(run_id, folder)
-                if src_path is not None and src_path.exists():
-                    break
-        elif norm_status == "finished":
-            for folder in (FINISHED_DIR, LEGACY_FINISHED_DIR):
-                candidate = folder / f"{run_id}_job.json"
-                if candidate.exists():
-                    src_path = candidate
-                    break
-        elif norm_status == "error":
-            for folder in (ERROR_DIR, LEGACY_ERROR_DIR):
-                src_path = _find_meta_in_folder(run_id, folder)
-                if src_path is not None and src_path.exists():
-                    break
+    src: Optional[Path] = None
+    for folder, is_finished in search:
+        if is_finished:
+            candidate = folder / f"{run_id}_job.json"
+            if candidate.exists():
+                src = candidate
+                break
+        else:
+            candidate = _find_meta_in_folder(run_id, folder)
+            if candidate is not None and candidate.exists():
+                src = candidate
+                break
 
-        if src_path is None or not src_path.exists():
-            continue
+    if src is None or not src.exists():
+        return None
 
-        job = load_job(src_path)
-        job.status = norm_new
-        job.updated_at = time.time()
-        dst_path = _job_path_for_status(run_id, norm_new)
-        _safe_unlink(src_path)
+    try:
+        job = load_job(src)
+    except Exception as e:
+        _queue_log("update_job_status:", f"failed to load job run_id={run_id} from {src}: {repr(e)}", level=logging.WARNING)
+        return None
 
-        # remove any stale file in queue dirs under both naming schemes
-        for folder in (PENDING_DIR, LEGACY_QUEUE_DIR, LEGACY_PENDING_DIR):
-            _safe_unlink(folder / f"{run_id}.json")
-            _safe_unlink(folder / f"{run_id}_job.json")
+    job.status = norm_new
+    job.updated_at = time.time()
 
-        job.save_to(dst_path.parent, filename=dst_path.name)
-        return job
+    dst_path = _job_path_for_status(run_id, norm_new)
 
-    # Also check legacy queue root directly if not found above
-    for legacy_name in (f"{run_id}_job.json", f"{run_id}.json"):
-        legacy_path = LEGACY_QUEUE_DIR / legacy_name
-        if legacy_path.exists():
-            job = load_job(legacy_path)
-            job.status = norm_new
-            job.updated_at = time.time()
-            _safe_unlink(legacy_path)
-            dst_path = _job_path_for_status(run_id, norm_new)
-            job.save_to(dst_path.parent, filename=dst_path.name)
-            return job
+    # Write destination first, then clean up source (safer on crashes).
+    # If the job is already in the destination path, update it in-place and do not unlink.
+    try:
+        same_path = src.resolve() == dst_path.resolve()
+    except Exception:
+        same_path = (src == dst_path)
 
-    return None
+    job.save_to(dst_path.parent, filename=dst_path.name)
+
+    # For backward compatibility with older watchers, queued jobs may also be mirrored into
+    # the queue root. This is best-effort and must not fail the status update.
+    if norm_new == "queued":
+        try:
+            job.save_to(LEGACY_QUEUE_DIR, filename=f"{run_id}_job.json")
+        except Exception:
+            pass
+
+    if not same_path:
+        _safe_unlink(src)
+
+    # If moving out of queued, clean queued shadows.
+    if norm_new != "queued":
+        _cleanup_queued_copies(run_id)
+    if norm_new in ("finished", "error"):
+        _cleanup_claim_lock(run_id)
+
+    return job
 
 
 def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
@@ -1134,13 +1395,25 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
         else:
             # Prefer the canonical "*_job.json". If none exist, fall back
             # to "*.json" for older jobs, while still skipping progress files.
-            has_job_files = any(folder.glob("*_job.json"))
+            try:
+                has_job_files = any(folder.glob("*_job.json"))
+            except Exception:
+                has_job_files = False
             patterns = ["*_job.json"] if has_job_files else ["*.json"]
 
         for pattern in patterns:
-            for path in sorted(folder.glob(pattern)):
+            try:
+                paths = sorted(folder.glob(pattern))
+            except Exception:
+                continue
+            for path in paths:
                 # Skip progress and other non metadata files
-                if not finished and path.name.endswith("_progress.json"):
+                name = path.name
+                if name.endswith("_progress.json") or name.endswith("_results.json") or name.endswith("_result.json"):
+                    continue
+                if name.startswith("."):
+                    continue
+                if not path.is_file():
                     continue
                 try:
                     job = load_job(path)
@@ -1196,7 +1469,15 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
     jobs: List[RunJob] = list(jobs_by_id.values())
     # Sort by created_at descending (newest first for UI)
     jobs.sort(key=lambda j: j.created_at, reverse=True)
-    return jobs[:limit]
+
+    try:
+        lim = int(limit)
+    except Exception:
+        lim = 100
+
+    if lim <= 0:
+        return []
+    return jobs[:lim]
 
 
 def get_next_queued_job() -> Optional[RunJob]:
@@ -1209,7 +1490,7 @@ def get_next_queued_job() -> Optional[RunJob]:
     queued = list_jobs(status="queued", limit=1000)
     if not queued:
         _log("get_next_queued_job: no queued jobs found")
-        _queue_log("get_next_queued_job:", "no queued jobs found")
+        _queue_log("get_next_queued_job:", "no queued jobs found", level=logging.DEBUG)
         return None
     # list_jobs returns newest first; for FIFO we take the last (oldest)
     job = queued[-1]
@@ -1219,83 +1500,176 @@ def get_next_queued_job() -> Optional[RunJob]:
         f"selected run_id={job.run_id}",
         f"created_at={job.created_at}",
         f"queued_count={len(queued)}",
+        level=logging.DEBUG,
     )
     return job
 
 
+def _claim_lock_path(run_id: str) -> Path:
+    return _LOCKS_DIR / f"{run_id}.claim.lock"
+
+
+def _active_meta_exists(run_id: str) -> bool:
+    return any(
+        p.exists()
+        for p in (
+            ACTIVE_DIR / f"{run_id}_job.json",
+            ACTIVE_DIR / f"{run_id}.json",
+            LEGACY_ACTIVE_DIR / f"{run_id}_job.json",
+            LEGACY_ACTIVE_DIR / f"{run_id}.json",
+        )
+    )
+
+
+def _final_meta_exists(run_id: str) -> bool:
+    return any(
+        p.exists()
+        for p in (
+            FINISHED_DIR / f"{run_id}_job.json",
+            ERROR_DIR / f"{run_id}_job.json",
+            LEGACY_FINISHED_DIR / f"{run_id}_job.json",
+            LEGACY_ERROR_DIR / f"{run_id}_job.json",
+        )
+    )
+
+
+def _acquire_claim_lock(run_id: str) -> Optional[Path]:
+    """
+    Acquire an exclusive lock for claiming a job.
+
+    Returns the lock path if acquired, otherwise None.
+    Automatically breaks stale locks that are older than the configured timeout,
+    but only when there is no corresponding active/finished/error metadata.
+    """
+    lock_path = _claim_lock_path(run_id)
+    stale_seconds = _coerce_positive_int(os.getenv("ARA_CLAIM_LOCK_STALE_SECONDS", "").strip()) or 900
+
+    # Fast path: try to create lock atomically.
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        # Possibly stale. Only break if job is not clearly active/finished/error.
+        try:
+            if _active_meta_exists(run_id) or _final_meta_exists(run_id):
+                return None
+        except Exception:
+            return None
+
+        try:
+            age = time.time() - lock_path.stat().st_mtime
+        except Exception:
+            age = float("inf")
+
+        if age < float(stale_seconds):
+            return None
+
+        # Best-effort stale lock cleanup.
+        try:
+            lock_path.unlink()
+        except Exception:
+            return None
+
+        # Retry once.
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+    try:
+        payload = {
+            "run_id": run_id,
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "claimed_at": time.time(),
+        }
+        os.write(fd, json.dumps(payload, ensure_ascii=False, default=_json_default).encode("utf-8"))
+    except Exception:
+        # If we can't write, still hold the lock; it's fine.
+        pass
+    finally:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+
+    return lock_path
+
+
+def _release_claim_lock(lock_path: Optional[Path]) -> None:
+    if lock_path is None:
+        return
+    _safe_unlink(lock_path)
+
+
 def _claim_job_atomic(job: RunJob) -> Optional[RunJob]:
     """
-    Atomically claim a specific job by moving its metadata file into ACTIVE_DIR.
+    Atomically claim a specific job by creating ACTIVE metadata and removing queued copies.
 
-    This uses os.replace (atomic rename on same filesystem) to avoid races.
-    If another worker claims it first, this returns None.
+    This uses a per-run_id exclusive lock to avoid races in multi-worker setups.
     """
     run_id = job.run_id
 
-    src_candidates = [
-        _find_meta_in_folder(run_id, PENDING_DIR),
-        _find_meta_in_folder(run_id, LEGACY_QUEUE_DIR),
-        _find_meta_in_folder(run_id, LEGACY_PENDING_DIR),
-    ]
-    src: Optional[Path] = None
-    for cand in src_candidates:
-        if cand is not None and cand.exists():
-            src = cand
-            break
-
-    if src is None:
-        _log("claim_job_atomic: no metadata file found for", run_id)
-        _queue_log("claim_job_atomic:", f"no metadata file found for run_id={run_id}")
-        return None
-
-    # Preserve the file name when moving into ACTIVE_DIR so both
-    # "{run_id}.json" and "{run_id}_job.json" keep working.
-    dst_active = ACTIVE_DIR / src.name
-
+    # If already active/finished/error, clean stale queued copies and skip.
     try:
-        os.replace(str(src), str(dst_active))
-    except Exception as e:
-        _log("claim_job_atomic: os.replace failed for", run_id, "error:", repr(e))
-        _queue_log("claim_job_atomic:", f"os.replace failed for run_id={run_id}", f"error={repr(e)}")
-        # If another worker won the race and already created dst_active,
-        # treat that as a successful claim elsewhere.
-        if dst_active.exists():
+        if _active_meta_exists(run_id) or _final_meta_exists(run_id):
+            _cleanup_queued_copies(run_id)
             return None
+    except Exception:
+        # If filesystem checks fail, be conservative and skip claiming.
         return None
 
-    # Remove any duplicate shadows in queue folders
-    for folder in (PENDING_DIR, LEGACY_QUEUE_DIR, LEGACY_PENDING_DIR):
-        _safe_unlink(folder / f"{run_id}.json}")
-        _safe_unlink(folder / f"{run_id}_job.json")
+    lock_path = _acquire_claim_lock(run_id)
+    if lock_path is None:
+        return None
 
-    # Normalize status inside the job file to "active"
     try:
-        claimed = load_job(dst_active)
-        claimed.status = "active"
-        claimed.updated_at = time.time()
-        _atomic_write_json(dst_active, claimed.to_dict())
-        _log("claim_job_atomic: claimed", run_id, "at", dst_active)
-        _queue_log("claim_job_atomic:", f"claimed run_id={run_id}", f"path={dst_active}")
-        return claimed
-    except Exception:
-        # Best effort fallback if JSON is malformed
-        try:
-            with dst_active.open("r", encoding="utf8") as f:
-                data = json.load(f)
-            data["status"] = "active"
-            data["updated_at"] = time.time()
-            _atomic_write_json(dst_active, data)
-            _log("claim_job_atomic: claimed with raw JSON for", run_id)
-            _queue_log("claim_job_atomic:", f"claimed (raw JSON) run_id={run_id}", f"path={dst_active}")
-            return RunJob.from_dict(data)
-        except Exception as e:
-            _log("claim_job_atomic: failed to finalize claim for", run_id, "error:", repr(e))
-            _queue_log(
-                "claim_job_atomic:",
-                f"failed to finalize claim for run_id={run_id}",
-                f"error={repr(e)}",
-            )
-            return job
+        # Re-check once under lock.
+        if _active_meta_exists(run_id) or _final_meta_exists(run_id):
+            _cleanup_queued_copies(run_id)
+            return None
+
+        # Load the most current job metadata from any queued location if possible.
+        src_candidates = [
+            _find_meta_in_folder(run_id, PENDING_DIR),
+            _find_meta_in_folder(run_id, LEGACY_PENDING_DIR),
+            _find_meta_in_folder(run_id, LEGACY_QUEUE_DIR),
+        ]
+        src: Optional[Path] = None
+        for cand in src_candidates:
+            if cand is not None and cand.exists():
+                src = cand
+                break
+
+        loaded = job
+        if src is not None:
+            try:
+                loaded = load_job(src)
+            except Exception:
+                loaded = job
+
+        loaded.run_id = run_id
+        loaded.config = _inject_run_id_into_config(run_id, loaded.config if isinstance(loaded.config, dict) else {})
+        loaded.status = "active"
+        loaded.updated_at = time.time()
+
+        # Always write canonical active metadata file name for stability.
+        active_meta_path = ACTIVE_DIR / f"{run_id}_job.json"
+        loaded.save_to(active_meta_path.parent, filename=active_meta_path.name)
+
+        # Remove queued copies (including shadow copies).
+        _cleanup_queued_copies(run_id)
+
+        _log("claim_job_atomic: claimed", run_id, "at", active_meta_path)
+        _queue_log("claim_job_atomic:", f"claimed run_id={run_id}", f"path={active_meta_path}", level=logging.INFO)
+        return loaded
+    except Exception as e:
+        _log("claim_job_atomic: failed for", run_id, "error:", repr(e))
+        _queue_log("claim_job_atomic:", f"failed for run_id={run_id}", f"error={repr(e)}", level=logging.WARNING)
+        return None
+    finally:
+        _release_claim_lock(lock_path)
 
 
 def claim_next_job() -> Optional[RunJob]:
@@ -1306,13 +1680,14 @@ def claim_next_job() -> Optional[RunJob]:
     move it to the active folder so that other workers do not pick it up.
 
     Implementation note:
-        This is upgraded to be atomic for multi worker setups.
-        It iterates oldest first and attempts an os.replace claim.
+        Uses an exclusive lock per run_id and creates an active metadata file
+        (ACTIVE_DIR/<run_id>_job.json) to avoid multi-worker races, including
+        the presence of legacy "shadow copies" in the queue root.
     """
     queued = list_jobs(status="queued", limit=2000)
     if not queued:
         _log("claim_next_job: no queued jobs")
-        _queue_log("claim_next_job:", "no queued jobs")
+        _queue_log("claim_next_job:", "no queued jobs", level=logging.DEBUG)
         return None
 
     # Oldest first
@@ -1322,11 +1697,11 @@ def claim_next_job() -> Optional[RunJob]:
         claimed = _claim_job_atomic(job)
         if claimed is not None:
             _log("claim_next_job: claimed job", claimed.run_id)
-            _queue_log("claim_next_job:", f"claimed run_id={claimed.run_id}")
+            _queue_log("claim_next_job:", f"claimed run_id={claimed.run_id}", level=logging.INFO)
             return claimed
 
     _log("claim_next_job: could not claim any queued job")
-    _queue_log("claim_next_job:", "could not claim any queued job")
+    _queue_log("claim_next_job:", "could not claim any queued job", level=logging.DEBUG)
     return None
 
 
@@ -1344,7 +1719,8 @@ def progress_path(run_id: str) -> Path:
             "notes": "optional human readable progress"
         }
     """
-    return ACTIVE_DIR / f"{run_id}_progress.json"
+    safe_id = _sanitize_run_id_for_filename(run_id)
+    return ACTIVE_DIR / f"{safe_id}_progress.json"
 
 
 def result_path(run_id: str) -> Path:
@@ -1357,19 +1733,22 @@ def result_path(run_id: str) -> Path:
         - finished/{run_id}_job.json   (job metadata, used by list_jobs)
         - finished/{run_id}.json       (final result payload, used by UI)
     """
-    return FINISHED_DIR / f"{run_id}.json"
+    safe_id = _sanitize_run_id_for_filename(run_id)
+    return FINISHED_DIR / f"{safe_id}.json"
 
 
 def error_log_path(run_id: str) -> Path:
     """
     Path where the worker can write an error message or traceback.
     """
-    return ERROR_DIR / f"{run_id}_error.txt"
+    safe_id = _sanitize_run_id_for_filename(run_id)
+    return ERROR_DIR / f"{safe_id}_error.txt"
 
 
 # ---------------------------------------------------------------------------
 # Engine worker specific helpers (used by engine_worker.py)
 # ---------------------------------------------------------------------------
+
 
 def load_next_pending_job() -> Optional[RunJob]:
     """
@@ -1379,11 +1758,30 @@ def load_next_pending_job() -> Optional[RunJob]:
     job = claim_next_job()
     if job is None:
         _log("load_next_pending_job: no job claimed")
-        _queue_log("load_next_pending_job:", "no job claimed")
+        _queue_log("load_next_pending_job:", "no job claimed", level=logging.DEBUG)
     else:
         _log("load_next_pending_job: returning job", job.run_id)
-        _queue_log("load_next_pending_job:", f"returning run_id={job.run_id}")
+        _queue_log("load_next_pending_job:", f"returning run_id={job.run_id}", level=logging.INFO)
     return job
+
+
+def _cleanup_active_artifacts(run_id: str) -> None:
+    """
+    Remove active artifacts for a run (metadata variants + progress).
+    """
+    for p in (
+        ACTIVE_DIR / f"{run_id}_job.json",
+        ACTIVE_DIR / f"{run_id}.json",
+        ACTIVE_DIR / f"{run_id}_progress.json",
+        LEGACY_ACTIVE_DIR / f"{run_id}_job.json",
+        LEGACY_ACTIVE_DIR / f"{run_id}.json",
+        LEGACY_ACTIVE_DIR / f"{run_id}_progress.json",
+    ):
+        _safe_unlink(p)
+
+
+def _cleanup_claim_lock(run_id: str) -> None:
+    _safe_unlink(_claim_lock_path(run_id))
 
 
 def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
@@ -1392,48 +1790,49 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
 
     Used by engine_worker queue mode.
     """
+    run_id = str(job.run_id).strip()
+    if not _is_safe_run_id(run_id):
+        raise ValueError(f"save_job_result called with unsafe run_id: {run_id!r}")
+
     # Ensure identifiers are present in the result for UI convenience
     if "job_id" not in result_obj:
-        result_obj["job_id"] = job.run_id
+        result_obj["job_id"] = run_id
     if "run_id" not in result_obj:
-        result_obj["run_id"] = job.run_id
+        result_obj["run_id"] = run_id
 
-    rp = result_path(job.run_id)
+    rp = result_path(run_id)
     _atomic_write_json(rp, result_obj)
 
-    # Prefer moving the active metadata into finished metadata
+    # Produce finished metadata from active metadata if available, else from provided job.
+    finished_job = job
     active_meta_candidates = [
-        ACTIVE_DIR / f"{job.run_id}_job.json",
-        ACTIVE_DIR / f"{job.run_id}.json",  # legacy
-        LEGACY_ACTIVE_DIR / f"{job.run_id}_job.json",
-        LEGACY_ACTIVE_DIR / f"{job.run_id}.json",
+        ACTIVE_DIR / f"{run_id}_job.json",
+        ACTIVE_DIR / f"{run_id}.json",  # legacy
+        LEGACY_ACTIVE_DIR / f"{run_id}_job.json",
+        LEGACY_ACTIVE_DIR / f"{run_id}.json",
     ]
     for active_meta in active_meta_candidates:
         if not active_meta.exists():
             continue
         try:
-            j = load_job(active_meta)
+            finished_job = load_job(active_meta)
+            break
         except Exception:
-            j = job
-        j.status = "finished"
-        j.updated_at = time.time()
-        _safe_unlink(active_meta)
-        j.save_to(FINISHED_DIR, filename=f"{job.run_id}_job.json")
-        # Also remove any lingering legacy queue copy
-        for folder in (LEGACY_QUEUE_DIR, PENDING_DIR, LEGACY_PENDING_DIR):
-            _safe_unlink(folder / f"{job.run_id}.json")
-            _safe_unlink(folder / f"{job.run_id}_job.json")
-        _log("save_job_result: marked finished", job.run_id)
-        _queue_log("save_job_result:", f"marked finished run_id={job.run_id}", f"result_path={rp}")
-        return
+            continue
 
-    # Fallback
-    _log("save_job_result: active metadata not found, using update_job_status for", job.run_id)
-    _queue_log(
-        "save_job_result:",
-        f"active metadata not found for run_id={job.run_id}, using update_job_status",
-    )
-    update_job_status(job.run_id, "finished")
+    finished_job.run_id = run_id
+    finished_job.config = _inject_run_id_into_config(run_id, finished_job.config if isinstance(finished_job.config, dict) else {})
+    finished_job.status = "finished"
+    finished_job.updated_at = time.time()
+
+    # Write finished metadata, then clean up active/queued artifacts.
+    finished_job.save_to(FINISHED_DIR, filename=f"{run_id}_job.json")
+    _cleanup_active_artifacts(run_id)
+    _cleanup_queued_copies(run_id)
+    _cleanup_claim_lock(run_id)
+
+    _log("save_job_result: marked finished", run_id)
+    _queue_log("save_job_result:", f"marked finished run_id={run_id}", f"result_path={rp}", level=logging.INFO)
 
 
 def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
@@ -1442,50 +1841,62 @@ def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
 
     error_info can be a string or a dict.
     """
-    ep = error_log_path(job.run_id)
-    ep.parent.mkdir(parents=True, exist_ok=True)
-    with ep.open("w", encoding="utf8") as f:
-        if isinstance(error_info, str):
-            f.write(error_info)
-        else:
-            json.dump(error_info, f, indent=2)
+    run_id = str(job.run_id).strip()
+    if not _is_safe_run_id(run_id):
+        raise ValueError(f"mark_job_error called with unsafe run_id: {run_id!r}")
 
-    # Prefer moving the active metadata into error
+    ep = error_log_path(run_id)
+
+    try:
+        if isinstance(error_info, str):
+            _atomic_write_text(ep, error_info)
+        else:
+            # Preserve legacy behavior: write structured JSON into the ".txt" file.
+            text_payload = json.dumps(error_info, indent=2, ensure_ascii=False, default=_json_default)
+            _atomic_write_text(ep, text_payload)
+    except Exception:
+        # Fallback: best-effort text with traceback.
+        tb = traceback.format_exc()
+        try:
+            _atomic_write_text(ep, f"{error_info}\n\n{tb}")
+        except Exception:
+            pass
+
+    # Produce error metadata from active metadata if available, else from provided job.
+    error_job = job
     active_meta_candidates = [
-        ACTIVE_DIR / f"{job.run_id}_job.json",
-        ACTIVE_DIR / f"{job.run_id}.json",  # legacy
-        LEGACY_ACTIVE_DIR / f"{job.run_id}_job.json",
-        LEGACY_ACTIVE_DIR / f"{job.run_id}.json",
+        ACTIVE_DIR / f"{run_id}_job.json",
+        ACTIVE_DIR / f"{run_id}.json",  # legacy
+        LEGACY_ACTIVE_DIR / f"{run_id}_job.json",
+        LEGACY_ACTIVE_DIR / f"{run_id}.json",
     ]
     for active_meta in active_meta_candidates:
         if not active_meta.exists():
             continue
         try:
-            j = load_job(active_meta)
+            error_job = load_job(active_meta)
+            break
         except Exception:
-            j = job
-        j.status = "error"
-        j.updated_at = time.time()
-        _safe_unlink(active_meta)
-        j.save_to(ERROR_DIR, filename=f"{job.run_id}_job.json")
-        for folder in (LEGACY_QUEUE_DIR, PENDING_DIR, LEGACY_PENDING_DIR):
-            _safe_unlink(folder / f"{job.run_id}.json")
-            _safe_unlink(folder / f"{job.run_id}_job.json")
-        _log("mark_job_error: marked error", job.run_id)
-        _queue_log("mark_job_error:", f"marked error run_id={job.run_id}", f"error_path={ep}")
-        return
+            continue
 
-    _log("mark_job_error: active metadata not found, using update_job_status for", job.run_id)
-    _queue_log(
-        "mark_job_error:",
-        f"active metadata not found for run_id={job.run_id}, using update_job_status",
-    )
-    update_job_status(job.run_id, "error")
+    error_job.run_id = run_id
+    error_job.config = _inject_run_id_into_config(run_id, error_job.config if isinstance(error_job.config, dict) else {})
+    error_job.status = "error"
+    error_job.updated_at = time.time()
+
+    error_job.save_to(ERROR_DIR, filename=f"{run_id}_job.json")
+    _cleanup_active_artifacts(run_id)
+    _cleanup_queued_copies(run_id)
+    _cleanup_claim_lock(run_id)
+
+    _log("mark_job_error: marked error", run_id)
+    _queue_log("mark_job_error:", f"marked error run_id={run_id}", f"error_path={ep}", level=logging.INFO)
 
 
 # ---------------------------------------------------------------------------
 # Optional helpers for UI and debugging
 # ---------------------------------------------------------------------------
+
 
 def load_job_result(run_id: str) -> Optional[Dict[str, Any]]:
     """
@@ -1494,12 +1905,16 @@ def load_job_result(run_id: str) -> Optional[Dict[str, Any]]:
     Accepts either finished/<run_id>.json or finished/<run_id>_results.json
     as the result payload file. Also supports legacy finished/ layout.
     """
+    run_id = str(run_id).strip()
+    if not _is_safe_run_id(run_id):
+        return None
+
     rp_main = FINISHED_DIR / f"{run_id}.json"
     rp_alt = FINISHED_DIR / f"{run_id}_results.json"
     rp_legacy_main = LEGACY_FINISHED_DIR / f"{run_id}.json"
     rp_legacy_alt = LEGACY_FINISHED_DIR / f"{run_id}_results.json"
 
-    rp = None
+    rp: Optional[Path] = None
     for candidate in (rp_main, rp_alt, rp_legacy_main, rp_legacy_alt):
         if candidate.exists():
             rp = candidate
@@ -1508,7 +1923,7 @@ def load_job_result(run_id: str) -> Optional[Dict[str, Any]]:
     if rp is None or not rp.exists():
         return None
     try:
-        with rp.open("r", encoding="utf8") as f:
+        with rp.open("r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
