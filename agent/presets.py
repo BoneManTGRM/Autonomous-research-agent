@@ -1870,3 +1870,153 @@ def describe_presets() -> List[Dict[str, Any]]:
             }
         )
     return summaries
+
+
+# ---------------------------------------------------------------------
+# Preset inspector helpers
+# ---------------------------------------------------------------------
+def build_preset_inspector_snapshot() -> Dict[str, Any]:
+    """
+    Compact JSON style snapshot of presets for UI inspector panes.
+
+    Example shape per preset:
+
+    {
+        "general": {
+            "label": "General research",
+            "domain": "general",
+            "default_goal": "...",
+            "default_runtime_profile_key": "8_hours",
+            "default_runtime_profile_label": "8 Hour Run",
+            "snapshot_enabled": False,
+            "supports_swarm": True,
+            "supports_single_agent": True,
+            "swarm_default_agents": 4,
+            "swarm_max_agents": 32,
+            "evidence_mode": "balanced",
+            "biomarkers_enabled": False,
+        },
+        ...
+    }
+    """
+    snapshot: Dict[str, Any] = {}
+
+    for name, cfg in PRESETS.items():
+        runtime_key = cfg.get("default_runtime_profile", "24_hours")
+        runtime_profile = RUNTIME_PROFILES.get(runtime_key, RUNTIME_PROFILES["24_hours"])
+
+        swarm_cfg = cfg.get("swarm") or {}
+        snapshot_enabled = bool(
+            cfg.get("snapshot_enabled")
+            or (cfg.get("snapshot") or {}).get("enabled")
+        )
+
+        snapshot[name] = {
+            "label": cfg.get("label", name),
+            "domain": cfg.get("domain", "general"),
+            "default_goal": cfg.get("default_goal"),
+            "default_runtime_profile_key": runtime_key,
+            "default_runtime_profile_label": runtime_profile.get("label", runtime_key),
+            "snapshot_enabled": snapshot_enabled,
+            "supports_swarm": cfg.get("supports_swarm", False),
+            "supports_single_agent": cfg.get("supports_single_agent", True),
+            "swarm_default_agents": swarm_cfg.get(
+                "default_agents",
+                SWARM_GLOBAL_HINTS.get("default_agents"),
+            ),
+            "swarm_max_agents": swarm_cfg.get(
+                "max_agents",
+                SWARM_GLOBAL_HINTS.get("max_agents_safe"),
+            ),
+            "evidence_mode": (cfg.get("evidence_modes") or {}).get("mode"),
+            "biomarkers_enabled": bool(
+                (cfg.get("biomarker_intelligence") or {}).get("enabled")
+            ),
+        }
+
+    return snapshot
+
+
+def summarize_preset_for_ui(name: str, swarm_size: Optional[int] = None) -> str:
+    """
+    Turn a preset and optional swarm size into a short human summary line.
+
+    Example:
+        summarize_preset_for_ui("longevity", swarm_size=32)
+
+    Could return something like:
+        "Longevity / Anti aging, 24 Hour Run, 32 agent swarm, snapshots on,
+         high clinical evidence strictness, biomarkers enabled"
+    """
+    cfg = get_preset(name)
+
+    label = cfg.get("label", name)
+    domain = cfg.get("domain", "general")
+
+    runtime_key = cfg.get("default_runtime_profile", "24_hours")
+    runtime_profile = get_runtime_profile(runtime_key)
+    runtime_label = runtime_profile.get("label", runtime_key)
+
+    # Snapshot state
+    snapshot_enabled = bool(
+        cfg.get("snapshot_enabled")
+        or (cfg.get("snapshot") or {}).get("enabled")
+    )
+
+    # Swarm sizing
+    swarm_cfg = cfg.get("swarm") or {}
+    max_agents = swarm_cfg.get("max_agents", SWARM_GLOBAL_HINTS.get("max_agents_safe"))
+    default_agents = swarm_cfg.get(
+        "default_agents",
+        SWARM_GLOBAL_HINTS.get("default_agents"),
+    )
+
+    chosen_swarm: Optional[int]
+    if isinstance(swarm_size, int) and swarm_size > 0:
+        chosen_swarm = swarm_size
+    else:
+        chosen_swarm = default_agents if isinstance(default_agents, int) else None
+
+    if isinstance(chosen_swarm, int) and isinstance(max_agents, int):
+        chosen_swarm = min(chosen_swarm, max_agents)
+
+    # Evidence and biomarkers
+    evidence_mode = (cfg.get("evidence_modes") or {}).get("mode")
+    biomarker_enabled = bool(
+        (cfg.get("biomarker_intelligence") or {}).get("enabled")
+    )
+
+    phrases: List[str] = []
+
+    # Label and runtime
+    phrases.append(label)
+    if domain and domain.lower() != label.lower():
+        phrases.append(f"domain {domain}")
+    phrases.append(runtime_label)
+
+    # Swarm phrase
+    if isinstance(chosen_swarm, int) and chosen_swarm > 0:
+        agent_word = "agent" if chosen_swarm == 1 else "agents"
+        phrases.append(f"{chosen_swarm} {agent_word} swarm")
+
+    # Snapshots
+    phrases.append("snapshots on" if snapshot_enabled else "snapshots off")
+
+    # Evidence mode phrase
+    if evidence_mode:
+        if evidence_mode == "clinical":
+            phrases.append("high clinical evidence strictness")
+        elif evidence_mode == "mathematical":
+            phrases.append("formal proof focused evidence")
+        elif evidence_mode == "exploratory":
+            phrases.append("exploratory evidence mode")
+        elif evidence_mode == "balanced":
+            phrases.append("balanced evidence mode")
+        else:
+            phrases.append(f"{evidence_mode} evidence mode")
+
+    # Biomarkers hint
+    if biomarker_enabled:
+        phrases.append("biomarkers enabled")
+
+    return ", ".join(phrases)
