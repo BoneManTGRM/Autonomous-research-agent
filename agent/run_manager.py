@@ -150,20 +150,43 @@ class RunConfig:
 
         # Figure out total cycles:
         #   1) explicit cfg["total_cycles"]
-        #   2) runtime_hints["manual_cycles"]
-        #   3) fallback to 1
+        #   2) runtime_hints["manual_cycles"] or runtime_hints["max_cycles"]
+        #   3) limits["max_cycles"]
+        #   4) fallback to 1
         runtime_hints = cfg.get("runtime_hints") or {}
-        manual_cycles = runtime_hints.get("manual_cycles") or runtime_hints.get("max_cycles")
-        total_cycles = int(cfg.get("total_cycles") or manual_cycles or 1)
+        limits_cfg = cfg.get("limits") or {}
+        manual_cycles = (
+            runtime_hints.get("manual_cycles")
+            or runtime_hints.get("max_cycles")
+            or limits_cfg.get("max_cycles")
+        )
+        total_cycles_raw = cfg.get("total_cycles") or manual_cycles or 1
+        try:
+            total_cycles = int(total_cycles_raw)
+        except Exception:
+            total_cycles = 1
         if total_cycles < 1:
             total_cycles = 1
 
-        max_seconds = cfg.get("max_seconds")
-        if max_seconds is not None:
+        # Time limits:
+        #   Prefer explicit max_seconds, otherwise accept max_minutes and convert.
+        max_seconds_raw = cfg.get("max_seconds")
+        if max_seconds_raw is None:
+            max_minutes_raw = cfg.get("max_minutes")
+            if max_minutes_raw is not None:
+                try:
+                    minutes = int(max_minutes_raw)
+                    if minutes > 0:
+                        max_seconds_raw = minutes * 60
+                except Exception:
+                    max_seconds_raw = None
+        if max_seconds_raw is not None:
             try:
-                max_seconds = int(max_seconds)
+                max_seconds = int(max_seconds_raw)
             except Exception:
                 max_seconds = None
+        else:
+            max_seconds = None
 
         rye_stop_threshold = cfg.get("rye_stop_threshold")
         equilibrium_stop_label = cfg.get("equilibrium_stop_label")
@@ -238,6 +261,7 @@ class RunConfig:
                     "mode",
                     "total_cycles",
                     "max_seconds",
+                    "max_minutes",
                     "rye_stop_threshold",
                     "equilibrium_stop_label",
                     "min_cycles_before_stop",
@@ -253,6 +277,7 @@ class RunConfig:
                     "runtime_hints",
                     "objective_mode",
                     "experiment_mode",
+                    "limits",
                 }
             },
             objective_mode=objective_mode,
