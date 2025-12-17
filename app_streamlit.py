@@ -3464,8 +3464,8 @@ def main() -> None:
                             st.caption(note)
                     else:
                         st.info(note or "Discovery log contains non JSON serializable objects.")
-                        
-     # ----------------- Snapshots and equilibrium tab -----------------
+
+        # ----------------- Snapshots and equilibrium tab -----------------
         with tab_snapshots:
             st.markdown("### Snapshots and equilibrium")
 
@@ -4177,3 +4177,5 @@ def main() -> None:
     # Streamlit entry point
 if __name__ == "__main__":
     main()
+                        
+    
