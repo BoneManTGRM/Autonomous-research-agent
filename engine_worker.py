@@ -231,10 +231,15 @@ VERBOSE_LOGS: bool = _env_bool("WORKER_VERBOSE_LOGS", default=True)
 
 
 def _log(msg: str) -> None:
-    """High signal log line with timestamp."""
+    """High signal log line with timestamp including pid and thread name."""
     try:
         ts = datetime.utcnow().isoformat() + "Z"
-        print(f"[engine_worker] {ts} {msg}")
+        pid = os.getpid()
+        try:
+            thread_name = threading.current_thread().name
+        except Exception:
+            thread_name = "main"
+        print(f"[engine_worker][{pid}:{thread_name}] {ts} {msg}")
         sys.stdout.flush()
     except Exception:
         # Last resort logging, never crash on log
@@ -250,6 +255,43 @@ def _vlog(msg: str) -> None:
     if not VERBOSE_LOGS:
         return
     _log(msg)
+
+
+_STARTUP_LOGGED: bool = False
+
+
+def _log_startup_config() -> None:
+    """
+    One time startup config log for this worker process.
+    Logs global hard limits, BASE_DIR, ARA_RUNS_DIR, and verbosity.
+    """
+    global _STARTUP_LOGGED
+    if _STARTUP_LOGGED:
+        return
+    _STARTUP_LOGGED = True
+    try:
+        ara_runs_env = os.getenv("ARA_RUNS_DIR")
+        try:
+            base_dir_str = str(BASE_DIR.resolve())
+        except Exception:
+            base_dir_str = str(BASE_DIR)
+        _log(
+            f"[startup] HARD_MAX_CYCLES={HARD_MAX_CYCLES}, "
+            f"HARD_MAX_ROUNDS={HARD_MAX_ROUNDS}, "
+            f"HARD_MAX_MINUTES={HARD_MAX_MINUTES}"
+        )
+        _log(
+            f"[startup] BASE_DIR={base_dir_str}, "
+            f"ARA_RUNS_DIR_env={ara_runs_env!r}, "
+            f"WORKER_VERBOSE_LOGS={VERBOSE_LOGS}"
+        )
+    except Exception as e:
+        # Never crash on startup logging
+        try:
+            print(f"[engine_worker][startup] failed to log startup config: {e}")
+            sys.stdout.flush()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -269,7 +311,10 @@ def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
             if not isinstance(data, dict):
                 _log("[config] settings file did not contain a dict, using empty config.")
                 return {}
-            _vlog(f"[config] loaded settings from {path} with keys: {list(data.keys())}")
+            _vlog(
+                f"[config] loaded settings from {path} "
+                f"with keys: {list(data.keys())}"
+            )
             return data
     except Exception as e:
         _log(f"[config] failed to load {path}: {e}")
@@ -449,6 +494,7 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
 
 def init_agent_from_config() -> Tuple[CoreAgent, Dict[str, Any]]:
     """Create a CoreAgent and MemoryStore from config/settings.yaml."""
+    _log_startup_config()
     ensure_directories()
     config = load_settings(CONFIG_PATH_DEFAULT)
 
@@ -853,7 +899,8 @@ def _update_worker_state(
         )
         _vlog(
             f"[worker_state] status={status}, mode={mode}, domain={domain}, "
-            f"run_id={run_id}, current={current}, total={total}, experiment_mode={experiment_mode}"
+            f"run_id={run_id}, current={current}, total={total}, "
+            f"experiment_mode={experiment_mode}"
         )
     except Exception as e:
         _log(f"[worker_state] failed to update worker state: {e}")
@@ -889,6 +936,16 @@ def _write_cycles_and_run_state(
         f"[cycles] writing cycle history for run_id={run_id}, mode={mode}, "
         f"items={len(cycles)}"
     )
+    if cycles:
+        try:
+            first_keys = list(cycles[0].keys())
+            _vlog(f"[cycles] first cycle keys: {first_keys}")
+            if len(cycles) > 1:
+                last_keys = list(cycles[-1].keys())
+                _vlog(f"[cycles] last cycle keys: {last_keys}")
+        except Exception as e:
+            _vlog(f"[cycles] unable to log cycle key summary: {e}")
+
     ms = _get_memory_store(agent)
     if ms is None:
         _vlog("[cycles] no MemoryStore, skipping cycle history write.")
@@ -1241,6 +1298,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
           runs with max_minutes=None and forever=True passed into the core
           engines. Hard minute clamps are not applied in that case.
     """
+    _log_startup_config()
     _log("[direct_job] starting run_engine_job call.")
     _configure_tavily_from_env()
     agent, base_config = init_agent_from_config()
@@ -1924,6 +1982,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
     the worker ignores max_minutes so the job runs until the specified
     cycles or rounds complete (or stop_rye triggers), unless forever=True.
     """
+    _log_startup_config()
     start_ts = time.time()
 
     base_goal, base_domain = build_goal_and_domain()
@@ -2752,6 +2811,7 @@ def run_job_queue_worker() -> None:
         - WORKER_MODE is unset or explicitly "queue" (default behavior in __main__), or
         - WORKER_QUEUE_MODE=1 is set in the environment.
     """
+    _log_startup_config()
     if RunJob is None or load_next_pending_job is None:
         print("Queue mode requested but agent/run_jobs.py is not available.")
         sys.stdout.flush()
@@ -2835,7 +2895,10 @@ def run_job_queue_worker() -> None:
 
             if job is None:
                 idle_loops += 1
-                print("[Queue] No runnable job returned by load_next_pending_job().")
+                print(
+                    f"[Queue] No runnable job returned by load_next_pending_job(). "
+                    f"idle_loops={idle_loops}"
+                )
                 sys.stdout.flush()
                 _heartbeat(agent, label="queue_idle")
                 time.sleep(5.0)
@@ -2845,7 +2908,10 @@ def run_job_queue_worker() -> None:
             sys.stdout.flush()
 
             _process_single_job(agent, config, job)
-            print(f"[Queue] Finished job {getattr(job, 'run_id', 'unknown')}, returning to poll loop.")
+            print(
+                f"[Queue] Finished job {getattr(job, 'run_id', 'unknown')}, "
+                "returning to poll loop."
+            )
             sys.stdout.flush()
             time.sleep(1.0)
         except Exception as loop_err:
@@ -2881,6 +2947,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
     By default, runs are finite. Forever mode must be explicitly enabled.
     """
+    _log_startup_config()
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
 
@@ -3186,6 +3253,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
     By default, runs are finite. Forever mode must be explicitly enabled.
     """
+    _log_startup_config()
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
 
@@ -3802,6 +3870,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
     Meta remains finite by design; forever mode is not applied here.
     """
+    _log_startup_config()
     goal, domain = build_goal_and_domain()
     preset_cfg = get_preset(domain)
 
@@ -4261,108 +4330,75 @@ def main() -> None:
 
     1) Queue worker (file-based jobs via agent/run_jobs):
 
-       - If WORKER_MODE is unset or explicitly "queue", the worker runs the
-         file-based queue worker. This is the default behavior when you just
-         run `python engine_worker.py` on Render.
-       - You can also force queue mode with WORKER_QUEUE_MODE=1.
-       - If agent/run_jobs.py is missing or fails to import, queue mode logs
-         an error and exits; the queue worker cannot start.
+       If WORKER_MODE is unset or explicitly "queue", the worker runs the
+       file-based queue worker. This is the default behavior when you just
+       run python engine_worker.py on Render.
+
+       You can also force queue mode with WORKER_QUEUE_MODE=1.
+       If agent/run_jobs.py is missing or fails to import, queue mode logs
+       an error and exits; the queue worker cannot start.
 
     2) Direct engines (no queue):
 
-       - WORKER_QUEUE_MODE=0 and WORKER_MODE != "queue" -> direct engine behavior:
-           * WORKER_META=1          -> run meta controller (Option C, finite macro budget)
-           * WORKER_META=0 and WORKER_MODE=swarm or WORKER_SWARM=1 -> swarm engine
-           * otherwise             -> single agent engine
+       WORKER_QUEUE_MODE=0 and WORKER_MODE != "queue" -> direct engine behavior:
+           WORKER_META=1          -> run meta controller (Option C, finite macro budget)
+           WORKER_META=0 and WORKER_MODE=swarm or WORKER_SWARM=1 -> swarm engine
+           otherwise             -> single agent engine
 
-    Forever / safety:
-       - HARD_MAX_CYCLES, HARD_MAX_ROUNDS, HARD_MAX_MINUTES still apply unless
-         disabled (HARD_MAX_MINUTES=0).
-       - WORKER_FOREVER=1 disables time guards in single/swarm/direct/queue
-         engines and passes forever=True into the underlying loops; use with care.
+    Forever and safety:
+       Hard caps are always applied unless you explicitly relax them with
+       WORKER_HARD_MAX_* or WORKER_FOREVER where documented above.
     """
-    print("Starting Autonomous Research Agent background engine...")
-    print(
-        f"[Safety] HARD_MAX_CYCLES={HARD_MAX_CYCLES}, "
-        f"HARD_MAX_ROUNDS={HARD_MAX_ROUNDS}, "
-        f"HARD_MAX_MINUTES={HARD_MAX_MINUTES}"
-    )
-    print(f"[engine_worker] VERBOSE_LOGS={VERBOSE_LOGS}")
-    # Extra debug: show effective runs directory for this worker instance
-    print(f"[engine_worker] ARA_RUNS_DIR env: {os.getenv('ARA_RUNS_DIR')!r}")
+    _log_startup_config()
     try:
-        print(f"[engine_worker] BASE_DIR (effective): {BASE_DIR.resolve()}")
-    except Exception:
-        print(f"[engine_worker] BASE_DIR (effective): {BASE_DIR}")
-    sys.stdout.flush()
+        mode_env_raw = os.getenv("WORKER_MODE", "queue")
+        mode_env = mode_env_raw.strip().lower()
+        queue_mode_flag = _env_bool("WORKER_QUEUE_MODE", default=(mode_env == "queue"))
+        meta_flag = _env_bool("WORKER_META", default=False)
+        swarm_flag_env = _env_bool("WORKER_SWARM", default=False)
 
-    # Default queue_mode to False; __main__ can still force queue by setting WORKER_QUEUE_MODE=1.
-    queue_mode = _env_bool("WORKER_QUEUE_MODE", default=False)
+        _log(
+            f"[main] starting engine_worker with WORKER_MODE={mode_env!r}, "
+            f"WORKER_QUEUE_MODE={queue_mode_flag}, WORKER_META={meta_flag}, "
+            f"WORKER_SWARM={swarm_flag_env}"
+        )
 
-    if queue_mode:
-        if RunJob is None or load_next_pending_job is None:
-            print(
-                "Queue mode was requested (WORKER_QUEUE_MODE=1), "
-                "but agent/run_jobs.py is missing or failed to import. "
-                "Queue worker cannot start."
-            )
-            sys.stdout.flush()
+        # Queue mode
+        if queue_mode_flag or mode_env == "queue":
+            _log("[main] entering queue worker mode.")
+            run_job_queue_worker()
             return
-        run_job_queue_worker()
-        return
 
-    _configure_tavily_from_env()
-    agent, config = init_agent_from_config()
+        # Direct engines
+        _configure_tavily_from_env()
+        agent, config = init_agent_from_config()
 
-    use_swarm = _env_bool("WORKER_SWARM", default=False)
-    mode = os.getenv("WORKER_MODE", "single").strip().lower()
-    # Meta mode is OFF by default. You must explicitly set WORKER_META=1
-    # to enable the Option C meta-controller.
-    use_meta = _env_bool("WORKER_META", default=False)
-
-    _log(
-        f"[main] effective mode={mode}, use_swarm={use_swarm}, use_meta={use_meta}, "
-        f"queue_mode={queue_mode}"
-    )
-
-    try:
-        if use_meta:
+        if meta_flag:
+            _log("[main] entering meta controller engine mode.")
             run_meta_engine(agent, config)
         else:
-            if use_swarm or mode == "swarm":
+            direct_swarm = (mode_env == "swarm") or swarm_flag_env
+            if direct_swarm:
+                _log("[main] entering direct swarm engine mode.")
                 run_swarm_engine(agent, config)
             else:
+                _log("[main] entering direct single agent engine mode.")
                 run_single_agent_engine(agent, config)
+
+        _log("[main] engine_worker main completed cleanly.")
+
     except KeyboardInterrupt:
-        print("Engine interrupted by user or environment.")
-        sys.stdout.flush()
-    except Exception:
-        print("Fatal error in engine_worker:")
-        traceback.print_exc()
-        sys.stdout.flush()
+        _log("[main] KeyboardInterrupt received, shutting down engine worker.")
+    except Exception as e:
+        tb = traceback.format_exc()
+        try:
+            print(f"[main] Fatal error in engine worker: {e}")
+            print(tb)
+            sys.stdout.flush()
+        except Exception:
+            pass
+        _log(f"[main] Fatal error in engine worker: {e}")
 
 
 if __name__ == "__main__":
-    # Updated guard: if WORKER_MODE is empty, default to "queue" so the
-    # queue worker runs and picks up jobs. Only explicit "off" values
-    # prevent the worker from starting.
-    raw_mode = os.getenv("WORKER_MODE", "").strip().lower()
-    effective_mode = raw_mode or "queue"
-
-    print(
-        f"[engine_worker] WORKER_MODE raw={raw_mode!r} -> effective={effective_mode!r}"
-    )
-    sys.stdout.flush()
-
-    if effective_mode in {"off", "disabled", "0", "none"}:
-        print(
-            "[engine_worker] WORKER_MODE is disabled. "
-            "Exiting without starting worker."
-        )
-        sys.stdout.flush()
-        sys.exit(0)
-
-    if effective_mode == "queue":
-        os.environ["WORKER_QUEUE_MODE"] = "1"
-
     main()
