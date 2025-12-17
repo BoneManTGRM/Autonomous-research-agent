@@ -23,24 +23,27 @@ else
   echo "[start_unified] ARA_RUNS_DIR already set to $ARA_RUNS_DIR"
 fi
 
+# Queue root helper so engine_worker.py and run_jobs.py stay in sync
+export ARA_QUEUE_ROOT="$ARA_RUNS_DIR/queue"
+
 echo "[start_unified] Preparing run directories under $ARA_RUNS_DIR"
 mkdir -p \
   "$ARA_RUNS_DIR" \
-  "$ARA_RUNS_DIR/pending" \
-  "$ARA_RUNS_DIR/active" \
-  "$ARA_RUNS_DIR/finished" \
-  "$ARA_RUNS_DIR/error" \
-  "$ARA_RUNS_DIR/queue" \
+  "$ARA_QUEUE_ROOT" \
+  "$ARA_QUEUE_ROOT/pending" \
+  "$ARA_QUEUE_ROOT/active" \
+  "$ARA_QUEUE_ROOT/finished" \
+  "$ARA_QUEUE_ROOT/error" \
   "$ARA_RUNS_DIR/memory"
 
 echo "[start_unified] Run directory tree:"
 for d in \
   "$ARA_RUNS_DIR" \
-  "$ARA_RUNS_DIR/active" \
-  "$ARA_RUNS_DIR/finished" \
-  "$ARA_RUNS_DIR/pending" \
-  "$ARA_RUNS_DIR/queue" \
-  "$ARA_RUNS_DIR/error" \
+  "$ARA_QUEUE_ROOT" \
+  "$ARA_QUEUE_ROOT/pending" \
+  "$ARA_QUEUE_ROOT/active" \
+  "$ARA_QUEUE_ROOT/finished" \
+  "$ARA_QUEUE_ROOT/error" \
   "$ARA_RUNS_DIR/memory"
 do
   if [ -d "$d" ]; then
@@ -110,6 +113,7 @@ python - << 'EOF' || echo "[start_unified] Warning: sanity check failed"
 import os, sys
 print("[start_unified] Python version:", sys.version.replace("\n", " "))
 print("[start_unified] Sanity check: ARA_RUNS_DIR env =", os.getenv("ARA_RUNS_DIR"))
+print("[start_unified] Sanity check: ARA_QUEUE_ROOT env =", os.getenv("ARA_QUEUE_ROOT"))
 try:
     from agent import run_jobs
     print("[start_unified] Sanity check: run_jobs.BASE_DIR =", run_jobs.BASE_DIR)
@@ -139,7 +143,7 @@ echo "[start_unified] Engine worker PID: $WORKER_PID"
 
 # -------------------------------------------------------------------
 # Start Streamlit UI in foreground
-# Render provides \$PORT, but default to 8501 if missing
+# Render provides $PORT, but default to 8501 if missing
 # -------------------------------------------------------------------
 PORT="${PORT:-8501}"
 echo "[start_unified] Starting Streamlit UI on port $PORT"
