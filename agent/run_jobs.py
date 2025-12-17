@@ -143,6 +143,7 @@ __all__ = [
     "_inject_run_id_into_config",
     "_ensure_monitoring_block",
     "MONITORING_DEFAULTS",
+    "STATUS_PRIORITY",
     "create_job",
     "enqueue_job",
     "load_job",
