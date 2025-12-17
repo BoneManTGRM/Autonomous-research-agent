@@ -51,7 +51,7 @@ import re
 import sys
 import glob
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional
+from typing import Any, Dict, List, Tuple, Optional, Set
 from datetime import datetime
 
 import streamlit as st
@@ -158,10 +158,19 @@ try:
         RUNS_ERROR_DIR = None
 
 except ModuleNotFoundError as e:
-    # If the agent package itself is missing, allow flat layout fallback.
-    # If something inside agent.* is missing, re raise so we see the real error.
-    if "agent" not in str(e):
+    # If the *agent package itself* is missing, allow flat layout fallback.
+    # If a submodule or dependency is missing, re-raise so we see the real error.
+    missing_name = getattr(e, "name", None)
+    if missing_name not in (None, "agent"):
         raise
+    if missing_name is None:
+        msg = str(e)
+        if (
+            "No module named 'agent'" not in msg
+            and 'No module named "agent"' not in msg
+            and "No module named agent" not in msg
+        ):
+            raise
 
     # Flat layout fallback: all modules live next to this file
     from memory_store import MemoryStore
@@ -281,6 +290,38 @@ def _parse_timestamp_str(ts: str) -> Optional[datetime]:
         return None
 
 
+def _maybe_float(v: Any) -> Optional[float]:
+    """Best-effort convert to float. Returns None if not convertible."""
+    if v is None:
+        return None
+    if isinstance(v, bool):
+        return float(v)
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return float(s)
+        except Exception:
+            return None
+    return None
+
+
+def _format_metric_value(v: Any, decimals: int = 3) -> str:
+    """Format a metric value safely for st.metric."""
+    num = _maybe_float(v)
+    if num is not None:
+        try:
+            return f"{num:.{decimals}f}"
+        except Exception:
+            return str(num)
+    if v is None:
+        return "n/a"
+    return str(v)
+
+
 def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
     """Load YAML settings file into a dictionary."""
     if not os.path.exists(config_path):
@@ -398,23 +439,26 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
         f"(role: {role}, domain: {domain})"
     )
 
-    # Metrics
+    # Metrics (safe handling for None / strings)
+    delta_val = cycle_summary.get("delta_R")
+    if delta_val is None:
+        delta_val = cycle_summary.get("delta_r")
+
+    energy_val = cycle_summary.get("energy_E")
+    if energy_val is None:
+        energy_val = cycle_summary.get("energy")
+
+    rye_val = cycle_summary.get("RYE")
+    if rye_val is None:
+        rye_val = cycle_summary.get("rye")
+
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.metric(
-            "delta_R",
-            cycle_summary.get("delta_R", cycle_summary.get("delta_r", 0.0)),
-        )
+        st.metric("delta_R", _format_metric_value(delta_val, decimals=4))
     with col2:
-        st.metric(
-            "Energy E",
-            cycle_summary.get("energy_E", cycle_summary.get("energy", 0.0)),
-        )
+        st.metric("Energy E", _format_metric_value(energy_val, decimals=4))
     with col3:
-        st.metric(
-            "RYE",
-            round(cycle_summary.get("RYE", cycle_summary.get("rye", 0.0)), 3),
-        )
+        st.metric("RYE", _format_metric_value(rye_val, decimals=3))
 
     # Issues
     issues_before = cycle_summary.get("issues_before", [])
@@ -578,6 +622,33 @@ def _get_job_label(job: Any) -> str:
         or _get_job_id(job)
     )
     return str(label)
+
+
+def _job_created_at_ts(job: Any) -> float:
+    """Best-effort numeric timestamp for sorting jobs."""
+    ts_raw = None
+    if hasattr(job, "created_at"):
+        ts_raw = getattr(job, "created_at", None)
+    elif isinstance(job, dict):
+        ts_raw = job.get("created_at")
+
+    if isinstance(ts_raw, (int, float)):
+        return float(ts_raw)
+
+    if isinstance(ts_raw, str):
+        dt = _parse_timestamp_str(ts_raw)
+        if dt is not None:
+            try:
+                return dt.timestamp()
+            except Exception:
+                return 0.0
+        # Last-ditch parse
+        try:
+            return datetime.fromisoformat(ts_raw.replace("Z", "")).timestamp()
+        except Exception:
+            return 0.0
+
+    return 0.0
 
 
 def render_job_summary(job: Any) -> None:
@@ -747,23 +818,8 @@ def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]
         return []
 
     # Sort jobs by created_at so we can take the most recent N
-    def _job_created_at(j: Any) -> float:
-        ts_raw = None
-        if hasattr(j, "created_at"):
-            ts_raw = getattr(j, "created_at", None)
-        elif isinstance(j, dict):
-            ts_raw = j.get("created_at")
-        if isinstance(ts_raw, (int, float)):
-            return float(ts_raw)
-        if isinstance(ts_raw, str):
-            try:
-                return datetime.fromisoformat(ts_raw.replace("Z", "")).timestamp()
-            except Exception:
-                return 0.0
-        return 0.0
-
     try:
-        jobs_sorted = sorted(jobs, key=_job_created_at)
+        jobs_sorted = sorted(jobs, key=_job_created_at_ts)
     except Exception:
         jobs_sorted = jobs
 
@@ -812,21 +868,21 @@ def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]
     return history
 
 
-def extract_citations_from_history(
+def extract_unique_citations_from_history(
     history: List[Dict[str, Any]],
     max_items: int = 200,
 ) -> List[Dict[str, Any]]:
-    """Flatten citations from a list of cycle history entries.
+    """Flatten citations from a list of cycle history entries and deduplicate them.
 
-    This is used when run level citations are missing and only per cycle
-    citations or sources are available. It returns a deduplicated list
-    of citation dictionaries in a simple format.
+    This is used when run-level citations are missing and only per-cycle citations
+    or sources are available. It returns a deduplicated list of citation dicts in
+    a simple format (no cycle metadata).
     """
     if not history:
         return []
 
     collected: List[Dict[str, Any]] = []
-    seen_keys: set[Tuple[Optional[str], Optional[str]]] = set()
+    seen_keys: Set[Tuple[Optional[str], Optional[str]]] = set()
 
     for entry in history:
         for key in ("citations", "sources", "source_list"):
@@ -1015,8 +1071,8 @@ def render_result_details(result: Dict[str, Any]) -> None:
 
     flattened_citations: List[Dict[str, Any]] = []
     if not sources and cycles:
-        # Reuse the helper that flattens citations from cycle history
-        flattened_citations = extract_citations_from_history(cycles)
+        # Flatten and deduplicate citations from cycles to avoid huge repeats
+        flattened_citations = extract_unique_citations_from_history(cycles)
         if flattened_citations:
             sources = flattened_citations
 
@@ -1119,7 +1175,7 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
                 findings.append(txt)
 
     # Deduplicate while preserving order
-    seen: set[str] = set()
+    seen: Set[str] = set()
     unique_findings: List[str] = []
     for f in findings:
         f_clean = f.strip()
@@ -1303,7 +1359,7 @@ def compute_msil_profile(
         return None
 
     return None
-    
+
 
 # -------------------------------------------------------------------
 # Advanced log and snapshot helpers
@@ -1380,7 +1436,7 @@ def load_snapshots() -> List[Dict[str, Any]]:
             pass
 
     # Deduplicate directories
-    seen_dirs: set[str] = set()
+    seen_dirs: Set[str] = set()
     unique_snapshot_dirs: List[Path] = []
     for d in snapshot_dir_candidates:
         try:
@@ -1453,10 +1509,10 @@ def extract_hypotheses_from_history(history: List[Dict[str, Any]]) -> List[Dict[
     return results
 
 
-def extract_citations_from_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Flatten citations across all cycles into a list with cycle info for the citation viewer.
+def extract_citation_rows_from_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten citations across all cycles into rows with cycle info for the citation viewer.
 
-    Supports both classic per cycle 'citations' lists and alternate
+    Supports both classic per-cycle 'citations' lists and alternate
     fields like 'sources' or 'source_list' that some workers use.
     """
     results: List[Dict[str, Any]] = []
@@ -1819,23 +1875,8 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
         return []
 
     # Sort jobs by created_at so we can take the most recent N
-    def _job_created_at(j: Any) -> float:
-        ts_raw = None
-        if hasattr(j, "created_at"):
-            ts_raw = getattr(j, "created_at", None)
-        elif isinstance(j, dict):
-            ts_raw = j.get("created_at")
-        if isinstance(ts_raw, (int, float)):
-            return float(ts_raw)
-        if isinstance(ts_raw, str):
-            try:
-                return datetime.fromisoformat(ts_raw.replace("Z", "")).timestamp()
-            except Exception:
-                return 0.0
-        return 0.0
-
     try:
-        jobs_sorted = sorted(jobs, key=_job_created_at)
+        jobs_sorted = sorted(jobs, key=_job_created_at_ts)
     except Exception:
         jobs_sorted = jobs
 
@@ -1927,7 +1968,7 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
                     }
                 )
 
-    flattened = extract_citations_from_history(all_history)
+    flattened = extract_citation_rows_from_history(all_history)
     flattened.extend(top_level_citations)
     return flattened
 
@@ -1951,23 +1992,8 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
         return []
 
     # Sort jobs by created_at so we can take the most recent N
-    def _job_created_at(j: Any) -> float:
-        ts_raw = None
-        if hasattr(j, "created_at"):
-            ts_raw = getattr(j, "created_at", None)
-        elif isinstance(j, dict):
-            ts_raw = j.get("created_at")
-        if isinstance(ts_raw, (int, float)):
-            return float(ts_raw)
-        if isinstance(ts_raw, str):
-            try:
-                return datetime.fromisoformat(ts_raw.replace("Z", "")).timestamp()
-            except Exception:
-                return 0.0
-        return 0.0
-
     try:
-        jobs_sorted = sorted(jobs, key=_job_created_at)
+        jobs_sorted = sorted(jobs, key=_job_created_at_ts)
     except Exception:
         jobs_sorted = jobs
 
@@ -2200,7 +2226,8 @@ def main() -> None:
         value=current_key or "",
         help="Optional. If provided, allows real web search through Tavily in the engine worker.",
     )
-    if new_key and new_key != current_key:
+    # Allow clearing the key by entering empty string
+    if new_key != current_key:
         st.session_state["tavily_key"] = new_key
 
     # Preset and domain selection
@@ -2546,6 +2573,12 @@ def main() -> None:
                     "max_cycles_per_agent": 1,
                     "stagger_start": False,
                     "max_agents_per_tick": 0,
+                    # Optional per-role goal specialization (safe extra metadata for workers that care)
+                    "role_goals": {
+                        name: role_specific_goal(goal_clean, name) for name, _ in swarm_roles
+                    }
+                    if swarm_roles
+                    else {},
                 }
             else:
                 swarm_config = {
@@ -2588,7 +2621,9 @@ def main() -> None:
                 "min_cycles_before_stop": min(3, int(cycles)),
                 "source_controls": source_controls,
                 "runtime_hints": runtime_hints,
+                # Provide both keys for compatibility across workers
                 "swarm": swarm_config,
+                "swarm_config": swarm_config,
                 "longevity_config": longevity_config,
                 "snapshot_config": snapshot_config,
                 "snapshots_enabled": bool(enable_snapshots),
@@ -2599,6 +2634,7 @@ def main() -> None:
 
             if pdf_payload is not None:
                 run_config["pdf"] = pdf_payload
+                run_config["pdf_payload"] = pdf_payload
 
             # Meta for UI and analytics (does not go into RunConfig directly)
             t_key = st.session_state.get("tavily_key")
@@ -2650,8 +2686,23 @@ def main() -> None:
         else:
             base = Path(runs_root) / label
         try:
-            pattern = "*_job.json" if label in ("pending", "active") else "*.json"
-            items = sorted(p.name for p in base.glob(pattern))
+            if not base.exists() or not base.is_dir():
+                items: List[str] = []
+            else:
+                items = []
+                for p in sorted(base.iterdir()):
+                    if p.is_dir():
+                        items.append(p.name + "/")
+                    elif p.suffix.lower() == ".json":
+                        items.append(p.name)
+
+                # For pending/active, focus on job files for clarity
+                if label in ("pending", "active"):
+                    items = [x for x in items if x.endswith("_job.json")]
+
+                # Avoid overly long debug output
+                if len(items) > 60:
+                    items = items[:60] + ["..."]
         except Exception as e:
             items = [f"error: {e}"]
         st.text(f"DEBUG {label}: {items}")
@@ -2695,6 +2746,20 @@ def main() -> None:
         except Exception:
             active_jobs = []
 
+    # Sort job lists for better UX
+    try:
+        finished_jobs = sorted(finished_jobs, key=_job_created_at_ts, reverse=True)
+    except Exception:
+        pass
+    try:
+        pending_jobs = sorted(pending_jobs, key=_job_created_at_ts)
+    except Exception:
+        pass
+    try:
+        active_jobs = sorted(active_jobs, key=_job_created_at_ts)
+    except Exception:
+        pass
+
     col_runs_left, col_runs_right = st.columns([2, 1])
 
     with col_runs_left:
@@ -2704,11 +2769,11 @@ def main() -> None:
         else:
             run_ids = [_get_job_id(j) for j in finished_jobs]
 
+            id_to_job = { _get_job_id(j): j for j in finished_jobs }
+
             def _format_run(jid: str) -> str:
-                for j in finished_jobs:
-                    if _get_job_id(j) == jid:
-                        return _get_job_label(j)
-                return jid
+                j = id_to_job.get(jid)
+                return _get_job_label(j) if j is not None else jid
 
             selected_run_id = st.selectbox(
                 "Select a finished run",
@@ -2716,10 +2781,7 @@ def main() -> None:
                 format_func=_format_run,
             )
             if selected_run_id:
-                selected_job_header = next(
-                    (j for j in finished_jobs if _get_job_id(j) == selected_run_id),
-                    None,
-                )
+                selected_job_header = id_to_job.get(selected_run_id)
                 if selected_job_header:
                     render_job_summary(selected_job_header)
                 result = load_job_result(selected_run_id)
@@ -2746,7 +2808,7 @@ def main() -> None:
             st.info("No active runs detected by run_jobs.")
         else:
             # Deduplicate active jobs by run_id in case backend reports both stale and current
-            seen_ids: set[str] = set()
+            seen_ids: Set[str] = set()
             for job in active_jobs:
                 jid = _get_job_id(job)
                 if jid in seen_ids:
@@ -2959,15 +3021,30 @@ def main() -> None:
 
             adv_cols = st.columns(5)
             with adv_cols[0]:
-                st.metric("Rolling RYE (10)", f"{roll_val:.3f}" if roll_val is not None else "n/a")
+                st.metric(
+                    "Rolling RYE (10)",
+                    f"{float(roll_val):.3f}" if isinstance(roll_val, (int, float)) else "n/a",
+                )
             with adv_cols[1]:
-                st.metric("RYE trend", f"{trend_val:.3f}" if trend_val is not None else "n/a")
+                st.metric(
+                    "RYE trend",
+                    f"{float(trend_val):.3f}" if isinstance(trend_val, (int, float)) else "n/a",
+                )
             with adv_cols[2]:
-                st.metric("RYE slope", f"{slope_val:.4f}" if slope_val is not None else "n/a")
+                st.metric(
+                    "RYE slope",
+                    f"{float(slope_val):.4f}" if isinstance(slope_val, (int, float)) else "n/a",
+                )
             with adv_cols[3]:
-                st.metric("Stability index", f"{stability_val:.3f}" if stability_val is not None else "n/a")
+                st.metric(
+                    "Stability index",
+                    f"{float(stability_val):.3f}" if isinstance(stability_val, (int, float)) else "n/a",
+                )
             with adv_cols[4]:
-                st.metric("Recovery momentum", f"{momentum_val:.3f}" if momentum_val is not None else "n/a")
+                st.metric(
+                    "Recovery momentum",
+                    f"{float(momentum_val):.3f}" if isinstance(momentum_val, (int, float)) else "n/a",
+                )
 
             # Learning speed and breakthrough profile plus 10x Option C view
             st.markdown("### Learning speed and breakthrough profile")
@@ -3188,7 +3265,7 @@ def main() -> None:
             st.markdown("### Source citation viewer")
 
             # First try per cycle citations from history
-            citations = extract_citations_from_history(history)
+            citations = extract_citation_rows_from_history(history)
             # Fallback to finished run JSONs if nothing found
             if not citations:
                 citations = load_citations_from_finished_runs()
@@ -4177,5 +4254,3 @@ def main() -> None:
     # Streamlit entry point
 if __name__ == "__main__":
     main()
-                        
-    
