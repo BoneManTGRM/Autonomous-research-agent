@@ -517,7 +517,12 @@ class DiscoveryEngine:
                 If True and a DiscoveryLogger is attached, mirror discoveries
                 into the Markdown discovery log.
         """
-        history: List[Dict[str, Any]] = self.memory_store.get_cycle_history() or []
+        history: List[Dict[str, Any]] = []
+        try:
+            if hasattr(self.memory_store, "get_cycle_history"):
+                history = self.memory_store.get_cycle_history() or []  # type: ignore[assignment]
+        except Exception:
+            history = []
 
         # Early exit
         if not history:
@@ -528,8 +533,16 @@ class DiscoveryEngine:
             }
 
         # Compute baselines
-        rye_vals = [float(e["RYE"]) for e in history if isinstance(e.get("RYE"), (int, float))]
-        delta_vals = [float(e["delta_R"]) for e in history if isinstance(e.get("delta_R"), (int, float))]
+        rye_vals = [
+            float(e["RYE"])
+            for e in history
+            if isinstance(e.get("RYE"), (int, float))
+        ]
+        delta_vals = [
+            float(e.get("delta_R", e.get("delta_r")))
+            for e in history
+            if isinstance(e.get("delta_R", e.get("delta_r")), (int, float))
+        ]
 
         rye_mean, rye_std = _compute_stats(rye_vals)
         delta_mean, delta_std = _compute_stats(delta_vals)
@@ -561,9 +574,17 @@ class DiscoveryEngine:
 
             cycle_idx = entry.get("cycle")
             role = str(entry.get("role", "agent"))
+
             rye = float(entry["RYE"]) if isinstance(entry.get("RYE"), (int, float)) else None
-            delta_R = float(entry["delta_R"]) if isinstance(entry.get("delta_R"), (int, float)) else None
-            energy_E = float(entry["energy_E"]) if isinstance(entry.get("energy_E"), (int, float)) else None
+            delta_raw = entry.get("delta_R", entry.get("delta_r"))
+            delta_R = float(delta_raw) if isinstance(delta_raw, (int, float)) else None
+
+            energy_raw = (
+                entry.get("energy_E")
+                or entry.get("energy_e")
+                or entry.get("Energy")
+            )
+            energy_E = float(energy_raw) if isinstance(energy_raw, (int, float)) else None
 
             # Search and swarm metrics if present in cycle history
             info_gain = entry.get("info_gain")
@@ -638,7 +659,7 @@ class DiscoveryEngine:
 
                 disc = Discovery(
                     id=f"{domain}-{cycle_idx}-{kind}-{len(cycle_new)}",
-                    created_at=datetime.utcnow().isoformat(),
+                    created_at=datetime.utcnow().isoformat() + "Z",
                     cycle=int(cycle_idx) if isinstance(cycle_idx, int) else None,
                     role=role,
                     domain=domain,
@@ -888,6 +909,36 @@ def run_discovery_pass(
         - max_candidates_per_cycle
         - create_hypotheses
         - log_to_markdown
+
+    You can also pass constructor kwargs such as:
+        - hypothesis_manager
+        - discovery_logger
+        - intelligence_profile
+        - run_id
+        - domain
+        - runtime_profile
     """
-    engine = DiscoveryEngine(memory_store=memory_store, presets=presets)
-    return engine.run_pass(domains=domains, **kwargs)
+    constructor_keys = {
+        "hypothesis_manager",
+        "discovery_logger",
+        "intelligence_profile",
+        "run_id",
+        "domain",
+        "runtime_profile",
+    }
+
+    ctor_kwargs: Dict[str, Any] = {}
+    run_kwargs: Dict[str, Any] = {}
+
+    for k, v in kwargs.items():
+        if k in constructor_keys:
+            ctor_kwargs[k] = v
+        else:
+            run_kwargs[k] = v
+
+    engine = DiscoveryEngine(
+        memory_store=memory_store,
+        presets=presets,
+        **ctor_kwargs,
+    )
+    return engine.run_pass(domains=domains, **run_kwargs)
