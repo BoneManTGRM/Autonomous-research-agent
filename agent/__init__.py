@@ -21,7 +21,7 @@ Design goals:
 from __future__ import annotations
 
 import os
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type, TypedDict
 
 # Optional core tool classes.
 # These imports are all guarded so that missing dependencies never
@@ -53,9 +53,11 @@ __all__ = [
     "DataConnectors",
     "TOOL_REGISTRY",
     "get_tool_descriptor",
+    "get_tool_callable",
     "build_tool_instance",
     "list_tools",
     "has_tool",
+    "register_tool",
 ]
 
 # -------------------------------------------------------------------
@@ -89,7 +91,17 @@ __all__ = [
 # the names existing, not the exact descriptor shape.
 # -------------------------------------------------------------------
 
-TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {}
+
+class ToolDescriptor(TypedDict):
+    kind: str
+    cls: Optional[Type[Any]]
+    description: str
+    tags: List[str]
+    enabled: bool
+    fn: Optional[Callable[..., Any]]
+
+
+TOOL_REGISTRY: Dict[str, ToolDescriptor] = {}
 
 
 def _env_flag(name: str, default: bool = True) -> bool:
@@ -124,11 +136,15 @@ def _safe_register(
         return
 
     try:
+        # Deduplicate tags while preserving order
+        tag_list = tags or []
+        tag_list = list(dict.fromkeys(tag_list))
+
         TOOL_REGISTRY[name] = {
             "kind": kind,
             "cls": cls,
             "description": description,
-            "tags": tags or [],
+            "tags": tag_list,
             "enabled": True,
             "fn": fn,
         }
@@ -137,29 +153,79 @@ def _safe_register(
         return
 
 
+def register_tool(
+    name: str,
+    *,
+    kind: str,
+    cls: Optional[Type[Any]] = None,
+    description: str = "",
+    tags: Optional[List[str]] = None,
+    enabled: bool = True,
+    fn: Optional[Callable[..., Any]] = None,
+) -> None:
+    """
+    Public registration hook for downstream modules/plugins.
+
+    This is intentionally thin and safe; it will not raise.
+    """
+    _safe_register(
+        name,
+        kind=kind,
+        cls=cls,
+        description=description,
+        tags=tags,
+        enabled=enabled,
+        fn=fn,
+    )
+
+
 # -------------------------------------------------------------------
 # Registration of tools
 # -------------------------------------------------------------------
 #
-# Environment flags:
+# Environment flags (existing):
 #   DISABLE_BROWSER_TOOLS=1  -> skip BrowserTool-style registrations
 #   DISABLE_SANDBOX_TOOLS=1  -> skip CodeSandbox registrations
 #   DISABLE_DATA_TOOLS=1     -> skip DataConnectors registrations
+#
+# Additional environment flags (new, optional):
+#   DISABLE_WEB_TOOLS=1          -> disable *all* web capability (browser + web_search)
+#   DISABLE_WEB_SEARCH_TOOLS=1   -> disable function-based web search bridge (Tavily/EXTREME)
+#   DISABLE_TAVILY_SEARCH=1      -> alias for DISABLE_WEB_SEARCH_TOOLS
+#   DISABLE_EXTREME_WEB_SEARCH=1 -> alias for DISABLE_WEB_SEARCH_TOOLS
 # -------------------------------------------------------------------
 
+# Web/browser toggles
+web_tools_disabled = _env_flag("DISABLE_WEB_TOOLS", default=False)
+
+# Keep existing semantics: DISABLE_BROWSER_TOOLS disables BrowserTool class-based browsing,
+# but does not automatically disable function-based web search unless DISABLE_WEB_TOOLS
+# (or the search-specific flags) are set.
+browser_enabled = not (_env_flag("DISABLE_BROWSER_TOOLS", default=False) or web_tools_disabled)
+
+web_search_disabled = (
+    web_tools_disabled
+    or _env_flag("DISABLE_WEB_SEARCH_TOOLS", default=False)
+    or _env_flag("DISABLE_TAVILY_SEARCH", default=False)
+    or _env_flag("DISABLE_EXTREME_WEB_SEARCH", default=False)
+)
+
+# Single unified callable for all web-style search entries if EXTREME MODE is present
+web_fn: Optional[Callable[..., Any]] = None
+try:
+    if not web_search_disabled and callable(extreme_web_search_tool):
+        web_fn = extreme_web_search_tool  # type: ignore[assignment]
+except Exception:
+    web_fn = None
+
 # Browser and web tools
-browser_enabled = not _env_flag("DISABLE_BROWSER_TOOLS", default=False)
-
-# Single unified callable for all web-style entries if EXTREME MODE is present
-web_fn: Optional[Callable[..., Any]] = extreme_web_search_tool
-
 _safe_register(
     "browser",
     kind="browser",
     cls=BrowserTool if browser_enabled else None,
     description="HTTP web browsing and scraping helper (Playwright + requests).",
     tags=["web", "browser"],
-    fn=None,  # BrowserTool is a class; web_fn is for unified search
+    fn=None,
 )
 
 # Aliases so detect_tools() and the UI can see web capability
@@ -187,14 +253,17 @@ _safe_register(
     tags=["web", "internet", "alias"],
     fn=web_fn,
 )
+
 # Explicit Tavily-style name so agents or LangChain-style configs
 # that look for "tavily_search" can still find an EXTREME-capable tool.
+# Only register this name if we actually have a callable web search bridge.
 _safe_register(
     "tavily_search",
     kind="browser",
-    cls=BrowserTool if browser_enabled else None,
+    cls=None,
     description="Tavily-powered EXTREME web search via web_search tool.",
     tags=["web", "search", "tavily"],
+    enabled=web_fn is not None,
     fn=web_fn,
 )
 
@@ -271,7 +340,7 @@ _safe_register(
 # -------------------------------------------------------------------
 # Public helpers
 # -------------------------------------------------------------------
-def get_tool_descriptor(name: str) -> Optional[Dict[str, Any]]:
+def get_tool_descriptor(name: str) -> Optional[ToolDescriptor]:
     """
     Return the descriptor for a given tool name, or None if not registered.
 
@@ -284,6 +353,18 @@ def get_tool_descriptor(name: str) -> Optional[Dict[str, Any]]:
         fn: Optional[Callable]
     """
     return TOOL_REGISTRY.get(name)
+
+
+def get_tool_callable(name: str) -> Optional[Callable[..., Any]]:
+    """
+    Convenience helper: return the callable 'fn' for a tool if present/callable,
+    otherwise None.
+    """
+    desc = TOOL_REGISTRY.get(name)
+    if not desc:
+        return None
+    fn = desc.get("fn")
+    return fn if callable(fn) else None
 
 
 def build_tool_instance(name: str, **kwargs: Any) -> Any:
