@@ -269,13 +269,33 @@ class DiscoveryManager:
         candidates: List[DiscoveryCandidate] = []
 
         for entry in history:
-            cycle_index = int(entry.get("cycle_index") or 0)
+            # Flexible cycle index handling to work with older and newer schemas
+            cycle_index_raw = entry.get("cycle_index", entry.get("cycle", 0))
+            try:
+                cycle_index = int(cycle_index_raw)
+            except Exception:
+                cycle_index = 0
+
+            # RYE metrics with fallbacks
             rye_before = _safe_float(entry.get("rye_before"))
+            if rye_before is None and isinstance(entry.get("RYE_before"), (int, float)):
+                rye_before = _safe_float(entry.get("RYE_before"))
+
             rye_after = _safe_float(entry.get("rye_after") or entry.get("rye_value"))
-            delta_rye = None
+            if rye_after is None and isinstance(entry.get("RYE"), (int, float)):
+                rye_after = _safe_float(entry.get("RYE"))
+
+            delta_rye: Optional[float] = None
             if rye_after is not None and rye_before is not None:
                 delta_rye = rye_after - rye_before
+            elif isinstance(entry.get("delta_R"), (int, float)):
+                delta_rye = _safe_float(entry.get("delta_R"))
+
+            # Energy cost with fallback to energy_E
             energy_cost = _safe_float(entry.get("energy_cost"))
+            if energy_cost is None and isinstance(entry.get("energy_E"), (int, float)):
+                energy_cost = _safe_float(entry.get("energy_E"))
+
             rye_eff = None
             if delta_rye is not None and energy_cost and energy_cost > 0:
                 rye_eff = delta_rye / energy_cost
