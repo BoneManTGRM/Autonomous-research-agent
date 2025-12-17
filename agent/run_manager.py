@@ -669,13 +669,23 @@ class RunManager:
         last_cycle_meta: Dict[str, Any] = {}
         stop_reason: str = "completed"
 
-        # Respect per agent cap when provided, otherwise fall back to total_cycles.
+        # Respect per agent cap when provided, and treat run_config.total_cycles
+        # as the primary global budget across the swarm.
         effective_max_per_agent = (
             swarm_cfg.max_cycles_per_agent
             if swarm_cfg.max_cycles_per_agent > 0
             else run_config.total_cycles
         )
-        total_cycles_budget = effective_max_per_agent * swarm_cfg.swarm_size
+        if effective_max_per_agent < 1:
+            effective_max_per_agent = 1
+
+        if run_config.total_cycles and run_config.total_cycles > 0:
+            total_cycles_budget = min(
+                run_config.total_cycles,
+                effective_max_per_agent * swarm_cfg.swarm_size,
+            )
+        else:
+            total_cycles_budget = effective_max_per_agent * swarm_cfg.swarm_size
 
         # Track per agent cycle counts so we do not exceed max_cycles_per_agent
         per_agent_counts: List[int] = [0 for _ in agents]
@@ -988,12 +998,16 @@ class RunManager:
         if not history:
             return
 
-        # We do not know hours_run_so_far at this point for this helper, so we
-        # pass None. The 90d likelihood will still be computed heuristically.
+        # Use actual elapsed_seconds for hours_run_so_far when available.
+        elapsed_seconds = summary.get("elapsed_seconds")
+        hours_run_so_far: Optional[float] = None
+        if isinstance(elapsed_seconds, (int, float)) and elapsed_seconds >= 0:
+            hours_run_so_far = float(elapsed_seconds) / 3600.0
+
         option_c = rm.build_option_c_signature(
             history,
             domain=run_config.domain,
-            hours_run_so_far=None,
+            hours_run_so_far=hours_run_so_far,
             window=10,
         )
 
@@ -1029,6 +1043,7 @@ class RunManager:
         learning = summary.get("learning_speed") or {}
         run_tier = summary.get("run_tier") or {}
         diagnostics = summary.get("rye_diagnostics") or {}
+        swarm_cfg = run_config.swarm_config
 
         manifest: Dict[str, Any] = {
             "run_id": summary.get("run_id", run_config.run_id),
@@ -1053,6 +1068,10 @@ class RunManager:
             ),
             "tier3_candidate": summary.get("tier3_candidate"),
             "objective_mode": run_config.objective_mode,
+            # Swarm specific manifest fields (even if mode is not swarm, harmless to log)
+            "swarm_size": swarm_cfg.swarm_size,
+            "swarm_roles": summary.get("swarm_roles") or swarm_cfg.roles,
+            "swarm_max_cycles_per_agent": swarm_cfg.max_cycles_per_agent,
         }
 
         try:
