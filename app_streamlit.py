@@ -1096,7 +1096,7 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
 def build_findings_report_from_history(history: List[Dict[str, Any]]) -> str:
     """Build a findings style report directly from synthetic history.
 
-    Used when MemoryStore has no cycles but finished run JSON files exist.
+    Used when MemoryStore has no cycles but finished runs do.
     Focuses on interventions, mechanisms, cures, and treatment style items.
     """
     if not history:
@@ -2832,7 +2832,8 @@ def main() -> None:
                     snapshot_cycles: List[int] = []
                     snapshot_rye: List[Any] = []
                     for e in snapshot_points:
-                        snapshot_cycles.append(int(e.get("cycle", 0) or 0))
+                        c_num = int(e.get("cycle", 0) or 0)
+                        snapshot_cycles.append(c_num)
                         v = e.get("RYE")
                         if not isinstance(v, (int, float)):
                             v = e.get("rye")
@@ -3412,10 +3413,12 @@ def main() -> None:
                         format_func=lambda i: labels[i],
                     )
                 with col_sel2:
+                    # Safe default even when there is only 1 snapshot
+                    idx2_default = len(snapshots) - 1
                     idx2 = st.selectbox(
                         "Select second snapshot to compare",
                         options=list(range(len(snapshots))),
-                        index=min(len(snapshots) - 1, max(0, len(snapshots) - 1)),
+                        index=idx2_default,
                         format_func=lambda i: labels[i],
                     )
 
@@ -3761,7 +3764,10 @@ def main() -> None:
                 dot = build_insight_graph(
                     history=history, discoveries=discoveries_for_graph
                 )
-                st.graphviz_chart(dot)
+                try:
+                    st.graphviz_chart(dot)
+                except Exception as e:
+                    st.info(f"Graphviz could not render this graph: {e}")
 
     # ------------------------------
     # Run diagnostics (state from MemoryStore)
