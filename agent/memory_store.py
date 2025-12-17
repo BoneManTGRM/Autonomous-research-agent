@@ -3465,9 +3465,16 @@ class MemoryStore:
         Each row bundles run_id, goals, counts, basic RYE and timeline
         so that the UI can build a cycles/citations/discoveries table
         without extra joins.
+
+        Uses run_manifests when available, and falls back to scanning
+        cycles for runs that do not yet have a manifest, so older or
+        legacy runs still appear in the table.
         """
-        manifests = self.list_run_manifests(limit=limit)
         rows: List[Dict[str, Any]] = []
+
+        # First: rows backed by explicit manifests (preferred)
+        manifests = self.list_run_manifests(limit=limit)
+        seen_run_ids = set()
 
         for m in manifests:
             if not isinstance(m, dict):
@@ -3476,12 +3483,15 @@ class MemoryStore:
             if not isinstance(run_id, str) or not run_id:
                 continue
 
+            seen_run_ids.add(run_id)
             summary = self.get_run_summary(run_id)
             counts = summary.get("counts", {}) or {}
             timeline = summary.get("timeline", {}) or {}
             rye_basic = summary.get("rye_basic", {}) or {}
 
             goals = summary.get("goals", []) or []
+            if not isinstance(goals, list):
+                goals = []
             goals_str = ", ".join([g for g in goals if isinstance(g, str)])
 
             row = {
@@ -3493,14 +3503,77 @@ class MemoryStore:
                 "citations": int(counts.get("citations", 0) or 0),
                 "discoveries": int(counts.get("discoveries", 0) or 0),
                 "benchmarks": int(counts.get("benchmarks", 0) or 0),
-                "started_at": timeline.get("started_at"),
-                "finished_at": timeline.get("finished_at"),
+                "started_at": timeline.get("started_at") or m.get("started_at"),
+                "finished_at": timeline.get("finished_at") or m.get("finished_at"),
                 "avg_rye": rye_basic.get("avg"),
                 "best_rye": rye_basic.get("max"),
+                # Extra fields many UIs like to show, but safe if unused
+                "status": m.get("status"),
+                "mode": m.get("mode"),
+                "domain": m.get("domain"),
+                "runtime_profile": m.get("runtime_profile"),
+                "created_at": m.get("created_at"),
+                "logged_at": m.get("logged_at"),
             }
             rows.append(row)
 
-        return rows
+        # Second: synthesize rows for any run_id present in cycles
+        # that does not yet have a manifest entry.
+        history = self._data.get("cycles", [])
+        if isinstance(history, list):
+            runs_without_manifest: Dict[str, List[Dict[str, Any]]] = {}
+            for c in history:
+                if not isinstance(c, dict):
+                    continue
+                rid = c.get("run_id")
+                if not isinstance(rid, str) or not rid:
+                    continue
+                if rid in seen_run_ids:
+                    continue
+                runs_without_manifest.setdefault(rid, []).append(c)
+
+            for run_id, _cycles in runs_without_manifest.items():
+                summary = self.get_run_summary(run_id)
+                counts = summary.get("counts", {}) or {}
+                timeline = summary.get("timeline", {}) or {}
+                rye_basic = summary.get("rye_basic", {}) or {}
+
+                goals = summary.get("goals", []) or []
+                if not isinstance(goals, list):
+                    goals = []
+                goals_str = ", ".join([g for g in goals if isinstance(g, str)])
+
+                row = {
+                    "run_id": run_id,
+                    "label": run_id,
+                    "goals": goals,
+                    "goals_str": goals_str,
+                    "cycles": int(counts.get("cycles", 0) or 0),
+                    "citations": int(counts.get("citations", 0) or 0),
+                    "discoveries": int(counts.get("discoveries", 0) or 0),
+                    "benchmarks": int(counts.get("benchmarks", 0) or 0),
+                    "started_at": timeline.get("started_at"),
+                    "finished_at": timeline.get("finished_at"),
+                    "avg_rye": rye_basic.get("avg"),
+                    "best_rye": rye_basic.get("max"),
+                    "status": None,
+                    "mode": None,
+                    "domain": None,
+                    "runtime_profile": None,
+                    "created_at": None,
+                    "logged_at": None,
+                }
+                rows.append(row)
+
+        # Sort rows by logged_at then started_at, newest first
+        def _row_key(r: Dict[str, Any]) -> str:
+            ts = r.get("logged_at") or r.get("started_at") or ""
+            return str(ts)
+
+        rows_sorted = sorted(rows, key=_row_key, reverse=True)
+        if limit and limit > 0:
+            rows_sorted = rows_sorted[:limit]
+        return rows_sorted
 
     def get_run_overview_rows(self, limit: int = 200) -> List[Dict[str, Any]]:
         """Compatibility alias for get_run_table_rows used by some UIs."""
