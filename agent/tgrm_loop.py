@@ -2192,35 +2192,41 @@ class TGRMLoop:
                 purpose="initial",
             )
             search_query = _clamp_query(goal)
-            web_results = self.web_tool.search(search_query, **web_params)
-            stats["web_calls"] += 1
-            if tool_usage is not None:
-                tool_usage.web_calls += 1
+            try:
+                web_results = self.web_tool.search(search_query, **web_params)
+            except Exception:
+                web_results = []
+                note_lines.append("Web search failed for initial research; continuing without web results.")
+                note_lines.append("")
+            else:
+                stats["web_calls"] += 1
+                if tool_usage is not None:
+                    tool_usage.web_calls += 1
 
-            web_summary = self.web_tool.summarize_results(web_results)
-            web_cites_raw = self.web_tool.to_citations(web_results)
-            web_cites = self._tag_citations(
-                web_cites_raw,
-                goal=goal,
-                query=search_query,
-                channel="web",
-                phase="initial",
-            )
-            citations.extend(web_cites)
+                web_summary = self.web_tool.summarize_results(web_results)
+                web_cites_raw = self.web_tool.to_citations(web_results)
+                web_cites = self._tag_citations(
+                    web_cites_raw,
+                    goal=goal,
+                    query=search_query,
+                    channel="web",
+                    phase="initial",
+                )
+                citations.extend(web_cites)
 
-            if tool_usage is not None:
-                tool_usage.approx_tokens += self._estimate_tokens(web_summary)
+                if tool_usage is not None:
+                    tool_usage.approx_tokens += self._estimate_tokens(web_summary)
 
-            note_lines.append("Web summary (Tavily or equivalent):")
-            note_lines.append(web_summary)
-            note_lines.append("")
-            note_lines.append("Web sources:")
-            for c in web_cites:
-                url = c.get("url", "")
-                note_lines.append(f"- {c.get('title', '')} ({url})")
-                if not first_url and url:
-                    first_url = url
-            note_lines.append("")
+                note_lines.append("Web summary (Tavily or equivalent):")
+                note_lines.append(web_summary)
+                note_lines.append("")
+                note_lines.append("Web sources:")
+                for c in web_cites:
+                    url = c.get("url", "")
+                    note_lines.append(f"- {c.get('title', '')} ({url})")
+                    if not first_url and url:
+                        first_url = url
+                note_lines.append("")
 
         # Optional headless browser deep dive on the top URL (only if browser exists)
         if first_url and hasattr(self.tools, "browser"):
@@ -2249,47 +2255,59 @@ class TGRMLoop:
 
         # PubMed search
         if source_controls.get("pubmed", False):
-            pubmed_results = self.pubmed_tool.search(goal, max_results=5)
-            stats["pubmed_calls"] += 1
-            pubmed_cites = self._tag_citations(
-                pubmed_results,
-                goal=goal,
-                query=goal,
-                channel="pubmed",
-                phase="initial",
-            )
-            citations.extend(pubmed_cites)
+            try:
+                pubmed_results = self.pubmed_tool.search(goal, max_results=5)
+            except Exception:
+                pubmed_results = []
+                note_lines.append("PubMed search failed for initial research; continuing without PubMed results.")
+                note_lines.append("")
+            else:
+                stats["pubmed_calls"] += 1
+                pubmed_cites = self._tag_citations(
+                    pubmed_results,
+                    goal=goal,
+                    query=goal,
+                    channel="pubmed",
+                    phase="initial",
+                )
+                citations.extend(pubmed_cites)
 
-            if tool_usage is not None:
-                titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
-                tool_usage.approx_tokens += self._estimate_tokens(titles)
+                if tool_usage is not None:
+                    titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
+                    tool_usage.approx_tokens += self._estimate_tokens(titles)
 
-            note_lines.append("PubMed sources:")
-            for r in pubmed_cites:
-                note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
-            note_lines.append("")
+                note_lines.append("PubMed sources:")
+                for r in pubmed_cites:
+                    note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+                note_lines.append("")
 
         # Semantic Scholar search
         if source_controls.get("semantic", False):
-            sem_results = self.semantic_tool.search(goal, max_results=5)
-            stats["semantic_calls"] += 1
-            sem_cites = self._tag_citations(
-                sem_results,
-                goal=goal,
-                query=goal,
-                channel="semantic",
-                phase="initial",
-            )
-            citations.extend(sem_cites)
+            try:
+                sem_results = self.semantic_tool.search(goal, max_results=5)
+            except Exception:
+                sem_results = []
+                note_lines.append("Semantic Scholar search failed for initial research; continuing without Semantic Scholar results.")
+                note_lines.append("")
+            else:
+                stats["semantic_calls"] += 1
+                sem_cites = self._tag_citations(
+                    sem_results,
+                    goal=goal,
+                    query=goal,
+                    channel="semantic",
+                    phase="initial",
+                )
+                citations.extend(sem_cites)
 
-            if tool_usage is not None:
-                titles = " ".join(r.get("title", "") or "" for r in sem_results)
-                tool_usage.approx_tokens += self._estimate_tokens(titles)
+                if tool_usage is not None:
+                    titles = " ".join(r.get("title", "") or "" for r in sem_results)
+                    tool_usage.approx_tokens += self._estimate_tokens(titles)
 
-            note_lines.append("Semantic Scholar sources:")
-            for r in sem_cites:
-                note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
-            note_lines.append("")
+                note_lines.append("Semantic Scholar sources:")
+                for r in sem_cites:
+                    note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+                note_lines.append("")
 
         # Optional PDF ingestion if provided
         if source_controls.get("pdf", False) and pdf_bytes:
@@ -2411,77 +2429,95 @@ class TGRMLoop:
                     purpose="targeted",
                 )
                 search_query = _clamp_query(q)
-                web_results = self.web_tool.search(search_query, **web_params)
-                stats["web_calls"] += 1
-                if tool_usage is not None:
-                    tool_usage.web_calls += 1
+                try:
+                    web_results = self.web_tool.search(search_query, **web_params)
+                except Exception:
+                    web_results = []
+                    note_lines.append("Web search failed for this question; continuing without web results for this item.")
+                    note_lines.append("")
+                else:
+                    stats["web_calls"] += 1
+                    if tool_usage is not None:
+                        tool_usage.web_calls += 1
 
-                web_summary = self.web_tool.summarize_results(web_results)
-                web_cites_raw = self.web_tool.to_citations(web_results)
-                web_cites = self._tag_citations(
-                    web_cites_raw,
-                    goal=goal,
-                    query=search_query,
-                    channel="web",
-                    phase="targeted",
-                )
-                citations.extend(web_cites)
+                    web_summary = self.web_tool.summarize_results(web_results)
+                    web_cites_raw = self.web_tool.to_citations(web_results)
+                    web_cites = self._tag_citations(
+                        web_cites_raw,
+                        goal=goal,
+                        query=search_query,
+                        channel="web",
+                        phase="targeted",
+                    )
+                    citations.extend(web_cites)
 
-                if tool_usage is not None:
-                    tool_usage.approx_tokens += self._estimate_tokens(web_summary)
+                    if tool_usage is not None:
+                        tool_usage.approx_tokens += self._estimate_tokens(web_summary)
 
-                note_lines.append("Web summary (Tavily or equivalent):")
-                note_lines.append(web_summary)
-                note_lines.append("Web sources:")
-                for c in web_cites:
-                    note_lines.append(f"- {c.get('title', '')} ({c.get('url', '')})")
-                note_lines.append("")
+                    note_lines.append("Web summary (Tavily or equivalent):")
+                    note_lines.append(web_summary)
+                    note_lines.append("Web sources:")
+                    for c in web_cites:
+                        note_lines.append(f"- {c.get('title', '')} ({c.get('url', '')})")
+                    note_lines.append("")
 
             if source_controls.get("pubmed", False):
-                pubmed_results = self.pubmed_tool.search(q, max_results=5)
-                stats["pubmed_calls"] += 1
-                pubmed_cites = self._tag_citations(
-                    pubmed_results,
-                    goal=goal,
-                    query=q,
-                    channel="pubmed",
-                    phase="targeted",
-                )
-                citations.extend(pubmed_cites)
-
-                if tool_usage is not None:
-                    titles = " ".join(
-                        r.get("title", "") or "" for r in pubmed_results
+                try:
+                    pubmed_results = self.pubmed_tool.search(q, max_results=5)
+                except Exception:
+                    pubmed_results = []
+                    note_lines.append("PubMed search failed for this question; continuing without PubMed results for this item.")
+                    note_lines.append("")
+                else:
+                    stats["pubmed_calls"] += 1
+                    pubmed_cites = self._tag_citations(
+                        pubmed_results,
+                        goal=goal,
+                        query=q,
+                        channel="pubmed",
+                        phase="targeted",
                     )
-                    tool_usage.approx_tokens += self._estimate_tokens(titles)
+                    citations.extend(pubmed_cites)
 
-                note_lines.append("PubMed sources:")
-                for r in pubmed_cites:
-                    note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
-                note_lines.append("")
+                    if tool_usage is not None:
+                        titles = " ".join(
+                            r.get("title", "") or "" for r in pubmed_results
+                        )
+                        tool_usage.approx_tokens += self._estimate_tokens(titles)
+
+                    note_lines.append("PubMed sources:")
+                    for r in pubmed_cites:
+                        note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+                    note_lines.append("")
 
             if source_controls.get("semantic", False):
-                sem_results = self.semantic_tool.search(q, max_results=5)
-                stats["semantic_calls"] += 1
-                sem_cites = self._tag_citations(
-                    sem_results,
-                    goal=goal,
-                    query=q,
-                    channel="semantic",
-                    phase="targeted",
-                )
-                citations.extend(sem_cites)
-
-                if tool_usage is not None:
-                    titles = " ".join(
-                        r.get("title", "") or "" for r in sem_results
+                try:
+                    sem_results = self.semantic_tool.search(q, max_results=5)
+                except Exception:
+                    sem_results = []
+                    note_lines.append("Semantic Scholar search failed for this question; continuing without Semantic Scholar results for this item.")
+                    note_lines.append("")
+                else:
+                    stats["semantic_calls"] += 1
+                    sem_cites = self._tag_citations(
+                        sem_results,
+                        goal=goal,
+                        query=q,
+                        channel="semantic",
+                        phase="targeted",
                     )
-                    tool_usage.approx_tokens += self._estimate_tokens(titles)
+                    citations.extend(sem_cites)
 
-                note_lines.append("Semantic Scholar sources:")
-                for r in sem_cites:
-                    note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
-                note_lines.append("")
+                    if tool_usage is not None:
+                        titles = " ".join(
+                            r.get("title", "") or "" for r in sem_results
+                        )
+                        tool_usage.approx_tokens += self._estimate_tokens(titles)
+
+                    note_lines.append("Semantic Scholar sources:")
+                    for r in sem_cites:
+                        note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+                    note_lines.append("")
 
         note_text = "\n".join(note_lines)
         return note_text, citations, stats
@@ -2527,73 +2563,91 @@ class TGRMLoop:
                 purpose="strengthen",
             )
             search_query = _clamp_query(query)
-            web_results = self.web_tool.search(search_query, **web_params)
-            stats["web_calls"] += 1
-            if tool_usage is not None:
-                tool_usage.web_calls += 1
+            try:
+                web_results = self.web_tool.search(search_query, **web_params)
+            except Exception:
+                web_results = []
+                note_lines.append("Web search failed while strengthening citations; continuing without web results.")
+                note_lines.append("")
+            else:
+                stats["web_calls"] += 1
+                if tool_usage is not None:
+                    tool_usage.web_calls += 1
 
-            web_summary = self.web_tool.summarize_results(web_results)
-            web_cites_raw = self.web_tool.to_citations(web_results)
-            web_cites = self._tag_citations(
-                web_cites_raw,
-                goal=goal,
-                query=search_query,
-                channel="web",
-                phase="strengthen",
-            )
-            citations.extend(web_cites)
+                web_summary = self.web_tool.summarize_results(web_results)
+                web_cites_raw = self.web_tool.to_citations(web_results)
+                web_cites = self._tag_citations(
+                    web_cites_raw,
+                    goal=goal,
+                    query=search_query,
+                    channel="web",
+                    phase="strengthen",
+                )
+                citations.extend(web_cites)
 
-            if tool_usage is not None:
-                tool_usage.approx_tokens += self._estimate_tokens(web_summary)
+                if tool_usage is not None:
+                    tool_usage.approx_tokens += self._estimate_tokens(web_summary)
 
-            note_lines.append("Web summary (stronger evidence focus):")
-            note_lines.append(web_summary)
-            note_lines.append("Web sources:")
-            for c in web_cites:
-                note_lines.append(f"- {c.get('title', '')} ({c.get('url', '')})")
-            note_lines.append("")
+                note_lines.append("Web summary (stronger evidence focus):")
+                note_lines.append(web_summary)
+                note_lines.append("Web sources:")
+                for c in web_cites:
+                    note_lines.append(f"- {c.get('title', '')} ({c.get('url', '')})")
+                note_lines.append("")
 
         if source_controls.get("pubmed", False):
-            pubmed_results = self.pubmed_tool.search(query, max_results=10)
-            stats["pubmed_calls"] += 1
-            pubmed_cites = self._tag_citations(
-                pubmed_results,
-                goal=goal,
-                query=query,
-                channel="pubmed",
-                phase="strengthen",
-            )
-            citations.extend(pubmed_cites)
+            try:
+                pubmed_results = self.pubmed_tool.search(query, max_results=10)
+            except Exception:
+                pubmed_results = []
+                note_lines.append("PubMed search failed while strengthening citations; continuing without PubMed results.")
+                note_lines.append("")
+            else:
+                stats["pubmed_calls"] += 1
+                pubmed_cites = self._tag_citations(
+                    pubmed_results,
+                    goal=goal,
+                    query=query,
+                    channel="pubmed",
+                    phase="strengthen",
+                )
+                citations.extend(pubmed_cites)
 
-            if tool_usage is not None:
-                titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
-                tool_usage.approx_tokens += self._estimate_tokens(titles)
+                if tool_usage is not None:
+                    titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
+                    tool_usage.approx_tokens += self._estimate_tokens(titles)
 
-            note_lines.append("PubMed sources (stronger evidence):")
-            for r in pubmed_cites:
-                note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
-            note_lines.append("")
+                note_lines.append("PubMed sources (stronger evidence):")
+                for r in pubmed_cites:
+                    note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+                note_lines.append("")
 
         if source_controls.get("semantic", False):
-            sem_results = self.semantic_tool.search(query, max_results=10)
-            stats["semantic_calls"] += 1
-            sem_cites = self._tag_citations(
-                sem_results,
-                goal=goal,
-                query=query,
-                channel="semantic",
-                phase="strengthen",
-            )
-            citations.extend(sem_cites)
+            try:
+                sem_results = self.semantic_tool.search(query, max_results=10)
+            except Exception:
+                sem_results = []
+                note_lines.append("Semantic Scholar search failed while strengthening citations; continuing without Semantic Scholar results.")
+                note_lines.append("")
+            else:
+                stats["semantic_calls"] += 1
+                sem_cites = self._tag_citations(
+                    sem_results,
+                    goal=goal,
+                    query=query,
+                    channel="semantic",
+                    phase="strengthen",
+                )
+                citations.extend(sem_cites)
 
-            if tool_usage is not None:
-                titles = " ".join(r.get("title", "") or "" for r in sem_results)
-                tool_usage.approx_tokens += self._estimate_tokens(titles)
+                if tool_usage is not None:
+                    titles = " ".join(r.get("title", "") or "" for r in sem_results)
+                    tool_usage.approx_tokens += self._estimate_tokens(titles)
 
-            note_lines.append("Semantic Scholar sources (stronger evidence):")
-            for r in sem_cites:
-                note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
-            note_lines.append("")
+                note_lines.append("Semantic Scholar sources (stronger evidence):")
+                for r in sem_cites:
+                    note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+                note_lines.append("")
 
         note_text = "\n".join(note_lines)
         return note_text, citations, stats
@@ -2671,73 +2725,91 @@ class TGRMLoop:
                 purpose="gap_repair",
             )
             search_query = _clamp_query(query)
-            web_results = self.web_tool.search(search_query, **web_params)
-            stats["web_calls"] += 1
-            if tool_usage is not None:
-                tool_usage.web_calls += 1
+            try:
+                web_results = self.web_tool.search(search_query, **web_params)
+            except Exception:
+                web_results = []
+                note_lines.append("Web search failed during gap repair; continuing without web results.")
+                note_lines.append("")
+            else:
+                stats["web_calls"] += 1
+                if tool_usage is not None:
+                    tool_usage.web_calls += 1
 
-            web_summary = self.web_tool.summarize_results(web_results)
-            web_cites_raw = self.web_tool.to_citations(web_results)
-            web_cites = self._tag_citations(
-                web_cites_raw,
-                goal=goal,
-                query=search_query,
-                channel="web",
-                phase="gap_repair",
-            )
-            citations.extend(web_cites)
+                web_summary = self.web_tool.summarize_results(web_results)
+                web_cites_raw = self.web_tool.to_citations(web_results)
+                web_cites = self._tag_citations(
+                    web_cites_raw,
+                    goal=goal,
+                    query=search_query,
+                    channel="web",
+                    phase="gap_repair",
+                )
+                citations.extend(web_cites)
 
-            if tool_usage is not None:
-                tool_usage.approx_tokens += self._estimate_tokens(web_summary)
+                if tool_usage is not None:
+                    tool_usage.approx_tokens += self._estimate_tokens(web_summary)
 
-            note_lines.append("Web summary (gap repair):")
-            note_lines.append(web_summary)
-            note_lines.append("Web sources:")
-            for c in web_cites:
-                note_lines.append(f"- {c.get('title', '')} ({c.get('url', '')})")
-            note_lines.append("")
+                note_lines.append("Web summary (gap repair):")
+                note_lines.append(web_summary)
+                note_lines.append("Web sources:")
+                for c in web_cites:
+                    note_lines.append(f"- {c.get('title', '')} ({c.get('url', '')})")
+                note_lines.append("")
 
         if dom == "longevity" and source_controls.get("pubmed", False):
-            pubmed_results = self.pubmed_tool.search(query, max_results=10)
-            stats["pubmed_calls"] += 1
-            pubmed_cites = self._tag_citations(
-                pubmed_results,
-                goal=goal,
-                query=query,
-                channel="pubmed",
-                phase="gap_repair",
-            )
-            citations.extend(pubmed_cites)
+            try:
+                pubmed_results = self.pubmed_tool.search(query, max_results=10)
+            except Exception:
+                pubmed_results = []
+                note_lines.append("PubMed search failed during gap repair; continuing without PubMed results.")
+                note_lines.append("")
+            else:
+                stats["pubmed_calls"] += 1
+                pubmed_cites = self._tag_citations(
+                    pubmed_results,
+                    goal=goal,
+                    query=query,
+                    channel="pubmed",
+                    phase="gap_repair",
+                )
+                citations.extend(pubmed_cites)
 
-            if tool_usage is not None:
-                titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
-                tool_usage.approx_tokens += self._estimate_tokens(titles)
+                if tool_usage is not None:
+                    titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
+                    tool_usage.approx_tokens += self._estimate_tokens(titles)
 
-            note_lines.append("PubMed sources (gap repair):")
-            for r in pubmed_cites:
-                note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
-            note_lines.append("")
+                note_lines.append("PubMed sources (gap repair):")
+                for r in pubmed_cites:
+                    note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+                note_lines.append("")
 
         if source_controls.get("semantic", False):
-            sem_results = self.semantic_tool.search(query, max_results=10)
-            stats["semantic_calls"] += 1
-            sem_cites = self._tag_citations(
-                sem_results,
-                goal=goal,
-                query=query,
-                channel="semantic",
-                phase="gap_repair",
-            )
-            citations.extend(sem_cites)
+            try:
+                sem_results = self.semantic_tool.search(query, max_results=10)
+            except Exception:
+                sem_results = []
+                note_lines.append("Semantic Scholar search failed during gap repair; continuing without Semantic Scholar results.")
+                note_lines.append("")
+            else:
+                stats["semantic_calls"] += 1
+                sem_cites = self._tag_citations(
+                    sem_results,
+                    goal=goal,
+                    query=query,
+                    channel="semantic",
+                    phase="gap_repair",
+                )
+                citations.extend(sem_cites)
 
-            if tool_usage is not None:
-                titles = " ".join(r.get("title", "") or "" for r in sem_results)
-                tool_usage.approx_tokens += self._estimate_tokens(titles)
+                if tool_usage is not None:
+                    titles = " ".join(r.get("title", "") or "" for r in sem_results)
+                    tool_usage.approx_tokens += self._estimate_tokens(titles)
 
-            note_lines.append("Semantic Scholar sources (gap repair):")
-            for r in sem_cites:
-                note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
-            note_lines.append("")
+                note_lines.append("Semantic Scholar sources (gap repair):")
+                for r in sem_cites:
+                    note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
+                note_lines.append("")
 
         note_text = "\n".join(note_lines)
         return note_text, citations, stats
