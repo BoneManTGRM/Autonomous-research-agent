@@ -243,7 +243,7 @@ except ModuleNotFoundError as e:
 CONFIG_PATH_DEFAULT = str(REPO_ROOT / "config" / "settings.yaml")
 
 # Rough estimate for cycles per hour in continuous mode.
-# Used historically; now only advisory metadata handed to the worker.
+# Used historically, now only advisory metadata handed to the worker.
 CYCLES_PER_HOUR_ESTIMATE = 120
 
 # Swarm roles: base archetypes for mini agents
@@ -637,11 +637,11 @@ def _extract_cycles_from_run_result(
     """Normalize cycles from a finished run result into history style entries.
 
     This is used as a fallback when MemoryStore.get_cycle_history() is empty,
-    so the History / Citations panels can still populate directly from
+    so the History and Citations panels can still populate directly from
     finished run JSON files written by the engine worker.
 
     default_timestamp:
-        A best effort timestamp for the run (for example job.created_at).
+        A best effort timestamp for the run, for example job.created_at.
         Used when no per cycle or run level timestamp is present.
     """
     if not isinstance(run_result, dict):
@@ -694,7 +694,7 @@ def _extract_cycles_from_run_result(
         if c2.get("cycle") is None:
             c2["cycle"] = idx + 1
 
-        # Domain / role / goal fallbacks
+        # Domain, role, goal fallbacks
         if not c2.get("domain"):
             c2["domain"] = domain
         if not c2.get("role"):
@@ -726,9 +726,9 @@ def _extract_cycles_from_run_result(
 def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
     """Rebuild a synthetic history from finished run JSON files.
 
-    This is a fallback for History / Citations when MemoryStore has no
-    cycle history (for example when the queue mode worker only writes
-    per run result JSON and does not stream cycles into MemoryStore).
+    This is a fallback for History and Citations when MemoryStore has no
+    cycle history, for example when the queue mode worker only writes
+    per run result JSON and does not stream cycles into MemoryStore.
     """
     if list_run_jobs is not None:
         try:
@@ -812,12 +812,76 @@ def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]
     return history
 
 
+def extract_citations_from_history(
+    history: List[Dict[str, Any]],
+    max_items: int = 200,
+) -> List[Dict[str, Any]]:
+    """Flatten citations from a list of cycle history entries.
+
+    This is used when run level citations are missing and only per cycle
+    citations or sources are available. It returns a deduplicated list
+    of citation dictionaries in a simple format.
+    """
+    if not history:
+        return []
+
+    collected: List[Dict[str, Any]] = []
+    seen_keys: set[Tuple[Optional[str], Optional[str]]] = set()
+
+    for entry in history:
+        for key in ("citations", "sources", "source_list"):
+            items = entry.get(key)
+            if not isinstance(items, list):
+                continue
+            for item in items:
+                if isinstance(item, dict):
+                    title = item.get("title") or item.get("name") or ""
+                    url = item.get("url") or item.get("link") or ""
+                    provider = item.get("source") or item.get("provider") or ""
+                    key_tuple = (title.strip() or None, url.strip() or None)
+                    if key_tuple in seen_keys:
+                        continue
+                    seen_keys.add(key_tuple)
+                    collected.append(
+                        {
+                            "title": title,
+                            "url": url,
+                            "provider": provider,
+                            "source": provider,
+                            "snippet": item.get("snippet") or item.get("summary") or "",
+                        }
+                    )
+                else:
+                    # Wrap raw strings as loose citation entries
+                    text = str(item).strip()
+                    if not text:
+                        continue
+                    key_tuple = (text, None)
+                    if key_tuple in seen_keys:
+                        continue
+                    seen_keys.add(key_tuple)
+                    collected.append(
+                        {
+                            "title": text,
+                            "url": "",
+                            "provider": "",
+                            "source": "",
+                            "snippet": "",
+                        }
+                    )
+
+                if len(collected) >= max_items:
+                    return collected
+
+    return collected
+
+
 def render_result_details(result: Dict[str, Any]) -> None:
     """Safe read only result viewer for a finished job.
 
     Handles both flat and nested schemas such as:
     - result["summary"], result["cycles"], result["citations"]
-    - result["result"]["summary"], result["result"]["cycle_history"], etc.
+    - result["result"]["summary"], result["result"]["cycle_history"], and similar patterns.
     Also attempts to surface citations and discovery candidates even when
     they are only present inside per cycle entries.
     """
@@ -1223,7 +1287,7 @@ def compute_msil_profile(
         goal = str(history[-1].get("goal") or "unknown_goal")
 
     try:
-        # Preferred simple function style (matches msil.analyze_run signature)
+        # Preferred simple function style, matches msil.analyze_run signature
         analyze_run = getattr(_msil_module, "analyze_run", None)
         if callable(analyze_run):
             return analyze_run(history=history, goal=goal, config=None)
@@ -1239,7 +1303,7 @@ def compute_msil_profile(
         return None
 
     return None
-
+    
 
 # -------------------------------------------------------------------
 # Advanced log and snapshot helpers
@@ -1603,11 +1667,17 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
         "and discovery log entries. It is an autonomous research artifact, not medical advice.\n"
     )
 
-    # Top cycles by RYE
+    # Top cycles by RYE or delta_R (with lowercase fallbacks)
     scored_cycles: List[Tuple[float, Dict[str, Any]]] = []
     for e in history:
         rye_val = e.get("RYE")
+        if rye_val is None:
+            rye_val = e.get("rye")
+
         d_r = e.get("delta_R")
+        if d_r is None:
+            d_r = e.get("delta_r")
+
         if isinstance(rye_val, (int, float)):
             score = float(rye_val)
         elif isinstance(d_r, (int, float)):
@@ -1627,9 +1697,19 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
             cycle_idx = e.get("cycle")
             role = e.get("role", "agent")
             domain = e.get("domain", "general")
+
             rye_val = e.get("RYE")
+            if rye_val is None:
+                rye_val = e.get("rye")
+
             d_r = e.get("delta_R")
+            if d_r is None:
+                d_r = e.get("delta_r")
+
             energy_e = e.get("energy_E")
+            if energy_e is None:
+                energy_e = e.get("energy")
+
             ts = e.get("timestamp")
 
             header = f"- Cycle {cycle_idx} [{domain}/{role}]"
@@ -1806,7 +1886,7 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
         if isinstance(cites, list):
             for c in cites:
                 if not isinstance(c, dict):
-                    # treat plain strings as URLs or labels
+                    # Treat plain strings as URLs or labels
                     url = str(c)
                     top_level_citations.append(
                         {
@@ -2746,15 +2826,28 @@ def main() -> None:
             rows: List[Dict[str, Any]] = []
             for entry in history:
                 goal_text = entry.get("goal", "") or ""
+
+                delta_val = entry.get("delta_R")
+                if delta_val is None:
+                    delta_val = entry.get("delta_r")
+
+                energy_val = entry.get("energy_E")
+                if energy_val is None:
+                    energy_val = entry.get("energy")
+
+                rye_val = entry.get("RYE")
+                if rye_val is None:
+                    rye_val = entry.get("rye")
+
                 rows.append(
                     {
                         "cycle": entry.get("cycle"),
                         "role": entry.get("role", "agent"),
                         "domain": entry.get("domain", "general"),
                         "goal": goal_text[:60] + ("..." if len(goal_text) > 60 else ""),
-                        "delta_R": entry.get("delta_R"),
-                        "energy_E": entry.get("energy_E"),
-                        "RYE": entry.get("RYE"),
+                        "delta_R": delta_val,
+                        "energy_E": energy_val,
+                        "RYE": rye_val,
                         "timestamp": entry.get("timestamp"),
                     }
                 )
@@ -3371,8 +3464,8 @@ def main() -> None:
                             st.caption(note)
                     else:
                         st.info(note or "Discovery log contains non JSON serializable objects.")
-
-        # ----------------- Snapshots and equilibrium tab -----------------
+                        
+     # ----------------- Snapshots and equilibrium tab -----------------
         with tab_snapshots:
             st.markdown("### Snapshots and equilibrium")
 
@@ -3889,7 +3982,7 @@ def main() -> None:
         else:
             st.write("Worker state method is not available in this MemoryStore build.")
 
-       # ------------------------------
+    # ------------------------------
     # Report generation
     # ------------------------------
     st.markdown("---")
