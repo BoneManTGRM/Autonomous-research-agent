@@ -37,7 +37,7 @@ Runtime safety and forever mode:
 
 Queue mode using agent/run_jobs.py:
     - When WORKER_MODE is unset or set to "queue", the worker runs in
-      file-based queue mode by default (Render-friendly).
+      file-based queue mode by default (Render friendly).
     - You can also force queue mode with WORKER_QUEUE_MODE=1.
     - The worker polls the job queue via agent.run_jobs, executes jobs,
       and writes results via save_job_result / mark_job_error.
@@ -78,7 +78,7 @@ try:
 except Exception:  # pragma: no cover
     TOOL_REGISTRY = {}  # type: ignore[assignment]
 
-# File-based run queue integration
+# File based run queue integration
 try:
     from agent.run_jobs import (
         RunJob,
@@ -117,7 +117,7 @@ except Exception:
 
 
 # ---------------------------------------------------------------------------
-# Hard safety caps + forever mode
+# Hard safety caps and forever mode
 # ---------------------------------------------------------------------------
 
 
@@ -170,7 +170,7 @@ def _clamp_int(value: int, hard_max: int, label: str) -> int:
         sys.stdout.flush()
         return hard_max
     if value <= 0:
-        print(f"[Safety] {label} requested {value} is non-positive. Using 1.")
+        print(f"[Safety] {label} requested {value} is non positive. Using 1.")
         sys.stdout.flush()
         return 1
     return value
@@ -194,7 +194,7 @@ def _clamp_minutes(value: Optional[float], label: str) -> Optional[float]:
     # If the global hard max is 0, treat that as "no hard upper bound".
     if HARD_MAX_MINUTES == 0:
         if value <= 0:
-            print(f"[Safety] {label} minutes {value} is non-positive. Ignoring.")
+            print(f"[Safety] {label} minutes {value} is non positive. Ignoring.")
             sys.stdout.flush()
             return None
         return value
@@ -207,7 +207,7 @@ def _clamp_minutes(value: Optional[float], label: str) -> Optional[float]:
         sys.stdout.flush()
         return HARD_MAX_MINUTES
     if value <= 0:
-        print(f"[Safety] {label} minutes {value} is non-positive. Ignoring.")
+        print(f"[Safety] {label} minutes {value} is non positive. Ignoring.")
         sys.stdout.flush()
         return None
     return value
@@ -306,7 +306,7 @@ def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
         _log(f"[config] settings file not found at {path}, using empty config.")
         return {}
     try:
-        with path.open("r", encoding="utf-8") as f:
+        with path.open("r", encoding="utf 8") as f:
             data = yaml.safe_load(f) or {}
             if not isinstance(data, dict):
                 _log("[config] settings file did not contain a dict, using empty config.")
@@ -401,7 +401,7 @@ def _configure_tavily_from_env() -> None:
     If WORKER_TAVILY_KEY is set and TAVILY_API_KEY is not already set,
     propagate it so the engine can be used headless without the Streamlit UI.
 
-    This NEVER hard-wires a key in code; it only mirrors env -> env.
+    This never hard wires a key in code; it only mirrors env to env.
     """
     worker_key = os.getenv("WORKER_TAVILY_KEY")
     existing = os.getenv("TAVILY_API_KEY")
@@ -672,7 +672,7 @@ def _start_heartbeat_loop(
     run_id: str,
     label: str,
     interval_seconds: int = 15,
-) -> tuple[threading.Event, threading.Thread]:
+) -> Tuple[threading.Event, threading.Thread]:
     """
     Background heartbeat loop so long runs always tick the watchdog.
 
@@ -750,7 +750,7 @@ def _build_experiment_fingerprint(
         payload["env"] = env_sample
 
     try:
-        data = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf-8")
+        data = json.dumps(payload, sort_keys=True, ensure_ascii=True).encode("utf 8")
         fp = hashlib.sha256(data).hexdigest()
         _vlog(f"[fingerprint] computed fingerprint {fp} for mode={mode}")
         return fp
@@ -1057,9 +1057,9 @@ def _write_snapshot(
     Best effort snapshot writer.
 
     This is intentionally tolerant:
-      - If MemoryStore exposes a write_snapshot-style API, use it.
+      - If MemoryStore exposes a write_snapshot style API, use it.
       - Otherwise, it falls back to storing snapshots into a generic
-        `snapshots[run_id]` list on the underlying data structure.
+        snapshots[run_id] list on the underlying data structure.
 
     Snapshot behavior (enabled flag) is controlled by:
       - snapshot_cfg["enabled"] (bool)
@@ -1164,7 +1164,7 @@ def _run_post_run_intelligence(
         if result is not None:
             info[label] = result
             _log(
-                f"[post_run] hook {hook_name} returned non-empty result "
+                f"[post_run] hook {hook_name} returned non empty result "
                 f"for label={label}"
             )
 
@@ -1276,7 +1276,7 @@ def _attach_top_level_defaults(
 
 
 # ---------------------------------------------------------------------------
-# Direct single-job API for engine_worker_queue.py / tests
+# Direct single job API for engine_worker_queue.py and tests
 # ---------------------------------------------------------------------------
 
 
@@ -1284,14 +1284,14 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     """
     Execute a single engine job and return a result dict.
 
-    This is a pure "one-shot" API:
-      - It does NOT use the file-based queue helpers.
+    This is a pure one shot API:
+      - It does NOT use the file based queue helpers.
       - It does NOT write result JSON to disk.
-      - It returns a structured result that Streamlit / queue wrappers can save.
+      - It returns a structured result that Streamlit or queue wrappers can save.
 
     `job` may be:
       - A dict with keys: "run_id", "config", optional "meta"
-      - An object with .run_id, .config, optional .meta attributes (e.g. RunJob)
+      - An object with .run_id, .config, optional .meta attributes (for example RunJob)
 
     Forever control:
         - If config["forever"] is true, or WORKER_FOREVER=1 is set, the job
@@ -1351,7 +1351,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 roles_list = ["agent"]
 
     # ------------------------------------------------------------------
-    # Safe extraction of cycles / rounds (never int(None))
+    # Safe extraction of cycles and rounds (never int(None))
     # ------------------------------------------------------------------
     max_cycles_explicit = (
         ("max_cycles" in cfg and cfg.get("max_cycles") is not None)
@@ -1386,7 +1386,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
     macro_total = max_rounds if mode == "swarm" else max_cycles
 
-    # Forever flag: either per-job config or global env.
+    # Forever flag: either per job config or global env.
     forever_env = _env_bool("WORKER_FOREVER", default=False)
     forever_cfg = bool(cfg.get("forever", False))
     forever = forever_env or forever_cfg
@@ -1703,7 +1703,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         if overall_summary:
             result_obj["summary"] = overall_summary
 
-        # Attach top level defaults including citations / discoveries / sources / rye_metrics
+        # Attach top level defaults including citations, discoveries, sources, rye_metrics
         result_obj = _attach_top_level_defaults(result_obj, normalized_cycles, diag)
 
         final_macro_total = macro_total
@@ -1764,7 +1764,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             "snapshot": snapshot_cfg,
         }
 
-        # Best-effort snapshot of partial state if enabled
+        # Best effort snapshot of partial state if enabled
         if snapshot_enabled:
             try:
                 _write_snapshot(
@@ -1835,13 +1835,13 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Queue mode: process jobs from agent/run_jobs
+# Queue mode: process jobs from agent.run_jobs
 # ---------------------------------------------------------------------------
 
 
 def _cleanup_active_job_files(run_id: str) -> None:
     """
-    Best-effort cleanup for active job descriptors once a job is finished
+    Best effort cleanup for active job descriptors once a job is finished
     or errors so the UI and queue do not think the job is still active.
 
     Only touches files inside BASE_DIR / "active" and never deletes
@@ -1890,11 +1890,11 @@ def _write_job_progress(
     prompt_details: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
-    Best-effort progress writer for queue jobs.
+    Best effort progress writer for queue jobs.
 
     Writes runs/active/{run_id}_progress.json using run_jobs.progress_path
     so the Streamlit UI can show basic status, even if we do not have
-    per-cycle callbacks.
+    per cycle callbacks.
 
     Includes goal, domain, job_config, and prompt_details so logs and the UI
     can see the original prompt and config for the job.
@@ -1924,7 +1924,7 @@ def _write_job_progress(
             "prompt_details": prompt_details or {},
         }
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as f:
+        with path.open("w", encoding="utf 8") as f:
             json.dump(payload, f, indent=2)
 
         # Explicit console log for progress including cycle fraction if known
@@ -1997,7 +1997,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
         preset_cfg.get("default_runtime_profile"),
     )
 
-    # Snapshot configuration: preset + job overrides
+    # Snapshot configuration: preset plus job overrides
     snapshot_cfg: Dict[str, Any] = {}
     preset_snapshot = preset_cfg.get("snapshot")
     if isinstance(preset_snapshot, dict):
@@ -2022,7 +2022,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 roles_list = ["agent"]
 
     # ------------------------------------------------------------------
-    # Safe extraction of cycles / rounds for queue jobs
+    # Safe extraction of cycles and rounds for queue jobs
     # ------------------------------------------------------------------
     max_cycles_explicit = (
         ("max_cycles" in cfg and cfg.get("max_cycles") is not None)
@@ -2275,7 +2275,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 # Live progress from CoreAgent into progress file plus heartbeat plus worker_state
                 status_local = str(update.get("status", "active"))
 
-                # Accept multiple possible field names for current / total
+                # Accept multiple possible field names for current and total
                 current_local = (
                     update.get("current_cycle")
                     or update.get("current")
@@ -2649,7 +2649,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 out_dir = BASE_DIR / "finished"
                 out_dir.mkdir(parents=True, exist_ok=True)
                 rp = out_dir / f"{job.run_id}.json"
-                with rp.open("w", encoding="utf-8") as f:
+                with rp.open("w", encoding="utf 8") as f:
                     json.dump(result_obj, f, indent=2)
             _log(f"[queue_job] saved result for run_id={job.run_id}")
         except Exception as e:
@@ -2727,7 +2727,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
             "snapshot": snapshot_cfg,
         }
 
-        # Best-effort error snapshot if enabled
+        # Best effort error snapshot if enabled
         if snapshot_enabled:
             try:
                 _write_snapshot(
@@ -2750,7 +2750,7 @@ def _process_single_job(agent: CoreAgent, base_config: Dict[str, Any], job: RunJ
                 err_dir = BASE_DIR / "error"
                 err_dir.mkdir(parents=True, exist_ok=True)
                 ep = err_dir / f"{job.run_id}.json"
-                with ep.open("w", encoding="utf-8") as f:
+                with ep.open("w", encoding="utf 8") as f:
                     json.dump(error_payload, f, indent=2)
         except Exception:
             pass
@@ -2808,7 +2808,7 @@ def run_job_queue_worker() -> None:
         - Loops continuously so Render worker can stay alive.
 
     Queue mode is activated when:
-        - WORKER_MODE is unset or explicitly "queue" (default behavior in __main__), or
+        - WORKER_MODE is unset or explicitly "queue" (default behavior in main), or
         - WORKER_QUEUE_MODE=1 is set in the environment.
     """
     _log_startup_config()
@@ -2923,7 +2923,7 @@ def run_job_queue_worker() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Single and swarm engines (direct, non-queue)
+# Single and swarm engines (direct, non queue)
 # ---------------------------------------------------------------------------
 
 
@@ -3012,7 +3012,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         env_keys=env_keys_for_fingerprint,
     )
 
-    # Canonical prompt details for single-engine runs
+    # Canonical prompt details for single engine runs
     prompt_details: Dict[str, Any] = {
         "goal": goal,
         "domain": domain,
@@ -3330,7 +3330,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         env_keys=env_keys_for_fingerprint,
     )
 
-    # Canonical prompt details for swarm-engine runs
+    # Canonical prompt details for swarm engine runs
     prompt_details: Dict[str, Any] = {
         "goal": goal,
         "domain": domain,
@@ -3626,7 +3626,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Meta-controller engine (Option C) - still finite (macro budget)
+# Meta controller engine (Option C) finite macro budget
 # ---------------------------------------------------------------------------
 
 
@@ -3635,7 +3635,7 @@ def _compute_segment_stats(
     domain: Optional[str],
 ) -> Dict[str, Any]:
     """
-    Inspect a list of cycle or swarm summaries and compute stats for the meta-controller.
+    Inspect a list of cycle or swarm summaries and compute stats for the meta controller.
 
     Uses build_run_diagnostics so segment stats are consistent with the UI.
     Returns:
@@ -3717,7 +3717,7 @@ def _initial_meta_plan(
     The exact minutes per phase are distributed from total_budget_minutes.
     If no total budget is given, defaults to a 60 minute plan.
 
-    Note: this is finite-only; there is always a macro budget for meta.
+    Note: this is finite only; there is always a macro budget for meta.
     """
     if total_budget_minutes is None or total_budget_minutes <= 0:
         total_budget_minutes = 60.0
@@ -3847,7 +3847,7 @@ def _adjust_phase_from_stats(
 
 def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     """
-    Meta-controller engine (Option C).
+    Meta controller engine (Option C).
 
     Instead of one giant continuous call, this orchestrates multiple segments:
 
@@ -3860,12 +3860,12 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         - adjusts segment duration and stop_rye
         - can stop early if time is almost exhausted or RYE has clearly collapsed
 
-    Controlled by (finite-only):
+    Controlled by (finite only):
     - WORKER_MAX_MINUTES (overall macro budget; if not set, derived from presets,
                           and clamped by HARD_MAX_MINUTES unless disabled)
     - WORKER_META_MAX_SEGMENTS (max number of segments, default 6)
     - WORKER_RUNTIME_PROFILE (hint for phase profiles only)
-    - WORKER_MODE / WORKER_SWARM (preferred mode: single vs swarm)
+    - WORKER_MODE or WORKER_SWARM (preferred mode: single vs swarm)
     - WORKER_SOURCES etc as in single and swarm engines
 
     Meta remains finite by design; forever mode is not applied here.
@@ -3928,7 +3928,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         env_keys=env_keys_for_fingerprint,
     )
 
-    # Canonical prompt details for meta-engine runs
+    # Canonical prompt details for meta engine runs
     prompt_details: Dict[str, Any] = {
         "goal": goal,
         "domain": domain,
@@ -4142,6 +4142,8 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             )
 
             seg_stats = _compute_segment_stats(segment_summaries, domain=domain)
+            segments_run[-1]["stats"] = seg_stats
+
             seg_avg_rye = seg_stats["avg_rye"]
             if seg_avg_rye is not None:
                 if recent_avg_rye is None:
@@ -4162,77 +4164,86 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
             total_elapsed += segment_elapsed
 
-            print(f"[Meta] Segment {seg_index + 1} stats:")
-            print(f"        cycles/summaries: {seg_stats['count']}")
-            print(f"        avg RYE: {seg_stats['avg_rye']}")
-            print(f"        best RYE: {seg_stats['max_rye']}")
-            print(f"        stability: {seg_stats['stability']}")
-            print(f"        momentum: {seg_stats['momentum']}")
-            print(f"        smoothed recent RYE: {recent_avg_rye}")
             print(
-                "        total elapsed minutes: "
-                f"{total_elapsed:.2f} / {total_budget_minutes:.2f}"
+                f"[Meta] Segment {seg_index + 1} stats: "
+                f"count={seg_stats['count']}, "
+                f"avg_rye={seg_stats['avg_rye']}, "
+                f"stability={seg_stats['stability']}, "
+                f"momentum={seg_stats['momentum']}"
+            )
+            print(
+                f"[Meta] Recent avg RYE for planning: "
+                f"{recent_avg_rye if recent_avg_rye is not None else 'None'}"
+            )
+            print(
+                f"[Meta] Total elapsed (approx): "
+                f"{total_elapsed:.2f} / {total_budget_minutes:.2f} minutes"
             )
             sys.stdout.flush()
 
-            _log_milestone(
-                agent,
-                run_id=run_id,
-                goal=goal,
-                domain=domain,
-                label=f"meta_segment_{seg_index + 1}",
-                description=(
-                    f"Phase {phase_name} ({phase_mode}) finished with avg RYE "
-                    f"{seg_stats['avg_rye']} and stability {seg_stats['stability']}."
-                ),
-                level="info",
-                extra={
-                    "segment_index": seg_index + 1,
-                    "phase_mode": phase_mode,
-                    "runtime_profile": phase_profile,
-                    "minutes_requested": effective_minutes,
-                    "segment_stats": seg_stats,
-                },
-            )
+            try:
+                _log_milestone(
+                    agent,
+                    run_id=run_id,
+                    goal=goal,
+                    domain=domain,
+                    label=f"meta_segment_{seg_index + 1}",
+                    description=(
+                        f"Completed meta segment {seg_index + 1}: "
+                        f"phase={phase_name}, mode={phase_mode}, "
+                        f"effective_minutes={effective_minutes:.2f}"
+                    ),
+                    level="info",
+                    extra={
+                        "phase": phase_name,
+                        "mode": phase_mode,
+                        "runtime_profile": phase_profile,
+                        "segment_index": seg_index + 1,
+                        "segment_stats": seg_stats,
+                        "minutes_requested": effective_minutes,
+                        "minutes_elapsed": segment_elapsed,
+                    },
+                )
+            except Exception:
+                pass
 
             _heartbeat(agent, label="worker_meta_segment", run_id=run_id)
 
-            if (
-                recent_avg_rye is not None
-                and recent_avg_rye < 0.01
-                and total_elapsed > total_budget_minutes * 0.6
-            ):
-                print("[Meta] RYE collapsed and most of the budget is used. Stopping early.")
-                break
-
+        # Meta loop finished
         _heartbeat(agent, label="worker_meta_finished", run_id=run_id)
 
-        total_segments = len(segments_run)
-        total_summaries = sum(len(seg["summaries"]) for seg in segments_run)
-        print("")
-        print("=== Meta controller run finished ===")
-        print(f"Segments executed: {total_segments}")
-        print(f"Total summaries across segments: {total_summaries}")
-        print(f"Final smoothed recent RYE: {recent_avg_rye}")
-        print(
-            "Total elapsed minutes (approx): "
-            f"{total_elapsed:.2f} / {total_budget_minutes:.2f}"
-        )
-        sys.stdout.flush()
-
-        combined_history: List[Dict[str, Any]] = []
+        # Flatten summaries across segments
+        all_summaries: List[Dict[str, Any]] = []
         for seg in segments_run:
-            combined_history.extend(seg.get("summaries", []))
+            seg_summaries = seg.get("summaries") or []
+            if isinstance(seg_summaries, list):
+                all_summaries.extend(seg_summaries)
 
-        # Write aggregated cycle history and run_state snapshots for diagnostics panel
+        print("=== Meta controller run finished cleanly ===")
+        print(f"Total segments executed: {len(segments_run)}")
+        print(f"Total summaries across all segments: {len(all_summaries)}")
+
+        diag: Dict[str, Any] = {}
+        try:
+            diag = build_run_diagnostics(history=all_summaries, domain=domain, window=10)
+            print(f"RYE avg: {diag.get('rye_avg')}")
+            print(f"RYE median: {diag.get('rye_median')}")
+            print(f"RYE last: {diag.get('rye_last')}")
+            print(f"Stability index: {diag.get('stability_index')}")
+            print(f"Recovery momentum: {diag.get('recovery_momentum')}")
+        except Exception:
+            print("Diagnostics computation failed for meta run, see logs for details.")
+
+        normalized_cycles = _normalize_cycles_for_ui(all_summaries)
+
         _write_cycles_and_run_state(
             agent,
             run_id=run_id,
             mode="meta",
             goal=goal,
             domain=domain,
-            cycles=_normalize_cycles_for_ui(combined_history),
-            diagnostics=None,
+            cycles=normalized_cycles,
+            diagnostics=diag,
         )
 
         intelligence_info = _run_post_run_intelligence(
@@ -4241,26 +4252,31 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             goal=goal,
             domain=domain,
             run_id=run_id,
-            history=combined_history,
+            history=normalized_cycles,
         )
 
-        extra_segments = [
-            {
+        # Build manifest extra segment metadata without storing full summaries again
+        segments_manifest: List[Dict[str, Any]] = []
+        for seg in segments_run:
+            entry: Dict[str, Any] = {
                 "phase": seg.get("phase"),
                 "mode": seg.get("mode"),
                 "runtime_profile": seg.get("runtime_profile"),
                 "minutes_requested": seg.get("minutes_requested"),
-                "segment_items": len(seg.get("summaries", [])),
+                "stats": seg.get("stats"),
             }
-            for seg in segments_run
-        ]
+            segments_manifest.append(entry)
 
         extra_manifest: Dict[str, Any] = {
             "engine": "meta",
-            "segments": extra_segments,
+            "segments": segments_manifest,
+            "total_elapsed_minutes": total_elapsed,
+            "meta_max_segments": meta_max_segments_int,
             "experiment_fingerprint": experiment_fingerprint,
             "prompt_details": prompt_details,
         }
+        if diag:
+            extra_manifest["diagnostics"] = diag
         if intelligence_info:
             extra_manifest["intelligence"] = intelligence_info
 
@@ -4274,11 +4290,12 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 runtime_profile=runtime_profile_env,
                 stop_rye=stop_rye_env,
                 max_minutes=total_budget_minutes,
-                summaries=combined_history,
+                summaries=normalized_cycles,
                 extra=extra_manifest,
             )
         except Exception:
-            print("Manifest logging failed, see logs for details.")
+            print("Manifest logging failed for meta run, see logs for details.")
+        sys.stdout.flush()
 
         _update_worker_state(
             agent,
@@ -4292,20 +4309,18 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             max_minutes=total_budget_minutes,
             run_id=run_id,
             experiment_mode="meta_controller",
-            current=total_segments,
+            current=len(segments_run),
             total=meta_max_segments_int,
             extra={
                 "experiment_fingerprint": experiment_fingerprint,
-                "final_recent_rye": recent_avg_rye,
-                "total_segments": total_segments,
-                "total_summaries": total_summaries,
+                "final_diagnostics": diag,
                 "intelligence": intelligence_info if intelligence_info else None,
                 "prompt_details": prompt_details,
             },
         )
         _log(
-            f"[meta_engine] run_id={run_id} finished with segments={total_segments}, "
-            f"summaries={total_summaries}."
+            f"[meta_engine] run_id={run_id} finished with {len(segments_run)} segments "
+            f"and {len(normalized_cycles)} summaries, worker_state set to stopped."
         )
     finally:
         if hb_stop is not None:
@@ -4322,82 +4337,70 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_mode_from_env_and_args() -> str:
+    """
+    Decide which engine mode to run when invoked as a script.
+
+    Priority:
+        1) First CLI arg in {"single","swarm","meta","queue"}
+        2) WORKER_MODE env in same set
+        3) WORKER_QUEUE_MODE=1 -> "queue"
+        4) WORKER_META=1 -> "meta"
+        5) WORKER_SWARM=1 -> "swarm"
+        6) Default "queue"
+    """
+    if len(sys.argv) > 1:
+        arg_mode = sys.argv[1].strip().lower()
+        if arg_mode in {"single", "swarm", "meta", "queue"}:
+            return arg_mode
+
+    env_mode = os.getenv("WORKER_MODE")
+    if env_mode:
+        m = env_mode.strip().lower()
+        if m in {"single", "swarm", "meta", "queue"}:
+            return m
+
+    if _env_bool("WORKER_QUEUE_MODE", default=False):
+        return "queue"
+    if _env_bool("WORKER_META", default=False):
+        return "meta"
+    if _env_bool("WORKER_SWARM", default=False):
+        return "swarm"
+
+    return "queue"
+
+
 def main() -> None:
     """
-    Entry point for the background worker.
+    Script entry point.
 
-    Mode selection:
-
-    1) Queue worker (file-based jobs via agent/run_jobs):
-
-       If WORKER_MODE is unset or explicitly "queue", the worker runs the
-       file-based queue worker. This is the default behavior when you just
-       run python engine_worker.py on Render.
-
-       You can also force queue mode with WORKER_QUEUE_MODE=1.
-       If agent/run_jobs.py is missing or fails to import, queue mode logs
-       an error and exits; the queue worker cannot start.
-
-    2) Direct engines (no queue):
-
-       WORKER_QUEUE_MODE=0 and WORKER_MODE != "queue" -> direct engine behavior:
-           WORKER_META=1          -> run meta controller (Option C, finite macro budget)
-           WORKER_META=0 and WORKER_MODE=swarm or WORKER_SWARM=1 -> swarm engine
-           otherwise             -> single agent engine
-
-    Forever and safety:
-       Hard caps are always applied unless you explicitly relax them with
-       WORKER_HARD_MAX_* or WORKER_FOREVER where documented above.
+    Initializes CoreAgent and chooses one of:
+        - run_single_agent_engine
+        - run_swarm_engine
+        - run_meta_engine
+        - run_job_queue_worker
     """
-    _log_startup_config()
-    try:
-        mode_env_raw = os.getenv("WORKER_MODE", "queue")
-        mode_env = mode_env_raw.strip().lower()
-        queue_mode_flag = _env_bool("WORKER_QUEUE_MODE", default=(mode_env == "queue"))
-        meta_flag = _env_bool("WORKER_META", default=False)
-        swarm_flag_env = _env_bool("WORKER_SWARM", default=False)
+    mode = _resolve_mode_from_env_and_args()
+    _log(f"[main] resolved worker mode: {mode}")
 
-        _log(
-            f"[main] starting engine_worker with WORKER_MODE={mode_env!r}, "
-            f"WORKER_QUEUE_MODE={queue_mode_flag}, WORKER_META={meta_flag}, "
-            f"WORKER_SWARM={swarm_flag_env}"
-        )
+    # Queue mode owns its own agent and config, do not pre init here.
+    if mode == "queue":
+        run_job_queue_worker()
+        return
 
-        # Queue mode
-        if queue_mode_flag or mode_env == "queue":
-            _log("[main] entering queue worker mode.")
-            run_job_queue_worker()
-            return
+    _configure_tavily_from_env()
+    agent, config = init_agent_from_config()
 
-        # Direct engines
-        _configure_tavily_from_env()
-        agent, config = init_agent_from_config()
-
-        if meta_flag:
-            _log("[main] entering meta controller engine mode.")
-            run_meta_engine(agent, config)
-        else:
-            direct_swarm = (mode_env == "swarm") or swarm_flag_env
-            if direct_swarm:
-                _log("[main] entering direct swarm engine mode.")
-                run_swarm_engine(agent, config)
-            else:
-                _log("[main] entering direct single agent engine mode.")
-                run_single_agent_engine(agent, config)
-
-        _log("[main] engine_worker main completed cleanly.")
-
-    except KeyboardInterrupt:
-        _log("[main] KeyboardInterrupt received, shutting down engine worker.")
-    except Exception as e:
-        tb = traceback.format_exc()
-        try:
-            print(f"[main] Fatal error in engine worker: {e}")
-            print(tb)
-            sys.stdout.flush()
-        except Exception:
-            pass
-        _log(f"[main] Fatal error in engine worker: {e}")
+    if mode == "single":
+        run_single_agent_engine(agent, config)
+    elif mode == "swarm":
+        run_swarm_engine(agent, config)
+    elif mode == "meta":
+        run_meta_engine(agent, config)
+    else:
+        # Fallback to queue if an unknown mode sneaks through.
+        _log(f"[main] unknown mode {mode!r}, falling back to queue worker.")
+        run_job_queue_worker()
 
 
 if __name__ == "__main__":
