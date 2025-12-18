@@ -25,6 +25,18 @@ Features:
 - Optional PDF report export (if reportlab is installed)
 - Optional MSIL meta skill intelligence view when msil module is available
 
+Live console upgrades (this update):
+- Sticky heartbeat/status bar at the top
+- Autonomy level indicator
+- Agent presence chips (single / two-stage / swarm)
+- Narrative timeline feed (uses event log if present; otherwise synthesizes from history)
+- Discovery confidence cards (top discovery candidates)
+
+Run diagnostics upgrades (this update):
+- Unified loaders: read from MemoryStore when available, with file-based fallbacks
+- Progress normalization (supports both cycle progress and phase progress, if emitted by worker)
+- Optional auto-refresh so the UI can actually show 1/3 → 2/3 → 3/3 while the worker runs
+
 Reparodynamics:
     The UI is a front panel on a reparodynamic system:
     - It never runs TGRM cycles directly.
@@ -45,19 +57,27 @@ Note:
 from __future__ import annotations
 
 import base64
+import glob
+import html
 import json
 import os
 import re
 import sys
-import glob
+import time
 import uuid
-from pathlib import Path
-from typing import Any, Dict, List, Tuple, Optional, Set
 from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set, Tuple
 
+import pandas as pd
 import streamlit as st
 import yaml
-import pandas as pd
+
+# Optional auto-refresh component (preferred over sleep+rereun if installed)
+try:  # pragma: no cover
+    from streamlit_autorefresh import st_autorefresh  # type: ignore[import]
+except Exception:  # pragma: no cover
+    st_autorefresh = None  # type: ignore[assignment]
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -86,26 +106,26 @@ _queue_load_job_result = None  # type: ignore[assignment]
 try:
     # Package layout (recommended, what you have on Render)
     from agent.memory_store import MemoryStore
-    from agent.presets import PRESETS, get_preset, RUNTIME_PROFILES
+    from agent.presets import PRESETS, RUNTIME_PROFILES, get_preset
+    from agent.report_builder import build_agent_report
     from agent.report_generator import (
-        generate_report,
         generate_findings_report,
-        generate_report_pdf,
         generate_findings_report_pdf,
+        generate_report,
+        generate_report_pdf,
     )
     # Only import the rye_metrics symbols that are actually used here
     from agent.rye_metrics import (
-        build_run_diagnostics,
-        rye_volatility_signature,
-        detect_rye_equilibrium,
-        tgrm_harmonic_index,
-        estimate_breakthrough_probability,
-        breakthrough_likelihood_90d,
         autonomy_safety_envelope,
-        early_failure_warning_score,
+        breakthrough_likelihood_90d,
+        build_run_diagnostics,
         classify_run_tier,
+        detect_rye_equilibrium,
+        early_failure_warning_score,
+        estimate_breakthrough_probability,
+        rye_volatility_signature,
+        tgrm_harmonic_index,
     )
-    from agent.report_builder import build_agent_report
 
     # Optional discovery and verification helpers (imported lazily if present)
     try:  # type: ignore[import]
@@ -143,16 +163,16 @@ try:
     # Job queue abstraction: import paths from run_jobs so UI and worker share the exact same directories
     try:
         from agent.run_jobs import (
+            ACTIVE_DIR as RUNS_ACTIVE_DIR,
+            BASE_DIR as RUNS_BASE_DIR,
+            ERROR_DIR as RUNS_ERROR_DIR,
+            FINISHED_DIR as RUNS_FINISHED_DIR,
+            PENDING_DIR as RUNS_PENDING_DIR,
+            QUEUE_ROOT as RUNS_QUEUE_ROOT,
             create_job,
             list_jobs as list_run_jobs,
-            result_path,
             load_job_result as _queue_load_job_result,
-            BASE_DIR as RUNS_BASE_DIR,
-            QUEUE_ROOT as RUNS_QUEUE_ROOT,
-            PENDING_DIR as RUNS_PENDING_DIR,
-            ACTIVE_DIR as RUNS_ACTIVE_DIR,
-            FINISHED_DIR as RUNS_FINISHED_DIR,
-            ERROR_DIR as RUNS_ERROR_DIR,
+            result_path,
         )
     except Exception:
         create_job = None  # type: ignore[assignment]
@@ -183,25 +203,25 @@ except ModuleNotFoundError as e:
 
     # Flat layout fallback: all modules live next to this file
     from memory_store import MemoryStore
-    from presets import PRESETS, get_preset, RUNTIME_PROFILES  # type: ignore[no-redef]
+    from presets import PRESETS, RUNTIME_PROFILES, get_preset  # type: ignore[no-redef]
+    from report_builder import build_agent_report  # type: ignore[no-redef]
     from report_generator import (  # type: ignore[no-redef]
-        generate_report,
         generate_findings_report,
-        generate_report_pdf,
         generate_findings_report_pdf,
+        generate_report,
+        generate_report_pdf,
     )
     from rye_metrics import (  # type: ignore[no-redef]
-        build_run_diagnostics,
-        rye_volatility_signature,
-        detect_rye_equilibrium,
-        tgrm_harmonic_index,
-        estimate_breakthrough_probability,
-        breakthrough_likelihood_90d,
         autonomy_safety_envelope,
-        early_failure_warning_score,
+        breakthrough_likelihood_90d,
+        build_run_diagnostics,
         classify_run_tier,
+        detect_rye_equilibrium,
+        early_failure_warning_score,
+        estimate_breakthrough_probability,
+        rye_volatility_signature,
+        tgrm_harmonic_index,
     )
-    from report_builder import build_agent_report  # type: ignore[no-redef]
 
     try:  # type: ignore[import]
         import discovery_log as _discovery_module  # pragma: no cover
@@ -237,16 +257,16 @@ except ModuleNotFoundError as e:
     # Flat layout run_jobs fallback (also import paths)
     try:
         from run_jobs import (  # type: ignore[no-redef]
+            ACTIVE_DIR as RUNS_ACTIVE_DIR,
+            BASE_DIR as RUNS_BASE_DIR,
+            ERROR_DIR as RUNS_ERROR_DIR,
+            FINISHED_DIR as RUNS_FINISHED_DIR,
+            PENDING_DIR as RUNS_PENDING_DIR,
+            QUEUE_ROOT as RUNS_QUEUE_ROOT,
             create_job,
             list_jobs as list_run_jobs,
-            result_path,
             load_job_result as _queue_load_job_result,
-            BASE_DIR as RUNS_BASE_DIR,
-            QUEUE_ROOT as RUNS_QUEUE_ROOT,
-            PENDING_DIR as RUNS_PENDING_DIR,
-            ACTIVE_DIR as RUNS_ACTIVE_DIR,
-            FINISHED_DIR as RUNS_FINISHED_DIR,
-            ERROR_DIR as RUNS_ERROR_DIR,
+            result_path,
         )
     except Exception:
         create_job = None  # type: ignore[assignment]
@@ -259,7 +279,6 @@ except ModuleNotFoundError as e:
         RUNS_FINISHED_DIR = None
         RUNS_ERROR_DIR = None
         _queue_load_job_result = None  # type: ignore[assignment]
-
 
 # Use absolute path for default config relative to repo root
 CONFIG_PATH_DEFAULT = str(REPO_ROOT / "config" / "settings.yaml")
@@ -283,6 +302,10 @@ MAX_SWARM_AGENTS: int = 32
 
 # Limit points in charts so the frontend does not hit RangeError on very long runs.
 MAX_POINTS_FOR_CHARTS: int = 1000
+
+# Live console defaults
+LIVE_EVENTS_LIMIT: int = 30
+DISCOVERY_CARDS_LIMIT: int = 6
 
 
 # -------------------------------------------------------------------
@@ -320,6 +343,57 @@ def _maybe_float(v: Any) -> Optional[float]:
         except Exception:
             return None
     return None
+
+
+def _safe_int(v: Any, default: Optional[int] = None) -> Optional[int]:
+    """Best-effort convert to int."""
+    if v is None:
+        return default
+    try:
+        if isinstance(v, bool):
+            return int(v)
+        if isinstance(v, int):
+            return int(v)
+        if isinstance(v, float):
+            return int(v)
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return default
+            return int(float(s))
+        return int(v)
+    except Exception:
+        return default
+
+
+def _clamp_float(x: Optional[float], lo: float = 0.0, hi: float = 1.0) -> Optional[float]:
+    if x is None:
+        return None
+    try:
+        return max(lo, min(hi, float(x)))
+    except Exception:
+        return None
+
+
+def _humanize_seconds(seconds: Optional[float]) -> str:
+    if seconds is None:
+        return "n/a"
+    try:
+        s = float(seconds)
+    except Exception:
+        return "n/a"
+    if s < 0:
+        s = 0.0
+    if s < 60:
+        return f"{s:.0f}s"
+    m = s / 60.0
+    if m < 60:
+        return f"{m:.0f}m"
+    h = m / 60.0
+    if h < 24:
+        return f"{h:.1f}h"
+    d = h / 24.0
+    return f"{d:.1f}d"
 
 
 def _format_metric_value(v: Any, decimals: int = 3) -> str:
@@ -525,10 +599,7 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
     if cycle_index is None:
         cycle_index = 1
 
-    st.markdown(
-        f"### Cycle {cycle_index} "
-        f"(role: {role}, domain: {domain})"
-    )
+    st.markdown(f"### Cycle {cycle_index} (role: {role}, domain: {domain})")
 
     # Metrics (safe handling for None / strings)
     delta_val = cycle_summary.get("delta_R")
@@ -949,10 +1020,7 @@ def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]
     # Sort by timestamp if present then by cycle
     def _sort_key(e: Dict[str, Any]):
         ts = e.get("timestamp")
-        if isinstance(ts, str):
-            sort_ts = ts
-        else:
-            sort_ts = ""
+        sort_ts = ts if isinstance(ts, str) else ""
         return sort_ts, int(e.get("cycle") or 0)
 
     history.sort(key=_sort_key)
@@ -963,12 +1031,7 @@ def extract_unique_citations_from_history(
     history: List[Dict[str, Any]],
     max_items: int = 200,
 ) -> List[Dict[str, Any]]:
-    """Flatten citations from a list of cycle history entries and deduplicate them.
-
-    This is used when run-level citations are missing and only per-cycle citations
-    or sources are available. It returns a deduplicated list of citation dicts in
-    a simple format (no cycle metadata).
-    """
+    """Flatten citations from a list of cycle history entries and deduplicate them."""
     if not history:
         return []
 
@@ -999,7 +1062,6 @@ def extract_unique_citations_from_history(
                         }
                     )
                 else:
-                    # Wrap raw strings as loose citation entries
                     text = str(item).strip()
                     if not text:
                         continue
@@ -1024,57 +1086,29 @@ def extract_unique_citations_from_history(
 
 
 def render_result_details(result: Dict[str, Any]) -> None:
-    """Safe read only result viewer for a finished job.
-
-    Handles both flat and nested schemas such as:
-    - result["summary"], result["cycles"], result["citations"]
-    - result["result"]["summary"], result["result"]["cycle_history"], and similar patterns.
-    Also attempts to surface citations and discovery candidates even when
-    they are only present inside per cycle entries.
-    """
-    # Some workers nest the payload under "result"
+    """Safe read only result viewer for a finished job."""
     payload = result.get("result")
-    if isinstance(payload, dict):
-        base = payload
-    else:
-        base = result
+    base = payload if isinstance(payload, dict) else result
 
     st.markdown("### Run summary")
 
-    summary = (
-        base.get("summary")
-        or base.get("human_summary")
-        or base.get("run_summary")
-    )
+    summary = base.get("summary") or base.get("human_summary") or base.get("run_summary")
     if summary:
         st.write(summary)
     else:
         st.info("No summary was provided by the engine.")
 
-    # Discoveries or key findings at run level
-    key_findings = (
-        base.get("key_findings")
-        or base.get("discoveries")
-        or base.get("discovery_candidates")
-    )
+    key_findings = base.get("key_findings") or base.get("discoveries") or base.get("discovery_candidates")
     if isinstance(key_findings, list) and key_findings:
         st.markdown("#### Key findings and discovery candidates")
         for item in key_findings:
             if isinstance(item, dict):
-                txt = item.get("text") or item.get("summary") or item.get("title") or str(
-                    item
-                )
+                txt = item.get("text") or item.get("summary") or item.get("title") or str(item)
             else:
                 txt = str(item)
             st.markdown(f"- {txt}")
 
-    # RYE metrics at run level
-    rye_metrics = (
-        base.get("rye_metrics")
-        or base.get("rye")
-        or base.get("run_rye_metrics")
-        or base.get("metrics")
-    )
+    rye_metrics = base.get("rye_metrics") or base.get("rye") or base.get("run_rye_metrics") or base.get("metrics")
     if isinstance(rye_metrics, dict):
         st.markdown("#### RYE metrics")
         cols = st.columns(3)
@@ -1088,16 +1122,8 @@ def render_result_details(result: Dict[str, Any]) -> None:
         if isinstance(stability, (int, float)):
             cols[2].metric("Stability index", f"{stability:.3f}")
 
-    # Try to normalize cycle history from various possible keys
     cycles: Optional[List[Dict[str, Any]]] = None
-    for key in (
-        "cycles",
-        "cycle_history",
-        "history",
-        "tgrm_history",
-        "run_history",
-        "per_cycle",
-    ):
+    for key in ("cycles", "cycle_history", "history", "tgrm_history", "run_history", "per_cycle"):
         val = base.get(key)
         if isinstance(val, list) and val:
             cycles = [c for c in val if isinstance(c, dict)]
@@ -1113,11 +1139,7 @@ def render_result_details(result: Dict[str, Any]) -> None:
         rye_values: List[Any] = []
 
         for idx, c in enumerate(cycles):
-            c_num = c.get("cycle")
-            if c_num is None:
-                c_num = c.get("cycle_index")
-            if c_num is None:
-                c_num = idx + 1
+            c_num = c.get("cycle") or c.get("cycle_index") or (idx + 1)
             cycle_numbers.append(c_num)
 
             d_val = c.get("delta_r")
@@ -1148,21 +1170,12 @@ def render_result_details(result: Dict[str, Any]) -> None:
             st.line_chart(df)
             st.caption("Timeline of delta_R, energy, and RYE per cycle.")
 
-        # Detailed per cycle summaries
         with st.expander("Per cycle details"):
             for c in cycles:
                 render_cycle_summary(c)
 
-    # Sources and citations at run level or flattened from cycles
-    sources = (
-        base.get("sources")
-        or base.get("citations")
-        or base.get("source_list")
-    )
-
-    flattened_citations: List[Dict[str, Any]] = []
+    sources = base.get("sources") or base.get("citations") or base.get("source_list")
     if not sources and cycles:
-        # Flatten and deduplicate citations from cycles to avoid huge repeats
         flattened_citations = extract_unique_citations_from_history(cycles)
         if flattened_citations:
             sources = flattened_citations
@@ -1188,13 +1201,7 @@ def render_result_details(result: Dict[str, Any]) -> None:
                 line += f"  \n  {snippet}"
             st.markdown(f"- {line}")
 
-    # Optional debug or diagnostics view
-    debug = (
-        base.get("debug")
-        or base.get("diagnostics")
-        or result.get("debug")
-        or result.get("diagnostics")
-    )
+    debug = base.get("debug") or base.get("diagnostics") or result.get("debug") or result.get("diagnostics")
     if debug:
         with st.expander("Diagnostics and debug"):
             st.json(debug)
@@ -1212,7 +1219,6 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
     roles = sorted({str(e.get("role", "agent")) for e in history})
     domains = sorted({str(e.get("domain", "general")) for e in history})
 
-    # Parse timestamps if possible
     timestamps: List[datetime] = []
     for e in history:
         ts = e.get("timestamp")
@@ -1231,7 +1237,6 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
         minutes = (total_seconds % 3600) // 60
         runtime_text = f"Approx runtime: {hours} hours {minutes} minutes (from first to last cycle)."
 
-    # RYE stats (support both RYE and rye keys)
     rye_vals: List[float] = []
     for e in history:
         v = e.get("RYE")
@@ -1244,13 +1249,12 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
     if rye_vals:
         avg_rye = sum(rye_vals) / len(rye_vals)
         rye_text = (
-            f"RYE statistics:\n"
+            "RYE statistics:\n"
             f"- Min RYE: {min(rye_vals):.3f}\n"
             f"- Max RYE: {max(rye_vals):.3f}\n"
             f"- Average RYE: {avg_rye:.3f}"
         )
 
-    # Collect candidate findings from notes, repairs, and hypotheses
     findings: List[str] = []
     for e in history:
         for n in (e.get("notes_added") or []):
@@ -1258,14 +1262,10 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
         for r in e.get("repairs") or []:
             findings.append(str(r))
         for h in e.get("hypotheses") or []:
-            if isinstance(h, dict):
-                txt = h.get("text", "")
-            else:
-                txt = str(h)
+            txt = h.get("text", "") if isinstance(h, dict) else str(h)
             if txt:
                 findings.append(txt)
 
-    # Deduplicate while preserving order
     seen: Set[str] = set()
     unique_findings: List[str] = []
     for f in findings:
@@ -1305,11 +1305,7 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
 
 
 def build_findings_report_from_history(history: List[Dict[str, Any]]) -> str:
-    """Build a findings style report directly from synthetic history.
-
-    Used when MemoryStore has no cycles but finished runs do.
-    Focuses on interventions, mechanisms, cures, and treatment style items.
-    """
+    """Build a findings style report directly from synthetic history."""
     if not history:
         return "# Findings Report\n\nNo cycles found."
 
@@ -1317,7 +1313,6 @@ def build_findings_report_from_history(history: List[Dict[str, Any]]) -> str:
     domains = sorted({str(e.get("domain", "general")) for e in history})
     roles = sorted({str(e.get("role", "agent")) for e in history})
 
-    # Collect candidate items with loose filters that often mark cure or treatment like content.
     keywords = ["treatment", "therapy", "intervention", "protocol", "cure", "mechanism"]
     findings: List[Tuple[float, str, Dict[str, Any]]] = []
 
@@ -1327,7 +1322,6 @@ def build_findings_report_from_history(history: List[Dict[str, Any]]) -> str:
         for kw in keywords:
             if kw in text_low:
                 score += 1.0
-        # Prefer shorter, punchier lines
         if len(text) < 200:
             score += 0.3
         return score
@@ -1342,23 +1336,17 @@ def build_findings_report_from_history(history: List[Dict[str, Any]]) -> str:
         for field in ("notes_added", "repairs", "hypotheses"):
             items = e.get(field) or []
             for item in items:
-                if isinstance(item, dict):
-                    text = item.get("text") or item.get("summary") or ""
-                else:
-                    text = str(item)
+                text = (item.get("text") or item.get("summary") or "") if isinstance(item, dict) else str(item)
                 text = text.strip()
                 if not text:
                     continue
                 score = _score_text(text)
-                if score <= 0.0:
-                    # Keep some generic high level things but with low score
-                    if len(text) > 260:
-                        continue
+                if score <= 0.0 and len(text) > 260:
+                    continue
                 meta = dict(base_meta)
                 meta["source_field"] = field
                 findings.append((score, text, meta))
 
-    # Sort by score descending, keep top N
     findings.sort(key=lambda x: x[0], reverse=True)
     top_findings = findings[:80]
 
@@ -1386,10 +1374,7 @@ def build_findings_report_from_history(history: List[Dict[str, Any]]) -> str:
         if cycle is not None:
             header_parts.append(f"cycle {cycle}")
         header = " ".join(header_parts) + f" from {field}]"
-        # Clip text a bit
-        t = text
-        if len(t) > 480:
-            t = t[:480] + "..."
+        t = text[:480] + "..." if len(text) > 480 else text
         if ts:
             lines.append(f"- {header} ({ts})")
         else:
@@ -1399,7 +1384,6 @@ def build_findings_report_from_history(history: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-# Helper used by learning speed panels and Option C report
 def compute_run_hours(history: List[Dict[str, Any]]) -> Optional[float]:
     """Approximate total hours between first and last cycle timestamps."""
     timestamps: List[datetime] = []
@@ -1421,12 +1405,7 @@ def compute_msil_profile(
     history: List[Dict[str, Any]],
     goal: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Call optional MSIL layer if available to compute meta skill intelligence profile.
-
-    This is wired to the msil.analyze_run helper when present, and falls back
-    to constructing an internal MetaSkillIntelligenceLayer using the
-    msil._HistoryBackedMemoryStore wrapper if needed.
-    """
+    """Call optional MSIL layer if available to compute meta skill intelligence profile."""
     if not history or _msil_module is None:
         return None
 
@@ -1434,12 +1413,10 @@ def compute_msil_profile(
         goal = str(history[-1].get("goal") or "unknown_goal")
 
     try:
-        # Preferred simple function style, matches msil.analyze_run signature
         analyze_run = getattr(_msil_module, "analyze_run", None)
         if callable(analyze_run):
             return analyze_run(history=history, goal=goal, config=None)
 
-        # Class based API fallback using msil._HistoryBackedMemoryStore
         layer_cls = getattr(_msil_module, "MetaSkillIntelligenceLayer", None)
         store_cls = getattr(_msil_module, "_HistoryBackedMemoryStore", None)
         if layer_cls is not None and store_cls is not None:
@@ -1464,6 +1441,840 @@ def _load_json_file(path: Path) -> Optional[Any]:
             return json.load(f)
     except Exception:
         return None
+
+
+def _first_existing_json(paths: List[Path]) -> Tuple[Optional[Any], Optional[Path]]:
+    """Return (json_data, path) for the first readable JSON in paths."""
+    for p in paths:
+        data = _load_json_file(p)
+        if data is not None:
+            return data, p
+    return None, None
+
+
+def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]]:
+    """Common places the worker may write state/diagnostics files."""
+    runs_root = Path(get_runs_root())
+    queue_root = Path(get_queue_root())
+
+    logs = runs_root / "logs"
+    q_pending = queue_root / "pending"
+    q_active = queue_root / "active"
+    q_finished = queue_root / "finished"
+
+    # Generic filenames (shared)
+    worker_state = [
+        logs / "worker_state.json",
+        logs / "engine_worker_state.json",
+        logs / "worker_status.json",
+        queue_root / "worker_state.json",
+        q_active / "worker_state.json",
+    ]
+    run_state = [
+        logs / "run_state.json",
+        logs / "last_run_state.json",
+        queue_root / "run_state.json",
+        q_active / "run_state.json",
+    ]
+    heartbeat = [
+        logs / "watchdog_heartbeat.json",
+        logs / "heartbeat.json",
+        logs / "worker_heartbeat.json",
+        queue_root / "watchdog_heartbeat.json",
+        q_active / "watchdog_heartbeat.json",
+    ]
+    events = [
+        logs / "event_log.json",
+        logs / "events.json",
+        logs / "timeline.json",
+        queue_root / "event_log.json",
+    ]
+
+    # Per-run filenames (if emitted)
+    if run_id:
+        worker_state.extend(
+            [
+                logs / f"{run_id}_worker_state.json",
+                logs / f"{run_id}_state.json",
+                runs_root / run_id / "worker_state.json",
+                runs_root / run_id / "state.json",
+            ]
+        )
+        run_state.extend(
+            [
+                logs / f"{run_id}_run_state.json",
+                logs / f"{run_id}_runstate.json",
+                runs_root / run_id / "run_state.json",
+            ]
+        )
+        heartbeat.extend(
+            [
+                logs / f"{run_id}_heartbeat.json",
+                runs_root / run_id / "heartbeat.json",
+            ]
+        )
+        events.extend(
+            [
+                logs / f"{run_id}_events.json",
+                logs / f"{run_id}_event_log.json",
+                runs_root / run_id / "events.json",
+                runs_root / run_id / "event_log.json",
+            ]
+        )
+
+    progress = []
+    if run_id:
+        progress = [
+            logs / f"{run_id}_progress.json",
+            queue_root / f"{run_id}_progress.json",
+            q_active / f"{run_id}_progress.json",
+            q_finished / f"{run_id}_progress.json",
+            runs_root / run_id / "progress.json",
+        ]
+
+    return {
+        "worker_state": worker_state,
+        "run_state": run_state,
+        "heartbeat": heartbeat,
+        "events": events,
+        "progress": progress,
+        "queue_pending": [q_pending],
+        "queue_active": [q_active],
+        "queue_finished": [q_finished],
+        "runs_logs": [logs],
+    }
+
+
+def _normalize_watchdog_info(raw: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return None
+    last_beat = raw.get("last_beat") or raw.get("lastBeat") or raw.get("timestamp") or raw.get("ts")
+    count = raw.get("count")
+    if count is None:
+        count = raw.get("heartbeat_count") or raw.get("beats") or 0
+    seconds_since = raw.get("seconds_since_last") or raw.get("seconds_since") or raw.get("age_seconds")
+
+    # Try compute seconds since if we have an ISO timestamp
+    if seconds_since is None and isinstance(last_beat, str):
+        dt = _parse_timestamp_str(last_beat)
+        if dt is not None:
+            try:
+                seconds_since = (datetime.utcnow() - dt).total_seconds()
+            except Exception:
+                seconds_since = None
+
+    return {
+        "last_beat": last_beat,
+        "count": _safe_int(count, 0) or 0,
+        "seconds_since_last": seconds_since,
+    }
+
+
+def load_watchdog_info_unified(memory: MemoryStore, run_id: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Load heartbeat/watchdog info, preferring MemoryStore but with file fallbacks.
+
+    Returns (info_or_none, source_string).
+    """
+    # MemoryStore
+    func = getattr(memory, "get_watchdog_info", None)
+    if callable(func):
+        try:
+            raw = func()
+            info = _normalize_watchdog_info(raw)
+            if info:
+                return info, "MemoryStore.get_watchdog_info"
+        except Exception:
+            pass
+
+    # File fallback
+    paths = _candidate_state_paths(run_id=run_id)["heartbeat"]
+    raw, p = _first_existing_json(paths)
+    info = _normalize_watchdog_info(raw)
+    if info and p is not None:
+        return info, str(p)
+
+    return None, "not found"
+
+
+def _normalize_worker_state(raw: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw, dict):
+        return None
+    ws = dict(raw)
+
+    # Normalize common run id keys
+    run_id_val = ws.get("run_id") or ws.get("job_id") or ws.get("id")
+    if run_id_val is not None:
+        ws["run_id"] = str(run_id_val)
+
+    # Normalize progress keys (both phase and cycle)
+    # Phase progress (if worker emits it)
+    if "phase_total" not in ws and "total_phases" in ws:
+        ws["phase_total"] = ws.get("total_phases")
+    if "phase_index" not in ws and "phase" in ws:
+        ws["phase_index"] = ws.get("phase")
+
+    # Cycle progress
+    if "total" not in ws and "total_cycles" in ws:
+        ws["total"] = ws.get("total_cycles")
+    if "current" not in ws:
+        # several worker styles
+        ws["current"] = ws.get("current_cycle") or ws.get("cycle") or ws.get("cycle_index")
+
+    return ws
+
+
+def load_worker_state_unified(memory: MemoryStore, run_id_hint: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Load worker state, preferring MemoryStore but with file fallbacks."""
+    # MemoryStore methods (try multiple names)
+    for name in ("get_worker_state", "read_worker_state", "load_worker_state"):
+        func = getattr(memory, name, None)
+        if callable(func):
+            try:
+                raw = func()
+                ws = _normalize_worker_state(raw)
+                if ws:
+                    return ws, f"MemoryStore.{name}"
+            except Exception:
+                pass
+
+    paths = _candidate_state_paths(run_id=run_id_hint)["worker_state"]
+    raw, p = _first_existing_json(paths)
+    ws = _normalize_worker_state(raw)
+    if ws and p is not None:
+        return ws, str(p)
+
+    return None, "not found"
+
+
+def load_run_state_unified(memory: MemoryStore, run_id_hint: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Load last saved run state, preferring MemoryStore but with file fallbacks."""
+    func = getattr(memory, "load_run_state", None)
+    if callable(func):
+        try:
+            raw = func()
+            if isinstance(raw, dict) and raw:
+                return raw, "MemoryStore.load_run_state"
+        except Exception:
+            pass
+
+    paths = _candidate_state_paths(run_id=run_id_hint)["run_state"]
+    raw, p = _first_existing_json(paths)
+    if isinstance(raw, dict) and raw and p is not None:
+        return raw, str(p)
+
+    return None, "not found"
+
+
+def load_progress_unified(run_id: Optional[str]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Load progress JSON if the worker emits one (recommended for smooth 1/3→2/3→3/3 updates)."""
+    if not run_id:
+        return None, "no run_id"
+
+    paths = _candidate_state_paths(run_id=run_id)["progress"]
+    raw, p = _first_existing_json(paths)
+    if isinstance(raw, dict) and raw and p is not None:
+        return raw, str(p)
+
+    # Loose glob fallback (in case the worker uses custom naming)
+    try:
+        runs_root = Path(get_runs_root())
+        queue_root = Path(get_queue_root())
+        glob_candidates = []
+        glob_candidates.extend(runs_root.glob(f"**/{run_id}*progress*.json"))
+        glob_candidates.extend(queue_root.glob(f"**/{run_id}*progress*.json"))
+        for gp in glob_candidates[:10]:
+            data = _load_json_file(gp)
+            if isinstance(data, dict) and data:
+                return data, str(gp)
+    except Exception:
+        pass
+
+    return None, "not found"
+
+
+def _derive_active_run_id_from_queue() -> Optional[str]:
+    """Try to infer an active run id by looking at queue/active or runs/active."""
+    # Prefer canonical queue/active
+    candidates: List[Path] = []
+    try:
+        qr = Path(get_queue_root())
+        candidates.append(qr / "active")
+        candidates.append(qr)
+    except Exception:
+        pass
+    # Also check run_jobs active dir if present
+    if isinstance(RUNS_ACTIVE_DIR, Path):
+        candidates.append(RUNS_ACTIVE_DIR)
+
+    for base in candidates:
+        if not base.exists() or not base.is_dir():
+            continue
+        # Look for *_job.json
+        try:
+            job_files = sorted(base.glob("*_job.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        except Exception:
+            job_files = sorted(base.glob("*_job.json"))
+        for fp in job_files[:10]:
+            stem = fp.name.replace("_job.json", "")
+            if stem:
+                return stem
+    return None
+
+
+def load_job_payload_from_disk(run_id: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Load the job JSON (config/meta) for a given run_id.
+
+    This enables autonomy level + agent presence even when MemoryStore doesn't expose it.
+    """
+    if not run_id:
+        return None, "no run_id"
+
+    candidates: List[Path] = []
+
+    # canonical dirs
+    try:
+        qr = Path(get_queue_root())
+        candidates.extend(
+            [
+                qr / "pending" / f"{run_id}_job.json",
+                qr / "active" / f"{run_id}_job.json",
+                qr / "finished" / f"{run_id}_job.json",
+                qr / f"{run_id}_job.json",
+                qr / f"{run_id}.json",  # legacy
+            ]
+        )
+    except Exception:
+        pass
+
+    # run_jobs dirs if exposed
+    for d in (RUNS_PENDING_DIR, RUNS_ACTIVE_DIR, RUNS_FINISHED_DIR, RUNS_ERROR_DIR):
+        if isinstance(d, Path):
+            candidates.append(d / f"{run_id}_job.json")
+            candidates.append(d / f"{run_id}.json")
+
+    # Also check runs_root
+    try:
+        rr = Path(get_runs_root())
+        candidates.extend(
+            [
+                rr / "pending" / f"{run_id}_job.json",
+                rr / "active" / f"{run_id}_job.json",
+                rr / "finished" / f"{run_id}_job.json",
+            ]
+        )
+    except Exception:
+        pass
+
+    for fp in candidates:
+        data = _load_json_file(fp)
+        if isinstance(data, dict) and data:
+            return data, str(fp)
+
+    return None, "not found"
+
+
+def compute_progress_view(
+    worker_state: Optional[Dict[str, Any]],
+    progress_state: Optional[Dict[str, Any]],
+    watchdog: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Compute a robust (current, total, fraction, label) progress view.
+
+    Supports:
+    - phase_index/phase_total (preferred if present)
+    - current/total cycles
+    - fallbacks based on progress JSON naming variants
+    """
+    status = (worker_state or {}).get("status") or (progress_state or {}).get("status") or "unknown"
+    status_s = str(status).lower()
+
+    # Preferred: phase progress (3-phase pipeline etc.)
+    phase_cur = (
+        (worker_state or {}).get("phase_index")
+        or (progress_state or {}).get("phase_index")
+        or (progress_state or {}).get("phase_current")
+    )
+    phase_tot = (
+        (worker_state or {}).get("phase_total")
+        or (progress_state or {}).get("phase_total")
+        or (progress_state or {}).get("phase_count")
+    )
+    phase_name = (worker_state or {}).get("phase_name") or (progress_state or {}).get("phase_name") or ""
+
+    # Cycle progress
+    cur = (
+        (worker_state or {}).get("effective_current")
+        or (progress_state or {}).get("effective_current")
+        or (worker_state or {}).get("current")
+        or (progress_state or {}).get("current")
+        or (progress_state or {}).get("current_cycle")
+        or (progress_state or {}).get("cycle")
+        or (progress_state or {}).get("cycle_index")
+    )
+    tot = (
+        (worker_state or {}).get("effective_total")
+        or (progress_state or {}).get("effective_total")
+        or (worker_state or {}).get("total")
+        or (progress_state or {}).get("total")
+        or (progress_state or {}).get("total_cycles")
+        or (progress_state or {}).get("max_cycles")
+    )
+
+    # Select which progress track to display
+    use_phase = _safe_int(phase_tot, None)
+    if use_phase is not None and use_phase > 0:
+        c = _safe_int(phase_cur, 0) or 0
+        t = use_phase
+
+        # Heuristic: if worker emits 0-based phase indices, shift to 1-based display
+        # We detect 0-based by seeing 0 <= c < t AND status indicates active work.
+        if status_s in {"running", "active", "in_progress", "working"} and 0 <= c < t:
+            # Many workers store phase_index as 0..t-1
+            # If c==0 and we already have any heartbeat activity, display 1
+            if c == 0:
+                hb_count = _safe_int((watchdog or {}).get("count"), 0) or 0
+                hb_last = (watchdog or {}).get("last_beat")
+                if hb_count > 0 or hb_last:
+                    c_disp = 1
+                else:
+                    c_disp = 0
+            else:
+                # if 0-based, c==1 should display 2, etc.
+                # This does not break 1-based if your worker never emits 0.
+                c_disp = min(c + 1, t)
+        else:
+            c_disp = min(max(c, 0), t)
+
+        frac = float(c_disp) / float(t) if t > 0 else None
+        return {
+            "kind": "phase",
+            "current": c_disp,
+            "total": t,
+            "fraction": _clamp_float(frac),
+            "label": phase_name or "phases",
+        }
+
+    # Otherwise show cycle progress
+    c2 = _safe_int(cur, None)
+    t2 = _safe_int(tot, None)
+    if c2 is None or t2 is None or t2 <= 0:
+        return {"kind": "none", "current": None, "total": None, "fraction": None, "label": ""}
+
+    # Common worker convention: current = completed cycles (0..total)
+    # If you want the UI to show 1/3 as soon as cycle 1 starts, you need either:
+    # - progress JSON per cycle, or
+    # - auto-refresh + worker_state updates per cycle, or
+    # - a "started" flag/phase_index.
+    c_disp2 = min(max(c2, 0), t2)
+    frac2 = float(c_disp2) / float(t2) if t2 > 0 else None
+
+    # Small improvement: if run is active and current == 0 but we have heartbeat activity, show "1" as "in progress"
+    if status_s in {"running", "active", "in_progress", "working"} and c_disp2 == 0 and t2 > 0:
+        hb_count = _safe_int((watchdog or {}).get("count"), 0) or 0
+        hb_last = (watchdog or {}).get("last_beat")
+        if hb_count > 0 or hb_last:
+            c_disp2 = 1
+            frac2 = float(c_disp2) / float(t2)
+
+    return {
+        "kind": "cycle",
+        "current": c_disp2,
+        "total": t2,
+        "fraction": _clamp_float(frac2),
+        "label": "cycles",
+    }
+
+
+def derive_health_class(
+    worker_state: Optional[Dict[str, Any]],
+    watchdog: Optional[Dict[str, Any]],
+) -> Tuple[str, str]:
+    """Return (health_class, human_label)."""
+    status_raw = (worker_state or {}).get("status") or "unknown"
+    status = str(status_raw).lower()
+
+    seconds_since = _maybe_float((watchdog or {}).get("seconds_since_last"))
+    hb_count = _safe_int((watchdog or {}).get("count"), 0) or 0
+
+    # Worker status driven
+    if status in {"queued", "pending"}:
+        return "idle", "Queued"
+    if status in {"finished", "done", "completed"}:
+        return "idle", "Completed"
+    if status in {"error", "failed"}:
+        return "offline", "Error"
+
+    # Heartbeat driven
+    if seconds_since is None:
+        if status in {"running", "active", "in_progress", "working"}:
+            return "stale", "Running (no heartbeat)"
+        return "unknown", "Unknown"
+
+    # These thresholds assume heartbeat interval ~60s (your config uses 60)
+    if seconds_since <= 90:
+        return "healthy", "Healthy"
+    if seconds_since <= 300:
+        return "stale", "Stale"
+    if status in {"running", "active", "in_progress", "working"} and hb_count > 0:
+        return "offline", "Heartbeat lost"
+    return "offline", "Offline"
+
+
+def inject_base_styles() -> None:
+    """Global UI polish + styles for heartbeat bar, cards, chips, and event feed."""
+    st.markdown(
+        """
+<style>
+/* Layout rhythm */
+.block-container { padding-top: 0.75rem; padding-bottom: 2.5rem; max-width: 1180px; }
+
+/* Sticky topbar */
+.ara-topbar-wrap{
+  position: sticky;
+  top: 0;
+  z-index: 9999;
+  margin: -0.75rem -1rem 1rem -1rem;
+  padding: 0.65rem 1rem 0.6rem 1rem;
+  background: rgba(8, 10, 18, 0.78);
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  backdrop-filter: blur(10px);
+}
+.ara-topbar{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap: 1rem;
+}
+.ara-topbar-left, .ara-topbar-mid, .ara-topbar-right{
+  display:flex; align-items:center; gap: 0.75rem; min-width: 0;
+}
+.ara-topbar-mid { opacity: 0.9; }
+.ara-topbar-title{
+  font-weight: 650;
+  letter-spacing: 0.2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ara-dot{
+  width: 10px; height: 10px; border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.15);
+  box-shadow: 0 0 0 0 rgba(34,197,94,0.0);
+}
+.ara-dot.healthy { background: #22c55e; animation: araPulse 1.8s infinite; }
+.ara-dot.stale   { background: #f59e0b; }
+.ara-dot.offline { background: #ef4444; }
+.ara-dot.idle    { background: #60a5fa; }
+.ara-dot.unknown { background: #94a3b8; }
+
+@keyframes araPulse{
+  0%   { box-shadow: 0 0 0 0 rgba(34,197,94,0.35); }
+  70%  { box-shadow: 0 0 0 10px rgba(34,197,94,0.0); }
+  100% { box-shadow: 0 0 0 0 rgba(34,197,94,0.0); }
+}
+
+.ara-kv{
+  font-size: 0.85rem;
+  opacity: 0.86;
+  white-space: nowrap;
+}
+.ara-kv code{
+  font-size: 0.8rem;
+  padding: 0.1rem 0.35rem;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+
+/* Mini progress bar */
+.ara-mini-progress{
+  width: 160px;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.10);
+  overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.ara-mini-progress > div{
+  height: 100%;
+  width: 0%;
+  background: rgba(110,231,183,0.9);
+}
+
+/* Chips */
+.ara-chip{
+  display:inline-flex;
+  align-items:center;
+  gap: 0.4rem;
+  padding: 0.30rem 0.60rem;
+  border-radius: 999px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(255,255,255,0.04);
+  margin: 0.15rem 0.35rem 0.15rem 0;
+  font-size: 0.85rem;
+  opacity: 0.92;
+}
+.ara-chip.active{
+  border-color: rgba(110,231,183,0.55);
+  box-shadow: 0 0 0 3px rgba(110,231,183,0.10);
+}
+
+/* Cards */
+.ara-card{
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 18px;
+  background: rgba(255,255,255,0.03);
+  padding: 0.9rem 1rem;
+}
+.ara-card-title{
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  margin-bottom: 0.25rem;
+}
+.ara-card-sub{
+  font-size: 0.85rem;
+  opacity: 0.78;
+  margin-bottom: 0.65rem;
+}
+.ara-card-mono{
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 0.82rem;
+  opacity: 0.85;
+}
+
+/* Event feed */
+.ara-feed{
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 18px;
+  background: rgba(255,255,255,0.02);
+  padding: 0.25rem 0.9rem;
+}
+.ara-event{
+  padding: 0.7rem 0.25rem;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.ara-event:last-child{ border-bottom: none; }
+.ara-event-meta{
+  font-size: 0.78rem;
+  opacity: 0.70;
+  margin-bottom: 0.15rem;
+}
+.ara-event-msg{
+  font-size: 0.92rem;
+  opacity: 0.92;
+}
+
+/* Reduce clutter of Streamlit default anchors in markdown headers */
+h1 a, h2 a, h3 a, h4 a { display:none !important; }
+</style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_topbar(
+    worker_state: Optional[Dict[str, Any]],
+    watchdog: Optional[Dict[str, Any]],
+    progress_view: Dict[str, Any],
+    autonomy_view: Dict[str, Any],
+) -> None:
+    health_class, health_label = derive_health_class(worker_state, watchdog)
+
+    run_id = (worker_state or {}).get("run_id") or ""
+    mode = (worker_state or {}).get("mode") or (worker_state or {}).get("run_mode") or ""
+    status = (worker_state or {}).get("status") or "unknown"
+
+    seconds_since = _maybe_float((watchdog or {}).get("seconds_since_last"))
+    beat_txt = _humanize_seconds(seconds_since)
+
+    cur = progress_view.get("current")
+    tot = progress_view.get("total")
+    frac = progress_view.get("fraction")
+    kind_label = progress_view.get("label") or ""
+    if isinstance(cur, int) and isinstance(tot, int) and tot > 0:
+        progress_text = f"{cur}/{tot}"
+    else:
+        progress_text = "—"
+
+    autonomy_label = autonomy_view.get("label") or "Autonomy"
+    autonomy_score = autonomy_view.get("score")
+    if isinstance(autonomy_score, int):
+        autonomy_text = f"{autonomy_label} ({autonomy_score}/4)"
+    else:
+        autonomy_text = autonomy_label
+
+    width_pct = 0
+    if isinstance(frac, (int, float)):
+        width_pct = int(max(0.0, min(1.0, float(frac))) * 100)
+
+    # Escape user-controlled strings
+    run_id_html = html.escape(str(run_id)) if run_id else ""
+    mode_html = html.escape(str(mode)) if mode else ""
+    status_html = html.escape(str(status))
+    autonomy_html = html.escape(str(autonomy_text))
+
+    mid_parts = []
+    if run_id_html:
+        mid_parts.append(f'Run <code>{run_id_html}</code>')
+    if mode_html:
+        mid_parts.append(f'Mode <code>{mode_html}</code>')
+    mid_txt = " • ".join(mid_parts) if mid_parts else "No active run detected"
+
+    right_txt = f"{progress_text}"
+    if kind_label:
+        right_txt += f" {html.escape(str(kind_label))}"
+
+    st.markdown(
+        f"""
+<div class="ara-topbar-wrap">
+  <div class="ara-topbar">
+    <div class="ara-topbar-left">
+      <div class="ara-dot {health_class}"></div>
+      <div class="ara-topbar-title">{html.escape(health_label)}</div>
+      <div class="ara-kv">Beat {html.escape(beat_txt)} ago</div>
+      <div class="ara-kv">Status <code>{status_html}</code></div>
+    </div>
+
+    <div class="ara-topbar-mid">
+      <div class="ara-kv">{mid_txt}</div>
+    </div>
+
+    <div class="ara-topbar-right">
+      <div class="ara-kv">{autonomy_html}</div>
+      <div class="ara-kv"><code>{html.escape(right_txt)}</code></div>
+      <div class="ara-mini-progress" title="progress">
+        <div style="width:{width_pct}%"></div>
+      </div>
+    </div>
+  </div>
+</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def compute_autonomy_view(
+    job_payload: Optional[Dict[str, Any]],
+    worker_state: Optional[Dict[str, Any]],
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Compute autonomy level based on configured features + observed stability."""
+    cfg = {}
+    if isinstance(job_payload, dict):
+        cfg = job_payload.get("config") if isinstance(job_payload.get("config"), dict) else {}
+        if not isinstance(cfg, dict):
+            cfg = {}
+
+    source_controls = cfg.get("source_controls") if isinstance(cfg.get("source_controls"), dict) else {}
+    monitoring = cfg.get("monitoring") if isinstance(cfg.get("monitoring"), dict) else {}
+    swarm_cfg = cfg.get("swarm_config") or cfg.get("swarm") or {}
+    if not isinstance(swarm_cfg, dict):
+        swarm_cfg = {}
+
+    # Feature flags
+    has_tools = bool(source_controls.get("web") or source_controls.get("sandbox") or source_controls.get("tavily_enabled"))
+    is_multi = bool(cfg.get("multi_agent_pair") or (_safe_int(swarm_cfg.get("swarm_size"), 1) or 1) > 1)
+    is_monitored = bool(monitoring.get("heartbeat_enabled", True) or monitoring.get("run_state_enabled", True) or monitoring.get("snapshots_enabled", False))
+
+    # Observed stability (optional)
+    stable_signal = False
+    if isinstance(diagnostics, dict):
+        stab = diagnostics.get("stability_index")
+        eq = diagnostics.get("equilibrium_fraction") or diagnostics.get("equilibrium")
+        try:
+            if isinstance(stab, (int, float)) and float(stab) >= 0.70:
+                stable_signal = True
+        except Exception:
+            pass
+        try:
+            if isinstance(eq, (int, float)) and float(eq) >= 0.60:
+                stable_signal = True
+        except Exception:
+            pass
+
+    # Score ladder
+    score = 0
+    label = "Assisted"
+    explain = "Manual finite runs, UI queues jobs. No tool autonomy detected."
+
+    if has_tools:
+        score = 1
+        label = "Tool-assisted"
+        explain = "Uses external tools (web/sandbox) when enabled."
+
+    if is_multi:
+        score = 2
+        label = "Multi-agent"
+        explain = "Multiple roles/agents contribute (two-stage or swarm)."
+
+    if is_monitored:
+        score = max(score, 3)
+        label = "Self-monitoring"
+        explain = "Emits heartbeat/state/snapshots for operational stability."
+
+    if stable_signal:
+        score = max(score, 4)
+        label = "Self-stabilizing"
+        explain = "Signals suggest stability/equilibrium emerging (heuristic)."
+
+    # Add current state context
+    status = (worker_state or {}).get("status")
+    if status:
+        explain = f"{explain} Worker status: {status}."
+
+    return {"score": score, "label": label, "explain": explain}
+
+
+def _infer_agents_from_job_config(job_payload: Optional[Dict[str, Any]]) -> List[str]:
+    if not isinstance(job_payload, dict):
+        return ["agent"]
+    cfg = job_payload.get("config") if isinstance(job_payload.get("config"), dict) else {}
+    if not isinstance(cfg, dict):
+        cfg = {}
+    mode = str(cfg.get("mode") or "").lower()
+
+    swarm_cfg = cfg.get("swarm_config") or cfg.get("swarm") or {}
+    if not isinstance(swarm_cfg, dict):
+        swarm_cfg = {}
+
+    swarm_size = _safe_int(swarm_cfg.get("swarm_size"), 1) or 1
+    roles = swarm_cfg.get("roles")
+    if isinstance(roles, list) and roles:
+        role_names = [str(r) for r in roles if str(r).strip()]
+        if role_names:
+            return role_names
+
+    if mode == "swarm" or swarm_size > 1:
+        # Provide at least the canonical base roles (count = swarm_size)
+        pairs = build_swarm_roles(True, swarm_size)
+        return [p[0] for p in pairs] if pairs else ["agent"]
+
+    if bool(cfg.get("multi_agent_pair")) or mode == "two_stage":
+        return ["researcher", "critic"]
+
+    return ["agent"]
+
+
+def render_agent_presence(
+    agents: List[str],
+    active_agent: Optional[str] = None,
+) -> None:
+    if not agents:
+        agents = ["agent"]
+
+    st.markdown('<div class="ara-card">', unsafe_allow_html=True)
+    st.markdown('<div class="ara-card-title">Agent presence</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ara-card-sub">Roles currently configured for the active run.</div>', unsafe_allow_html=True)
+
+    chips = []
+    for a in agents[:MAX_SWARM_AGENTS]:
+        a_clean = str(a)
+        is_active = active_agent and (a_clean == active_agent or a_clean.split("_", 1)[0] == str(active_agent))
+        cls = "ara-chip active" if is_active else "ara-chip"
+        chips.append(f'<span class="{cls}">● {html.escape(a_clean)}</span>')
+    st.markdown("".join(chips), unsafe_allow_html=True)
+
+    st.markdown("</div>", unsafe_allow_html=True)
 
 
 def load_discovery_log() -> List[Dict[str, Any]]:
@@ -1496,7 +2307,6 @@ def load_discovery_log() -> List[Dict[str, Any]]:
         if isinstance(data, list):
             return [d for d in data if isinstance(d, dict)]
 
-    # If discovery module exposes a helper, use it
     if _discovery_module is not None:
         try:
             func = getattr(_discovery_module, "load_discovery_log", None)
@@ -1509,34 +2319,233 @@ def load_discovery_log() -> List[Dict[str, Any]]:
     return []
 
 
-def load_snapshots() -> List[Dict[str, Any]]:
-    """Load snapshot JSON files as a list of {name, timestamp, data}.
+def load_event_log_unified(run_id: Optional[str]) -> Tuple[List[Dict[str, Any]], str]:
+    """Load event log from common paths.
 
-    Looks in legacy logs paths and also under run specific snapshot
-    directories such as <runs_root>/<run_id>/snapshots when present.
+    If your worker doesn't emit an event log yet, this will be empty (and we synthesize from history).
     """
+    paths = _candidate_state_paths(run_id=run_id)["events"]
+    raw, p = _first_existing_json(paths)
+
+    if isinstance(raw, dict):
+        maybe = raw.get("events") or raw.get("timeline") or raw.get("items")
+        if isinstance(maybe, list):
+            events = [e for e in maybe if isinstance(e, dict)]
+            return events, str(p) if p else "dict container"
+        return [], str(p) if p else "dict container"
+
+    if isinstance(raw, list):
+        return [e for e in raw if isinstance(e, dict)], str(p) if p else "list container"
+
+    return [], "not found"
+
+
+def _event_ts_to_str(ts_val: Any) -> str:
+    if isinstance(ts_val, (int, float)):
+        try:
+            return datetime.utcfromtimestamp(float(ts_val)).isoformat(timespec="seconds") + "Z"
+        except Exception:
+            return ""
+    if isinstance(ts_val, str):
+        return ts_val
+    return ""
+
+
+def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: int = LIVE_EVENTS_LIMIT) -> List[Dict[str, Any]]:
+    """Create a narrative event feed from cycle history."""
+    if not history:
+        return []
+
+    events: List[Dict[str, Any]] = []
+    tail = history[-limit:]
+    for e in tail:
+        cycle = e.get("cycle")
+        role = e.get("role", "agent")
+        domain = e.get("domain", "general")
+        rye = e.get("RYE")
+        if rye is None:
+            rye = e.get("rye")
+        d_r = e.get("delta_R")
+        if d_r is None:
+            d_r = e.get("delta_r")
+
+        notes_n = len(e.get("notes_added") or [])
+        hyps_n = len(e.get("hypotheses") or [])
+        repairs_n = len(e.get("repairs") or [])
+
+        parts = [f"Cycle {cycle} [{domain}/{role}]"]
+        if isinstance(rye, (int, float)):
+            parts.append(f"RYE {float(rye):.3f}")
+        if isinstance(d_r, (int, float)):
+            parts.append(f"ΔR {float(d_r):.3f}")
+        if repairs_n:
+            parts.append(f"{repairs_n} repairs")
+        if notes_n:
+            parts.append(f"{notes_n} notes")
+        if hyps_n:
+            parts.append(f"{hyps_n} hypotheses")
+
+        msg = " • ".join(parts)
+        events.append(
+            {
+                "ts": e.get("timestamp") or "",
+                "kind": "cycle",
+                "message": msg,
+            }
+        )
+    return events
+
+
+def render_narrative_feed(events: List[Dict[str, Any]], source_label: str = "") -> None:
+    st.markdown('<div class="ara-card">', unsafe_allow_html=True)
+    title = "Recent activity"
+    if source_label and source_label != "not found":
+        title += f" (source: {html.escape(source_label)})"
+    st.markdown(f'<div class="ara-card-title">{title}</div>', unsafe_allow_html=True)
+    st.markdown('<div class="ara-card-sub">A readable timeline. Raw logs stay optional.</div>', unsafe_allow_html=True)
+
+    if not events:
+        st.markdown('<div class="ara-feed"><div class="ara-event"><div class="ara-event-msg">No events yet.</div></div></div>', unsafe_allow_html=True)
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    # Keep only last N and reverse so newest at top
+    tail = events[-LIVE_EVENTS_LIMIT:]
+    tail = list(reversed(tail))
+
+    rows = []
+    for ev in tail:
+        ts = _event_ts_to_str(ev.get("ts") or ev.get("timestamp") or "")
+        kind = str(ev.get("kind") or ev.get("type") or "event")
+        msg = str(ev.get("message") or ev.get("text") or ev.get("summary") or "")
+        if not msg:
+            continue
+        meta = " • ".join([x for x in [ts, kind] if x])
+        rows.append(
+            f"""
+<div class="ara-event">
+  <div class="ara-event-meta">{html.escape(meta)}</div>
+  <div class="ara-event-msg">{html.escape(msg)}</div>
+</div>
+            """
+        )
+
+    st.markdown(f'<div class="ara-feed">{"".join(rows)}</div>', unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
+
+def _infer_discovery_confidence(d: Dict[str, Any]) -> Optional[float]:
+    conf = d.get("confidence")
+    if isinstance(conf, (int, float)):
+        return _clamp_float(float(conf), 0.0, 1.0)
+    # Infer from rye_gain if present
+    gain = d.get("rye_gain") or d.get("delta_rye") or d.get("delta_RYE")
+    if isinstance(gain, (int, float)):
+        # Soft scale: 0.0..1.0 as gain 0..1 (cap)
+        return _clamp_float(float(gain), 0.0, 1.0)
+    return None
+
+
+def render_discovery_cards(discoveries: List[Dict[str, Any]]) -> None:
+    st.markdown("### Discovery candidates")
+
+    if not discoveries:
+        st.info("No discovery entries found yet.")
+        return
+
+    # Sort by confidence then gain
+    def _score(d: Dict[str, Any]) -> float:
+        c = _infer_discovery_confidence(d)
+        gain = d.get("rye_gain") or d.get("delta_rye") or 0.0
+        try:
+            g = float(gain)
+        except Exception:
+            g = 0.0
+        return (c or 0.0) * 1.2 + g * 0.2
+
+    sorted_disc = sorted(discoveries, key=_score, reverse=True)
+    top = sorted_disc[:DISCOVERY_CARDS_LIMIT]
+
+    cols = st.columns(3)
+    for i, d in enumerate(top):
+        with cols[i % 3]:
+            title = d.get("title") or d.get("summary") or d.get("id") or "Discovery"
+            title = str(title).strip()
+            if len(title) > 70:
+                title = title[:70] + "..."
+            domain = str(d.get("domain") or "general")
+            conf = _infer_discovery_confidence(d)
+            gain = d.get("rye_gain") or d.get("delta_rye") or d.get("delta_RYE")
+            try:
+                gain_f = float(gain) if gain is not None else None
+            except Exception:
+                gain_f = None
+            evidence = d.get("evidence") or d.get("citations") or d.get("sources") or []
+            ev_n = len(evidence) if isinstance(evidence, list) else 0
+
+            desc = d.get("description") or d.get("details") or d.get("text") or ""
+            desc = str(desc).strip()
+            if len(desc) > 160:
+                desc = desc[:160] + "..."
+
+            conf_txt = f"{conf:.2f}" if isinstance(conf, (int, float)) else "n/a"
+            gain_txt = f"{gain_f:.3f}" if isinstance(gain_f, (int, float)) else "n/a"
+
+            st.markdown(
+                f"""
+<div class="ara-card">
+  <div class="ara-card-title">{html.escape(title)}</div>
+  <div class="ara-card-sub">{html.escape(domain)} • confidence {html.escape(conf_txt)} • RYE gain {html.escape(gain_txt)} • evidence {ev_n}</div>
+  <div class="ara-card-mono">{html.escape(desc) if desc else "—"}</div>
+</div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def safe_json_preview(
+    obj: Any,
+    max_chars: int = 200_000,
+    max_items: Optional[int] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """Convert an object to JSON for display with size limits.
+
+    Returns (json_string_or_none, info_message_or_none).
+    """
+    note_parts: List[str] = []
+
+    if max_items is not None and isinstance(obj, list) and len(obj) > max_items:
+        obj = obj[-max_items:]
+        note_parts.append(f"Showing last {max_items} items from a larger array.")
+
+    try:
+        s = json.dumps(obj, indent=2)
+    except TypeError:
+        return None, "Object contains non JSON serializable entries."
+
+    if len(s) > max_chars:
+        s = s[:max_chars] + "\n... (truncated)"
+        note_parts.append(f"Output truncated to {max_chars} characters for display.")
+
+    note = " ".join(note_parts) if note_parts else None
+    return s, note
+
+
+# -------------------------------------------------------------------
+# Snapshot + hypotheses + citations + verification helpers (unchanged)
+# -------------------------------------------------------------------
+def load_snapshots() -> List[Dict[str, Any]]:
+    """Load snapshot JSON files as a list of {name, timestamp, data}."""
     snapshot_dir_candidates: List[Path] = []
 
-    # Prefer shared runs-root logs, then repo-root logs
     try:
         runs_logs = Path(get_runs_root()) / "logs"
-        snapshot_dir_candidates.extend(
-            [
-                runs_logs / "snapshots",
-                runs_logs / "snapshot",
-            ]
-        )
+        snapshot_dir_candidates.extend([runs_logs / "snapshots", runs_logs / "snapshot"])
     except Exception:
         pass
 
-    snapshot_dir_candidates.extend(
-        [
-            REPO_ROOT / "logs" / "snapshots",
-            REPO_ROOT / "logs" / "snapshot",
-        ]
-    )
+    snapshot_dir_candidates.extend([REPO_ROOT / "logs" / "snapshots", REPO_ROOT / "logs" / "snapshot"])
 
-    # Also look under the runs root for per run snapshot folders
     try:
         runs_root_path = Path(get_runs_root())
         if runs_root_path.exists() and runs_root_path.is_dir():
@@ -1549,7 +2558,6 @@ def load_snapshots() -> List[Dict[str, Any]]:
     except Exception:
         pass
 
-    # If RUNS_FINISHED_DIR is configured, check for snapshots inside each run folder there too
     if isinstance(RUNS_FINISHED_DIR, Path):
         try:
             for run_dir in RUNS_FINISHED_DIR.iterdir():
@@ -1561,7 +2569,6 @@ def load_snapshots() -> List[Dict[str, Any]]:
         except Exception:
             pass
 
-    # Deduplicate directories
     seen_dirs: Set[str] = set()
     unique_snapshot_dirs: List[Path] = []
     for d in snapshot_dir_candidates:
@@ -1584,22 +2591,12 @@ def load_snapshots() -> List[Dict[str, Any]]:
                 continue
             ts_val = data.get("timestamp") or data.get("timestamp_utc") or data.get("created_at")
             try:
-                if isinstance(ts_val, str):
-                    ts = _parse_timestamp_str(ts_val)
-                else:
-                    ts = None
+                ts = _parse_timestamp_str(ts_val) if isinstance(ts_val, str) else None
             except Exception:
                 ts = None
             snapshots.append(
-                {
-                    "name": path.name,
-                    "path": str(path),
-                    "timestamp": ts,
-                    "raw_timestamp": ts_val,
-                    "data": data,
-                }
+                {"name": path.name, "path": str(path), "timestamp": ts, "raw_timestamp": ts_val, "data": data}
             )
-    # Sort by timestamp if available
     snapshots.sort(key=lambda s: s["timestamp"] or datetime.min)
     return snapshots
 
@@ -1623,24 +2620,13 @@ def extract_hypotheses_from_history(history: List[Dict[str, Any]]) -> List[Dict[
             if not text:
                 continue
             results.append(
-                {
-                    "cycle": cycle_idx,
-                    "role": role,
-                    "domain": domain,
-                    "timestamp": ts,
-                    "text": text,
-                    "confidence": conf,
-                }
+                {"cycle": cycle_idx, "role": role, "domain": domain, "timestamp": ts, "text": text, "confidence": conf}
             )
     return results
 
 
 def extract_citation_rows_from_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Flatten citations across all cycles into rows with cycle info for the citation viewer.
-
-    Supports both classic per-cycle 'citations' lists and alternate
-    fields like 'sources' or 'source_list' that some workers use.
-    """
+    """Flatten citations across all cycles into rows with cycle info for the citation viewer."""
     results: List[Dict[str, Any]] = []
     for entry in history:
         cycle_idx = entry.get("cycle")
@@ -1648,15 +2634,8 @@ def extract_citation_rows_from_history(history: List[Dict[str, Any]]) -> List[Di
         domain = entry.get("domain", "general")
         ts = entry.get("timestamp")
 
-        raw_cites = (
-            entry.get("citations")
-            or entry.get("sources")
-            or entry.get("source_list")
-            or []
-        )
-
+        raw_cites = entry.get("citations") or entry.get("sources") or entry.get("source_list") or []
         for c in raw_cites:
-            # Allow simple string citations such as plain URLs
             if not isinstance(c, dict):
                 url = str(c)
                 results.append(
@@ -1695,8 +2674,6 @@ def extract_citation_rows_from_history(history: List[Dict[str, Any]]) -> List[Di
 def load_verification_log() -> List[Dict[str, Any]]:
     """Try to load verification log entries from standard locations."""
     candidates: List[Path] = []
-
-    # Prefer shared runs-root logs, then repo-root logs
     try:
         runs_logs = Path(get_runs_root()) / "logs"
         candidates.extend(
@@ -1747,7 +2724,6 @@ def equilibrium_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Optional[fl
 
 
 def _safe_gv_id(prefix: str, raw: str) -> str:
-    """Sanitize Graphviz node id to avoid spaces and punctuation issues."""
     clean = re.sub(r"[^a-zA-Z0-9_]", "_", raw)
     if not clean:
         clean = "node"
@@ -1755,7 +2731,6 @@ def _safe_gv_id(prefix: str, raw: str) -> str:
 
 
 def _clean_label_text(text: str, max_len: int = 60) -> str:
-    """Clean label text for Graphviz: strip quotes, newlines, and compress spaces."""
     text = str(text)
     text = text.replace('"', "'").replace("\n", " ").replace("\r", " ")
     text = re.sub(r"\s+", " ", text).strip()
@@ -1768,11 +2743,8 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
     """Build a Graphviz DOT string linking goals, roles, hypotheses, and discoveries."""
     nodes: List[str] = []
     edges: List[str] = []
-
-    # Single root node for the run
     nodes.append('run [label="Run", shape=box, style=filled, fillcolor="#eeeeee"]')
 
-    # Domains
     domains = sorted({str(e.get("domain", "general")) for e in history})
     domain_ids: Dict[str, str] = {}
     for d in domains:
@@ -1782,7 +2754,6 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
         nodes.append(f'{node_id} [label="{safe_d_label}", shape=box]')
         edges.append(f"run -> {node_id}")
 
-    # Roles
     roles = sorted({str(e.get("role", "agent")) for e in history})
     role_ids: Dict[str, str] = {}
     for r in roles:
@@ -1792,20 +2763,13 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
         nodes.append(f'{node_id} [label="{safe_r_label}", shape=ellipse]')
         edges.append(f"run -> {node_id}")
 
-    # Hypotheses, take top 8 by confidence if available
     hyps = extract_hypotheses_from_history(history)
-    if hyps:
-        scored = []
-        for h in hyps:
-            conf = h.get("confidence")
-            if isinstance(conf, (int, float)):
-                score = float(conf)
-            else:
-                score = 0.0
-            scored.append((score, h))
-        scored.sort(key=lambda x: x[0], reverse=True)
-    else:
-        scored = []
+    scored = []
+    for h in hyps:
+        conf = h.get("confidence")
+        score = float(conf) if isinstance(conf, (int, float)) else 0.0
+        scored.append((score, h))
+    scored.sort(key=lambda x: x[0], reverse=True)
     top_hyps = [h for _, h in scored[:8]]
 
     for idx, h in enumerate(top_hyps):
@@ -1825,7 +2789,6 @@ def build_insight_graph(history: List[Dict[str, Any]], discoveries: List[Dict[st
         edges.append(f"{d_id} -> {hyp_id}")
         edges.append(f"{r_id} -> {hyp_id}")
 
-    # Discoveries, top 8 by rye_gain if present
     top_disc: List[Dict[str, Any]] = []
     if discoveries:
         scored_disc = []
@@ -1867,13 +2830,11 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
         "and discovery log entries. It is an autonomous research artifact, not medical advice.\n"
     )
 
-    # Top cycles by RYE or delta_R (with lowercase fallbacks)
     scored_cycles: List[Tuple[float, Dict[str, Any]]] = []
     for e in history:
         rye_val = e.get("RYE")
         if rye_val is None:
             rye_val = e.get("rye")
-
         d_r = e.get("delta_R")
         if d_r is None:
             d_r = e.get("delta_r")
@@ -1926,7 +2887,6 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
                 header += " (" + ", ".join(metrics_parts) + ")"
             lines.append(header)
 
-            # Attach one or two short notes or hypotheses as evidence
             notes = e.get("notes_added") or []
             hyps = e.get("hypotheses") or []
             details_added = 0
@@ -1942,10 +2902,7 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
                     break
             if details_added < 2:
                 for h in hyps:
-                    if isinstance(h, dict):
-                        txt = h.get("text", "")
-                    else:
-                        txt = str(h)
+                    txt = h.get("text", "") if isinstance(h, dict) else str(h)
                     txt = txt.strip()
                     if not txt:
                         continue
@@ -1956,7 +2913,6 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
                     if details_added >= 2:
                         break
 
-    # Pull best discoveries from discovery log
     lines.append("\n## Discovery log highlights\n")
     if not discoveries:
         lines.append("No discovery log entries found.\n")
@@ -2018,7 +2974,6 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
     if not jobs:
         return []
 
-    # Sort jobs by created_at so we can take the most recent N
     try:
         jobs_sorted = sorted(jobs, key=_job_created_at_ts)
     except Exception:
@@ -2032,12 +2987,7 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
     for job in jobs_slice:
         run_id = _get_job_id(job)
 
-        created_at_raw = None
-        if hasattr(job, "created_at"):
-            created_at_raw = getattr(job, "created_at", None)
-        elif isinstance(job, dict):
-            created_at_raw = job.get("created_at")
-
+        created_at_raw = getattr(job, "created_at", None) if hasattr(job, "created_at") else (job.get("created_at") if isinstance(job, dict) else None)
         default_ts = None
         if isinstance(created_at_raw, (int, float)):
             try:
@@ -2052,26 +3002,15 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
             continue
 
         payload = result.get("result")
-        if isinstance(payload, dict):
-            base = payload
-        else:
-            base = result
+        base = payload if isinstance(payload, dict) else result
 
-        # Per cycle entries (with citations) routed through the history flattener
         cycles = _extract_cycles_from_run_result(result, run_id=run_id, default_timestamp=default_ts)
         all_history.extend(cycles)
 
-        # Run level citations or sources
-        cites = (
-            base.get("citations")
-            or base.get("sources")
-            or base.get("source_list")
-            or []
-        )
+        cites = base.get("citations") or base.get("sources") or base.get("source_list") or []
         if isinstance(cites, list):
             for c in cites:
                 if not isinstance(c, dict):
-                    # Treat plain strings as URLs or labels
                     url = str(c)
                     top_level_citations.append(
                         {
@@ -2135,7 +3074,6 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
     if not jobs:
         return []
 
-    # Sort jobs by created_at so we can take the most recent N
     try:
         jobs_sorted = sorted(jobs, key=_job_created_at_ts)
     except Exception:
@@ -2148,12 +3086,7 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
     for job in jobs_slice:
         run_id = _get_job_id(job)
 
-        created_at_raw = None
-        if hasattr(job, "created_at"):
-            created_at_raw = getattr(job, "created_at", None)
-        elif isinstance(job, dict):
-            created_at_raw = job.get("created_at")
-
+        created_at_raw = getattr(job, "created_at", None) if hasattr(job, "created_at") else (job.get("created_at") if isinstance(job, dict) else None)
         default_ts = None
         if isinstance(created_at_raw, (int, float)):
             try:
@@ -2168,17 +3101,9 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
             continue
 
         payload = result.get("result")
-        if isinstance(payload, dict):
-            base = payload
-        else:
-            base = result
+        base = payload if isinstance(payload, dict) else result
 
-        candidates = (
-            base.get("discoveries")
-            or base.get("discovery_candidates")
-            or base.get("discovery_log")
-            or []
-        )
+        candidates = base.get("discoveries") or base.get("discovery_candidates") or base.get("discovery_log") or []
         if not isinstance(candidates, list):
             continue
 
@@ -2205,52 +3130,64 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
 
 
 # -------------------------------------------------------------------
-# JSON preview helper to avoid front-end RangeError on huge histories
-# -------------------------------------------------------------------
-def safe_json_preview(
-    obj: Any,
-    max_chars: int = 200_000,
-    max_items: Optional[int] = None,
-) -> Tuple[Optional[str], Optional[str]]:
-    """Convert an object to JSON for display with size limits.
-
-    Returns (json_string_or_none, info_message_or_none).
-    """
-    note_parts: List[str] = []
-
-    if max_items is not None and isinstance(obj, list) and len(obj) > max_items:
-        obj = obj[-max_items:]
-        note_parts.append(f"Showing last {max_items} items from a larger array.")
-
-    try:
-        s = json.dumps(obj, indent=2)
-    except TypeError:
-        return None, "Object contains non JSON serializable entries."
-
-    if len(s) > max_chars:
-        s = s[:max_chars] + "\n... (truncated)"
-        note_parts.append(f"Output truncated to {max_chars} characters for display.")
-
-    note = " ".join(note_parts) if note_parts else None
-    return s, note
-
-
-# -------------------------------------------------------------------
 # Main Streamlit app
 # -------------------------------------------------------------------
 def main() -> None:
-    st.set_page_config(
-        page_title="ARA powered by Reparodynamics",
-        page_icon="🧪",
-        layout="wide",
-    )
+    st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="🧪", layout="wide")
+
+    inject_base_styles()
 
     # Resolve base + queue paths once for UI display
     runs_base_dir = get_runs_root()
     queue_root_dir = get_queue_root()
     queue_pending_dir = str(Path(queue_root_dir) / "pending")
 
-    # Header: ARA with yellow orange red gradient and powered by Reparodynamics pill
+    # Shared MemoryStore instance (read-only UI)
+    memory = init_memory_store()
+
+    # Determine active run id as early as possible (worker_state run_id > queue scan)
+    ws0, ws_src0 = load_worker_state_unified(memory)
+    active_run_id = (ws0 or {}).get("run_id") or _derive_active_run_id_from_queue()
+
+    # Diagnostics sources (for top bar + live console)
+    watchdog0, watchdog_src0 = load_watchdog_info_unified(memory, run_id=active_run_id)
+    progress0_raw, progress_src0 = load_progress_unified(active_run_id)
+    progress_view0 = compute_progress_view(ws0, progress0_raw, watchdog0)
+
+    # Light history preview for narrative synthesis and stability/autonomy (last ~25 only)
+    history_preview: List[Dict[str, Any]] = []
+    get_cycle_history_preview = getattr(memory, "get_cycle_history", None)
+    if callable(get_cycle_history_preview):
+        try:
+            hist = get_cycle_history_preview() or []
+            if isinstance(hist, list):
+                history_preview = [e for e in hist if isinstance(e, dict)][-25:]
+        except Exception:
+            history_preview = []
+    if not history_preview:
+        # fallback to finished runs (small)
+        history_preview = load_history_from_finished_runs(limit_runs=5)[-25:]
+
+    diagnostics_preview: Optional[Dict[str, Any]] = None
+    if history_preview:
+        try:
+            diagnostics_preview = build_run_diagnostics(history=history_preview, domain=None, window=10)
+        except Exception:
+            diagnostics_preview = None
+
+    # Autonomy + agents (from job payload if available)
+    job_payload0, job_payload_src0 = load_job_payload_from_disk(active_run_id) if active_run_id else (None, "no run_id")
+    autonomy_view0 = compute_autonomy_view(job_payload0, ws0, diagnostics_preview)
+    agents0 = _infer_agents_from_job_config(job_payload0)
+
+    # Event log (or synthesized)
+    event_log0, event_src0 = load_event_log_unified(active_run_id)
+    narrative_events = event_log0 if event_log0 else build_narrative_events_from_history(history_preview, limit=LIVE_EVENTS_LIMIT)
+
+    # Top sticky heartbeat bar
+    render_topbar(ws0, watchdog0, progress_view0, autonomy_view0)
+
+    # Header: ARA with gradient and powered by pill
     st.markdown(
         """
         <style>
@@ -2258,7 +3195,7 @@ def main() -> None:
             display: flex;
             align-items: center;
             gap: 0.75rem;
-            margin-bottom: 1.5rem;
+            margin-bottom: 1.25rem;
         }
         .ara-logo-text {
             font-size: 2.6rem;
@@ -2281,13 +3218,8 @@ def main() -> None:
             align-items: center;
             gap: 0.25rem;
         }
-        .ara-powered-pill span.label {
-            opacity: 0.8;
-        }
-        .ara-powered-pill span.brand {
-            font-weight: 600;
-            opacity: 1.0;
-        }
+        .ara-powered-pill span.label { opacity: 0.8; }
+        .ara-powered-pill span.brand { font-weight: 600; opacity: 1.0; }
         </style>
         <div class="ara-header">
             <div class="ara-logo-text">ARA</div>
@@ -2302,13 +3234,10 @@ def main() -> None:
 
     st.caption(
         f"Finite mode only • Queue based runs • Engine worker processes jobs from `{queue_pending_dir}` for `*_job.json` files.\n"
-        "This UI never runs TGRM loops directly. It only queues jobs and visualizes finished artifacts."
+        "This UI never runs TGRM loops directly. It only queues jobs and visualizes artifacts."
     )
 
-    # Shared MemoryStore instance for diagnostics and history
-    memory = init_memory_store()
-
-    # Try to surface memory file path so you can confirm a single shared MemoryStore
+    # Show MemoryStore path in sidebar for sanity (diagnostics depend on this being shared)
     try:
         mem_path = getattr(memory, "path", None) or getattr(memory, "memory_file", None)
         if isinstance(mem_path, str):
@@ -2316,54 +3245,92 @@ def main() -> None:
     except Exception:
         pass
 
-    # Small always visible sidebar cycle counter from worker_state
-    get_worker_state = getattr(memory, "get_worker_state", None)
-    if not callable(get_worker_state):
-        get_worker_state = getattr(memory, "read_worker_state", None)
-    if not callable(get_worker_state):
-        get_worker_state = getattr(memory, "load_worker_state", None)
+    # ------------------------------------------------------------------
+    # Sidebar: Live updates (this fixes the “0/3 then 3/3” perception issue)
+    # ------------------------------------------------------------------
+    st.sidebar.subheader("Live updates")
+    auto_refresh = st.sidebar.checkbox(
+        "Auto-refresh while worker is running",
+        value=True,
+        help="Enables live dashboard updates so progress can show 1/3 → 2/3 → 3/3 during runs.",
+    )
+    refresh_seconds = 5
+    if auto_refresh:
+        refresh_seconds = st.sidebar.slider("Refresh interval (seconds)", min_value=2, max_value=30, value=5, step=1)
 
-    try:
-        ws = get_worker_state() if callable(get_worker_state) else None
-    except Exception:
-        ws = None
+    st.sidebar.markdown("---")
 
-    if isinstance(ws, dict):
-        cur = ws.get("current")
-        tot = ws.get("total")
-        eff_cur = ws.get("effective_current")
-        eff_tot = ws.get("effective_total")
-        status_val = ws.get("status") or "unknown"
-        run_id_val = ws.get("run_id") or ws.get("job_id") or ""
-
-        # Prefer effective_current / effective_total when present and valid
-        if isinstance(eff_cur, (int, float)) and isinstance(eff_tot, (int, float)) and eff_tot > 0:
-            display_cur = eff_cur
-            display_tot = eff_tot
-        elif isinstance(cur, (int, float)) and isinstance(tot, (int, float)) and tot > 0:
-            display_cur = cur
-            display_tot = tot
-        else:
-            display_cur = None
-            display_tot = None
-
-        if isinstance(display_cur, (int, float)) and isinstance(display_tot, (int, float)) and display_tot > 0:
-            try:
-                fraction = float(display_cur) / float(display_tot)
-            except Exception:
-                fraction = None
-            st.sidebar.caption(f"Current cycle: {int(display_cur)}/{int(display_tot)}")
-            if fraction is not None:
+    # Small always visible sidebar progress (unified + normalized)
+    if ws0:
+        pv = progress_view0
+        cur = pv.get("current")
+        tot = pv.get("total")
+        frac = pv.get("fraction")
+        label = pv.get("label") or ""
+        if isinstance(cur, int) and isinstance(tot, int) and tot > 0:
+            st.sidebar.caption(f"Progress: {cur}/{tot} {label}".strip())
+            if isinstance(frac, (int, float)):
                 try:
-                    st.sidebar.progress(min(fraction, 1.0))
+                    st.sidebar.progress(min(max(float(frac), 0.0), 1.0))
                 except Exception:
                     pass
         else:
-            st.sidebar.caption(f"Worker status: {status_val}")
-            if run_id_val:
-                st.sidebar.caption(f"Run: {run_id_val}")
+            st.sidebar.caption(f"Worker status: {(ws0.get('status') or 'unknown')}")
 
-    # Sidebar layout
+    # ------------------------------------------------------------------
+    # Live Console (visual upgrade set)
+    # ------------------------------------------------------------------
+    st.markdown("### Live console")
+    left_console, right_console = st.columns([1, 2], gap="large")
+
+    with left_console:
+        st.markdown(
+            f"""
+<div class="ara-card">
+  <div class="ara-card-title">Autonomy level</div>
+  <div class="ara-card-sub">{html.escape(str(autonomy_view0.get("label","Unknown")))} • {int(autonomy_view0.get("score",0))}/4</div>
+  <div class="ara-card-mono">{html.escape(str(autonomy_view0.get("explain","")))}</div>
+</div>
+            """,
+            unsafe_allow_html=True,
+        )
+        # progress bar for autonomy
+        try:
+            score = int(autonomy_view0.get("score", 0))
+            st.progress(max(0.0, min(1.0, score / 4.0)))
+        except Exception:
+            pass
+
+        st.write("")  # spacing
+        active_agent = None
+        if ws0:
+            active_agent = ws0.get("role") or ws0.get("active_role") or ws0.get("current_role")
+            if active_agent is not None:
+                active_agent = str(active_agent)
+        render_agent_presence(agents0, active_agent=active_agent)
+
+    with right_console:
+        render_narrative_feed(narrative_events, source_label=event_src0 if event_src0 != "not found" else "synthesized")
+
+        with st.expander("Raw event log JSON (if available)"):
+            if event_log0:
+                preview, note = safe_json_preview(event_log0, max_items=120)
+                if preview:
+                    st.code(preview, language="json")
+                    if note:
+                        st.caption(note)
+            else:
+                st.info("No event log file found. This view is synthesizing events from cycle history.")
+
+    # Discovery cards under live console
+    discoveries_live = load_discovery_log()
+    if not discoveries_live:
+        discoveries_live = load_discoveries_from_finished_runs()
+    render_discovery_cards(discoveries_live)
+
+    # ------------------------------------------------------------------
+    # Sidebar: Run configuration (original)
+    # ------------------------------------------------------------------
     st.sidebar.title("Run configuration")
 
     # Optional Tavily key input (per user, not stored on disk)
@@ -2375,7 +3342,6 @@ def main() -> None:
         value=current_key or "",
         help="Optional. If provided, allows real web search through Tavily in the engine worker.",
     )
-    # Allow clearing the key by entering empty string
     if new_key != current_key:
         st.session_state["tavily_key"] = new_key
 
@@ -2387,15 +3353,12 @@ def main() -> None:
         preset = {
             "label": "Default",
             "domain": "general",
-            "default_goal": (
-                "Explore Reparodynamics, define RYE and TGRM, and compare with related frameworks."
-            ),
+            "default_goal": "Explore Reparodynamics, define RYE and TGRM, and compare with related frameworks.",
         }
         selected_label = "Default"
         selected_key = "default"
     else:
         preset_labels = list(PRESETS.keys())
-        # For safety, selected_key and selected_label are the same in this mapping
         selected_label = st.sidebar.selectbox(
             "Select preset",
             options=preset_labels,
@@ -2403,22 +3366,14 @@ def main() -> None:
             help="Choose a domain oriented preset for this run.",
         )
         selected_key = selected_label
-        # PRESETS may be a dict of dicts, get_preset can add extra defaults
         try:
             preset = get_preset(selected_key)  # type: ignore[arg-type]
         except Exception:
             preset = PRESETS.get(selected_key, {})
-
         if not isinstance(preset, dict):
             preset = {}
 
-    # Domain tag used in run_config and longevity detection
-    domain_tag = (
-        preset.get("domain")
-        or preset.get("domain_tag")
-        or preset.get("domain_key")
-        or "general"
-    )
+    domain_tag = preset.get("domain") or preset.get("domain_tag") or preset.get("domain_key") or "general"
     if isinstance(domain_tag, dict):
         domain_tag = domain_tag.get("tag") or domain_tag.get("name") or "general"
 
@@ -2426,7 +3381,6 @@ def main() -> None:
 
     # Runtime profile view (finite only, advisory)
     st.sidebar.subheader("Runtime profile (advisory, finite only)")
-
     runtime_profile = None
     runtime_profile_key = preset.get("runtime_profile") or preset.get("runtime_profile_key")
     if runtime_profile_key and isinstance(RUNTIME_PROFILES, dict):
@@ -2457,18 +3411,11 @@ def main() -> None:
         )
         st.sidebar.caption("\n\n".join(lines))
     else:
-        st.sidebar.caption(
-            "This preset has no runtime profile configured. "
-            "Manual finite mode uses generic defaults."
-        )
+        st.sidebar.caption("This preset has no runtime profile configured. Manual finite mode uses generic defaults.")
 
     # Friendly label per run
     st.sidebar.subheader("Run label")
-    run_label = st.sidebar.text_input(
-        "Run label",
-        value="experiment",
-        help="Human friendly label for this run request.",
-    )
+    run_label = st.sidebar.text_input("Run label", value="experiment", help="Human friendly label for this run request.")
 
     # Tavily status (after handling key input)
     status = tavily_status()
@@ -2477,10 +3424,7 @@ def main() -> None:
         st.sidebar.success(status["display"])
     else:
         st.sidebar.warning(status["display"])
-        st.sidebar.write(
-            "Paste a Tavily key above to enable real web search. "
-            "Otherwise, stubbed results are used."
-        )
+        st.sidebar.write("Paste a Tavily key above to enable real web search. Otherwise, stubbed results are used.")
 
     # Tool status (web browser and sandbox)
     st.sidebar.subheader("Tools status")
@@ -2489,10 +3433,7 @@ def main() -> None:
     if tool_flags["web"]:
         st.sidebar.success("Web browser tool is available in tools.py.")
     else:
-        st.sidebar.info(
-            "Web browser tool not detected in tools.py. "
-            "Core engine may still use Tavily directly."
-        )
+        st.sidebar.info("Web browser tool not detected in tools.py. Core engine may still use Tavily directly.")
 
     if tool_flags["sandbox"]:
         st.sidebar.success("Sandbox tool is available for safe code execution.")
@@ -2503,19 +3444,12 @@ def main() -> None:
     use_web_tool = st.sidebar.checkbox(
         "Use web browser tool",
         value=status["has_key"],
-        help=(
-            "If enabled, the engine can use the web browser tool for searches. "
-            "If disabled, only local notes and PDFs are used."
-        ),
+        help="If enabled, the engine can use the web browser tool for searches.",
     )
-
     allow_sandbox = st.sidebar.checkbox(
         "Allow sandbox code execution",
         value=tool_flags["sandbox"],
-        help=(
-            "If enabled and the sandbox tool is present, the engine can run code in a bounded sandbox. "
-            "If disabled, code execution tools are not used."
-        ),
+        help="If enabled and present, the engine can run code in a bounded sandbox.",
     )
 
     # Swarm toggle and size
@@ -2523,10 +3457,7 @@ def main() -> None:
     enable_swarm = st.sidebar.checkbox(
         "Enable Swarm (multi role mini agents)",
         value=False,
-        help=(
-            "Request up to dozens of specialized agents (researchers, critics, explorers, "
-            "theorists, integrators). The worker runs them sequentially for safety."
-        ),
+        help="Request multiple specialized agents. The worker runs them sequentially for safety.",
     )
 
     swarm_size = 1
@@ -2537,10 +3468,7 @@ def main() -> None:
             min_value=2,
             max_value=MAX_SWARM_AGENTS,
             value=min(5, MAX_SWARM_AGENTS),
-            help=(
-                "Total number of mini agents in the swarm. "
-                "Higher values mean more total cycles and more API usage."
-            ),
+            help="Total number of mini agents in the swarm.",
         )
         swarm_roles = build_swarm_roles(True, swarm_size)
         st.sidebar.write("Active swarm agents:")
@@ -2553,31 +3481,21 @@ def main() -> None:
         multi_agent = st.sidebar.checkbox(
             "Enable classic Multi Agent (Researcher + Critic)",
             value=False,
-            help="If swarm is disabled, you can still request a simple researcher plus critic pair.",
+            help="If swarm is disabled, request a simple researcher + critic pair.",
         )
     else:
         st.sidebar.info("Classic Multi Agent is disabled when Swarm is enabled.")
 
-    # Source controls (defaults from preset, but user can override)
+    # Source controls
     sc_defaults = preset.get("source_controls", {})
-    use_pubmed = st.sidebar.checkbox(
-        "Use PubMed (scientific literature)",
-        value=bool(sc_defaults.get("pubmed", False)),
-    )
-    use_semantic = st.sidebar.checkbox(
-        "Use Semantic Scholar ingestion",
-        value=bool(sc_defaults.get("semantic", False)),
-    )
-    use_pdf = st.sidebar.checkbox(
-        "Enable PDF ingestion (upload papers below)",
-        value=bool(sc_defaults.get("pdf", True)),
-    )
+    use_pubmed = st.sidebar.checkbox("Use PubMed (scientific literature)", value=bool(sc_defaults.get("pubmed", False)))
+    use_semantic = st.sidebar.checkbox("Use Semantic Scholar ingestion", value=bool(sc_defaults.get("semantic", False)))
+    use_pdf = st.sidebar.checkbox("Enable PDF ingestion (upload papers below)", value=bool(sc_defaults.get("pdf", True)))
 
     uploaded_pdf = None
     if use_pdf:
         uploaded_pdf = st.sidebar.file_uploader("Upload a PDF paper", type=["pdf"])
 
-    # Biomarker mode
     use_biomarkers = st.sidebar.checkbox(
         "Biomarker / Longevity Mode (anti aging teams)",
         value=bool(sc_defaults.get("biomarkers", False)),
@@ -2588,10 +3506,7 @@ def main() -> None:
     enable_snapshots = st.sidebar.checkbox(
         "Enable snapshot generation",
         value=True,
-        help=(
-            "Snapshots and heartbeat are most useful for long runs (for example 200+ cycles). "
-            "For small test runs you can still set this to a low value like 1."
-        ),
+        help="Snapshots and heartbeat are most useful for long runs.",
     )
     snapshot_interval = st.sidebar.number_input(
         "Snapshot interval in cycles",
@@ -2599,34 +3514,26 @@ def main() -> None:
         max_value=1_000_000,
         value=1,
         step=1,
-        help=(
-            "Hint to the engine worker for how often to capture a snapshot. "
-            "Use small values such as 1 to 10 for tests and higher values for long runs."
-        ),
+        help="How often to capture a snapshot (hint to engine worker).",
     )
 
-    # Run mode presets: finite only in this build
     run_mode = st.sidebar.radio(
         "Run mode",
         ["Manual (finite cycles)"],
         index=0,
-        help=(
-            "This build uses finite mode only. "
-            "Each run requests a fixed number of cycles from the engine worker."
-        ),
+        help="This build uses finite mode only.",
     )
 
-    # No RYE based stop for finite only build
     stop_rye_threshold: Optional[float] = None
 
     # -----------------------------
-    # Main area
+    # Main area: goal + queue run
     # -----------------------------
     st.subheader("Research goal")
 
     default_goal = preset.get("default_goal") or (
-        "Research and summarize the concept of Reparodynamics, define RYE and TGRM, "
-        "identify similar frameworks in the literature, and produce a structured comparison table."
+        "Research and summarize Reparodynamics, define RYE and TGRM, identify similar frameworks, "
+        "and produce a structured comparison table."
     )
 
     if "goal_text" not in st.session_state:
@@ -2635,32 +3542,24 @@ def main() -> None:
     goal = st.text_area("Enter research goal:", value=st.session_state["goal_text"], height=160)
     st.session_state["goal_text"] = goal
 
-    # Cycles only matter in manual mode (hint to worker)
     cycles = st.number_input(
         "Number of TGRM cycles to request (manual mode)",
         min_value=1,
         max_value=1_000_000,
         value=3,
         step=1,
-        help="Used when Run mode is Manual. There are no timed presets in this build.",
+        help="Finite run cycle budget.",
     )
 
     run_button = st.button("Queue run request")
 
-    # ------------------------------
-    # Queue job (never run cycles here)
-    # ------------------------------
     if run_button:
         goal_clean = goal.strip()
         if not goal_clean:
             st.error("Please provide a research goal or question before queuing a run.")
         elif create_job is None:
-            st.error(
-                "Job queue backend (run_jobs.py) is not available. "
-                "Make sure agent/run_jobs.py exists and is importable."
-            )
+            st.error("Job queue backend (run_jobs.py) is not available. Make sure agent/run_jobs.py exists.")
         else:
-            # Source controls for the engine worker
             source_controls = {
                 "web": bool(use_web_tool),
                 "pubmed": bool(use_pubmed),
@@ -2671,23 +3570,15 @@ def main() -> None:
                 "tavily_enabled": bool(status["has_key"]),
             }
 
-            # Optional PDF embedded as base64 (worker can decode)
             pdf_payload: Optional[Dict[str, Any]] = None
             if use_pdf and uploaded_pdf is not None:
                 try:
                     pdf_bytes = uploaded_pdf.getvalue()
                     pdf_b64 = base64.b64encode(pdf_bytes).decode("ascii")
-                    pdf_payload = {
-                        "name": uploaded_pdf.name,
-                        "base64": pdf_b64,
-                    }
+                    pdf_payload = {"name": uploaded_pdf.name, "base64": pdf_b64}
                 except Exception:
-                    pdf_payload = {
-                        "name": uploaded_pdf.name,
-                        "base64": None,
-                    }
+                    pdf_payload = {"name": uploaded_pdf.name, "base64": None}
 
-            # Decide mode for RunManager (needs to be known before runtime_hints and run_config)
             if enable_swarm and swarm_size > 1:
                 mode = "swarm"
             elif multi_agent:
@@ -2695,8 +3586,6 @@ def main() -> None:
             else:
                 mode = "single"
 
-            # Runtime hints for the worker (finite only, advisory)
-            # For swarm, the worker will respect max_rounds; for single or two_stage, max_cycles.
             runtime_hints: Dict[str, Any] = {
                 "run_mode": "finite_manual",
                 "manual_cycles": int(cycles),
@@ -2706,18 +3595,10 @@ def main() -> None:
                 "cycles_per_hour_estimate": CYCLES_PER_HOUR_ESTIMATE,
             }
 
-            # Shared snapshot target directory (runs-root preferred)
             snapshots_target_dir = str(Path(get_runs_root()) / "logs" / "snapshots")
-
-            # Snapshot configuration for the worker and Snapshots tab (legacy compatibility)
-            snapshot_config: Dict[str, Any] = {
-                "enabled": bool(enable_snapshots),
-                "every_n_cycles": int(snapshot_interval),
-                "target_dir": snapshots_target_dir,
-            }
+            snapshot_config: Dict[str, Any] = {"enabled": bool(enable_snapshots), "every_n_cycles": int(snapshot_interval), "target_dir": snapshots_target_dir}
             runtime_hints["snapshot_config"] = snapshot_config
 
-            # Monitoring block (canonical, aligns with run_jobs defaults + worker expectations)
             monitoring_config: Dict[str, Any] = {
                 "snapshots_enabled": bool(enable_snapshots),
                 "snapshot_interval_cycles": int(snapshot_interval) if enable_snapshots else None,
@@ -2728,7 +3609,6 @@ def main() -> None:
                 "run_state_enabled": True,
             }
 
-            # Swarm configuration for the worker
             if enable_swarm:
                 swarm_config: Dict[str, Any] = {
                     "swarm_size": int(swarm_size),
@@ -2736,12 +3616,7 @@ def main() -> None:
                     "max_cycles_per_agent": 1,
                     "stagger_start": False,
                     "max_agents_per_tick": 0,
-                    # Optional per-role goal specialization (safe extra metadata for workers that care)
-                    "role_goals": {
-                        name: role_specific_goal(goal_clean, name) for name, _ in swarm_roles
-                    }
-                    if swarm_roles
-                    else {},
+                    "role_goals": {name: role_specific_goal(goal_clean, name) for name, _ in swarm_roles} if swarm_roles else {},
                 }
             else:
                 swarm_config = {
@@ -2752,7 +3627,6 @@ def main() -> None:
                     "max_agents_per_tick": 0,
                 }
 
-            # Optional longevity config stub for worker
             longevity_config: Dict[str, Any] = {}
             if str(domain_tag).lower() in {"longevity", "aging", "anti_aging"}:
                 longevity_defaults = preset.get("longevity_config", {})
@@ -2762,15 +3636,10 @@ def main() -> None:
                         "curriculum_profile": longevity_defaults.get("curriculum_profile"),
                     }
 
-            # Total cycles requested (for swarm, scale by swarm_size so this reflects approximate global budget)
             total_cycles_requested = int(cycles)
             if mode == "swarm":
                 total_cycles_requested = int(cycles) * int(swarm_size)
 
-            # Core run configuration that engine_worker can map to RunConfig
-            # Explicit finite guards:
-            # For single and two_stage, max_cycles limits the run.
-            # For swarm, max_rounds limits the run, while max_cycles_per_agent is in swarm_config.
             run_config: Dict[str, Any] = {
                 "goal": goal_clean,
                 "domain": domain_tag,
@@ -2784,7 +3653,6 @@ def main() -> None:
                 "min_cycles_before_stop": min(3, int(cycles)),
                 "source_controls": source_controls,
                 "runtime_hints": runtime_hints,
-                # Provide both keys for compatibility across workers
                 "swarm": swarm_config,
                 "swarm_config": swarm_config,
                 "longevity_config": longevity_config,
@@ -2793,7 +3661,6 @@ def main() -> None:
                 "use_biomarkers": bool(use_biomarkers),
                 "multi_agent_pair": bool(multi_agent),
                 "notes": (run_label or "experiment").strip(),
-                # Canonical monitoring config (newer workers / run_jobs defaults)
                 "monitoring": monitoring_config,
             }
 
@@ -2801,7 +3668,6 @@ def main() -> None:
                 run_config["pdf"] = pdf_payload
                 run_config["pdf_payload"] = pdf_payload
 
-            # Meta for UI and analytics (does not go into RunConfig directly)
             t_key = st.session_state.get("tavily_key")
             t_tail = t_key[-4:] if isinstance(t_key, str) and len(t_key) >= 4 else None
 
@@ -2813,14 +3679,9 @@ def main() -> None:
                 "mode": mode,
                 "tavily_enabled": bool(status["has_key"]),
                 "tavily_key_tail": t_tail,
-                "ui_metadata": {
-                    "requested_from": "streamlit",
-                    "client_version": "v3-run-manager-finite-only",
-                },
+                "ui_metadata": {"requested_from": "streamlit", "client_version": "v4-live-console-diagnostics"},
             }
 
-            # Single source of truth: register job through run_jobs.create_job.
-            # This writes the JSON into PENDING_DIR (and legacy shadow copies) using the same queue root as the worker.
             run_id = create_job(config=run_config, meta=meta)
 
             st.success(f"Run request queued with run id `{run_id}`.")
@@ -2828,8 +3689,7 @@ def main() -> None:
                 st.caption(f"Pending job written to `{RUNS_PENDING_DIR / (str(run_id) + '_job.json')}`")
             else:
                 st.caption(
-                    f"Job was queued via run_jobs.create_job. "
-                    f"The engine worker should watch `{queue_pending_dir}` for new `*_job.json` files."
+                    f"Job was queued via run_jobs.create_job. The engine worker should watch `{queue_pending_dir}` for new `*_job.json` files."
                 )
 
     # ------------------------------
@@ -2838,73 +3698,63 @@ def main() -> None:
     st.markdown("---")
     st.subheader("Runs and job queue")
 
-    # Debug view of what the UI actually sees on disk for the queue
-    st.caption(f"DEBUG runs base dir: `{runs_base_dir}`")
-    st.caption(f"DEBUG queue root: `{queue_root_dir}`")
-    st.caption(
-        "DEBUG view of queue directories. Active can include stale files if a worker stopped before cleaning up."
-    )
+    # Debug view moved behind expander to keep UI clean
+    with st.expander("Debug: queue directories", expanded=False):
+        st.caption(f"DEBUG runs base dir: `{runs_base_dir}`")
+        st.caption(f"DEBUG queue root: `{queue_root_dir}`")
+        st.caption("Active can include stale files if a worker stopped before cleaning up.")
 
-    def _debug_list_dir(label: str, specific: Optional[Path]) -> None:
-        if isinstance(specific, Path):
-            base = specific
-        else:
-            # Fallback (legacy layout)
-            base = Path(runs_base_dir) / label
-        try:
-            if not base.exists() or not base.is_dir():
-                items: List[str] = []
+        def _debug_list_dir(label: str, specific: Optional[Path]) -> None:
+            if isinstance(specific, Path):
+                base = specific
             else:
-                items = []
-                for p in sorted(base.iterdir()):
-                    if p.is_dir():
-                        items.append(p.name + "/")
-                    elif p.suffix.lower() == ".json":
-                        items.append(p.name)
+                base = Path(runs_base_dir) / label
+            try:
+                if not base.exists() or not base.is_dir():
+                    items: List[str] = []
+                else:
+                    items = []
+                    for p in sorted(base.iterdir()):
+                        if p.is_dir():
+                            items.append(p.name + "/")
+                        elif p.suffix.lower() == ".json":
+                            items.append(p.name)
 
-                # For pending/active, focus on job files for clarity
-                if label in ("pending", "active"):
-                    items = [x for x in items if x.endswith("_job.json") or x.endswith(".json")]
+                    if label in ("pending", "active"):
+                        items = [x for x in items if x.endswith("_job.json") or x.endswith(".json")]
 
-                # Avoid overly long debug output
-                if len(items) > 60:
-                    items = items[:60] + ["..."]
-        except Exception as e:
-            items = [f"error: {e}"]
-        st.text(f"DEBUG {label}: {items}")
+                    if len(items) > 60:
+                        items = items[:60] + ["..."]
+            except Exception as e:
+                items = [f"error: {e}"]
+            st.text(f"DEBUG {label}: {items}")
 
-    _debug_list_dir("pending", RUNS_PENDING_DIR)
-    _debug_list_dir("active", RUNS_ACTIVE_DIR)
-    _debug_list_dir("finished", RUNS_FINISHED_DIR)
-    _debug_list_dir("error", RUNS_ERROR_DIR)
+        _debug_list_dir("pending", RUNS_PENDING_DIR)
+        _debug_list_dir("active", RUNS_ACTIVE_DIR)
+        _debug_list_dir("finished", RUNS_FINISHED_DIR)
+        _debug_list_dir("error", RUNS_ERROR_DIR)
 
-    # Initialize job lists so they always exist
     finished_jobs: List[Any] = []
     pending_jobs: List[Any] = []
     active_jobs: List[Any] = []
 
     if list_run_jobs is not None:
-        # Finished jobs
         try:
             finished_jobs = list_run_jobs(status="finished")
         except TypeError:
-            # Fallback if signature is list_jobs() without args
             finished_jobs = list_run_jobs()  # type: ignore[call-arg]
         except Exception:
             finished_jobs = []
 
-        # Pending or queued jobs (support both status names)
         try:
             pending_jobs = list_run_jobs(status="queued")
             if not pending_jobs:
                 pending_jobs = list_run_jobs(status="pending")
         except TypeError:
-            # Old signature, no status support
             pending_jobs = []
         except Exception:
             pending_jobs = []
 
-        # Active jobs if the backend supports that status
         try:
             active_jobs = list_run_jobs(status="active")
         except TypeError:
@@ -2912,7 +3762,6 @@ def main() -> None:
         except Exception:
             active_jobs = []
 
-    # Sort job lists for better UX
     try:
         finished_jobs = sorted(finished_jobs, key=_job_created_at_ts, reverse=True)
     except Exception:
@@ -2934,43 +3783,32 @@ def main() -> None:
             st.info("No finished runs found yet.")
         else:
             run_ids = [_get_job_id(j) for j in finished_jobs]
-
             id_to_job = {_get_job_id(j): j for j in finished_jobs}
 
             def _format_run(jid: str) -> str:
                 j = id_to_job.get(jid)
                 return _get_job_label(j) if j is not None else jid
 
-            selected_run_id = st.selectbox(
-                "Select a finished run",
-                options=run_ids,
-                format_func=_format_run,
-            )
+            selected_run_id = st.selectbox("Select a finished run", options=run_ids, format_func=_format_run)
             if selected_run_id:
                 selected_job_header = id_to_job.get(selected_run_id)
                 if selected_job_header:
                     render_job_summary(selected_job_header)
                 result = load_job_result(selected_run_id)
                 if result is None:
-                    st.warning(
-                        "Result file missing or unreadable for this run. "
-                        "The engine worker may not have written it yet."
-                    )
+                    st.warning("Result file missing or unreadable for this run. The worker may not have written it yet.")
                 else:
                     st.markdown("---")
                     render_result_details(result)
 
     with col_runs_right:
         st.markdown("#### Active runs")
-
-        # Canonical pending directory used by run_jobs
         pending_dir_path = RUNS_PENDING_DIR if isinstance(RUNS_PENDING_DIR, Path) else (Path(queue_root_dir) / "pending")
         pending_dir = str(pending_dir_path)
 
         if not active_jobs:
             st.info("No active runs detected by run_jobs.")
         else:
-            # Deduplicate active jobs by run_id in case backend reports both stale and current
             seen_ids: Set[str] = set()
             for job in active_jobs:
                 jid = _get_job_id(job)
@@ -2985,7 +3823,6 @@ def main() -> None:
         st.markdown("#### Queued runs")
         st.caption(f"Queue directory: `{pending_dir}`")
 
-        # Clear queue button (canonical + legacy job copies)
         if st.button("🧹 Clear job queue", key="clear_queue_btn"):
             removed = 0
 
@@ -2996,23 +3833,16 @@ def main() -> None:
                 except Exception:
                     return False
 
-            # Canonical pending dir, legacy pending dir, and queue-root shadow copies
             dirs_to_scan: List[Tuple[Path, bool]] = []
-
-            # canonical pending folder
             try:
                 dirs_to_scan.append((Path(pending_dir), False))
             except Exception:
                 pass
-
-            # legacy pending folder: <runs_root>/pending
             try:
                 legacy_pending = Path(get_runs_root()) / "pending"
                 dirs_to_scan.append((legacy_pending, False))
             except Exception:
                 pass
-
-            # queue root shadow copies (root-level *_job.json and legacy <uuid>.json)
             try:
                 queue_root_path = Path(get_queue_root())
                 dirs_to_scan.append((queue_root_path, True))
@@ -3022,16 +3852,10 @@ def main() -> None:
             for dpath, root_level in dirs_to_scan:
                 if not isinstance(dpath, Path) or not dpath.exists() or not dpath.is_dir():
                     continue
-
                 for fp in dpath.glob("*.json"):
-                    # Only clear job metadata (avoid deleting results / progress / unrelated json)
                     name = fp.name
-
-                    # Never delete progress/result artifacts here
                     if name.endswith("_progress.json") or name.endswith("_results.json") or name.endswith("_result.json"):
                         continue
-
-                    # Canonical job naming
                     if name.endswith("_job.json"):
                         try:
                             fp.unlink()
@@ -3039,8 +3863,6 @@ def main() -> None:
                         except Exception:
                             pass
                         continue
-
-                    # Legacy job naming: <uuid>.json at root or in legacy pending dir
                     if _is_uuid_stem(fp.stem):
                         try:
                             fp.unlink()
@@ -3062,7 +3884,7 @@ def main() -> None:
                     st.markdown("---")
 
     # ------------------------------
-    # History and advanced panels
+    # History and advanced panels (original)
     # ------------------------------
     st.markdown("---")
     st.subheader("History and advanced analysis")
@@ -3075,17 +3897,14 @@ def main() -> None:
         except Exception:
             history = []
 
-    # Fallback to finished run results if MemoryStore has no cycles
     if not history:
         history = load_history_from_finished_runs()
 
     if not history:
         st.write("No cycles yet.")
     else:
-        # Pre compute optional MSIL profile
         msil_profile_full = compute_msil_profile(history)
 
-        # Top level tabs
         tab_history, tab_citations, tab_discovery, tab_snapshots, tab_hypo, tab_memory, tab_verify, tab_graph = st.tabs(
             [
                 "Cycle history",
@@ -3099,7 +3918,6 @@ def main() -> None:
             ]
         )
 
-        # ----------------- Cycle history tab -----------------
         with tab_history:
             rows: List[Dict[str, Any]] = []
             for entry in history:
@@ -3135,11 +3953,8 @@ def main() -> None:
             st.markdown("### Efficiency Charts")
 
             plot_rows = rows[-MAX_POINTS_FOR_CHARTS:]
-
             if plot_rows:
-                chart_df = pd.DataFrame(plot_rows)[
-                    ["cycle", "RYE", "delta_R", "energy_E"]
-                ].copy()
+                chart_df = pd.DataFrame(plot_rows)[["cycle", "RYE", "delta_R", "energy_E"]].copy()
                 chart_df = chart_df[chart_df["cycle"].notna()]
                 if not chart_df.empty:
                     chart_df = chart_df.set_index("cycle")
@@ -3158,7 +3973,6 @@ def main() -> None:
                 else:
                     st.info("No cycle indices available for charting yet.")
 
-            # Snapshot timeline over cycles (display only, no hard minimum interval)
             st.markdown("### Snapshot timeline")
 
             if history:
@@ -3173,10 +3987,7 @@ def main() -> None:
                         max_value=max_cycle,
                         value=default_interval,
                         step=1,
-                        help=(
-                            "This controls how densely cycles are sampled for the snapshot chart. "
-                            "It does not affect the engine worker."
-                        ),
+                        help="Controls how densely cycles are sampled for the snapshot chart (display only).",
                         key="history_snapshot_interval",
                     )
 
@@ -3185,19 +3996,14 @@ def main() -> None:
                         c_num = int(e.get("cycle", 0) or 0)
                         if c_num <= 0:
                             continue
-                        if (
-                            c_num == 1
-                            or c_num == max_cycle
-                            or c_num % snapshot_interval_display == 0
-                        ):
+                        if c_num == 1 or c_num == max_cycle or c_num % snapshot_interval_display == 0:
                             snapshot_points.append(e)
 
                     if len(snapshot_points) > MAX_POINTS_FOR_CHARTS:
                         snapshot_points = snapshot_points[-MAX_POINTS_FOR_CHARTS:]
 
                     st.caption(
-                        f"Showing {len(snapshot_points)} snapshot points out of {max_cycle} cycles "
-                        f"(interval {snapshot_interval_display})."
+                        f"Showing {len(snapshot_points)} snapshot points out of {max_cycle} cycles (interval {snapshot_interval_display})."
                     )
 
                     snapshot_cycles: List[int] = []
@@ -3211,9 +4017,7 @@ def main() -> None:
                         snapshot_rye.append(v)
 
                     if any(v is not None for v in snapshot_rye):
-                        df_snap = pd.DataFrame(
-                            {"cycle": snapshot_cycles, "RYE": snapshot_rye}
-                        ).set_index("cycle")
+                        df_snap = pd.DataFrame({"cycle": snapshot_cycles, "RYE": snapshot_rye}).set_index("cycle")
                         st.line_chart(df_snap)
                         st.caption("Snapshot view of RYE across the run.")
                     else:
@@ -3221,7 +4025,6 @@ def main() -> None:
             else:
                 st.info("No history available yet for snapshot timeline.")
 
-            # Advanced RYE diagnostics using rye_metrics build_run_diagnostics
             st.markdown("### Advanced RYE diagnostics")
 
             try:
@@ -3237,32 +4040,16 @@ def main() -> None:
 
             adv_cols = st.columns(5)
             with adv_cols[0]:
-                st.metric(
-                    "Rolling RYE (10)",
-                    f"{float(roll_val):.3f}" if isinstance(roll_val, (int, float)) else "n/a",
-                )
+                st.metric("Rolling RYE (10)", f"{float(roll_val):.3f}" if isinstance(roll_val, (int, float)) else "n/a")
             with adv_cols[1]:
-                st.metric(
-                    "RYE trend",
-                    f"{float(trend_val):.3f}" if isinstance(trend_val, (int, float)) else "n/a",
-                )
+                st.metric("RYE trend", f"{float(trend_val):.3f}" if isinstance(trend_val, (int, float)) else "n/a")
             with adv_cols[2]:
-                st.metric(
-                    "RYE slope",
-                    f"{float(slope_val):.4f}" if isinstance(slope_val, (int, float)) else "n/a",
-                )
+                st.metric("RYE slope", f"{float(slope_val):.4f}" if isinstance(slope_val, (int, float)) else "n/a")
             with adv_cols[3]:
-                st.metric(
-                    "Stability index",
-                    f"{float(stability_val):.3f}" if isinstance(stability_val, (int, float)) else "n/a",
-                )
+                st.metric("Stability index", f"{float(stability_val):.3f}" if isinstance(stability_val, (int, float)) else "n/a")
             with adv_cols[4]:
-                st.metric(
-                    "Recovery momentum",
-                    f"{float(momentum_val):.3f}" if isinstance(momentum_val, (int, float)) else "n/a",
-                )
+                st.metric("Recovery momentum", f"{float(momentum_val):.3f}" if isinstance(momentum_val, (int, float)) else "n/a")
 
-            # Learning speed and breakthrough profile plus 10x Option C view
             st.markdown("### Learning speed and breakthrough profile")
 
             hours_run = compute_run_hours(history)
@@ -3283,74 +4070,42 @@ def main() -> None:
             except Exception:
                 fail = {}
 
-            bp_prob = None
-            if isinstance(bp_short, dict):
-                bp_prob = bp_short.get("probability")
-
-            bp90_prob = None
-            if isinstance(bp90, dict):
-                bp90_prob = bp90.get("probability")
+            bp_prob = bp_short.get("probability") if isinstance(bp_short, dict) else None
+            bp90_prob = bp90.get("probability") if isinstance(bp90, dict) else None
 
             try:
                 tier_info = classify_run_tier(diagnostics, breakthrough_prob=bp_prob)
             except Exception:
                 tier_info = None
 
-            tier_label = None
-            if isinstance(tier_info, dict):
-                tier_label = tier_info.get("tier") or tier_info.get("label")
+            tier_label = tier_info.get("tier") or tier_info.get("label") if isinstance(tier_info, dict) else None
 
             ls_cols = st.columns(4)
             with ls_cols[0]:
-                st.metric(
-                    "Approx hours run",
-                    f"{hours_run:.2f}" if isinstance(hours_run, (int, float)) else "n/a",
-                )
+                st.metric("Approx hours run", f"{hours_run:.2f}" if isinstance(hours_run, (int, float)) else "n/a")
             with ls_cols[1]:
-                if isinstance(bp_prob, (int, float)):
-                    st.metric("Breakthrough signal (near term, 0 to 1)", f"{bp_prob:.3f}")
-                else:
-                    st.metric("Breakthrough signal (near term, 0 to 1)", "n/a")
+                st.metric("Breakthrough signal (near term, 0 to 1)", f"{bp_prob:.3f}" if isinstance(bp_prob, (int, float)) else "n/a")
             with ls_cols[2]:
-                if isinstance(bp90_prob, (int, float)):
-                    st.metric("Breakthrough signal 90d (0 to 1)", f"{bp90_prob:.3f}")
-                else:
-                    st.metric("Breakthrough signal 90d (0 to 1)", "n/a")
+                st.metric("Breakthrough signal 90d (0 to 1)", f"{bp90_prob:.3f}" if isinstance(bp90_prob, (int, float)) else "n/a")
             with ls_cols[3]:
                 st.metric("Run tier", tier_label or "n/a")
 
-            st.caption(
-                "Breakthrough signals are heuristic scores on a 0 to 1 scale derived from RYE and stability trends, "
-                "not calibrated real world probabilities."
-            )
+            st.caption("Breakthrough signals are heuristic scores (0..1), not calibrated real world probabilities.")
 
-            # Optional MSIL meta intelligence view
             st.markdown("### Meta skill intelligence (MSIL)")
-
             if msil_profile_full:
                 msil_score = msil_profile_full.get("msil_score")
                 skills = msil_profile_full.get("skills") or msil_profile_full.get("dimensions") or {}
-                domains_profile = (
-                    msil_profile_full.get("domains")
-                    or msil_profile_full.get("domain_profiles")
-                    or []
-                )
+                domains_profile = msil_profile_full.get("domains") or msil_profile_full.get("domain_profiles") or []
                 dynamics = msil_profile_full.get("dynamics") or {}
 
                 msil_cols = st.columns(3)
                 with msil_cols[0]:
-                    if isinstance(msil_score, (int, float)):
-                        st.metric("MSIL score", f"{msil_score:.3f}")
-                    else:
-                        st.metric("MSIL score", "n/a")
+                    st.metric("MSIL score", f"{msil_score:.3f}" if isinstance(msil_score, (int, float)) else "n/a")
                 with msil_cols[1]:
                     st.metric("Skill dimensions", len(skills) if isinstance(skills, dict) else 0)
                 with msil_cols[2]:
-                    dom_count = 0
-                    if isinstance(domains_profile, list):
-                        dom_count = len(domains_profile)
-                    elif isinstance(domains_profile, dict):
-                        dom_count = len(domains_profile)
+                    dom_count = len(domains_profile) if isinstance(domains_profile, list) else (len(domains_profile) if isinstance(domains_profile, dict) else 0)
                     st.metric("Domain profiles", dom_count)
 
                 with st.expander("Skill breakdown"):
@@ -3361,15 +4116,10 @@ def main() -> None:
                     with st.expander("Learning and stability dynamics"):
                         st.json(dynamics)
             else:
-                st.info(
-                    "MSIL module not detected or no MSIL profile available. "
-                    "This panel stays optional and non blocking."
-                )
+                st.info("MSIL module not detected or no MSIL profile available. This panel stays optional.")
 
-            # New Option C style 10x learning dashboard
             st.markdown("#### 10x learning dashboard (Option C signals)")
 
-            # Volatility
             volatility_info: Dict[str, Any] = {}
             try:
                 volatility_info = rye_volatility_signature(diagnostics)
@@ -3381,7 +4131,6 @@ def main() -> None:
             except Exception:
                 volatility_info = {}
 
-            # Equilibrium detection
             equilibrium_info: Dict[str, Any] = {}
             try:
                 equilibrium_info = detect_rye_equilibrium(diagnostics)
@@ -3393,7 +4142,6 @@ def main() -> None:
             except Exception:
                 equilibrium_info = {}
 
-            # Harmonic index
             harmonic_val: Optional[float] = None
             try:
                 harmonic_val = tgrm_harmonic_index(diagnostics)
@@ -3409,23 +4157,15 @@ def main() -> None:
             vol_regime = volatility_info.get("regime") or volatility_info.get("label")
             eq_flag = equilibrium_info.get("in_equilibrium")
             eq_reason = equilibrium_info.get("reason")
-            eq_state_text = "unknown"
-            if isinstance(eq_flag, bool):
-                eq_state_text = "yes" if eq_flag else "no"
+            eq_state_text = "yes" if eq_flag is True else ("no" if eq_flag is False else "unknown")
 
             oc_cols = st.columns(3)
             with oc_cols[0]:
                 st.metric("Equilibrium detected", eq_state_text)
             with oc_cols[1]:
-                if isinstance(vol_score, (int, float)):
-                    st.metric("Volatility score", f"{vol_score:.3f}")
-                else:
-                    st.metric("Volatility score", "n/a")
+                st.metric("Volatility score", f"{vol_score:.3f}" if isinstance(vol_score, (int, float)) else "n/a")
             with oc_cols[2]:
-                if isinstance(harmonic_val, (int, float)):
-                    st.metric("TGRM harmonic index", f"{harmonic_val:.3f}")
-                else:
-                    st.metric("TGRM harmonic index", "n/a")
+                st.metric("TGRM harmonic index", f"{harmonic_val:.3f}" if isinstance(harmonic_val, (int, float)) else "n/a")
 
             if vol_regime:
                 st.caption(f"Volatility regime: {vol_regime}")
@@ -3454,35 +4194,17 @@ def main() -> None:
                     st.code(preview, language="json")
                     if note:
                         st.caption(note)
-                else:
-                    st.info(note or "Signals contain non JSON serializable objects.")
 
             with st.expander("Raw history JSON"):
-                # Limit to avoid RangeError in the browser
                 preview, note = safe_json_preview(history, max_items=MAX_POINTS_FOR_CHARTS)
                 if preview is not None:
                     st.code(preview, language="json")
                     if note:
                         st.caption(note)
-                else:
-                    st.info(note or "History contains non JSON serializable objects.")
 
-            with st.expander("Raw diagnostics JSON"):
-                preview, note = safe_json_preview(diagnostics)
-                if preview is not None:
-                    st.code(preview, language="json")
-                    if note:
-                        st.caption(note)
-                else:
-                    st.info(note or "Diagnostics contain non JSON serializable objects.")
-
-        # ----------------- Citations tab -----------------
         with tab_citations:
             st.markdown("### Source citation viewer")
-
-            # First try per cycle citations from history
             citations = extract_citation_rows_from_history(history)
-            # Fallback to finished run JSONs if nothing found
             if not citations:
                 citations = load_citations_from_finished_runs()
 
@@ -3490,32 +4212,15 @@ def main() -> None:
                 st.info("No citations recorded yet in cycle history or finished run artifacts.")
             else:
                 citations_df = pd.DataFrame(citations)
-
-                # Ensure required columns exist so the table never breaks
-                expected_cols = [
-                    "cycle",
-                    "role",
-                    "domain",
-                    "source",
-                    "title",
-                    "snippet",
-                    "url",
-                    "timestamp",
-                ]
+                expected_cols = ["cycle", "role", "domain", "source", "title", "snippet", "url", "timestamp"]
                 for col in expected_cols:
                     if col not in citations_df.columns:
                         citations_df[col] = None
 
                 total_cites = len(citations_df)
-                unique_sources = sorted(
-                    {s for s in citations_df["source"].dropna().astype(str).unique() if s}
-                )
-                domains_c = sorted(
-                    {str(d) for d in citations_df["domain"].dropna().astype(str).unique()}
-                )
-                roles_c = sorted(
-                    {str(r) for r in citations_df["role"].dropna().astype(str).unique()}
-                )
+                unique_sources = sorted({s for s in citations_df["source"].dropna().astype(str).unique() if s})
+                domains_c = sorted({str(d) for d in citations_df["domain"].dropna().astype(str).unique()})
+                roles_c = sorted({str(r) for r in citations_df["role"].dropna().astype(str).unique()})
 
                 col_c1, col_c2, col_c3 = st.columns(3)
                 with col_c1:
@@ -3525,109 +4230,43 @@ def main() -> None:
                 with col_c3:
                     st.metric("Domains with citations", len(domains_c))
 
-                citations_domain_filter = st.multiselect(
-                    "Filter by domain",
-                    options=domains_c,
-                    default=domains_c,
-                    key="citations_domain_filter",
-                )
-                citations_role_filter = st.multiselect(
-                    "Filter by role",
-                    options=roles_c,
-                    default=roles_c,
-                    key="citations_role_filter",
-                )
-                citations_source_filter = st.multiselect(
-                    "Filter by source",
-                    options=unique_sources,
-                    default=unique_sources,
-                    key="citations_source_filter",
-                )
+                citations_domain_filter = st.multiselect("Filter by domain", options=domains_c, default=domains_c, key="citations_domain_filter")
+                citations_role_filter = st.multiselect("Filter by role", options=roles_c, default=roles_c, key="citations_role_filter")
+                citations_source_filter = st.multiselect("Filter by source", options=unique_sources, default=unique_sources, key="citations_source_filter")
 
-                # Search box for filtering citations by text
-                search_query = st.text_input(
-                    "Search citations (title or snippet)",
-                    value="",
-                    key="citations_search",
-                )
+                search_query = st.text_input("Search citations (title or snippet)", value="", key="citations_search")
+                group_by_option = st.selectbox("Group citations by", options=["None", "Cycle", "Source"], index=0, key="citations_group_by")
 
-                # Group by selector: None, cycle, or source
-                group_by_option = st.selectbox(
-                    "Group citations by",
-                    options=["None", "Cycle", "Source"],
-                    index=0,
-                    key="citations_group_by",
-                )
-
-                # Apply filters based on domain, role, source
                 filtered_df = citations_df[
                     citations_df["domain"].astype(str).isin(citations_domain_filter)
                     & citations_df["role"].astype(str).isin(citations_role_filter)
                     & citations_df["source"].astype(str).isin(citations_source_filter)
                 ].copy()
 
-                # Apply search filter if provided
                 if search_query:
-                    search_lower = search_query.lower()
+                    q = search_query.lower()
                     mask = (
-                        filtered_df["title"].astype(str).str.lower().str.contains(search_lower, na=False)
-                        | filtered_df["snippet"].astype(str).str.lower().str.contains(search_lower, na=False)
+                        filtered_df["title"].astype(str).str.lower().str.contains(q, na=False)
+                        | filtered_df["snippet"].astype(str).str.lower().str.contains(q, na=False)
                     )
                     filtered_df = filtered_df[mask]
 
-                # Show grouping if selected
                 if group_by_option == "Cycle":
-                    group_counts = (
-                        filtered_df.groupby("cycle")
-                        .size()
-                        .reset_index(name="citation_count")
-                        .sort_values("cycle")
-                    )
-                    st.write("Citations grouped by cycle:")
+                    group_counts = filtered_df.groupby("cycle").size().reset_index(name="citation_count").sort_values("cycle")
                     st.dataframe(group_counts, use_container_width=True)
-
                 elif group_by_option == "Source":
-                    group_counts = (
-                        filtered_df.groupby("source")
-                        .size()
-                        .reset_index(name="citation_count")
-                        .sort_values("citation_count", ascending=False)
-                    )
-                    st.write("Citations grouped by source:")
+                    group_counts = filtered_df.groupby("source").size().reset_index(name="citation_count").sort_values("citation_count", ascending=False)
                     st.dataframe(group_counts, use_container_width=True)
-
                 else:
-                    # Flat table view
                     display_df = filtered_df.copy().reset_index(drop=True)
-                    display_df["title_short"] = (
-                        display_df["title"].fillna("").astype(str).str.slice(0, 80)
+                    display_df["title_short"] = display_df["title"].fillna("").astype(str).str.slice(0, 80)
+                    display_df["snippet_short"] = display_df["snippet"].fillna("").astype(str).str.slice(0, 120)
+                    view_df = display_df[["cycle", "role", "domain", "source", "title_short", "snippet_short", "url", "timestamp"]].rename(
+                        columns={"title_short": "title", "snippet_short": "snippet"}
                     )
-                    display_df["snippet_short"] = (
-                        display_df["snippet"].fillna("").astype(str).str.slice(0, 120)
-                    )
-
-                    view_df = display_df[
-                        [
-                            "cycle",
-                            "role",
-                            "domain",
-                            "source",
-                            "title_short",
-                            "snippet_short",
-                            "url",
-                            "timestamp",
-                        ]
-                    ].rename(
-                        columns={
-                            "title_short": "title",
-                            "snippet_short": "snippet",
-                        }
-                    )
-
                     st.write(f"Showing {len(view_df)} citations after filters.")
                     st.dataframe(view_df, use_container_width=True)
 
-                    # Add a selectbox to display full citation details
                     if not view_df.empty:
                         selected_index = st.selectbox(
                             "Select a citation to view details",
@@ -3635,7 +4274,6 @@ def main() -> None:
                             format_func=lambda i: f"{view_df.iloc[i]['source']} - {str(view_df.iloc[i]['title'])[:50]}",
                             key="citations_select",
                         )
-
                         selected_citation = display_df.iloc[selected_index]
                         with st.expander("Citation details", expanded=False):
                             st.write(f"**Cycle:** {selected_citation['cycle']}")
@@ -3647,7 +4285,6 @@ def main() -> None:
                             st.write(f"**Timestamp:** {selected_citation['timestamp']}")
                             st.write(f"**Snippet:** {selected_citation['snippet']}")
 
-                    # Provide a download button for CSV export
                     if not filtered_df.empty:
                         csv_data = filtered_df.to_csv(index=False)
                         st.download_button(
@@ -3657,30 +4294,22 @@ def main() -> None:
                             mime="text/csv",
                         )
 
-                # Raw citations JSON
                 with st.expander("Raw citations JSON"):
                     preview, note = safe_json_preview(citations)
                     if preview is not None:
                         st.code(preview, language="json")
                         if note:
                             st.caption(note)
-                    else:
-                        st.info(note or "Citations contain non JSON serializable objects.")
 
-        # ----------------- Discovery log tab -----------------
         with tab_discovery:
             st.markdown("### Discovery log")
             discoveries = load_discovery_log()
             if not discoveries:
-                # Fallback: infer from finished run JSONs
                 discoveries = load_discoveries_from_finished_runs()
 
             if not discoveries:
-                st.info(
-                    "No discovery log entries found yet. The worker may not be writing discovery logs or run level discovery fields."
-                )
+                st.info("No discovery log entries found yet.")
             else:
-                # High level stats for discoveries
                 total_disc = len(discoveries)
                 domains_disc = sorted({str(d.get("domain", "general")) for d in discoveries})
                 best_gain = None
@@ -3701,31 +4330,19 @@ def main() -> None:
                 with col_d2:
                     st.metric("Domains with discoveries", len(domains_disc))
                 with col_d3:
-                    if best_gain is not None:
-                        st.metric("Best RYE gain", f"{best_gain:.3f}")
-                    else:
-                        st.metric("Best RYE gain", "n/a")
+                    st.metric("Best RYE gain", f"{best_gain:.3f}" if best_gain is not None else "n/a")
 
                 if best_label is not None and best_gain is not None:
                     st.caption(f"Top discovery candidate: {str(best_label)[:80]}")
 
-                # Simple filters
-                domains_available = sorted(
-                    {str(d.get("domain", "general")) for d in discoveries}
-                )
+                domains_available = sorted({str(d.get("domain", "general")) for d in discoveries})
                 discovery_domain_filter = st.multiselect(
                     "Filter by domain",
                     options=domains_available,
                     default=domains_available,
                     key="discovery_domain_filter",
                 )
-                min_gain = st.number_input(
-                    "Minimum RYE gain to show",
-                    min_value=0.0,
-                    max_value=10.0,
-                    value=0.0,
-                    step=0.01,
-                )
+                min_gain = st.number_input("Minimum RYE gain to show", min_value=0.0, max_value=10.0, value=0.0, step=0.01)
 
                 filtered = []
                 for d in discoveries:
@@ -3744,7 +4361,6 @@ def main() -> None:
                     filtered.append(d_view)
 
                 if filtered:
-                    st.write(f"Showing {len(filtered)} discoveries after filters.")
                     st.dataframe(pd.DataFrame(filtered), use_container_width=True)
                 else:
                     st.info("No discoveries matched the current filters.")
@@ -3755,31 +4371,21 @@ def main() -> None:
                         st.code(preview, language="json")
                         if note:
                             st.caption(note)
-                    else:
-                        st.info(note or "Discovery log contains non JSON serializable objects.")
 
-        # ----------------- Snapshots and equilibrium tab -----------------
         with tab_snapshots:
             st.markdown("### Snapshots and equilibrium")
-
             snapshots = load_snapshots()
             if not snapshots:
-                st.info(
-                    "No snapshots found yet. The worker will create them when snapshot generation is enabled for a run."
-                )
+                st.info("No snapshots found yet.")
             else:
                 labels = []
                 for s in snapshots:
                     ts = s["timestamp"]
-                    if isinstance(ts, datetime):
-                        label = f"{s['name']} - {ts.isoformat(timespec='seconds')}"
-                    else:
-                        label = s["name"]
+                    label = f"{s['name']} - {ts.isoformat(timespec='seconds')}" if isinstance(ts, datetime) else s["name"]
                     labels.append(label)
 
                 st.write(f"Total snapshots: {len(snapshots)}")
 
-                # Timeline view of equilibrium RYE across snapshots
                 rye_series = []
                 for s in snapshots:
                     eq = equilibrium_from_snapshot(s["data"])
@@ -3787,26 +4393,14 @@ def main() -> None:
                         rye_series.append(eq["rye_avg"])
                 if rye_series:
                     st.markdown("#### Snapshot RYE timeline")
-                    timeline_data = {"RYE avg": rye_series}
-                    st.line_chart(timeline_data)
-                    st.caption("Approximate evolution of equilibrium RYE across saved snapshots.")
+                    st.line_chart({"RYE avg": rye_series})
 
                 col_sel1, col_sel2 = st.columns(2)
                 with col_sel1:
-                    idx1 = st.selectbox(
-                        "Select first snapshot",
-                        options=list(range(len(snapshots))),
-                        format_func=lambda i: labels[i],
-                    )
+                    idx1 = st.selectbox("Select first snapshot", options=list(range(len(snapshots))), format_func=lambda i: labels[i])
                 with col_sel2:
-                    # Safe default even when there is only 1 snapshot
                     idx2_default = len(snapshots) - 1
-                    idx2 = st.selectbox(
-                        "Select second snapshot to compare",
-                        options=list(range(len(snapshots))),
-                        index=idx2_default,
-                        format_func=lambda i: labels[i],
-                    )
+                    idx2 = st.selectbox("Select second snapshot to compare", options=list(range(len(snapshots))), index=idx2_default, format_func=lambda i: labels[i])
 
                 s1 = snapshots[idx1]
                 s2 = snapshots[idx2]
@@ -3814,42 +4408,18 @@ def main() -> None:
                 st.markdown("#### Snapshot 1 equilibrium view")
                 eq1 = equilibrium_from_snapshot(s1["data"])
                 col_eq1 = st.columns(4)
-                col_eq1[0].metric(
-                    "RYE avg",
-                    f"{eq1['rye_avg']:.3f}" if eq1["rye_avg"] is not None else "n/a",
-                )
-                col_eq1[1].metric(
-                    "Stability idx",
-                    f"{eq1['stability_index']:.3f}" if eq1["stability_index"] is not None else "n/a",
-                )
-                col_eq1[2].metric(
-                    "Coherence plateau",
-                    f"{eq1['coherence_plateau']:.3f}" if eq1["coherence_plateau"] is not None else "n/a",
-                )
-                col_eq1[3].metric(
-                    "Equilibrium fraction",
-                    f"{eq1['equilibrium_fraction']:.3f}" if eq1["equilibrium_fraction"] is not None else "n/a",
-                )
+                col_eq1[0].metric("RYE avg", f"{eq1['rye_avg']:.3f}" if eq1["rye_avg"] is not None else "n/a")
+                col_eq1[1].metric("Stability idx", f"{eq1['stability_index']:.3f}" if eq1["stability_index"] is not None else "n/a")
+                col_eq1[2].metric("Coherence plateau", f"{eq1['coherence_plateau']:.3f}" if eq1["coherence_plateau"] is not None else "n/a")
+                col_eq1[3].metric("Equilibrium fraction", f"{eq1['equilibrium_fraction']:.3f}" if eq1["equilibrium_fraction"] is not None else "n/a")
 
                 st.markdown("#### Snapshot 2 equilibrium view")
                 eq2 = equilibrium_from_snapshot(s2["data"])
                 col_eq2 = st.columns(4)
-                col_eq2[0].metric(
-                    "RYE avg",
-                    f"{eq2['rye_avg']:.3f}" if eq2["rye_avg"] is not None else "n/a",
-                )
-                col_eq2[1].metric(
-                    "Stability idx",
-                    f"{eq2['stability_index']:.3f}" if eq2["stability_index"] is not None else "n/a",
-                )
-                col_eq2[2].metric(
-                    "Coherence plateau",
-                    f"{eq2['coherence_plateau']:.3f}" if eq2["coherence_plateau"] is not None else "n/a",
-                )
-                col_eq2[3].metric(
-                    "Equilibrium fraction",
-                    f"{eq2['equilibrium_fraction']:.3f}" if eq2["equilibrium_fraction"] is not None else "n/a",
-                )
+                col_eq2[0].metric("RYE avg", f"{eq2['rye_avg']:.3f}" if eq2["rye_avg"] is not None else "n/a")
+                col_eq2[1].metric("Stability idx", f"{eq2['stability_index']:.3f}" if eq2["stability_index"] is not None else "n/a")
+                col_eq2[2].metric("Coherence plateau", f"{eq2['coherence_plateau']:.3f}" if eq2["coherence_plateau"] is not None else "n/a")
+                col_eq2[3].metric("Equilibrium fraction", f"{eq2['equilibrium_fraction']:.3f}" if eq2["equilibrium_fraction"] is not None else "n/a")
 
                 st.markdown("#### Equilibrium delta (snapshot2 minus snapshot1)")
 
@@ -3864,20 +4434,10 @@ def main() -> None:
                 d_eqfrac = _delta(eq1["equilibrium_fraction"], eq2["equilibrium_fraction"])
 
                 col_de = st.columns(4)
-                col_de[0].metric(
-                    "Delta RYE avg", f"{d_rye:+.3f}" if d_rye is not None else "n/a"
-                )
-                col_de[1].metric(
-                    "Delta stability", f"{d_stab:+.3f}" if d_stab is not None else "n/a"
-                )
-                col_de[2].metric(
-                    "Delta plateau",
-                    f"{d_plateau:+.3f}" if d_plateau is not None else "n/a",
-                )
-                col_de[3].metric(
-                    "Delta equilibrium",
-                    f"{d_eqfrac:+.3f}" if d_eqfrac is not None else "n/a",
-                )
+                col_de[0].metric("Delta RYE avg", f"{d_rye:+.3f}" if d_rye is not None else "n/a")
+                col_de[1].metric("Delta stability", f"{d_stab:+.3f}" if d_stab is not None else "n/a")
+                col_de[2].metric("Delta plateau", f"{d_plateau:+.3f}" if d_plateau is not None else "n/a")
+                col_de[3].metric("Delta equilibrium", f"{d_eqfrac:+.3f}" if d_eqfrac is not None else "n/a")
 
                 with st.expander("Raw snapshot 1 JSON"):
                     preview, note = safe_json_preview(s1["data"])
@@ -3885,48 +4445,24 @@ def main() -> None:
                         st.code(preview, language="json")
                         if note:
                             st.caption(note)
-                    else:
-                        st.info(note or "Snapshot 1 contains non JSON serializable objects.")
                 with st.expander("Raw snapshot 2 JSON"):
                     preview, note = safe_json_preview(s2["data"])
                     if preview is not None:
                         st.code(preview, language="json")
                         if note:
                             st.caption(note)
-                    else:
-                        st.info(note or "Snapshot 2 contains non JSON serializable objects.")
 
-        # ----------------- Hypothesis manager tab -----------------
         with tab_hypo:
             st.markdown("### Hypothesis manager")
-
             all_hyps = extract_hypotheses_from_history(history)
             if not all_hyps:
                 st.info("No hypotheses recorded yet in cycle history.")
             else:
-                # Filters
                 domains = sorted({str(h["domain"]) for h in all_hyps})
                 roles = sorted({str(h["role"]) for h in all_hyps})
-                hypo_domain_filter = st.multiselect(
-                    "Filter by domain",
-                    options=domains,
-                    default=domains,
-                    key="hypo_domain_filter",
-                )
-                hypo_role_filter = st.multiselect(
-                    "Filter by role",
-                    options=roles,
-                    default=roles,
-                    key="hypo_role_filter",
-                )
-
-                min_conf = st.number_input(
-                    "Minimum confidence",
-                    min_value=0.0,
-                    max_value=1.0,
-                    value=0.0,
-                    step=0.05,
-                )
+                hypo_domain_filter = st.multiselect("Filter by domain", options=domains, default=domains, key="hypo_domain_filter")
+                hypo_role_filter = st.multiselect("Filter by role", options=roles, default=roles, key="hypo_role_filter")
+                min_conf = st.number_input("Minimum confidence", min_value=0.0, max_value=1.0, value=0.0, step=0.05)
 
                 filtered_h = []
                 for h in all_hyps:
@@ -3941,13 +4477,8 @@ def main() -> None:
                         continue
                     filtered_h.append(h)
 
-                st.write(
-                    f"Total hypotheses: {len(all_hyps)}, after filters: {len(filtered_h)}"
-                )
-
-                # Sort by confidence if present
-                def _score(h: Dict[str, Any]) -> float:
-                    c = h.get("confidence")
+                def _score(hh: Dict[str, Any]) -> float:
+                    c = hh.get("confidence")
                     try:
                         return float(c) if c is not None else 0.0
                     except Exception:
@@ -3972,53 +4503,23 @@ def main() -> None:
 
                 hypo_md = ["# Hypotheses\n"]
                 for h in filtered_h:
-                    conf_txt = ""
-                    if isinstance(h.get("confidence"), (int, float)):
-                        conf_txt = f" (confidence ~ {h['confidence']:.2f})"
-                    hypo_md.append(
-                        f"- [{h['domain']}/{h['role']} cycle {h['cycle']}] {h['text']}{conf_txt}"
-                    )
-                hypo_md_text = "\n".join(hypo_md)
-                st.download_button(
-                    "Download hypotheses as Markdown",
-                    data=hypo_md_text,
-                    file_name="hypotheses_export.md",
-                    mime="text/markdown",
-                )
+                    conf_txt = f" (confidence ~ {h['confidence']:.2f})" if isinstance(h.get("confidence"), (int, float)) else ""
+                    hypo_md.append(f"- [{h['domain']}/{h['role']} cycle {h['cycle']}] {h['text']}{conf_txt}")
+                st.download_button("Download hypotheses as Markdown", data="\n".join(hypo_md), file_name="hypotheses_export.md", mime="text/markdown")
 
-        # ----------------- Memory pruning tab -----------------
         with tab_memory:
             st.markdown("### Memory pruning and compaction")
-
             total_cycles = len(history)
             st.metric("Total cycles in history", total_cycles)
 
-            # Check for optional pruning hooks on MemoryStore or pruner module
-            has_prune_method = hasattr(memory, "prune_low_value_notes") or hasattr(
-                memory, "prune_history"
-            )
+            has_prune_method = hasattr(memory, "prune_low_value_notes") or hasattr(memory, "prune_history")
             has_pruner_module = _pruner_module is not None
 
             if not has_prune_method and not has_pruner_module:
-                st.info(
-                    "No pruning hooks detected on MemoryStore or memory_pruner module. "
-                    "You can still manually clear history by deleting the memory file on disk."
-                )
+                st.info("No pruning hooks detected.")
             else:
-                threshold = st.number_input(
-                    "Approximate minimum RYE gain to keep entries (used if supported)",
-                    min_value=0.0,
-                    max_value=1.0,
-                    value=0.01,
-                    step=0.005,
-                )
-                max_keep = st.number_input(
-                    "Maximum entries to keep in detailed history (0 means no cap)",
-                    min_value=0,
-                    max_value=100000,
-                    value=5000,
-                    step=500,
-                )
+                threshold = st.number_input("Approx minimum RYE gain to keep entries", min_value=0.0, max_value=1.0, value=0.01, step=0.005)
+                max_keep = st.number_input("Maximum entries to keep (0 means no cap)", min_value=0, max_value=100000, value=5000, step=500)
 
                 if st.button("Run pruning now (experimental)"):
                     pruned_count = 0
@@ -4026,59 +4527,34 @@ def main() -> None:
                     try:
                         if hasattr(memory, "prune_low_value_notes"):
                             func = getattr(memory, "prune_low_value_notes")
-                            pruned_count = int(
-                                func(threshold=threshold, max_keep=max_keep)  # type: ignore[arg-type]
-                            )
+                            pruned_count = int(func(threshold=threshold, max_keep=max_keep))  # type: ignore[arg-type]
                         elif hasattr(memory, "prune_history"):
                             func = getattr(memory, "prune_history")
-                            pruned_count = int(
-                                func(threshold=threshold, max_keep=max_keep)  # type: ignore[arg-type]
-                            )
-                        elif has_pruner_module and hasattr(
-                            _pruner_module, "run_memory_pruning"
-                        ):
+                            pruned_count = int(func(threshold=threshold, max_keep=max_keep))  # type: ignore[arg-type]
+                        elif has_pruner_module and hasattr(_pruner_module, "run_memory_pruning"):
                             func = getattr(_pruner_module, "run_memory_pruning")
-                            pruned_count = int(
-                                func(
-                                    memory_store=memory,
-                                    threshold=threshold,
-                                    max_keep=max_keep,
-                                )  # type: ignore[arg-type]
-                            )
+                            pruned_count = int(func(memory_store=memory, threshold=threshold, max_keep=max_keep))  # type: ignore[arg-type]
                     except Exception as e:
                         error_msg = str(e)
 
                     if error_msg:
-                        st.error(f"Pruning call raised an error: {error_msg}")
+                        st.error(f"Pruning error: {error_msg}")
                     else:
-                        st.success(
-                            f"Pruning completed. Approximate entries removed: {pruned_count}"
-                        )
-                        st.info(
-                            "Reload the page to reflect updated history and diagnostics."
-                        )
+                        st.success(f"Pruning completed. Approx entries removed: {pruned_count}")
+                        st.info("Reload the page to reflect updated history and diagnostics.")
 
-        # ----------------- Verification and cures tab -----------------
         with tab_verify:
             st.markdown("### Verification and cure oriented findings")
-
             verifications = load_verification_log()
             if not verifications:
-                st.info(
-                    "No verification log found yet. Verification engine has not written results or file is empty."
-                )
+                st.info("No verification log found yet.")
             else:
-                # Summaries
                 success_flags = []
                 rye_deltas = []
                 for v in verifications:
                     ok = v.get("verified") or v.get("success")
                     success_flags.append(bool(ok))
-                    delta = (
-                        v.get("rye_gain")
-                        or v.get("delta_rye")
-                        or v.get("delta_RYE")
-                    )
+                    delta = v.get("rye_gain") or v.get("delta_rye") or v.get("delta_RYE")
                     try:
                         rye_deltas.append(float(delta))
                     except Exception:
@@ -4088,32 +4564,18 @@ def main() -> None:
                 successful = sum(1 for x in success_flags if x)
                 st.metric("Total verifications", total)
                 st.metric("Successful verifications", successful)
+                st.metric("Success rate", f"{(successful / total * 100.0):.1f}%" if total > 0 else "n/a")
                 st.metric(
-                    "Success rate",
-                    f"{(successful / total * 100.0):.1f}%" if total > 0 else "n/a",
+                    "Average RYE change when verified",
+                    f"{(sum(rye_deltas) / len(rye_deltas)):.3f}" if rye_deltas else "n/a",
                 )
-                if rye_deltas:
-                    st.metric(
-                        "Average RYE change when verified",
-                        f"{(sum(rye_deltas) / len(rye_deltas)):.3f}",
-                    )
-                else:
-                    st.metric(
-                        "Average RYE change when verified",
-                        "n/a",
-                    )
 
-                # Table
                 view_rows_v = []
                 for v in verifications:
                     label = v.get("label") or v.get("id") or v.get("target") or "item"
                     hyp = v.get("hypothesis") or v.get("text")
                     ok = bool(v.get("verified") or v.get("success"))
-                    d_rye = (
-                        v.get("rye_gain")
-                        or v.get("delta_rye")
-                        or v.get("delta_RYE")
-                    )
+                    d_rye = v.get("rye_gain") or v.get("delta_rye") or v.get("delta_RYE")
                     domain = v.get("domain", "general")
                     view_rows_v.append(
                         {
@@ -4121,8 +4583,7 @@ def main() -> None:
                             "domain": domain,
                             "verified": ok,
                             "delta_RYE": d_rye,
-                            "hypothesis": (hyp or "")[:120]
-                            + ("..." if hyp and len(hyp) > 120 else ""),
+                            "hypothesis": (hyp or "")[:120] + ("..." if hyp and len(hyp) > 120 else ""),
                         }
                     )
                 st.dataframe(pd.DataFrame(view_rows_v), use_container_width=True)
@@ -4133,13 +4594,9 @@ def main() -> None:
                         st.code(preview, language="json")
                         if note:
                             st.caption(note)
-                    else:
-                        st.info(note or "Verification log contains non JSON serializable objects.")
 
-        # ----------------- Multi agent insight graph tab -----------------
         with tab_graph:
             st.markdown("### Multi agent insight graph")
-
             discoveries_for_graph = load_discovery_log()
             if not discoveries_for_graph:
                 discoveries_for_graph = load_discoveries_from_finished_runs()
@@ -4147,142 +4604,132 @@ def main() -> None:
             if not history:
                 st.info("No history yet to build a graph.")
             else:
-                dot = build_insight_graph(
-                    history=history, discoveries=discoveries_for_graph
-                )
+                dot = build_insight_graph(history=history, discoveries=discoveries_for_graph)
                 try:
                     st.graphviz_chart(dot)
                 except Exception as e:
                     st.info(f"Graphviz could not render this graph: {e}")
 
     # ------------------------------
-    # Run diagnostics (state from MemoryStore)
+    # Run diagnostics (FIXED: unified loaders + sources + progress)
     # ------------------------------
     st.markdown("---")
     st.subheader("Run diagnostics")
 
+    # Refresh button (manual)
+    if st.button("↻ Refresh diagnostics now", key="refresh_diag_btn"):
+        st.rerun()
+
+    # Reload unified states (fresh for this render)
+    ws, ws_src = load_worker_state_unified(memory)
+    run_id = (ws or {}).get("run_id") or active_run_id
+    watchdog, watchdog_src = load_watchdog_info_unified(memory, run_id=run_id)
+    run_state, run_state_src = load_run_state_unified(memory, run_id_hint=run_id)
+    progress_raw, progress_src = load_progress_unified(run_id)
+    progress_view = compute_progress_view(ws, progress_raw, watchdog)
+
     col_state, col_watchdog = st.columns(2)
 
     with col_state:
-        st.markdown("**Last saved run state (MemoryStore)**")
-        load_run_state = getattr(memory, "load_run_state", None)
-        if callable(load_run_state):
-            state = load_run_state()
+        st.markdown("**Last saved run state**")
+        if not run_state:
+            st.write("No saved run state found yet.")
         else:
-            state = {}
-        if not state:
-            st.write("No saved run state yet.")
-        else:
-            st.json(state)
-            if callable(getattr(memory, "clear_run_state", None)):
-                if st.button("Clear saved run state", key="clear_run_state_btn"):
+            st.caption(f"Source: `{run_state_src}`")
+            st.json(run_state)
+
+        # Clear saved run state (only if MemoryStore supports it)
+        if callable(getattr(memory, "clear_run_state", None)):
+            if st.button("Clear saved run state", key="clear_run_state_btn"):
+                try:
                     memory.clear_run_state()  # type: ignore[call-arg]
-                    st.success(
-                        "Saved run state cleared. It will be rebuilt on the next run "
-                        "by your engine worker."
-                    )
-            else:
-                st.info("MemoryStore.clear_run_state not available in this build.")
+                    st.success("Saved run state cleared.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Clear run state failed: {e}")
 
     with col_watchdog:
-        st.markdown("**Watchdog heartbeat (MemoryStore)**")
-        get_watchdog_info = getattr(memory, "get_watchdog_info", None)
-        if callable(get_watchdog_info):
-            info = get_watchdog_info()
-            last_beat = info.get("last_beat")
-            count = info.get("count", 0)
-            seconds_since = info.get("seconds_since_last")
-
+        st.markdown("**Watchdog heartbeat**")
+        if not watchdog:
+            st.write("No watchdog heartbeat found yet.")
+        else:
+            st.caption(f"Source: `{watchdog_src}`")
+            last_beat = watchdog.get("last_beat")
+            count = watchdog.get("count", 0)
+            seconds_since = watchdog.get("seconds_since_last")
             st.write(f"Last beat: {last_beat if last_beat else 'None recorded'}")
             st.write(f"Heartbeat count: {count}")
-            if isinstance(seconds_since, (int, float)):
-                st.write(f"Seconds since last beat: {seconds_since:.1f}")
-            else:
-                st.write("Seconds since last beat: not available")
-        else:
-            st.write("MemoryStore.get_watchdog_info not available in this build.")
+            st.write(f"Seconds since last beat: {_humanize_seconds(_maybe_float(seconds_since))}")
 
         st.markdown("---")
         st.markdown("**Worker state (engine queue)**")
+        if not ws:
+            st.write("No worker state recorded yet. The worker may not have started or may be writing elsewhere.")
+        else:
+            st.caption(f"Source: `{ws_src}`")
+            status_val = ws.get("status") or "unknown"
+            run_id_val = ws.get("run_id") or ws.get("job_id") or "none"
+            mode = ws.get("mode") or ws.get("run_mode")
+            domain_ws = ws.get("domain") or ""
+            goal_ws = ws.get("goal") or ""
 
-        # Try several possible worker state methods for compatibility
-        get_worker_state_diag = getattr(memory, "get_worker_state", None)
-        if not callable(get_worker_state_diag):
-            get_worker_state_diag = getattr(memory, "read_worker_state", None)
-        if not callable(get_worker_state_diag):
-            get_worker_state_diag = getattr(memory, "load_worker_state", None)
-
-        if callable(get_worker_state_diag):
-            try:
-                worker_state = get_worker_state_diag()
-            except Exception:
-                worker_state = None
-
-            if not worker_state:
-                st.write("No worker state recorded yet. The engine worker may not have started a run.")
-            else:
-                status_val = worker_state.get("status") or "unknown"
-                run_id_val = worker_state.get("run_id") or worker_state.get("job_id") or "none"
-                current = worker_state.get("current")
-                total = worker_state.get("total")
-                eff_cur = worker_state.get("effective_current")
-                eff_tot = worker_state.get("effective_total")
-                mode = worker_state.get("mode") or worker_state.get("run_mode")
-                goal_ws = worker_state.get("goal") or ""
-                domain_ws = worker_state.get("domain") or ""
-
-                # Prefer effective_current / effective_total when present
-                if isinstance(eff_cur, (int, float)) and isinstance(eff_tot, (int, float)) and eff_tot > 0:
-                    display_cur = eff_cur
-                    display_tot = eff_tot
-                elif isinstance(current, (int, float)) and isinstance(total, (int, float)) and total > 0:
-                    display_cur = current
-                    display_tot = total
+            cols_ws = st.columns(3)
+            with cols_ws[0]:
+                st.write(f"Status: `{status_val}`")
+                if mode:
+                    st.write(f"Mode: `{mode}`")
+            with cols_ws[1]:
+                st.write(f"Run id: `{run_id_val}`")
+                if domain_ws:
+                    st.write(f"Domain: `{domain_ws}`")
+            with cols_ws[2]:
+                cur = progress_view.get("current")
+                tot = progress_view.get("total")
+                if isinstance(cur, int) and isinstance(tot, int) and tot > 0:
+                    pct = (cur / tot) * 100.0
+                    st.write(f"Progress: {cur}/{tot} ({pct:.1f}%)")
                 else:
-                    display_cur = None
-                    display_tot = None
+                    st.write("Progress: n/a")
 
-                cols_ws = st.columns(3)
-                with cols_ws[0]:
-                    st.write(f"Status: `{status_val}`")
-                    if mode:
-                        st.write(f"Mode: `{mode}`")
-                with cols_ws[1]:
-                    st.write(f"Run id: `{run_id_val}`")
-                    if domain_ws:
-                        st.write(f"Domain: `{domain_ws}`")
-                with cols_ws[2]:
-                    if isinstance(display_cur, (int, float)) and isinstance(display_tot, (int, float)) and display_tot > 0:
-                        try:
-                            pct = (float(display_cur) / float(display_tot)) * 100.0
-                            st.write(f"Progress: {int(display_cur)}/{int(display_tot)} ({pct:.1f} percent)")
-                        except Exception:
-                            st.write(f"Progress: {int(display_cur)}/{int(display_tot)}")
-                    else:
-                        st.write("Progress: n/a")
+            if goal_ws:
+                st.caption(f"Worker goal: {str(goal_ws)[:140]}")
 
-                if goal_ws:
-                    st.caption(f"Worker goal: {str(goal_ws)[:140]}")
+            with st.expander("Raw worker state JSON"):
+                preview, note = safe_json_preview(ws)
+                if preview is not None:
+                    st.code(preview, language="json")
+                    if note:
+                        st.caption(note)
 
-                with st.expander("Raw worker state JSON"):
-                    preview, note = safe_json_preview(worker_state)
+            with st.expander("Raw progress JSON (if present)"):
+                if progress_raw:
+                    st.caption(f"Source: `{progress_src}`")
+                    preview, note = safe_json_preview(progress_raw)
                     if preview is not None:
                         st.code(preview, language="json")
                         if note:
                             st.caption(note)
-                    else:
-                        st.info(note or "Worker state contains non JSON serializable objects.")
-        else:
-            st.write("Worker state method is not available in this MemoryStore build.")
+                else:
+                    st.info("No progress JSON found. If you want smooth 1/3 → 2/3 updates, have the worker write `<run_id>_progress.json` each phase/cycle.")
+
+    with st.expander("Diagnostics discovery (files checked)"):
+        st.write("These are the standard locations the UI checks for diagnostics artifacts.")
+        paths = _candidate_state_paths(run_id=run_id)
+        for k in ["worker_state", "run_state", "heartbeat", "events", "progress"]:
+            st.markdown(f"**{k}**")
+            lst = paths.get(k, [])
+            shown = []
+            for p in lst[:12]:
+                exists = "✅" if p.exists() else "—"
+                shown.append(f"{exists} `{p}`")
+            st.write("\n".join(shown))
 
     # ------------------------------
-    # Report generation
+    # Report generation (original)
     # ------------------------------
     st.markdown("---")
     st.subheader("Generate report")
 
-    # For reports, prefer MemoryStore history when present, otherwise
-    # fall back to synthetic history rebuilt from finished runs.
     raw_memory_history: List[Dict[str, Any]] = []
     if callable(getattr(memory, "get_cycle_history", None)):
         try:
@@ -4297,78 +4744,43 @@ def main() -> None:
         history_for_reports = load_history_from_finished_runs()
         used_fallback_history = bool(history_for_reports)
 
-    hours_run_for_reports = (
-        compute_run_hours(history_for_reports) if history_for_reports else None
-    )
-    msil_profile_for_reports = (
-        compute_msil_profile(history_for_reports) if history_for_reports else None
-    )
+    hours_run_for_reports = compute_run_hours(history_for_reports) if history_for_reports else None
+    msil_profile_for_reports = compute_msil_profile(history_for_reports) if history_for_reports else None
 
-    # Discovery data for Option C and breakthrough reports
     discoveries_for_reports = load_discovery_log()
     if not discoveries_for_reports:
         discoveries_for_reports = load_discoveries_from_finished_runs()
 
     col_rep1, col_rep2, col_rep3 = st.columns(3)
 
-    # Full history and Option C combo
     with col_rep1:
         if st.button("Full history report", key="full_history_report_btn"):
             if not history_for_reports:
                 st.info("No cycles logged yet, nothing to report.")
             else:
-                if used_fallback_history:
-                    # When MemoryStore has no cycles but finished runs do,
-                    # fall back to an outcome style report instead of an empty one.
-                    report_md = build_outcome_summary(history_for_reports)
-                else:
-                    report_md = generate_report(memory_store=memory, goal=None)
-
+                report_md = build_outcome_summary(history_for_reports) if used_fallback_history else generate_report(memory_store=memory, goal=None)
                 st.markdown(report_md)
-                st.download_button(
-                    "Download full report (Markdown)",
-                    data=report_md,
-                    file_name="autonomous_research_report.md",
-                    mime="text/markdown",
-                )
+                st.download_button("Download full report (Markdown)", data=report_md, file_name="autonomous_research_report.md", mime="text/markdown")
 
-                # Optional PDF from MemoryStore only (if it has cycles)
                 if not used_fallback_history:
                     try:
-                        pdf_path = generate_report_pdf(
-                            memory_store=memory,
-                            goal=None,
-                            output_path="autonomous_research_report.pdf",
-                        )
+                        pdf_path = generate_report_pdf(memory_store=memory, goal=None, output_path="autonomous_research_report.pdf")
                         with open(pdf_path, "rb") as f:
-                            st.download_button(
-                                "Download full report (PDF)",
-                                data=f,
-                                file_name="autonomous_research_report.pdf",
-                                mime="application/pdf",
-                            )
+                            st.download_button("Download full report (PDF)", data=f, file_name="autonomous_research_report.pdf", mime="application/pdf")
                     except RuntimeError as e:
                         st.info(str(e))
                     except Exception:
-                        st.info(
-                            "PDF generation failed unexpectedly. Check server logs for details."
-                        )
+                        st.info("PDF generation failed unexpectedly. Check server logs for details.")
 
         if st.button("Full Option C learning speed report", key="option_c_report_btn"):
             if not history_for_reports:
                 st.info("No cycles logged yet, Option C learning report is empty.")
             else:
-                # Combine outcome summary, breakthrough snapshot, and optional MSIL profile
                 parts: List[str] = []
-
-                # Outcome view
                 parts.append(build_outcome_summary(history_for_reports))
                 parts.append("\n\n---\n\n")
-
-                # Breakthrough and high impact cycles
                 parts.append(build_breakthrough_report(history_for_reports, discoveries_for_reports))
 
-                # Optional MSIL profile snapshot
                 if msil_profile_for_reports:
                     parts.append("\n\n---\n\n")
                     parts.append("# MSIL meta skill profile snapshot\n\n")
@@ -4380,64 +4792,32 @@ def main() -> None:
                     parts.append(msil_json)
                     parts.append("\n```")
 
-                # Optional hours run hint
                 if isinstance(hours_run_for_reports, (int, float)):
-                    parts.append(
-                        f"\n\n_Approximate hours between first and last recorded cycle: {hours_run_for_reports:.2f}_\n"
-                    )
+                    parts.append(f"\n\n_Approximate hours between first and last recorded cycle: {hours_run_for_reports:.2f}_\n")
 
                 option_c_md = "".join(parts)
                 st.markdown(option_c_md)
-                st.download_button(
-                    "Download Option C learning report (Markdown)",
-                    data=option_c_md,
-                    file_name="option_c_learning_report.md",
-                    mime="text/markdown",
-                )
+                st.download_button("Download Option C learning report (Markdown)", data=option_c_md, file_name="option_c_learning_report.md", mime="text/markdown")
 
-    # Findings and cure style report
     with col_rep2:
         if st.button("Findings report (cures, mechanisms, treatments)", key="findings_report_btn"):
             if not history_for_reports:
                 st.info("No cycles logged yet, findings report is empty.")
             else:
-                if used_fallback_history:
-                    # Build directly from synthetic history when MemoryStore has no cycles
-                    findings_md = build_findings_report_from_history(history_for_reports)
-                else:
-                    findings_md = generate_findings_report(memory_store=memory, goal=None)
-
+                findings_md = build_findings_report_from_history(history_for_reports) if used_fallback_history else generate_findings_report(memory_store=memory, goal=None)
                 st.markdown(findings_md)
-                st.download_button(
-                    "Download findings report (Markdown)",
-                    data=findings_md,
-                    file_name="findings_report.md",
-                    mime="text/markdown",
-                )
+                st.download_button("Download findings report (Markdown)", data=findings_md, file_name="findings_report.md", mime="text/markdown")
 
-                # Optional PDF using MemoryStore based findings report
                 if not used_fallback_history:
                     try:
-                        pdf_path_f = generate_findings_report_pdf(
-                            memory_store=memory,
-                            goal=None,
-                            output_path="findings_report.pdf",
-                        )
+                        pdf_path_f = generate_findings_report_pdf(memory_store=memory, goal=None, output_path="findings_report.pdf")
                         with open(pdf_path_f, "rb") as f:
-                            st.download_button(
-                                "Download findings report (PDF)",
-                                data=f,
-                                file_name="findings_report.pdf",
-                                mime="application/pdf",
-                            )
+                            st.download_button("Download findings report (PDF)", data=f, file_name="findings_report.pdf", mime="application/pdf")
                     except RuntimeError as e:
                         st.info(str(e))
                     except Exception:
-                        st.info(
-                            "PDF generation for findings report failed unexpectedly. Check server logs for details."
-                        )
+                        st.info("PDF generation failed unexpectedly. Check server logs for details.")
 
-    # Breakthrough snapshot and raw history export
     with col_rep3:
         if st.button("Breakthrough snapshot report", key="breakthrough_snapshot_btn"):
             if not history_for_reports:
@@ -4445,18 +4825,10 @@ def main() -> None:
             else:
                 br_md = build_breakthrough_report(history_for_reports, discoveries_for_reports)
                 st.markdown(br_md)
-                st.download_button(
-                    "Download breakthrough snapshot (Markdown)",
-                    data=br_md,
-                    file_name="breakthrough_snapshot_report.md",
-                    mime="text/markdown",
-                )
+                st.download_button("Download breakthrough snapshot (Markdown)", data=br_md, file_name="breakthrough_snapshot_report.md", mime="text/markdown")
 
-        # Raw JSON export for external analysis
         if history_for_reports:
-            history_json_str, note_hist = safe_json_preview(
-                history_for_reports, max_chars=500_000, max_items=None
-            )
+            history_json_str, note_hist = safe_json_preview(history_for_reports, max_chars=500_000, max_items=None)
             if history_json_str is not None:
                 st.download_button(
                     "Download full cycle history as JSON",
@@ -4466,7 +4838,38 @@ def main() -> None:
                     key="history_json_export_btn",
                 )
 
-    # End of main()
-    # Streamlit entry point
+    # ------------------------------
+    # Auto-refresh (only while worker appears active)
+    # ------------------------------
+    if auto_refresh:
+        health_class, _ = derive_health_class(ws, watchdog)
+        status_now = str((ws or {}).get("status") or "").lower()
+        running_like = status_now in {"running", "active", "in_progress", "working"} or health_class in {"healthy", "stale"}
+        if running_like:
+            if callable(st_autorefresh):
+                try:
+                    st_autorefresh(interval=int(refresh_seconds * 1000), key="ara_autorefresh")
+                except Exception:
+                    # fallback to sleep+rereun
+                    time.sleep(float(refresh_seconds))
+                    try:
+                        st.rerun()
+                    except Exception:
+                        try:
+                            st.experimental_rerun()
+                        except Exception:
+                            pass
+            else:
+                time.sleep(float(refresh_seconds))
+                try:
+                    st.rerun()
+                except Exception:
+                    try:
+                        st.experimental_rerun()
+                    except Exception:
+                        pass
+
+
+# Streamlit entry point
 if __name__ == "__main__":
     main()
