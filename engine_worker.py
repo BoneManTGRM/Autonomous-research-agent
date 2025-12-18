@@ -128,6 +128,7 @@ _ENGINE_WORKER_VERSION: str = os.getenv(
     os.getenv("WORKER_VERSION", "engine_worker.py/always_on/2025-12-17"),
 )
 
+
 def _env_bool(name: str, default: bool = False) -> bool:
     """Parse a boolean from environment variables."""
     val = os.getenv(name)
@@ -135,6 +136,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
         return default
     val = val.strip().lower()
     return val in {"1", "true", "yes", "y", "on"}
+
 
 def _env_int(name: str, default: int) -> int:
     raw = os.getenv(name)
@@ -145,6 +147,7 @@ def _env_int(name: str, default: int) -> int:
     except Exception:
         return default
 
+
 def _env_float_value(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None or raw == "":
@@ -154,18 +157,22 @@ def _env_float_value(name: str, default: float) -> float:
     except Exception:
         return default
 
+
 def _now_utc_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
+
 
 # Worker "started at" markers for UI (uptime)
 _WORKER_STARTED_AT_MONO: float = time.monotonic()
 _WORKER_STARTED_AT_UTC: str = _now_utc_iso()
+
 
 def _safe_os_getpid() -> int:
     try:
         return os.getpid()
     except Exception:
         return -1
+
 
 def _default_worker_id() -> str:
     env = (
@@ -183,6 +190,7 @@ def _default_worker_id() -> str:
         host = "host"
     return f"{host}-{_safe_os_getpid()}-{uuid.uuid4().hex[:8]}"
 
+
 WORKER_ID: str = _default_worker_id()
 
 # ---------------------------------------------------------------------------
@@ -193,6 +201,7 @@ _LOG_LINE_MAX_CHARS: int = _env_int("WORKER_LOG_LINE_MAX_CHARS", 6000)
 _LOG_VALUE_MAX_CHARS: int = _env_int("WORKER_LOG_VALUE_MAX_CHARS", 800)
 _LOG_MAX_LIST_ITEMS: int = _env_int("WORKER_LOG_MAX_LIST_ITEMS", 25)
 _VERBOSE_LOGS: bool = _env_bool("WORKER_VERBOSE_LOGS", default=True)
+
 
 def _truncate_text(text: str, max_chars: int) -> str:
     if not isinstance(text, str):
@@ -205,6 +214,7 @@ def _truncate_text(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
     return text[: max_chars - 30] + f"...<truncated {len(text) - (max_chars - 30)} chars>"
+
 
 def safe_repr(obj: Any, max_chars: int = _LOG_VALUE_MAX_CHARS) -> str:
     """
@@ -251,12 +261,14 @@ def safe_repr(obj: Any, max_chars: int = _LOG_VALUE_MAX_CHARS) -> str:
         s = f"<safe_repr_error {type(e).__name__}: {e}>"
     return _truncate_text(s, max_chars=max_chars)
 
+
 def _compact_error_summary(exc: BaseException) -> str:
     try:
         msg = str(exc)
     except Exception:
         msg = "<unstringable>"
     return _truncate_text(f"{type(exc).__name__}: {msg}", 500)
+
 
 # ---------------------------------------------------------------------------
 # Structured logging with crash safety and light throttling
@@ -286,10 +298,12 @@ class _LogThrottle:
             return True
         return False
 
+
 _LOG_THROTTLE = _LogThrottle(
     max_keys=_env_int("WORKER_LOG_THROTTLE_MAX_KEYS", 512),
     min_interval_s=_env_float_value("WORKER_LOG_THROTTLE_MIN_INTERVAL_SECONDS", 10.0),
 )
+
 
 def _emit_log_line(line: str) -> None:
     try:
@@ -306,6 +320,7 @@ def _emit_log_line(line: str) -> None:
             sys.stderr.flush()
         except Exception:
             pass
+
 
 def log_kv(
     event: str,
@@ -366,6 +381,7 @@ def log_kv(
         except Exception:
             pass
 
+
 def log_exception(event: str, exc: BaseException, **fields: Any) -> None:
     summary = _compact_error_summary(exc)
     log_kv(event, level="ERROR", error_summary=summary, **fields)
@@ -377,14 +393,17 @@ def log_exception(event: str, exc: BaseException, **fields: Any) -> None:
     except Exception:
         pass
 
+
 # Backwards-compatible _log/_vlog wrappers used throughout this file
 def _log(msg: str) -> None:
     log_kv("log", msg=_truncate_text(str(msg), 2000))
+
 
 def _vlog(msg: str) -> None:
     if not _VERBOSE_LOGS:
         return
     log_kv("vlog", msg=_truncate_text(str(msg), 2000), level="DEBUG")
+
 
 # ---------------------------------------------------------------------------
 # Filesystem / IO hardening (atomic writes, safe reads, fsync)
@@ -392,6 +411,7 @@ def _vlog(msg: str) -> None:
 
 _STATE_IO_LOCK = threading.RLock()
 _IN_ATOMIC_WRITE = threading.Event()
+
 
 def _fsync_dir(path: Path) -> None:
     try:
@@ -404,6 +424,7 @@ def _fsync_dir(path: Path) -> None:
             os.close(fd)
     except Exception:
         return
+
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
     path = Path(path)
@@ -428,6 +449,7 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
                     tmp.unlink(missing_ok=True)  # type: ignore[arg-type]
             except Exception:
                 pass
+
 
 def atomic_write_json(
     path: Path,
@@ -457,6 +479,7 @@ def atomic_write_json(
     except Exception as e:
         log_exception("atomic_write_failed", e, path=str(path), bytes_len=len(data))
         return False
+
 
 def safe_read_text(path: Path, *, max_bytes: int = 2_000_000) -> Optional[str]:
     """
@@ -490,6 +513,7 @@ def safe_read_text(path: Path, *, max_bytes: int = 2_000_000) -> Optional[str]:
         log_exception("file_read_failed", e, path=str(path))
         return None
 
+
 def safe_read_json(path: Path, *, max_bytes: int = 2_000_000) -> Optional[Any]:
     """
     Safe JSON read with size limit. Returns None on errors.
@@ -503,6 +527,7 @@ def safe_read_json(path: Path, *, max_bytes: int = 2_000_000) -> Optional[Any]:
         log_exception("json_parse_failed", e, path=str(path))
         return None
 
+
 # ---------------------------------------------------------------------------
 # Memory RSS / runtime stats
 # ---------------------------------------------------------------------------
@@ -511,6 +536,7 @@ def _get_rss_bytes() -> Optional[int]:
     # Prefer psutil if available
     try:
         import psutil  # type: ignore
+
         return int(psutil.Process(os.getpid()).memory_info().rss)
     except Exception:
         pass
@@ -527,6 +553,7 @@ def _get_rss_bytes() -> Optional[int]:
     # resource (ru_maxrss)
     try:
         import resource  # type: ignore
+
         r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         # Linux: KB, macOS: bytes
         if sys.platform == "darwin":
@@ -535,11 +562,13 @@ def _get_rss_bytes() -> Optional[int]:
     except Exception:
         return None
 
+
 def _rss_mb() -> Optional[float]:
     b = _get_rss_bytes()
     if b is None:
         return None
     return float(b) / (1024.0 * 1024.0)
+
 
 # ---------------------------------------------------------------------------
 # Base dir resolution (kept compatible with agent.run_jobs)
@@ -559,6 +588,7 @@ def _resolve_base_dir() -> Path:
 
     try:
         import agent.run_jobs as _run_jobs_mod  # type: ignore[import]
+
         rj_base = getattr(_run_jobs_mod, "BASE_DIR", None)
         if rj_base is not None:
             base = Path(rj_base)
@@ -573,6 +603,7 @@ def _resolve_base_dir() -> Path:
     # Do not assume disk is reliable; directory creation handled by worker health checks.
     return base
 
+
 BASE_DIR: Path = _resolve_base_dir()
 
 # ---------------------------------------------------------------------------
@@ -580,6 +611,7 @@ BASE_DIR: Path = _resolve_base_dir()
 # ---------------------------------------------------------------------------
 
 _RUNS_ARTIFACT_SCHEMA_VERSION: int = 1
+
 
 def _resolve_runs_logs_dir(base_dir: Path) -> Path:
     """
@@ -603,12 +635,14 @@ def _resolve_runs_logs_dir(base_dir: Path) -> Path:
         p = Path(str(p))
     return p
 
+
 RUNS_LOGS_DIR: Path = _resolve_runs_logs_dir(BASE_DIR)
 
 _DISK_ARTIFACT_THROTTLE = _LogThrottle(
     max_keys=_env_int("WORKER_DISK_THROTTLE_MAX_KEYS", 512),
     min_interval_s=_env_float_value("WORKER_DISK_THROTTLE_MIN_INTERVAL_SECONDS", 0.5),
 )
+
 
 def _ensure_runs_logs_dir() -> Path:
     d = RUNS_LOGS_DIR
@@ -625,11 +659,13 @@ def _ensure_runs_logs_dir() -> Path:
         )
     return d
 
+
 def _safe_hostname() -> str:
     try:
         return socket.gethostname()
     except Exception:
         return "unknown-host"
+
 
 def _to_jsonable(
     obj: Any,
@@ -657,7 +693,16 @@ def _to_jsonable(
             seq = list(obj)
             out: List[Any] = []
             for item in seq[:max_list_items]:
-                out.append(_to_jsonable(item, max_str_chars=max_str_chars, max_list_items=max_list_items, max_dict_keys=max_dict_keys, depth=depth + 1, max_depth=max_depth))
+                out.append(
+                    _to_jsonable(
+                        item,
+                        max_str_chars=max_str_chars,
+                        max_list_items=max_list_items,
+                        max_dict_keys=max_dict_keys,
+                        depth=depth + 1,
+                        max_depth=max_depth,
+                    )
+                )
             if len(seq) > max_list_items:
                 out.append(f"...(+{len(seq) - max_list_items} items)")
             return out
@@ -671,7 +716,14 @@ def _to_jsonable(
             for k in keys_sorted[:max_dict_keys]:
                 sk = str(k)
                 try:
-                    out_d[sk] = _to_jsonable(obj.get(k), max_str_chars=max_str_chars, max_list_items=max_list_items, max_dict_keys=max_dict_keys, depth=depth + 1, max_depth=max_depth)
+                    out_d[sk] = _to_jsonable(
+                        obj.get(k),
+                        max_str_chars=max_str_chars,
+                        max_list_items=max_list_items,
+                        max_dict_keys=max_dict_keys,
+                        depth=depth + 1,
+                        max_depth=max_depth,
+                    )
                 except Exception:
                     out_d[sk] = safe_repr(obj.get(k), max_str_chars)
             if len(keys) > max_dict_keys:
@@ -686,6 +738,7 @@ def _to_jsonable(
             return safe_repr(obj, max_str_chars)
         except Exception:
             return "<unjsonable>"
+
 
 # ---------------------------------------------------------------------------
 # Narrative event timeline (agent/event_log.py) integration (best-effort)
@@ -702,6 +755,7 @@ _EVENT_LOG_THROTTLE = _LogThrottle(
     max_keys=_env_int("WORKER_EVENT_LOG_THROTTLE_MAX_KEYS", 1024),
     min_interval_s=_env_float_value("WORKER_EVENT_LOG_THROTTLE_MIN_INTERVAL_SECONDS", 2.0),
 )
+
 
 def _event(
     *,
@@ -758,6 +812,7 @@ def _event(
     except Exception:
         return
 
+
 def _disk_write_json(
     path: Path,
     payload: Any,
@@ -786,17 +841,22 @@ def _disk_write_json(
         log_exception("disk_artifact_write_failed", e, path=str(path))
         return False
 
+
 def _worker_state_file_path() -> Path:
     return _ensure_runs_logs_dir() / "worker_state.json"
+
 
 def _watchdog_heartbeat_file_path() -> Path:
     return _ensure_runs_logs_dir() / "watchdog_heartbeat.json"
 
+
 def _run_state_file_path() -> Path:
     return _ensure_runs_logs_dir() / "run_state.json"
 
+
 def _run_progress_file_path(run_id: str) -> Path:
     return _ensure_runs_logs_dir() / f"{run_id}_progress.json"
+
 
 def _emit_watchdog_heartbeat_file(
     *,
@@ -841,11 +901,14 @@ def _emit_watchdog_heartbeat_file(
             _watchdog_heartbeat_file_path(),
             payload,
             throttle_key="watchdog_heartbeat_file",
-            throttle_min_interval_s=_env_float_value("WORKER_WATCHDOG_HEARTBEAT_FILE_MIN_INTERVAL_SECONDS", 0.25),
+            throttle_min_interval_s=_env_float_value(
+                "WORKER_WATCHDOG_HEARTBEAT_FILE_MIN_INTERVAL_SECONDS", 0.25
+            ),
             force=force,
         )
     except Exception as e:
         log_exception("watchdog_heartbeat_file_failed", e)
+
 
 def _emit_worker_state_file(
     *,
@@ -930,16 +993,21 @@ def _emit_worker_state_file(
             "extra": extra_small,
         }
 
-        terminalish = str(status).lower() in {"error", "failed", "stopped"} or (current is not None and total is not None and current == total)
+        terminalish = str(status).lower() in {"error", "failed", "stopped"} or (
+            current is not None and total is not None and current == total
+        )
         _disk_write_json(
             _worker_state_file_path(),
             payload,
             throttle_key="worker_state_file",
-            throttle_min_interval_s=_env_float_value("WORKER_WORKER_STATE_FILE_MIN_INTERVAL_SECONDS", 0.5),
+            throttle_min_interval_s=_env_float_value(
+                "WORKER_WORKER_STATE_FILE_MIN_INTERVAL_SECONDS", 0.5
+            ),
             force=force or terminalish,
         )
     except Exception as e:
         log_exception("worker_state_file_failed", e, status=status, mode=mode, run_id=run_id)
+
 
 def _emit_run_progress_file(
     *,
@@ -990,14 +1058,22 @@ def _emit_run_progress_file(
             "extra": _to_jsonable(extra) if isinstance(extra, dict) else None,
         }
 
-        terminalish = str(status).lower() in {"finished", "done", "error", "failed", "stopped"} or (current is not None and total is not None and current == total)
+        terminalish = str(status).lower() in {
+            "finished",
+            "done",
+            "error",
+            "failed",
+            "stopped",
+        } or (current is not None and total is not None and current == total)
 
         # Per-run progress file
         _disk_write_json(
             _run_progress_file_path(run_id),
             payload,
             throttle_key=f"run_progress_file:{run_id}",
-            throttle_min_interval_s=_env_float_value("WORKER_RUN_PROGRESS_FILE_MIN_INTERVAL_SECONDS", 0.25),
+            throttle_min_interval_s=_env_float_value(
+                "WORKER_RUN_PROGRESS_FILE_MIN_INTERVAL_SECONDS", 0.25
+            ),
             force=force or terminalish,
         )
 
@@ -1008,11 +1084,14 @@ def _emit_run_progress_file(
             _run_state_file_path(),
             run_state_payload,
             throttle_key="run_state_file",
-            throttle_min_interval_s=_env_float_value("WORKER_RUN_STATE_FILE_MIN_INTERVAL_SECONDS", 0.25),
+            throttle_min_interval_s=_env_float_value(
+                "WORKER_RUN_STATE_FILE_MIN_INTERVAL_SECONDS", 0.25
+            ),
             force=force or terminalish,
         )
     except Exception as e:
         log_exception("run_progress_file_failed", e, run_id=run_id, status=status)
+
 
 # ---------------------------------------------------------------------------
 # Hard safety caps and forever mode (unchanged behavior)
@@ -1029,6 +1108,7 @@ def _parse_int_env(name: str, default: int) -> int:
         return v
     except Exception:
         return default
+
 
 def _parse_float_env(name: str, default: float) -> float:
     """
@@ -1049,9 +1129,11 @@ def _parse_float_env(name: str, default: float) -> float:
     except Exception:
         return default
 
+
 HARD_MAX_CYCLES: int = _parse_int_env("WORKER_HARD_MAX_CYCLES", 10_000_000)
 HARD_MAX_ROUNDS: int = _parse_int_env("WORKER_HARD_MAX_ROUNDS", HARD_MAX_CYCLES)
 HARD_MAX_MINUTES: float = _parse_float_env("WORKER_HARD_MAX_MINUTES", 129_600.0)
+
 
 def _clamp_int(value: int, hard_max: int, label: str) -> int:
     if value > hard_max:
@@ -1063,6 +1145,7 @@ def _clamp_int(value: int, hard_max: int, label: str) -> int:
         _emit_log_line(f"[Safety] {label} requested {value} is non positive. Using 1.")
         return 1
     return value
+
 
 def _clamp_minutes(value: Optional[float], label: str) -> Optional[float]:
     """
@@ -1088,11 +1171,13 @@ def _clamp_minutes(value: Optional[float], label: str) -> Optional[float]:
         return None
     return value
 
+
 # ---------------------------------------------------------------------------
 # Boot banner + startup logging
 # ---------------------------------------------------------------------------
 
 _STARTUP_LOGGED: bool = False
+
 
 def _boot_banner(mode: str) -> None:
     global _STARTUP_LOGGED
@@ -1156,6 +1241,7 @@ def _boot_banner(mode: str) -> None:
         env=env_flags,
     )
 
+
 # ---------------------------------------------------------------------------
 # Config and environment helpers (disk/parse hardened)
 # ---------------------------------------------------------------------------
@@ -1181,6 +1267,7 @@ def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
     except Exception as e:
         log_exception("config_load_failed", e, path=str(path))
         return {}
+
 
 def ensure_directories() -> None:
     """Ensure that log directories exist, same pattern as the Streamlit app."""
@@ -1208,6 +1295,7 @@ def ensure_directories() -> None:
             runs_logs=str(runs_logs_path),
         )
 
+
 def _env_float(name: str) -> Optional[float]:
     val = os.getenv(name)
     if not val:
@@ -1217,12 +1305,14 @@ def _env_float(name: str) -> Optional[float]:
     except Exception:
         return None
 
+
 def _env_list(name: str) -> Optional[List[str]]:
     val = os.getenv(name)
     if not val:
         return None
     parts = [p.strip() for p in val.split(",") if p.strip()]
     return parts or None
+
 
 # ---------------------------------------------------------------------------
 # Tool detection (tolerant)
@@ -1258,11 +1348,14 @@ def detect_tools() -> Dict[str, bool]:
     log_kv("tools_detected", web=has_web, sandbox=has_sandbox)
     return {"web": has_web, "sandbox": has_sandbox}
 
+
 def _configure_tavily_from_env() -> None:
     """
     Optional Tavily key configuration.
     """
-    if _env_bool("DISABLE_WEB_SEARCH", default=False) or _env_bool("WORKER_DISABLE_WEB", default=False):
+    if _env_bool("DISABLE_WEB_SEARCH", default=False) or _env_bool(
+        "WORKER_DISABLE_WEB", default=False
+    ):
         if _VERBOSE_LOGS:
             log_kv("tavily_skipped_web_disabled", level="DEBUG")
         return
@@ -1274,7 +1367,13 @@ def _configure_tavily_from_env() -> None:
         log_kv("tavily_key_propagated", from_env="WORKER_TAVILY_KEY", to_env="TAVILY_API_KEY")
     else:
         if _VERBOSE_LOGS:
-            log_kv("tavily_key_unchanged", level="DEBUG", has_worker_key=bool(worker_key), has_existing=bool(existing))
+            log_kv(
+                "tavily_key_unchanged",
+                level="DEBUG",
+                has_worker_key=bool(worker_key),
+                has_existing=bool(existing),
+            )
+
 
 def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
     """
@@ -1318,7 +1417,9 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
     _override_bool("biomarkers", "WORKER_BIOMARKERS")
     _override_bool("sandbox", "WORKER_SANDBOX")
 
-    if _env_bool("DISABLE_WEB_SEARCH", default=False) or _env_bool("WORKER_DISABLE_WEB", default=False):
+    if _env_bool("DISABLE_WEB_SEARCH", default=False) or _env_bool(
+        "WORKER_DISABLE_WEB", default=False
+    ):
         sc["web"] = False
         log_kv("sources_web_disabled_by_env", level="WARNING")
 
@@ -1333,6 +1434,7 @@ def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
 
     log_kv("sources_final", sources=sc)
     return sc
+
 
 # ---------------------------------------------------------------------------
 # Agent and memory helpers (unchanged, but logging hardened)
@@ -1368,6 +1470,7 @@ def init_agent_from_config() -> Tuple[CoreAgent, Dict[str, Any]]:
         if _VERBOSE_LOGS:
             log_kv("agent_initialized_roles_failed", level="DEBUG")
     return agent, config
+
 
 def build_goal_and_domain() -> Tuple[str, str]:
     """
@@ -1411,17 +1514,20 @@ def build_goal_and_domain() -> Tuple[str, str]:
 
     return goal, domain
 
+
 def _get_memory_store(agent: CoreAgent) -> Optional[MemoryStore]:
     ms = getattr(agent, "memory_store", None)
     if isinstance(ms, MemoryStore):
         return ms
     return None
 
+
 def _current_run_id(mode: str) -> str:
     base = os.getenv("WORKER_RUN_ID")
     if base:
         return base
     return f"{mode}-{_safe_os_getpid()}"
+
 
 def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> None:
     """
@@ -1486,6 +1592,7 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
         except Exception:
             pass
 
+
 def _start_heartbeat_loop(
     agent: CoreAgent,
     *,
@@ -1506,6 +1613,7 @@ def _start_heartbeat_loop(
     t.start()
     return stop_event, t
 
+
 def _safe_agent_hook(agent: CoreAgent, hook_name: str, **kwargs: Any) -> Optional[Any]:
     fn = getattr(agent, hook_name, None)
     if not callable(fn):
@@ -1515,6 +1623,7 @@ def _safe_agent_hook(agent: CoreAgent, hook_name: str, **kwargs: Any) -> Optiona
     except Exception as e:
         log_exception("agent_hook_failed", e, hook=hook_name, kwargs_keys=list(kwargs.keys()))
         return None
+
 
 def _build_experiment_fingerprint(
     *,
@@ -1551,6 +1660,7 @@ def _build_experiment_fingerprint(
     except Exception as e:
         log_exception("fingerprint_failed", e)
         return "unknown"
+
 
 def _log_run_manifest(
     agent: CoreAgent,
@@ -1601,6 +1711,7 @@ def _log_run_manifest(
     except Exception as e:
         log_exception("manifest_log_failed", e, run_id=run_id)
 
+
 def _log_milestone(
     agent: CoreAgent,
     *,
@@ -1648,9 +1759,16 @@ def _log_milestone(
         )
 
         if _VERBOSE_LOGS:
-            log_kv("milestone_logged", level="DEBUG", run_id=run_id, label=label, milestone_level=level)
+            log_kv(
+                "milestone_logged",
+                level="DEBUG",
+                run_id=run_id,
+                label=label,
+                milestone_level=level,
+            )
     except Exception as e:
         log_exception("milestone_log_failed", e, run_id=run_id, label=label)
+
 
 def _update_worker_state(
     agent: CoreAgent,
@@ -1691,7 +1809,9 @@ def _update_worker_state(
                 extra=extra,
             )
         except Exception as e:
-            log_exception("worker_state_update_failed", e, status=status, mode=mode, run_id=run_id)
+            log_exception(
+                "worker_state_update_failed", e, status=status, mode=mode, run_id=run_id
+            )
 
     # Streamlit artifact: worker_state.json
     try:
@@ -1713,6 +1833,7 @@ def _update_worker_state(
         )
     except Exception:
         pass
+
 
 def _write_cycles_and_run_state(
     agent: CoreAgent,
@@ -1813,6 +1934,7 @@ def _write_cycles_and_run_state(
     except Exception:
         pass
 
+
 def _write_snapshot(
     agent: CoreAgent,
     *,
@@ -1897,6 +2019,7 @@ def _write_snapshot(
     except Exception as e:
         log_exception("snapshot_write_failed", e, run_id=run_id)
 
+
 def _run_post_run_intelligence(
     agent: CoreAgent,
     *,
@@ -1940,6 +2063,7 @@ def _run_post_run_intelligence(
 
     return info
 
+
 # ---------------------------------------------------------------------------
 # Result normalization helpers for UI (unchanged)
 # ---------------------------------------------------------------------------
@@ -1959,6 +2083,7 @@ def _normalize_cycles_for_ui(cycles_list: List[Any]) -> List[Dict[str, Any]]:
         normalized.append(c)
     return normalized
 
+
 def _aggregate_from_cycles(cycles: List[Dict[str, Any]], key: str) -> List[Any]:
     out: List[Any] = []
     for c in cycles:
@@ -1966,6 +2091,7 @@ def _aggregate_from_cycles(cycles: List[Dict[str, Any]], key: str) -> List[Any]:
         if isinstance(val, list):
             out.extend(val)
     return out
+
 
 def _attach_top_level_defaults(
     result_obj: Dict[str, Any],
@@ -1994,6 +2120,7 @@ def _attach_top_level_defaults(
     result_obj.setdefault("diagnostics", diagnostics)
     result_obj.setdefault("rye_metrics", diagnostics)
     return result_obj
+
 
 # ---------------------------------------------------------------------------
 # Direct single job API (unchanged public behavior; additional safety retained)
@@ -2414,7 +2541,12 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
 
     except Exception as e:
         tb = traceback.format_exc()
-        log_kv("direct_job_fatal", level="ERROR", run_id=run_id, error_summary=_compact_error_summary(e))
+        log_kv(
+            "direct_job_fatal",
+            level="ERROR",
+            run_id=run_id,
+            error_summary=_compact_error_summary(e),
+        )
         _emit_log_line(_truncate_text(tb, _env_int("WORKER_TRACEBACK_MAX_CHARS", 20000)))
 
         error_payload: Dict[str, Any] = {
@@ -2515,6 +2647,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             except Exception:
                 pass
 
+
 # ---------------------------------------------------------------------------
 # Queue mode robustness: internal file queue backend (concurrency-safe, retries)
 # ---------------------------------------------------------------------------
@@ -2529,6 +2662,7 @@ class QueueDirs:
     bad_jobs: Path
     locks: Path
 
+
 def _resolve_queue_dirs(base: Path) -> QueueDirs:
     # Default layout
     pending = base / "pending"
@@ -2541,6 +2675,7 @@ def _resolve_queue_dirs(base: Path) -> QueueDirs:
     # Prefer agent.run_jobs directory constants if present
     try:
         import agent.run_jobs as run_jobs_mod  # type: ignore[import]
+
         for name, attr in [
             ("pending", "PENDING_DIR"),
             ("active", "ACTIVE_DIR"),
@@ -2575,6 +2710,7 @@ def _resolve_queue_dirs(base: Path) -> QueueDirs:
         locks=locks,
     )
 
+
 @dataclass
 class QueueJobRecord:
     run_id: str
@@ -2589,6 +2725,7 @@ class QueueJobRecord:
     claim_token: Optional[str]
     state_path: Path
     raw: Dict[str, Any] = field(default_factory=dict)
+
 
 class FileQueue:
     def __init__(self, dirs: QueueDirs, *, worker_id: str):
@@ -2715,7 +2852,9 @@ class FileQueue:
                                 pass
                         finally:
                             os.close(fd2)
-                        log_kv("lock_recovered_stale", level="WARNING", run_id=run_id, age_s=int(age))
+                        log_kv(
+                            "lock_recovered_stale", level="WARNING", run_id=run_id, age_s=int(age)
+                        )
                         return True
                     except Exception:
                         return False
@@ -2760,9 +2899,17 @@ class FileQueue:
                     path.unlink()
                 except Exception:
                     pass
-            log_kv("job_quarantined", level="ERROR", path=str(path), dest=str(dest), reason=_truncate_text(reason, 300))
+            log_kv(
+                "job_quarantined",
+                level="ERROR",
+                path=str(path),
+                dest=str(dest),
+                reason=_truncate_text(reason, 300),
+            )
         except Exception as e:
-            log_exception("job_quarantine_failed", e, path=str(path), reason=_truncate_text(reason, 200))
+            log_exception(
+                "job_quarantine_failed", e, path=str(path), reason=_truncate_text(reason, 200)
+            )
 
     def _parse_job(self, path: Path) -> Optional[QueueJobRecord]:
         data_raw = safe_read_json(path)
@@ -2830,7 +2977,9 @@ class FileQueue:
         if max_retries is None:
             max_retries = cfg.get("max_retries")
         try:
-            max_retries_int = int(max_retries) if max_retries is not None else int(self.default_max_retries)
+            max_retries_int = (
+                int(max_retries) if max_retries is not None else int(self.default_max_retries)
+            )
         except Exception:
             max_retries_int = int(self.default_max_retries)
         if max_retries_int < 0:
@@ -2962,7 +3111,9 @@ class FileQueue:
 
                 # Write updated state before move
                 if not atomic_write_json(p, job.raw, indent=2):
-                    log_kv("stale_recovery_write_failed", level="ERROR", run_id=job.run_id, path=str(p))
+                    log_kv(
+                        "stale_recovery_write_failed", level="ERROR", run_id=job.run_id, path=str(p)
+                    )
                     continue
 
                 # Move back to pending
@@ -2970,7 +3121,13 @@ class FileQueue:
                 try:
                     os.replace(str(p), str(dest))
                 except Exception as e:
-                    log_exception("stale_recovery_move_failed", e, run_id=job.run_id, src=str(p), dest=str(dest))
+                    log_exception(
+                        "stale_recovery_move_failed",
+                        e,
+                        run_id=job.run_id,
+                        src=str(p),
+                        dest=str(dest),
+                    )
                     continue
 
                 # Release lock if present (stale lock recovery)
@@ -3046,7 +3203,9 @@ class FileQueue:
                     continue
                 except Exception as e:
                     self.release_lock(job.run_id)
-                    log_exception("job_claim_move_failed", e, run_id=job.run_id, src=str(p), dest=str(dest))
+                    log_exception(
+                        "job_claim_move_failed", e, run_id=job.run_id, src=str(p), dest=str(dest)
+                    )
                     continue
 
                 # Re-parse from active path and set running claim info
@@ -3183,7 +3342,9 @@ class FileQueue:
 
         # Write state to active path before move
         if not atomic_write_json(job.state_path, job.raw, indent=2):
-            log_kv("retry_state_write_failed", level="ERROR", run_id=job.run_id, path=str(job.state_path))
+            log_kv(
+                "retry_state_write_failed", level="ERROR", run_id=job.run_id, path=str(job.state_path)
+            )
             return False
 
         # Move to pending
@@ -3220,7 +3381,9 @@ class FileQueue:
 
             return True
         except Exception as e:
-            log_exception("retry_move_failed", e, run_id=job.run_id, src=str(job.state_path), dest=str(dest))
+            log_exception(
+                "retry_move_failed", e, run_id=job.run_id, src=str(job.state_path), dest=str(dest)
+            )
             return False
 
     def finalize_success(self, job: QueueJobRecord, *, result_obj: Dict[str, Any]) -> bool:
@@ -3254,7 +3417,13 @@ class FileQueue:
         try:
             os.replace(str(job.state_path), str(job_state_path))
         except Exception as e:
-            log_exception("job_state_archive_failed", e, run_id=job.run_id, src=str(job.state_path), dest=str(job_state_path))
+            log_exception(
+                "job_state_archive_failed",
+                e,
+                run_id=job.run_id,
+                src=str(job.state_path),
+                dest=str(job_state_path),
+            )
             # If move fails, don't fail whole finalize; lock still should be released
         self.release_lock(job.run_id)
 
@@ -3315,7 +3484,13 @@ class FileQueue:
         try:
             os.replace(str(job.state_path), str(job_state_path))
         except Exception as e:
-            log_exception("job_state_error_archive_failed", e, run_id=job.run_id, src=str(job.state_path), dest=str(job_state_path))
+            log_exception(
+                "job_state_error_archive_failed",
+                e,
+                run_id=job.run_id,
+                src=str(job.state_path),
+                dest=str(job_state_path),
+            )
 
         self.release_lock(job.run_id)
 
@@ -3371,6 +3546,7 @@ class FileQueue:
         except Exception as e:
             log_exception("job_shutdown_requeue_failed", e, run_id=job.run_id, reason=reason_s)
 
+
 # ---------------------------------------------------------------------------
 # Adaptive backoff (idle + error), jitter, responsive wake
 # ---------------------------------------------------------------------------
@@ -3416,6 +3592,7 @@ class AdaptiveBackoff:
             s *= random.uniform(max(0.0, 1.0 - j), 1.0 + j)
         return max(0.05, s)
 
+
 # Optional FS watch wakeup (watchdog library if installed)
 class _PendingWatcher:
     def __init__(self, watch_dir: Path):
@@ -3439,6 +3616,7 @@ class _PendingWatcher:
             def __init__(self, ev: threading.Event):
                 super().__init__()
                 self._ev = ev
+
             def on_any_event(self, event):  # type: ignore[override]
                 try:
                     self._ev.set()
@@ -3487,6 +3665,7 @@ class _PendingWatcher:
         except Exception:
             pass
 
+
 # ---------------------------------------------------------------------------
 # Shutdown handling + watchdog
 # ---------------------------------------------------------------------------
@@ -3496,20 +3675,24 @@ _SHUTDOWN_SIGNAL: Optional[str] = None
 _CURRENT_QUEUE_JOB_LOCK = threading.RLock()
 _CURRENT_QUEUE_JOB: Optional[QueueJobRecord] = None
 
+
 def _set_current_job(job: Optional[QueueJobRecord]) -> None:
     global _CURRENT_QUEUE_JOB
     with _CURRENT_QUEUE_JOB_LOCK:
         _CURRENT_QUEUE_JOB = job
 
+
 def _get_current_job() -> Optional[QueueJobRecord]:
     with _CURRENT_QUEUE_JOB_LOCK:
         return _CURRENT_QUEUE_JOB
+
 
 def _signal_name(signum: int) -> str:
     try:
         return signal.Signals(signum).name
     except Exception:
         return str(signum)
+
 
 def _handle_shutdown_signal(signum: int, frame: Any) -> None:  # noqa: ARG001
     global _SHUTDOWN_SIGNAL
@@ -3524,6 +3707,7 @@ def _handle_shutdown_signal(signum: int, frame: Any) -> None:  # noqa: ARG001
         has_current_job=bool(_get_current_job()),
     )
 
+
 def _install_signal_handlers() -> None:
     try:
         signal.signal(signal.SIGTERM, _handle_shutdown_signal)
@@ -3533,6 +3717,7 @@ def _install_signal_handlers() -> None:
         signal.signal(signal.SIGINT, _handle_shutdown_signal)
     except Exception:
         pass
+
 
 class _WorkerWatchdog(threading.Thread):
     def __init__(
@@ -3612,12 +3797,14 @@ class _WorkerWatchdog(threading.Thread):
             finally:
                 self._stop.wait(self.check_interval_s)
 
+
 # ---------------------------------------------------------------------------
 # Queue progress writer (atomic + throttled logs)
 # ---------------------------------------------------------------------------
 
 _PROGRESS_LOG_MIN_INTERVAL_S = _env_float_value("WORKER_PROGRESS_LOG_MIN_INTERVAL_SECONDS", 10.0)
 _PROGRESS_LOG_STATE: Dict[str, float] = {}
+
 
 def _should_log_progress(run_id: str, status: str) -> bool:
     # Always log terminal states
@@ -3635,6 +3822,7 @@ def _should_log_progress(run_id: str, status: str) -> bool:
                 _PROGRESS_LOG_STATE.clear()
         return True
     return False
+
 
 def _cleanup_active_job_files(run_id: str) -> None:
     """
@@ -3661,8 +3849,10 @@ def _cleanup_active_job_files(run_id: str) -> None:
     except Exception as e:
         log_exception("active_cleanup_failed", e, run_id=run_id)
 
+
 def _fallback_progress_path(run_id: str) -> Path:
     return BASE_DIR / "active" / f"{run_id}_progress.json"
+
 
 def _write_job_progress(
     run_id: str,
@@ -3724,7 +3914,8 @@ def _write_job_progress(
                 phase_index=1,
                 phase_name="run",
                 extra=None,
-                force=status.lower() in {"finished", "error", "failed", "stopped", "retrying"},
+                force=status.lower()
+                in {"finished", "error", "failed", "stopped", "retrying"},
             )
         except Exception:
             pass
@@ -3753,6 +3944,7 @@ def _write_job_progress(
     except Exception as e:
         log_exception("progress_write_failed", e, run_id=run_id, status=status)
 
+
 # ---------------------------------------------------------------------------
 # Queue job execution (existing logic with controlled finalization)
 # ---------------------------------------------------------------------------
@@ -3763,8 +3955,10 @@ class JobExecutionOutcome:
     result: Optional[Dict[str, Any]] = None
     error: Optional[Dict[str, Any]] = None
 
+
 class JobWallTimeExceeded(RuntimeError):
     pass
+
 
 @contextlib.contextmanager
 def _job_wall_time_guard(seconds: Optional[float]) -> Any:
@@ -3777,7 +3971,12 @@ def _job_wall_time_guard(seconds: Optional[float]) -> Any:
         return
 
     # Windows / some platforms: SIGALRM + itimer not available
-    if not (hasattr(signal, "SIGALRM") and hasattr(signal, "ITIMER_REAL") and hasattr(signal, "setitimer") and hasattr(signal, "getitimer")):
+    if not (
+        hasattr(signal, "SIGALRM")
+        and hasattr(signal, "ITIMER_REAL")
+        and hasattr(signal, "setitimer")
+        and hasattr(signal, "getitimer")
+    ):
         yield
         return
 
@@ -3813,6 +4012,7 @@ def _job_wall_time_guard(seconds: Optional[float]) -> Any:
                 signal.setitimer(signal.ITIMER_REAL, float(old_timer[0]), float(old_timer[1]))
         except Exception:
             pass
+
 
 def _process_single_job(
     agent: CoreAgent,
@@ -4433,7 +4633,12 @@ def _process_single_job(
             except Exception as e:
                 log_exception("legacy_save_job_result_failed", e, run_id=run_id)
 
-        log_kv("job_execution_done", run_id=run_id, elapsed_s=round(elapsed, 2), cycles=len(normalized_cycles))
+        log_kv(
+            "job_execution_done",
+            run_id=run_id,
+            elapsed_s=round(elapsed, 2),
+            cycles=len(normalized_cycles),
+        )
         return JobExecutionOutcome(ok=True, result=result_obj)
 
     except JobWallTimeExceeded as e:
@@ -4461,7 +4666,12 @@ def _process_single_job(
             "run_id": run_id,
         }
 
-        log_kv("job_execution_error", level="ERROR", run_id=run_id, error_summary=error_payload["error_summary"])
+        log_kv(
+            "job_execution_error",
+            level="ERROR",
+            run_id=run_id,
+            error_summary=error_payload["error_summary"],
+        )
         _emit_log_line(_truncate_text(tb, _env_int("WORKER_TRACEBACK_MAX_CHARS", 20000)))
 
         # Do NOT mark error to disk here if finalize_to_disk False (retry logic decides).
@@ -4478,6 +4688,7 @@ def _process_single_job(
                 pass
 
         return JobExecutionOutcome(ok=False, error=error_payload)
+
 
 # ---------------------------------------------------------------------------
 # Always-on queue worker main loop (best-in-class, never exits on transient errors)
@@ -4502,6 +4713,7 @@ class WorkerStats:
     last_heartbeat_mono: float = field(default_factory=time.monotonic)
     last_progress_utc: Optional[str] = None
 
+
 def _interruptible_wait(timeout_s: float, watcher: Optional[_PendingWatcher]) -> None:
     # Always sleep at least a tiny amount when idle
     t = max(0.05, float(timeout_s))
@@ -4518,6 +4730,7 @@ def _interruptible_wait(timeout_s: float, watcher: Optional[_PendingWatcher]) ->
         if remaining <= 0:
             return
         time.sleep(min(0.25, remaining))
+
 
 def run_job_queue_worker() -> None:
     """
@@ -4583,7 +4796,9 @@ def run_job_queue_worker() -> None:
 
     stats = WorkerStats()
     heartbeat_interval_s = _env_float_value("WORKER_HEARTBEAT_SECONDS", 30.0)
-    heartbeat_stall_s = _env_float_value("WORKER_WATCHDOG_HEARTBEAT_STALL_SECONDS", max(90.0, heartbeat_interval_s * 3.0))
+    heartbeat_stall_s = _env_float_value(
+        "WORKER_WATCHDOG_HEARTBEAT_STALL_SECONDS", max(90.0, heartbeat_interval_s * 3.0)
+    )
 
     # Adaptive backoff for empty queue and errors
     backoff = AdaptiveBackoff(
@@ -4607,6 +4822,7 @@ def run_job_queue_worker() -> None:
     if tracemalloc_enabled:
         try:
             import tracemalloc  # type: ignore
+
             tracemalloc.start(tracemalloc_nframes)
             log_kv("tracemalloc_started", nframes=tracemalloc_nframes)
         except Exception as e:
@@ -4664,7 +4880,9 @@ def run_job_queue_worker() -> None:
 
     # Initial Streamlit artifacts for idle state
     try:
-        _emit_watchdog_heartbeat_file(label="queue_worker_started", run_id=None, extra={"counts": queue.scan_counts()}, force=True)
+        _emit_watchdog_heartbeat_file(
+            label="queue_worker_started", run_id=None, extra={"counts": queue.scan_counts()}, force=True
+        )
         _emit_worker_state_file(
             status="idle",
             mode="queue",
@@ -4736,7 +4954,11 @@ def run_job_queue_worker() -> None:
 
                 # Streamlit artifacts heartbeat while idle
                 try:
-                    counts_now = stats.last_counts if isinstance(stats.last_counts, dict) and stats.last_counts else queue.scan_counts()
+                    counts_now = (
+                        stats.last_counts
+                        if isinstance(stats.last_counts, dict) and stats.last_counts
+                        else queue.scan_counts()
+                    )
                     _emit_watchdog_heartbeat_file(
                         label="queue_worker_heartbeat",
                         run_id=None,
@@ -4774,7 +4996,9 @@ def run_job_queue_worker() -> None:
                             "queue_counts": _to_jsonable(counts_now),
                         },
                         throttle_key="run_state_file",
-                        throttle_min_interval_s=_env_float_value("WORKER_RUN_STATE_FILE_MIN_INTERVAL_SECONDS", 0.25),
+                        throttle_min_interval_s=_env_float_value(
+                            "WORKER_RUN_STATE_FILE_MIN_INTERVAL_SECONDS", 0.25
+                        ),
                         force=False,
                     )
                 except Exception:
@@ -4875,6 +5099,7 @@ def run_job_queue_worker() -> None:
 
             # Execute job (nested crash shield)
             _set_current_job(job)
+
             # Provide a simple job-like object for executor
             @dataclass
             class _JobLike:
@@ -4883,7 +5108,9 @@ def run_job_queue_worker() -> None:
                 meta: Any
                 created_at: float
 
-            job_like = _JobLike(run_id=job.run_id, config=job.config, meta=job.meta, created_at=job.created_at)
+            job_like = _JobLike(
+                run_id=job.run_id, config=job.config, meta=job.meta, created_at=job.created_at
+            )
 
             outcome: JobExecutionOutcome
             try:
@@ -4983,7 +5210,9 @@ def run_job_queue_worker() -> None:
             try:
                 job_count = stats.jobs_done + stats.jobs_failed + stats.jobs_retried
                 now_m = time.monotonic()
-                if (gc_every_n_jobs > 0 and job_count % gc_every_n_jobs == 0) or (now_m - last_gc_mono) >= float(gc_every_seconds):
+                if (gc_every_n_jobs > 0 and job_count % gc_every_n_jobs == 0) or (
+                    now_m - last_gc_mono
+                ) >= float(gc_every_seconds):
                     last_gc_mono = now_m
                     gc.collect()
                     log_kv("gc_collected", level="DEBUG", job_count=job_count)
@@ -4994,8 +5223,12 @@ def run_job_queue_worker() -> None:
             if tracemalloc_enabled:
                 try:
                     import tracemalloc  # type: ignore
+
                     job_count = stats.jobs_done + stats.jobs_failed + stats.jobs_retried
-                    if tracemalloc_snapshot_every_n_jobs > 0 and job_count % tracemalloc_snapshot_every_n_jobs == 0:
+                    if (
+                        tracemalloc_snapshot_every_n_jobs > 0
+                        and job_count % tracemalloc_snapshot_every_n_jobs == 0
+                    ):
                         snap = tracemalloc.take_snapshot()
                         if tracemalloc_prev is not None:
                             top = snap.compare_to(tracemalloc_prev, "lineno")
@@ -5024,6 +5257,7 @@ def run_job_queue_worker() -> None:
             cycle_elapsed = time.monotonic() - cycle_start_mono
             if cycle_elapsed < 0.001:
                 time.sleep(0.001)
+
 
 # ---------------------------------------------------------------------------
 # Single and swarm engines (non-queue): keep behavior, but add crash shields
@@ -5352,6 +5586,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 time.sleep(2.0)
                 continue
             return
+
 
 def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     """
@@ -5749,6 +5984,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 continue
             return
 
+
 # ---------------------------------------------------------------------------
 # Meta controller (kept; crash shield only)
 # ---------------------------------------------------------------------------
@@ -5795,7 +6031,10 @@ def _compute_segment_stats(segment_summaries: List[Dict[str, Any]], domain: Opti
         "momentum": diag.get("recovery_momentum"),
     }
 
-def _initial_meta_plan(goal: str, domain: str, preferred_mode: str, total_budget_minutes: Optional[float]) -> Dict[str, Any]:
+
+def _initial_meta_plan(
+    goal: str, domain: str, preferred_mode: str, total_budget_minutes: Optional[float]
+) -> Dict[str, Any]:
     if total_budget_minutes is None or total_budget_minutes <= 0:
         total_budget_minutes = 60.0
 
@@ -5862,7 +6101,10 @@ def _initial_meta_plan(goal: str, domain: str, preferred_mode: str, total_budget
         ],
     }
 
-def _adjust_phase_from_stats(phase_cfg: Dict[str, Any], stats: Dict[str, Any], recent_avg_rye: Optional[float]) -> Tuple[float, Optional[float]]:
+
+def _adjust_phase_from_stats(
+    phase_cfg: Dict[str, Any], stats: Dict[str, Any], recent_avg_rye: Optional[float]
+) -> Tuple[float, Optional[float]]:
     _ = stats
     base_target = float(phase_cfg.get("target_minutes", 20.0))
     min_minutes = float(phase_cfg.get("min_minutes", 5.0))
@@ -5894,6 +6136,7 @@ def _adjust_phase_from_stats(phase_cfg: Dict[str, Any], stats: Dict[str, Any], r
 
     effective_minutes = _clamp_minutes(effective_minutes, "meta.segment") or min_minutes
     return effective_minutes, effective_stop_rye
+
 
 def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     _boot_banner("meta")
@@ -6005,7 +6248,12 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             )
 
             # Meta phases for UI
-            meta_plan = _initial_meta_plan(goal=goal, domain=domain, preferred_mode=preferred_mode, total_budget_minutes=total_budget_minutes)
+            meta_plan = _initial_meta_plan(
+                goal=goal,
+                domain=domain,
+                preferred_mode=preferred_mode,
+                total_budget_minutes=total_budget_minutes,
+            )
             phase_total_ui = 3
             phase_index_map = {"exploration": 1, "stabilization": 2, "refinement": 3}
 
@@ -6094,7 +6342,9 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
                     # Phase info for UI (1/3, 2/3, 3/3)
                     phase_name_s = str(phase_name)
-                    phase_index_ui = phase_index_map.get(phase_name_s.lower(), min(seg_index + 1, phase_total_ui))
+                    phase_index_ui = phase_index_map.get(
+                        phase_name_s.lower(), min(seg_index + 1, phase_total_ui)
+                    )
                     if phase_index_ui > phase_total_ui:
                         phase_index_ui = phase_total_ui
 
@@ -6111,7 +6361,11 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         phase_total=phase_total_ui,
                         phase_index=phase_index_ui,
                         phase_name=phase_name_s,
-                        extra={"segment_index": seg_index + 1, "phase_mode": phase_mode, "runtime_profile": phase_profile},
+                        extra={
+                            "segment_index": seg_index + 1,
+                            "phase_mode": phase_mode,
+                            "runtime_profile": phase_profile,
+                        },
                         force=True,
                     )
 
@@ -6131,7 +6385,12 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         total=meta_max_segments_int,
                         extra={
                             "experiment_fingerprint": experiment_fingerprint,
-                            "phase": {"name": phase_name_s, "index": phase_index_ui, "total": phase_total_ui, "mode": phase_mode},
+                            "phase": {
+                                "name": phase_name_s,
+                                "index": phase_index_ui,
+                                "total": phase_total_ui,
+                                "mode": phase_mode,
+                            },
                         },
                     )
 
@@ -6374,7 +6633,12 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     force=True,
                 )
 
-                log_kv("meta_engine_done", run_id=run_id, segments=len(segments_run), summaries=len(normalized_cycles))
+                log_kv(
+                    "meta_engine_done",
+                    run_id=run_id,
+                    segments=len(segments_run),
+                    summaries=len(normalized_cycles),
+                )
                 return
 
             finally:
@@ -6424,6 +6688,7 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 continue
             return
 
+
 # ---------------------------------------------------------------------------
 # Entry point (crash shielded)
 # ---------------------------------------------------------------------------
@@ -6451,6 +6716,7 @@ def _resolve_mode_from_env_and_args() -> str:
         return "swarm"
 
     return "queue"
+
 
 def main() -> None:
     """
@@ -6493,6 +6759,7 @@ def main() -> None:
         run_swarm_engine(agent, config)
     else:
         run_meta_engine(agent, config)
+
 
 if __name__ == "__main__":
     # Top-level crash shield: never let an uncaught exception kill the worker.
