@@ -45,10 +45,10 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Union
 
 LOG_DIR_DEFAULT = Path("logs")
 LOG_FILE_NAME_DEFAULT = "discovery_log.md"
@@ -82,8 +82,10 @@ def _clamp_text(s: Any, max_len: int = 4000) -> str:
 
 
 def _normalize_tags(tags: Optional[Iterable[Any]]) -> Optional[List[str]]:
+    """Normalize tags into a stable, de-duped list preserving first-seen order."""
     if not tags:
         return None
+
     out: List[str] = []
     for t in tags:
         try:
@@ -96,7 +98,6 @@ def _normalize_tags(tags: Optional[Iterable[Any]]) -> Optional[List[str]]:
     if not out:
         return None
 
-    # Stable dedupe
     seen = set()
     deduped: List[str] = []
     for t in out:
@@ -104,7 +105,13 @@ def _normalize_tags(tags: Optional[Iterable[Any]]) -> Optional[List[str]]:
             continue
         seen.add(t)
         deduped.append(t)
-    return deduped
+
+    return deduped or None
+
+
+def _dataclass_shallow(obj: Any) -> Dict[str, Any]:
+    """Convert a dataclass instance to a shallow dict (no deepcopy)."""
+    return {f.name: getattr(obj, f.name) for f in fields(obj)}
 
 
 def _json_safe(obj: Any, *, max_depth: int = 8, _depth: int = 0) -> Any:
@@ -121,9 +128,12 @@ def _json_safe(obj: Any, *, max_depth: int = 8, _depth: int = 0) -> Any:
     if isinstance(obj, BaseException):
         return {"type": obj.__class__.__name__, "message": str(obj)}
 
+    # IMPORTANT: avoid dataclasses.asdict() (deepcopy) because `extra` may contain
+    # objects that cannot be deep-copied (locks, sockets, etc.).
     if is_dataclass(obj):
         try:
-            return _json_safe(asdict(obj), max_depth=max_depth, _depth=_depth + 1)
+            shallow = _dataclass_shallow(obj)
+            return _json_safe(shallow, max_depth=max_depth, _depth=_depth + 1)
         except Exception:
             return repr(obj)
 
@@ -181,7 +191,7 @@ def _try_fsync(f) -> None:
 
 
 def _ts_unix_from_iso(ts: str) -> Optional[float]:
-    """Best-effort parse ISO timestamps (supports trailing Z)."""
+    """Best-effort parse ISO timestamps (supports trailing Z; treats naive as UTC)."""
     if not isinstance(ts, str):
         return None
     s = ts.strip()
@@ -190,7 +200,10 @@ def _ts_unix_from_iso(ts: str) -> Optional[float]:
     try:
         if s.endswith("Z"):
             s = s[:-1] + "+00:00"
-        return datetime.fromisoformat(s).timestamp()
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
     except Exception:
         return None
 
@@ -310,7 +323,9 @@ class DiscoveryEvent:
             lines.append(f"- Confidence: `{float(self.confidence):.2f}`")
 
         if self.tags:
-            tag_str = ", ".join(sorted(set(self.tags)))
+            # Preserve stable order; avoid sorting which can hide intent.
+            tag_list = _normalize_tags(self.tags) or []
+            tag_str = ", ".join(tag_list)
             lines.append(f"- Tags: `{_clamp_text(tag_str, 2000)}`")
 
         if self.extra:
@@ -337,7 +352,7 @@ class DiscoveryEvent:
         Includes explicit R per energy and log version for later parsing.
         Ensures the payload is JSON serializable even if `extra` contains odd objects.
         """
-        data = asdict(self)
+        data: Dict[str, Any] = _dataclass_shallow(self)
         data["rye_ratio"] = self.rye_ratio()
         data["log_version"] = DISCOVERY_LOG_VERSION
         data["timestamp_unix"] = _ts_unix_from_iso(self.timestamp)
@@ -362,7 +377,7 @@ class DiscoveryLogger:
 
     def __init__(
         self,
-        log_dir: Path | str = LOG_DIR_DEFAULT,
+        log_dir: Union[Path, str] = LOG_DIR_DEFAULT,
         file_name: str = LOG_FILE_NAME_DEFAULT,
         run_id: Optional[str] = None,
         auto_header: bool = True,
@@ -412,7 +427,7 @@ class DiscoveryLogger:
     @classmethod
     def from_config(
         cls,
-        base_dir: Path | str,
+        base_dir: Union[Path, str],
         run_id: Optional[str] = None,
         for_worker: bool = False,
     ) -> "DiscoveryLogger":
@@ -549,7 +564,7 @@ class DiscoveryLogger:
         This is the core lower level method. Other helpers call this with
         pre filled kind values for hypotheses, RYE spikes, mechanisms, etc.
 
-        New optional fields:
+        Optional fields:
             info_gain, search_energy, semantic_diversity:
                 Used to mirror web search and TGRM stack quality metrics.
             swarm_size, swarm_config:
@@ -815,7 +830,7 @@ class DiscoveryLogger:
         confidence: Optional[float] = None,
     ) -> DiscoveryEvent:
         """Log a mechanism discovery or candidate mechanism."""
-        extra: Dict[str, Any] = {"citations": citations or []}
+        extra_payload: Dict[str, Any] = {"citations": citations or []}
         combined_tags = (tags or []) + ["mechanism", "discovery"]
         return self.log_event(
             kind="mechanism",
@@ -824,7 +839,7 @@ class DiscoveryLogger:
             cycle_index=cycle_index,
             agent_role=agent_role,
             tags=combined_tags,
-            extra=extra,
+            extra=extra_payload,
             goal=goal,
             domain=domain,
             severity="major",
@@ -844,7 +859,7 @@ class DiscoveryLogger:
         confidence: Optional[float] = None,
     ) -> DiscoveryEvent:
         """Log a treatment or stack candidate for cure extraction pipelines."""
-        extra: Dict[str, Any] = {"citations": citations or []}
+        extra_payload: Dict[str, Any] = {"citations": citations or []}
         combined_tags = (tags or []) + ["treatment", "candidate", "intervention"]
         return self.log_event(
             kind="treatment_candidate",
@@ -853,7 +868,7 @@ class DiscoveryLogger:
             cycle_index=cycle_index,
             agent_role=agent_role,
             tags=combined_tags,
-            extra=extra,
+            extra=extra_payload,
             goal=goal,
             domain=domain,
             severity="major",
@@ -873,7 +888,7 @@ class DiscoveryLogger:
         confidence: Optional[float] = None,
     ) -> DiscoveryEvent:
         """Log a very strong cure candidate with high RYE and verification needs."""
-        extra: Dict[str, Any] = {"citations": citations or []}
+        extra_payload: Dict[str, Any] = {"citations": citations or []}
         combined_tags = (tags or []) + ["cure_candidate", "high_stakes"]
         return self.log_event(
             kind="cure_candidate",
@@ -882,7 +897,7 @@ class DiscoveryLogger:
             cycle_index=cycle_index,
             agent_role=agent_role,
             tags=combined_tags,
-            extra=extra,
+            extra=extra_payload,
             goal=goal,
             domain=domain,
             severity="critical",
@@ -1095,7 +1110,7 @@ class DiscoveryLogger:
         citations = entry.get("citations") or []
         score = entry.get("score")
 
-        extra: Dict[str, Any] = {
+        extra_payload: Dict[str, Any] = {
             "citations": citations,
             "memory_entry": entry,
         }
@@ -1113,7 +1128,7 @@ class DiscoveryLogger:
             cycle_index=None,
             agent_role=None,
             tags=tags,
-            extra=extra,
+            extra=extra_payload,
             timestamp=ts,
             goal=str(goal) if goal is not None else None,
             domain=str(domain) if domain is not None else None,
