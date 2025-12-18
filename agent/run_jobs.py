@@ -161,6 +161,13 @@ Update notes:
     - list_jobs derives the effective job.status from the folder it was
       loaded from. Higher priority folder status (finished, error) will
       override a lower one (active, queued).
+
+Additional update (2025-12):
+    - load_job_by_id no longer returns early if one candidate file is corrupt.
+    - list_jobs can now handle mixed legacy "<run_id>.json" and new "*_job.json"
+      files in the same folder.
+    - Optional shared worker_state.json helpers were added to support a live
+      top-of-page status strip and phase counters in Streamlit.
 """
 
 # Public exports (useful for type checkers and explicit imports)
@@ -175,6 +182,7 @@ __all__ = [
     "QUEUE_DIR",
     "LEGACY_QUEUE_DIR",
     "LOCKS_DIR",
+    "WORKER_STATE_PATH",
     "RunJob",
     "debug_print_layout",
     "_inject_run_id_into_config",
@@ -191,12 +199,16 @@ __all__ = [
     "get_next_queued_job",
     "claim_next_job",
     "progress_path",
+    "write_progress",
+    "read_progress",
     "result_path",
     "error_log_path",
     "load_next_pending_job",
     "save_job_result",
     "mark_job_error",
     "load_job_result",
+    "read_worker_state",
+    "update_worker_state",
 ]
 
 # Resolve repository root so the default runs directory is stable
@@ -358,6 +370,15 @@ if _env_queue:
 else:
     QUEUE_ROOT = (BASE_DIR / "queue").resolve()
 
+# Optional shared worker state file (used by Streamlit to render a fixed top status bar).
+# You can override the path with ARA_WORKER_STATE_PATH.
+_env_worker_state_raw = os.getenv("ARA_WORKER_STATE_PATH")
+_env_worker_state = _env_worker_state_raw.strip() if isinstance(_env_worker_state_raw, str) else None
+if _env_worker_state:
+    WORKER_STATE_PATH = Path(_env_worker_state).resolve()
+else:
+    WORKER_STATE_PATH = (BASE_DIR / "worker_state.json").resolve()
+
 # Primary job layout used by the engine worker:
 #   - QUEUE_ROOT/pending/   : file based queue of pending jobs (canonical queue)
 #   - QUEUE_ROOT/active/    : in progress metadata and optional progress JSON
@@ -400,6 +421,7 @@ for folder in [
     LEGACY_FINISHED_DIR,
     LEGACY_ERROR_DIR,
     _LOCKS_DIR,
+    WORKER_STATE_PATH.parent,
 ]:
     try:
         folder.mkdir(parents=True, exist_ok=True)
@@ -409,6 +431,7 @@ for folder in [
 _log("Initialized BASE_DIR:", BASE_DIR)
 _log("QUEUE_ROOT:", QUEUE_ROOT)
 _log("PENDING_DIR:", PENDING_DIR, "ACTIVE_DIR:", ACTIVE_DIR, "FINISHED_DIR:", FINISHED_DIR)
+_log("WORKER_STATE_PATH:", WORKER_STATE_PATH)
 
 # Status priority for conflict resolution in list_jobs
 # Higher number wins when the same run_id appears in multiple folders.
@@ -430,6 +453,7 @@ def debug_print_layout() -> None:
     """
     env_val = os.environ.get("ARA_RUNS_DIR")
     env_queue_val = os.environ.get("ARA_QUEUE_ROOT")
+    env_worker_state_val = os.environ.get("ARA_WORKER_STATE_PATH")
     try:
         base_resolved = BASE_DIR.resolve()
     except Exception:
@@ -451,6 +475,8 @@ def debug_print_layout() -> None:
     print("[run_jobs] LEGACY_FINISHED_DIR:", LEGACY_FINISHED_DIR)
     print("[run_jobs] LEGACY_ERROR_DIR:", LEGACY_ERROR_DIR)
     print("[run_jobs] LOCKS_DIR:", _LOCKS_DIR)
+    print("[run_jobs] ARA_WORKER_STATE_PATH env (raw):", repr(env_worker_state_val))
+    print("[run_jobs] WORKER_STATE_PATH:", WORKER_STATE_PATH)
 
     def _names(glob_iter):
         try:
@@ -771,6 +797,71 @@ def _safe_float(value: Any, default: float) -> float:
         return float(value)
     except Exception:
         return default
+
+
+# ---------------------------------------------------------------------------
+# Shared worker state helpers (optional, but useful for Streamlit live UI)
+# ---------------------------------------------------------------------------
+
+
+def read_worker_state(default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Read the shared worker state file (worker_state.json).
+
+    This is intentionally tolerant: it returns `default` (or {}) on errors.
+
+    Recommended keys:
+        - heartbeat_ts (float)
+        - status (str): idle|running|backoff|fault|finished
+        - run_id (str)
+        - phase_index (int)
+        - phase_total (int)
+        - phase_name (str)
+        - cycle (int)
+        - updated_at (float)
+    """
+    base: Dict[str, Any] = dict(default or {})
+    path = WORKER_STATE_PATH
+    if not path.exists():
+        return base
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            base.update(data)
+        return base
+    except Exception:
+        return base
+
+
+def update_worker_state(update: Dict[str, Any], *, replace: bool = False) -> Path:
+    """
+    Update (merge) the shared worker state file atomically.
+
+    Args:
+        update: dict of keys to set
+        replace: if True, overwrite the entire file with `update`
+
+    Returns:
+        Path to the worker state file.
+    """
+    if not isinstance(update, dict):
+        update = {}
+    if replace:
+        state: Dict[str, Any] = dict(update)
+    else:
+        state = read_worker_state()
+        state.update(update)
+
+    # Common timestamp key for UI freshness checks
+    state.setdefault("updated_at", time.time())
+    _atomic_write_json(WORKER_STATE_PATH, state)
+    return WORKER_STATE_PATH
+
+
+# ---------------------------------------------------------------------------
+# Job schema and queue operations
+# ---------------------------------------------------------------------------
 
 
 @dataclass
@@ -1135,6 +1226,13 @@ def create_job(
     except Exception as e:
         _log("create_job: failed to write shadow copy to LEGACY_QUEUE_DIR:", repr(e))
 
+    # Optional legacy-pending mirror for older deployments that still watch BASE_DIR/pending.
+    if os.getenv("ARA_MIRROR_TO_LEGACY_PENDING", "").strip().lower() in ("1", "true", "yes", "on"):
+        try:
+            job.save_to(LEGACY_PENDING_DIR, filename=f"{run_id}_job.json")
+        except Exception:
+            pass
+
     _log("Created job", run_id, "status=queued", "QUEUE_ROOT:", QUEUE_ROOT)
     _queue_log("Enqueued job", f"run_id={run_id}", "status=queued", f"pending_path={pending_path}", level=logging.INFO)
 
@@ -1190,11 +1288,13 @@ def load_job_by_id(run_id: str) -> Optional[RunJob]:
         LEGACY_FINISHED_DIR / f"{run_id}_job.json",
         LEGACY_FINISHED_DIR / f"{run_id}__job.json",
     ):
-        if candidate.exists():
-            try:
-                return load_job(candidate)
-            except Exception:
-                return None
+        if not candidate.exists():
+            continue
+        try:
+            return load_job(candidate)
+        except Exception:
+            # Do not return early; fall through to other candidates.
+            continue
 
     # Other statuses: support "{run_id}_job.json", "{run_id}__job.json", and legacy "{run_id}.json"
     search_folders = [
@@ -1209,9 +1309,7 @@ def load_job_by_id(run_id: str) -> Optional[RunJob]:
     for folder in search_folders:
         # In ERROR_DIR, prefer *_job.json/__job.json over a payload {run_id}.json if present.
         if folder in (ERROR_DIR, LEGACY_ERROR_DIR):
-            path = _find_finished_meta_in_folder(run_id, folder)
-            if path is None:
-                path = _find_meta_in_folder(run_id, folder)
+            path = _find_finished_meta_in_folder(run_id, folder) or _find_meta_in_folder(run_id, folder)
         else:
             path = _find_meta_in_folder(run_id, folder)
 
@@ -1450,8 +1548,9 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
         This avoids cases where a job that has been moved to finished/ still
         carries an old "active" status in the JSON and appears wrong in the UI.
 
-        For pending and active it prefers "*_job.json" metadata files; if none exist
-        it falls back to "*.json" for older jobs, while still skipping progress files.
+        For pending and active it prefers "*_job.json" metadata files, but will also
+        pick up legacy "<run_id>.json" jobs even when the folder contains a mix of
+        both formats.
 
         For finished it only considers "*_job.json" metadata files (including "__job.json"),
         never the result payload "{run_id}.json".
@@ -1468,58 +1567,76 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
     """
     jobs_by_id: Dict[str, RunJob] = {}
 
+    def _should_skip_meta_file(name: str) -> bool:
+        if name.startswith("."):
+            return True
+        # Skip progress/results artifacts
+        if name.endswith("_progress.json") or name.endswith("_results.json") or name.endswith("_result.json"):
+            return True
+        # Skip obvious non-job JSON files some workers might write
+        if name.endswith("_state.json") or name == "worker_state.json":
+            return True
+        return False
+
     def collect(folder: Path, folder_status: Optional[str] = None, finished: bool = False) -> None:
         if not folder.exists():
             return
 
+        # For finished, do NOT read "<run_id>.json" (reserved for result payload).
         if finished:
-            patterns = ["*_job.json"]
+            candidates: List[Path] = []
+            try:
+                candidates = sorted(folder.glob("*_job.json"))
+            except Exception:
+                candidates = []
         else:
-            # Prefer the canonical "*_job.json". If none exist, fall back
-            # to "*.json" for older jobs, while still skipping progress files.
-            try:
-                has_job_files = any(folder.glob("*_job.json"))
-            except Exception:
-                has_job_files = False
-            patterns = ["*_job.json"] if has_job_files else ["*.json"]
-
-        for pattern in patterns:
-            try:
-                paths = sorted(folder.glob(pattern))
-            except Exception:
-                continue
-            for path in paths:
-                # Skip progress and other non metadata files
-                name = path.name
-                if name.endswith("_progress.json") or name.endswith("_results.json") or name.endswith("_result.json"):
-                    continue
-                if name.startswith("."):
-                    continue
-                if not path.is_file():
-                    continue
+            # Mixed-mode safe: read both new and legacy formats.
+            seen: set = set()
+            candidates = []
+            for pattern in ("*_job.json", "*.json"):
                 try:
-                    job = load_job(path)
+                    for p in folder.glob(pattern):
+                        key = str(p)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        candidates.append(p)
                 except Exception:
                     continue
+            try:
+                candidates.sort()
+            except Exception:
+                pass
 
-                # Force effective status from folder if provided
-                if folder_status is not None:
-                    job.status = folder_status
+        for path in candidates:
+            name = path.name
+            if _should_skip_meta_file(name):
+                continue
+            if not path.is_file():
+                continue
+            try:
+                job = load_job(path)
+            except Exception:
+                continue
 
-                existing = jobs_by_id.get(job.run_id)
-                if existing is None:
+            # Force effective status from folder if provided
+            if folder_status is not None:
+                job.status = folder_status
+
+            existing = jobs_by_id.get(job.run_id)
+            if existing is None:
+                jobs_by_id[job.run_id] = job
+            else:
+                existing_prio = STATUS_PRIORITY.get(existing.status, 0)
+                new_prio = STATUS_PRIORITY.get(job.status, 0)
+
+                if new_prio > existing_prio:
                     jobs_by_id[job.run_id] = job
-                else:
-                    existing_prio = STATUS_PRIORITY.get(existing.status, 0)
-                    new_prio = STATUS_PRIORITY.get(job.status, 0)
-
-                    if new_prio > existing_prio:
+                elif new_prio == existing_prio:
+                    existing_updated = getattr(existing, "updated_at", existing.created_at)
+                    job_updated = getattr(job, "updated_at", job.created_at)
+                    if job_updated >= existing_updated:
                         jobs_by_id[job.run_id] = job
-                    elif new_prio == existing_prio:
-                        existing_updated = getattr(existing, "updated_at", existing.created_at)
-                        job_updated = getattr(job, "updated_at", job.created_at)
-                        if job_updated >= existing_updated:
-                            jobs_by_id[job.run_id] = job
 
     if status is None:
         # Search all status folders plus legacy queue and legacy layout dirs
@@ -1749,6 +1866,21 @@ def _claim_job_atomic(job: RunJob) -> Optional[RunJob]:
         # Remove queued copies (including shadow copies).
         _cleanup_queued_copies(run_id)
 
+        # Best-effort: create an initial progress file so UIs don't jump 0->100%.
+        # (This is safe even if the worker overwrites progress later.)
+        try:
+            write_progress(
+                run_id,
+                {
+                    "phase_index": 0,
+                    "phase_total": 0,
+                    "phase_name": "starting",
+                    "notes": "claimed",
+                },
+            )
+        except Exception:
+            pass
+
         _log("claim_job_atomic: claimed", run_id, "at", active_meta_path)
         _queue_log("claim_job_atomic:", f"claimed run_id={run_id}", f"path={active_meta_path}", level=logging.INFO)
         return loaded
@@ -1801,14 +1933,54 @@ def progress_path(run_id: str) -> Path:
         {
             "run_id": "...",
             "status": "active",
-            "current_cycle": 12,
-            "total_cycles": 90,
-            "last_update_utc": "...",
-            "notes": "optional human readable progress"
+            "phase_index": 2,
+            "phase_total": 3,
+            "phase_name": "stabilization",
+            "cycle": 214,
+            "notes": "optional human readable progress",
+            "updated_at": 1734481234.12
         }
     """
     safe_id = _sanitize_run_id_for_filename(run_id)
     return ACTIVE_DIR / f"{safe_id}_progress.json"
+
+
+def write_progress(run_id: str, progress: Dict[str, Any]) -> Path:
+    """
+    Atomically write live progress JSON for a run.
+
+    This is intentionally lightweight so engine_worker.py can call it before each phase/cycle.
+    """
+    run_id = str(run_id).strip()
+    if not _is_safe_run_id(run_id):
+        raise ValueError(f"write_progress called with unsafe run_id: {run_id!r}")
+
+    payload: Dict[str, Any] = dict(progress or {})
+    payload.setdefault("run_id", run_id)
+    payload.setdefault("status", "active")
+    payload.setdefault("updated_at", time.time())
+    path = progress_path(run_id)
+    _atomic_write_json(path, payload)
+    return path
+
+
+def read_progress(run_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Read a run's live progress JSON (active/<run_id>_progress.json).
+    Returns None if missing/unreadable.
+    """
+    run_id = str(run_id).strip()
+    if not _is_safe_run_id(run_id):
+        return None
+    path = progress_path(run_id)
+    if not path.exists():
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
 
 
 def result_path(run_id: str) -> Path:
@@ -1857,6 +2029,20 @@ def load_next_pending_job() -> Optional[RunJob]:
     else:
         _log("load_next_pending_job: returning job", job.run_id)
         _queue_log("load_next_pending_job:", f"returning run_id={job.run_id}", level=logging.INFO)
+        # Best-effort: update worker state so the UI shows "running" immediately.
+        try:
+            update_worker_state(
+                {
+                    "status": "running",
+                    "run_id": job.run_id,
+                    "heartbeat_ts": time.time(),
+                    "phase_index": 0,
+                    "phase_total": 0,
+                    "phase_name": "",
+                }
+            )
+        except Exception:
+            pass
     return job
 
 
@@ -1901,6 +2087,14 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
     rp = result_path(run_id)
     _atomic_write_json(rp, result_obj)
 
+    # Optional compatibility alias for older readers.
+    try:
+        rp_alias = FINISHED_DIR / f"{run_id}_results.json"
+        if rp_alias != rp:
+            _atomic_write_json(rp_alias, result_obj)
+    except Exception:
+        pass
+
     # Produce finished metadata from active metadata if available, else from provided job.
     finished_job = job
     active_meta_candidates = [
@@ -1934,6 +2128,18 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
     _log("save_job_result: marked finished", run_id)
     _queue_log("save_job_result:", f"marked finished run_id={run_id}", f"result_path={rp}", level=logging.INFO)
 
+    # Best-effort: update worker state for live UI.
+    try:
+        update_worker_state(
+            {
+                "status": "finished",
+                "run_id": run_id,
+                "heartbeat_ts": time.time(),
+            }
+        )
+    except Exception:
+        pass
+
 
 def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
     """
@@ -1961,6 +2167,41 @@ def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
             _atomic_write_text(ep, f"{error_info}\n\n{tb}")
         except Exception:
             pass
+
+    # Optional structured error payload for UIs that prefer JSON.
+    #
+    # IMPORTANT:
+    #   Some older deployments used error/<run_id>.json as *metadata* (with a "config" field).
+    #   To avoid clobbering that, we only write/overwrite this payload if the existing file
+    #   does not look like job metadata.
+    try:
+        payload: Dict[str, Any]
+        if isinstance(error_info, dict):
+            payload = dict(error_info)
+        else:
+            payload = {"message": str(error_info)}
+        payload.setdefault("run_id", run_id)
+        payload.setdefault("status", "error")
+        payload.setdefault("ts", time.time())
+
+        payload_path = ERROR_DIR / f"{run_id}.json"
+
+        write_payload = True
+        if payload_path.exists():
+            try:
+                with payload_path.open("r", encoding="utf-8") as f:
+                    existing_payload = json.load(f)
+                if isinstance(existing_payload, dict) and "config" in existing_payload:
+                    # Looks like legacy job metadata; do not overwrite.
+                    write_payload = False
+            except Exception:
+                # If unreadable, it's probably not intentional metadata; allow overwrite.
+                write_payload = True
+
+        if write_payload:
+            _atomic_write_json(payload_path, payload)
+    except Exception:
+        pass
 
     # Produce error metadata from active metadata if available, else from provided job.
     error_job = job
@@ -1994,6 +2235,18 @@ def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
     _log("mark_job_error: marked error", run_id)
     _queue_log("mark_job_error:", f"marked error run_id={run_id}", f"error_path={ep}", level=logging.INFO)
 
+    # Best-effort: update worker state for live UI.
+    try:
+        update_worker_state(
+            {
+                "status": "fault",
+                "run_id": run_id,
+                "heartbeat_ts": time.time(),
+            }
+        )
+    except Exception:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Optional helpers for UI and debugging
@@ -2026,6 +2279,7 @@ def load_job_result(run_id: str) -> Optional[Dict[str, Any]]:
         return None
     try:
         with rp.open("r", encoding="utf-8") as f:
-            return json.load(f)
+            data = json.load(f)
+        return data if isinstance(data, dict) else None
     except Exception:
         return None
