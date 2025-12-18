@@ -20,10 +20,9 @@ It is designed for:
 
 Typical usage from TGRM or CoreAgent:
 
-    from pathlib import Path
     from agent.discovery_log import DiscoveryLogger
 
-    logger = DiscoveryLogger.default()
+    logger = DiscoveryLogger.default(run_id="abc123")
 
     logger.log_hypothesis(
         title="New candidate mechanism for pathway X",
@@ -34,7 +33,7 @@ Typical usage from TGRM or CoreAgent:
         rye_after=0.55,
         delta_r=0.13,
         energy=2.4,
-        tags=["longevity", "pathway_x", "hypothesis"]
+        tags=["longevity", "pathway_x", "hypothesis"],
     )
 
 All entries are appended so you can review discoveries after a long run
@@ -44,22 +43,27 @@ and export them into papers or structured summaries.
 from __future__ import annotations
 
 import json
+import os
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
+from typing import Any, Dict, Iterable, List, Optional
 
 LOG_DIR_DEFAULT = Path("logs")
 LOG_FILE_NAME_DEFAULT = "discovery_log.md"
 LOG_JSON_FILE_NAME_DEFAULT = "discovery_log.jsonl"
+
+# Schema marker for downstream parsers.
 DISCOVERY_LOG_VERSION = "2025-11-23-max2"
 
 
+# -----------------------------
+# Helpers (safe + stdlib only)
+# -----------------------------
 def _utc_iso() -> str:
-    """Return an ISO formatted UTC timestamp."""
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    """Return an ISO formatted UTC timestamp with trailing Z."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def _new_event_id() -> str:
@@ -67,6 +71,133 @@ def _new_event_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+def _clamp_text(s: Any, max_len: int = 4000) -> str:
+    try:
+        out = "" if s is None else str(s)
+    except Exception:
+        out = repr(s)
+    if len(out) <= max_len:
+        return out
+    return out[: max_len - 3] + "..."
+
+
+def _normalize_tags(tags: Optional[Iterable[Any]]) -> Optional[List[str]]:
+    if not tags:
+        return None
+    out: List[str] = []
+    for t in tags:
+        try:
+            s = str(t).strip()
+        except Exception:
+            s = repr(t).strip()
+        if s:
+            out.append(s)
+
+    if not out:
+        return None
+
+    # Stable dedupe
+    seen = set()
+    deduped: List[str] = []
+    for t in out:
+        if t in seen:
+            continue
+        seen.add(t)
+        deduped.append(t)
+    return deduped
+
+
+def _json_safe(obj: Any, *, max_depth: int = 8, _depth: int = 0) -> Any:
+    """Make an object JSON-serializable (best-effort)."""
+    if _depth > max_depth:
+        return repr(obj)
+
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+
+    if isinstance(obj, Path):
+        return str(obj)
+
+    if isinstance(obj, BaseException):
+        return {"type": obj.__class__.__name__, "message": str(obj)}
+
+    if is_dataclass(obj):
+        try:
+            return _json_safe(asdict(obj), max_depth=max_depth, _depth=_depth + 1)
+        except Exception:
+            return repr(obj)
+
+    if isinstance(obj, dict):
+        out: Dict[str, Any] = {}
+        for k, v in obj.items():
+            try:
+                kk = str(k)
+            except Exception:
+                kk = repr(k)
+            out[kk] = _json_safe(v, max_depth=max_depth, _depth=_depth + 1)
+        return out
+
+    if isinstance(obj, (list, tuple, set)):
+        return [_json_safe(v, max_depth=max_depth, _depth=_depth + 1) for v in obj]
+
+    # Last resort: try direct JSON encoding
+    try:
+        json.dumps(obj)
+        return obj
+    except Exception:
+        pass
+
+    try:
+        return str(obj)
+    except Exception:
+        return repr(obj)
+
+
+def _try_lock(f) -> None:
+    """Best-effort file lock (no-op on platforms without fcntl)."""
+    try:
+        import fcntl  # type: ignore
+
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        pass
+
+
+def _try_unlock(f) -> None:
+    try:
+        import fcntl  # type: ignore
+
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+
+
+def _try_fsync(f) -> None:
+    try:
+        f.flush()
+        os.fsync(f.fileno())
+    except Exception:
+        pass
+
+
+def _ts_unix_from_iso(ts: str) -> Optional[float]:
+    """Best-effort parse ISO timestamps (supports trailing Z)."""
+    if not isinstance(ts, str):
+        return None
+    s = ts.strip()
+    if not s:
+        return None
+    try:
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return None
+
+
+# -----------------------------
+# Data model
+# -----------------------------
 @dataclass
 class DiscoveryEvent:
     """Structured representation of a discovery related event."""
@@ -76,8 +207,6 @@ class DiscoveryEvent:
     description: str
 
     timestamp: str
-
-    # Unique identifier for cross linking
     event_id: str
 
     # Run and cycle context
@@ -104,8 +233,8 @@ class DiscoveryEvent:
 
     # Classification and metadata
     tags: Optional[List[str]] = None
-    severity: Optional[str] = None       # "info", "notice", "major", "critical"
-    confidence: Optional[float] = None   # 0 to 1
+    severity: Optional[str] = None  # "info", "notice", "major", "critical"
+    confidence: Optional[float] = None  # 0 to 1
     extra: Optional[Dict[str, Any]] = None
 
     def rye_ratio(self) -> Optional[float]:
@@ -121,8 +250,8 @@ class DiscoveryEvent:
         """Render this event as a Markdown block."""
         lines: List[str] = []
 
-        header_kind = self.kind.strip().upper()
-        header_title = self.title.strip() if self.title else "(no title)"
+        header_kind = (self.kind or "event").strip().upper()
+        header_title = (self.title or "(no title)").strip()
 
         # Heading
         lines.append(f"## [{self.timestamp}] {header_kind}: {header_title}")
@@ -137,35 +266,27 @@ class DiscoveryEvent:
         if self.agent_role:
             lines.append(f"- Agent role: `{self.agent_role}`")
         if self.goal:
-            lines.append(f"- Goal: `{self.goal}`")
+            lines.append(f"- Goal: `{_clamp_text(self.goal, 4000)}`")
         if self.domain:
-            lines.append(f"- Domain: `{self.domain}`")
+            lines.append(f"- Domain: `{_clamp_text(self.domain, 1000)}`")
 
         # Swarm context
         if self.swarm_size is not None:
             lines.append(f"- Swarm size: `{self.swarm_size}`")
         if self.swarm_config:
             try:
-                swarm_json = json.dumps(self.swarm_config, ensure_ascii=False, sort_keys=True)
+                swarm_json = json.dumps(_json_safe(self.swarm_config), ensure_ascii=False, sort_keys=True)
             except Exception:
                 swarm_json = str(self.swarm_config)
-            lines.append(f"- Swarm config: `{swarm_json}`")
+            lines.append(f"- Swarm config: `{_clamp_text(swarm_json, 3000)}`")
 
         # RYE metrics
-        if self.rye_before is not None or self.rye_after is not None:
-            before = (
-                f"{self.rye_before:.4f}"
-                if isinstance(self.rye_before, (int, float))
-                else str(self.rye_before)
-            )
-            after = (
-                f"{self.rye_after:.4f}"
-                if isinstance(self.rye_after, (int, float))
-                else str(self.rye_after)
-            )
+        if self.rye_before is not None:
+            before = f"{self.rye_before:.4f}" if isinstance(self.rye_before, (int, float)) else str(self.rye_before)
             lines.append(f"- RYE before: `{before}`")
+        if self.rye_after is not None:
+            after = f"{self.rye_after:.4f}" if isinstance(self.rye_after, (int, float)) else str(self.rye_after)
             lines.append(f"- RYE after: `{after}`")
-
         if self.delta_r is not None:
             lines.append(f"- Delta R: `{self.delta_r}`")
         if self.energy is not None:
@@ -186,24 +307,24 @@ class DiscoveryEvent:
         if self.severity:
             lines.append(f"- Severity: `{self.severity}`")
         if isinstance(self.confidence, (int, float)):
-            lines.append(f"- Confidence: `{self.confidence:.2f}`")
+            lines.append(f"- Confidence: `{float(self.confidence):.2f}`")
 
         if self.tags:
             tag_str = ", ".join(sorted(set(self.tags)))
-            lines.append(f"- Tags: `{tag_str}`")
+            lines.append(f"- Tags: `{_clamp_text(tag_str, 2000)}`")
 
         if self.extra:
             # Store extra as compact JSON for debug and later analysis
             try:
-                extra_json = json.dumps(self.extra, ensure_ascii=False, sort_keys=True)
+                extra_json = json.dumps(_json_safe(self.extra), ensure_ascii=False, sort_keys=True)
             except Exception:
                 extra_json = str(self.extra)
-            lines.append(f"- Extra: `{extra_json}`")
+            lines.append(f"- Extra: `{_clamp_text(extra_json, 3000)}`")
 
         lines.append("")
         lines.append("### Description")
         lines.append("")
-        lines.append(self.description.strip() or "(no description provided)")
+        lines.append((self.description or "").strip() or "(no description provided)")
         lines.append("")
         lines.append("---")
         lines.append("")
@@ -214,13 +335,18 @@ class DiscoveryEvent:
         """
         Return a dict ready for JSONL logging.
         Includes explicit R per energy and log version for later parsing.
+        Ensures the payload is JSON serializable even if `extra` contains odd objects.
         """
         data = asdict(self)
         data["rye_ratio"] = self.rye_ratio()
         data["log_version"] = DISCOVERY_LOG_VERSION
-        return data
+        data["timestamp_unix"] = _ts_unix_from_iso(self.timestamp)
+        return _json_safe(data)
 
 
+# -----------------------------
+# Logger
+# -----------------------------
 class DiscoveryLogger:
     """
     Discovery logger for Reparodynamics experiments.
@@ -242,14 +368,27 @@ class DiscoveryLogger:
         auto_header: bool = True,
         json_mirror: bool = True,
         json_file_name: str = LOG_JSON_FILE_NAME_DEFAULT,
+        *,
+        raise_on_error: bool = False,
+        fsync: bool = False,
+        file_lock: bool = True,
     ) -> None:
         self.log_dir = Path(log_dir)
         self.file_path = self.log_dir / file_name
         self.json_file_path = self.log_dir / json_file_name
-        self.run_id = run_id
-        self.json_mirror = json_mirror
 
-        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self.run_id = run_id
+        self.json_mirror = bool(json_mirror)
+
+        self.raise_on_error = bool(raise_on_error)
+        self._fsync = bool(fsync)
+        self._file_lock = bool(file_lock)
+
+        try:
+            self.log_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            if self.raise_on_error:
+                raise
 
         if auto_header and not self.file_path.exists():
             self._write_header()
@@ -291,6 +430,7 @@ class DiscoveryLogger:
         else:
             md_name = LOG_FILE_NAME_DEFAULT
             json_name = LOG_JSON_FILE_NAME_DEFAULT
+
         return cls(
             log_dir=logs_dir,
             file_name=md_name,
@@ -298,6 +438,16 @@ class DiscoveryLogger:
             json_mirror=True,
             json_file_name=json_name,
         )
+
+    # -----------------------------
+    # File I/O helpers (best-effort)
+    # -----------------------------
+    def _safe_call(self, fn, *args, **kwargs) -> None:
+        try:
+            fn(*args, **kwargs)
+        except Exception:
+            if self.raise_on_error:
+                raise
 
     def _write_header(self) -> None:
         """Write an initial header for the discovery log if the file is new."""
@@ -317,26 +467,57 @@ class DiscoveryLogger:
             "---",
             "",
         ]
-        self.file_path.write_text("\n".join(header_lines), encoding="utf-8")
+
+        def _write() -> None:
+            self.file_path.write_text("\n".join(header_lines), encoding="utf-8")
+
+        self._safe_call(_write)
 
     def _append_markdown(self, text: str) -> None:
         """Append a Markdown block to the discovery log."""
-        with self.file_path.open("a", encoding="utf-8") as f:
-            f.write(text)
-            if not text.endswith("\n"):
-                f.write("\n")
+        if not text:
+            return
+
+        def _append() -> None:
+            with self.file_path.open("a", encoding="utf-8") as f:
+                if self._file_lock:
+                    _try_lock(f)
+                try:
+                    f.write(text)
+                    if not text.endswith("\n"):
+                        f.write("\n")
+                    if self._fsync:
+                        _try_fsync(f)
+                finally:
+                    if self._file_lock:
+                        _try_unlock(f)
+
+        self._safe_call(_append)
 
     def _append_json(self, event: DiscoveryEvent) -> None:
         """Append a JSON line representation of the event if json mirroring is enabled."""
         if not self.json_mirror:
             return
-        record = event.to_json_ready()
-        line = json.dumps(record, ensure_ascii=False)
-        with self.json_file_path.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
 
+        def _append() -> None:
+            record = event.to_json_ready()
+            line = json.dumps(record, ensure_ascii=False, sort_keys=False)
+            with self.json_file_path.open("a", encoding="utf-8") as f:
+                if self._file_lock:
+                    _try_lock(f)
+                try:
+                    f.write(line + "\n")
+                    if self._fsync:
+                        _try_fsync(f)
+                finally:
+                    if self._file_lock:
+                        _try_unlock(f)
+
+        self._safe_call(_append)
+
+    # -----------------------------
     # Core logging primitive
-
+    # -----------------------------
     def log_event(
         self,
         kind: str,
@@ -377,9 +558,9 @@ class DiscoveryLogger:
                 Optional override if caller wants to set a fixed id.
         """
         event = DiscoveryEvent(
-            kind=kind,
-            title=title,
-            description=description,
+            kind=str(kind),
+            title=str(title),
+            description=str(description),
             timestamp=timestamp or _utc_iso(),
             event_id=event_id or _new_event_id(),
             run_id=self.run_id,
@@ -391,7 +572,7 @@ class DiscoveryLogger:
             rye_after=rye_after,
             delta_r=delta_r,
             energy=energy,
-            tags=tags,
+            tags=_normalize_tags(tags),
             severity=severity,
             confidence=confidence,
             extra=extra,
@@ -401,6 +582,7 @@ class DiscoveryLogger:
             swarm_size=swarm_size,
             swarm_config=swarm_config,
         )
+
         md = event.to_markdown()
         self._append_markdown(md)
         self._append_json(event)
@@ -409,7 +591,6 @@ class DiscoveryLogger:
     # ------------------------------------------------------------------
     # Convenience helpers for hypotheses
     # ------------------------------------------------------------------
-
     def log_hypothesis(
         self,
         title: str,
@@ -537,7 +718,6 @@ class DiscoveryLogger:
     # ------------------------------------------------------------------
     # RYE spikes and major repair events
     # ------------------------------------------------------------------
-
     def log_rye_spike(
         self,
         title: str,
@@ -559,9 +739,7 @@ class DiscoveryLogger:
         semantic_diversity: Optional[float] = None,
         swarm_size: Optional[int] = None,
     ) -> DiscoveryEvent:
-        """
-        Log a high RYE event, likely associated with a significant repair or insight.
-        """
+        """Log a high RYE event, likely associated with a significant repair or insight."""
         combined_tags = (tags or []) + ["rye_spike", "high_value"]
         return self.log_event(
             kind="rye_spike",
@@ -588,7 +766,6 @@ class DiscoveryLogger:
     # ------------------------------------------------------------------
     # Contradictions and repairs
     # ------------------------------------------------------------------
-
     def log_contradiction_resolved(
         self,
         title: str,
@@ -625,7 +802,6 @@ class DiscoveryLogger:
     # ------------------------------------------------------------------
     # Mechanisms, treatments, biomarkers, and structures
     # ------------------------------------------------------------------
-
     def log_mechanism(
         self,
         label: str,
@@ -772,7 +948,6 @@ class DiscoveryLogger:
     # ------------------------------------------------------------------
     # Run milestones and swarm or tool events
     # ------------------------------------------------------------------
-
     def log_run_milestone(
         self,
         label: str,
@@ -855,7 +1030,7 @@ class DiscoveryLogger:
         for example a long browser crawl or a large data pipeline run.
         """
         tool_tags = (tags or []) + ["tool_event", tool_name, status]
-        payload: Dict[str, Any] = extra.copy() if extra else {}
+        payload: Dict[str, Any] = extra.copy() if isinstance(extra, dict) else {}
         payload.update(
             {
                 "tool_name": tool_name,
@@ -865,9 +1040,9 @@ class DiscoveryLogger:
                 "rye_delta": rye_delta,
             }
         )
-        severity = "info" if status == "success" else "notice"
+        sev = "info" if status == "success" else "notice"
         if status == "error":
-            severity = "major"
+            sev = "major"
         return self.log_event(
             kind="tool_event",
             title=f"Tool {tool_name} {status}",
@@ -877,7 +1052,7 @@ class DiscoveryLogger:
             extra=payload,
             goal=goal,
             domain=domain,
-            severity=severity,
+            severity=sev,
             info_gain=info_gain,
             search_energy=search_energy,
         )
@@ -885,7 +1060,6 @@ class DiscoveryLogger:
     # ------------------------------------------------------------------
     # Integration helpers for MemoryStore style discovery entries
     # ------------------------------------------------------------------
-
     def log_from_memory_discovery(self, entry: Dict[str, Any]) -> DiscoveryEvent:
         """
         Bridge helper to log a discovery entry coming from MemoryStore.
@@ -909,7 +1083,15 @@ class DiscoveryLogger:
         ts = str(entry.get("timestamp") or _utc_iso())
         goal = entry.get("goal")
         domain = entry.get("domain")
-        tags = list(entry.get("tags") or [])
+
+        tags_raw = entry.get("tags") or []
+        if isinstance(tags_raw, str):
+            tags = [tags_raw]
+        elif isinstance(tags_raw, (list, tuple, set)):
+            tags = [str(x) for x in tags_raw]
+        else:
+            tags = []
+
         citations = entry.get("citations") or []
         score = entry.get("score")
 
@@ -918,15 +1100,11 @@ class DiscoveryLogger:
             "memory_entry": entry,
         }
 
-        severity = "major"
+        severity = "info"
         if kind == "cure_candidate":
             severity = "critical"
-        elif kind == "treatment":
+        elif kind in ("treatment", "treatment_candidate", "mechanism", "biomarker", "biomarker_shift"):
             severity = "major"
-        elif kind in ("mechanism", "biomarker"):
-            severity = "major"
-        else:
-            severity = "info"
 
         return self.log_event(
             kind=kind,
@@ -937,15 +1115,14 @@ class DiscoveryLogger:
             tags=tags,
             extra=extra,
             timestamp=ts,
-            goal=goal,
-            domain=domain,
+            goal=str(goal) if goal is not None else None,
+            domain=str(domain) if domain is not None else None,
             severity=severity,
-            confidence=score if isinstance(score, (int, float)) else None,
+            confidence=float(score) if isinstance(score, (int, float)) else None,
         )
 
 
 # Optional singleton style logger for very simple integrations
-
 _GLOBAL_LOGGER: Optional[DiscoveryLogger] = None
 
 
