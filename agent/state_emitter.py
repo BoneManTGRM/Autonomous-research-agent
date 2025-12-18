@@ -1,47 +1,21 @@
 # agent/state_emitter.py
 # -*- coding: utf-8 -*-
 """
-State emitter for the ARA engine worker.
+Disk-based state emitter used by the worker to communicate with Streamlit.
 
-Purpose
--------
-This module writes small JSON state artifacts to disk so Streamlit can show:
-- A sticky heartbeat status bar
-- Live progress (1/3 then 2/3 then 3/3) via phase_index and phase_total
-- Run diagnostics (worker_state, run_state, heartbeat)
-- Optional narrative event feed (event_log.json)
+It writes small JSON snapshots (heartbeat, worker state, run state, progress)
+using atomic replace so readers never see partial files. All writes are best-effort:
+a write failure must not crash the worker.
 
-Design goals
-------------
-- File-based and shared-disk friendly
-- Atomic writes (Streamlit never reads half a JSON file)
-- Safe: failures to write state must never crash the worker
+Typical outputs (under <runs_root>/logs):
+- watchdog_heartbeat.json
+- worker_state.json
+- run_state.json
+- <run_id>_progress.json
+- event_log.json (optional narrative feed)
 
-Canonical locations written
----------------------------
-<runs_root>/logs/watchdog_heartbeat.json
-<runs_root>/logs/worker_state.json
-<runs_root>/logs/run_state.json
-<runs_root>/logs/event_log.json
-<runs_root>/logs/<run_id>_progress.json
-
-Also writes aliases that the UI searches for:
-- heartbeat.json, worker_heartbeat.json
-- engine_worker_state.json, worker_status.json
-- last_run_state.json
-- events.json, timeline.json
-- per-run variants: <run_id>_worker_state.json, <run_id>_run_state.json, <run_id>_event_log.json, <run_id>_heartbeat.json
-- per-run dir variants: <runs_root>/<run_id>/state.json, worker_state.json, run_state.json, heartbeat.json, progress.json, event_log.json
-
-Phase indexing
---------------
-Your Streamlit UI includes a heuristic for 0-based phases.
-If you use 0-based indices, the UI can display 1..phase_total smoothly.
-
-Recommended:
-- exploration:     phase_index = 0, phase_total = 3
-- stabilization:   phase_index = 1, phase_total = 3
-- refinement:      phase_index = 2, phase_total = 3
+The module also writes several filename aliases because the UI may probe
+multiple locations/names.
 """
 
 from __future__ import annotations
@@ -51,10 +25,17 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Union
+
+
+try:
+    # Optional: keep schema_version aligned with agent/state_schema.py if present.
+    from .state_schema import SCHEMA_VERSION as _SCHEMA_VERSION  # type: ignore
+except Exception:
+    _SCHEMA_VERSION = "v1"
 
 
 # -----------------------------
@@ -66,15 +47,13 @@ def _repo_root() -> Path:
 
 
 def get_runs_root() -> Path:
-    """Resolve runs root directory in the same spirit as the Streamlit UI.
+    """Resolve a default runs directory.
 
     Priority:
     1) agent.run_jobs.BASE_DIR (if available)
     2) env var ARA_RUNS_DIR
     3) <repo_root>/runs
     """
-    # Avoid hard dependency at import time. If run_jobs imports this module,
-    # importing run_jobs here would create a cycle, so we keep this inside try.
     try:
         from . import run_jobs as _rj  # type: ignore
 
@@ -94,7 +73,7 @@ def get_runs_root() -> Path:
 
 
 def get_queue_root() -> Path:
-    """Resolve queue root directory.
+    """Resolve a default queue directory.
 
     Priority:
     1) agent.run_jobs.QUEUE_ROOT (if available)
@@ -137,18 +116,19 @@ def _ensure_dir(path: Path) -> None:
     try:
         path.mkdir(parents=True, exist_ok=True)
     except Exception:
+        # Never crash the worker for directory creation issues.
         pass
 
 
 def _atomic_write_json(path: Path, payload: Any) -> None:
-    """Atomically write JSON so Streamlit never reads half a file."""
+    """Write JSON via atomic replace (best-effort)."""
     _ensure_dir(path.parent)
     tmp = path.with_suffix(path.suffix + f".tmp_{os.getpid()}_{uuid.uuid4().hex}")
     try:
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
             f.write("\n")
-        os.replace(tmp, path)
+        os.replace(tmp, path)  # atomic on POSIX; replace on Windows
     finally:
         try:
             if tmp.exists():
@@ -167,7 +147,42 @@ def _read_json(path: Path) -> Optional[Any]:
         return None
 
 
-def _json_safe(value: Any) -> Any:
+def _json_safe(value: Any, *, _depth: int = 0, _max_depth: int = 6) -> Any:
+    """Convert values into something JSON-serializable, preserving structure when possible."""
+    if _depth >= _max_depth:
+        try:
+            return str(value)
+        except Exception:
+            return repr(value)
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    if isinstance(value, Path):
+        return str(value)
+
+    if is_dataclass(value):
+        try:
+            return _json_safe(asdict(value), _depth=_depth + 1, _max_depth=_max_depth)
+        except Exception:
+            return str(value)
+
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for k, v in value.items():
+            try:
+                sk = str(k)
+            except Exception:
+                sk = repr(k)
+            out[sk] = _json_safe(v, _depth=_depth + 1, _max_depth=_max_depth)
+        return out
+
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(v, _depth=_depth + 1, _max_depth=_max_depth) for v in value]
+
     try:
         json.dumps(value)
         return value
@@ -205,6 +220,7 @@ class EmitPaths:
             self.logs_dir / "heartbeat.json",
             self.logs_dir / "worker_heartbeat.json",
         ]
+        # Only mirror the canonical watchdog file into queue roots by default.
         paths.extend(self._maybe_queue("watchdog_heartbeat.json"))
 
         if run_id:
@@ -282,7 +298,7 @@ class EmitPaths:
 
 
 class StateEmitter:
-    """Writes worker heartbeat, state, progress, and event artifacts to disk."""
+    """Writes heartbeat/state/progress/event artifacts to disk (safe + atomic)."""
 
     def __init__(
         self,
@@ -303,7 +319,7 @@ class StateEmitter:
         self.logs_dir = self.runs_root / "logs"
         _ensure_dir(self.logs_dir)
 
-        self._start_ts = time.time()
+        self._start_ts = float(time.time())
         self._heartbeat_count = 0
 
         self.run_id: Optional[str] = str(run_id) if run_id else None
@@ -319,15 +335,20 @@ class StateEmitter:
             mirror_to_queue=mirror_to_queue,
         )
 
+        # Small in-memory caches (optional convenience; does not affect persistence)
         self._last_worker_state: Dict[str, Any] = {}
         self._last_run_state: Dict[str, Any] = {}
 
-    # --------
+    # -------------------------
     # Internals
-    # --------
+    # -------------------------
     def _safe_write_many(self, paths: Sequence[Path], payload: Any) -> None:
         last_err: Optional[Exception] = None
+        seen: set = set()
         for p in paths:
+            if p in seen:
+                continue
+            seen.add(p)
             try:
                 _atomic_write_json(p, payload)
             except Exception as e:
@@ -337,36 +358,52 @@ class StateEmitter:
             raise last_err
 
     def _now_meta(self) -> Dict[str, Any]:
+        iso = _utc_iso()
+        ts = float(time.time())
         return {
-            "timestamp": _utc_iso(),
-            "ts": float(time.time()),
+            "schema_version": _SCHEMA_VERSION,
+            "timestamp": iso,
+            "updated_at": iso,
+            "ts": ts,
+            "timestamp_unix": ts,
             "pid": int(os.getpid()),
         }
 
-    # --------
-    # Public: heartbeat
-    # --------
+    # -------------------------
+    # Heartbeat
+    # -------------------------
     def emit_heartbeat(self, status: str = "running", run_id: Optional[str] = None, **extra: Any) -> Dict[str, Any]:
-        """Write or update watchdog heartbeat JSON."""
+        """Update the watchdog heartbeat snapshot."""
         rid = run_id or self.run_id
         self._heartbeat_count += 1
 
+        now_ts = float(time.time())
+        iso = _utc_iso()
+
         payload: Dict[str, Any] = {
-            "last_beat": _utc_iso(),
-            "ts": float(time.time()),
+            "schema_version": _SCHEMA_VERSION,
+            "last_beat": iso,
+            "timestamp": iso,  # alias some readers prefer
+            "ts": now_ts,
+            "heartbeat_ts": now_ts,  # alias
             "count": int(self._heartbeat_count),
-            "run_id": rid,
+            "beats": int(self._heartbeat_count),  # alias
             "status": str(status),
-            "uptime_seconds": max(0.0, float(time.time() - self._start_ts)),
+            "uptime_seconds": max(0.0, float(now_ts - self._start_ts)),
         }
+        if rid:
+            payload["run_id"] = rid
+            payload.setdefault("job_id", rid)
+            payload.setdefault("id", rid)
+
         payload.update({k: _json_safe(v) for k, v in extra.items()})
 
         self._safe_write_many(self.paths.heartbeat_paths(rid), payload)
         return payload
 
-    # --------
-    # Public: worker state
-    # --------
+    # -------------------------
+    # Worker state
+    # -------------------------
     def emit_worker_state(
         self,
         *,
@@ -386,12 +423,16 @@ class StateEmitter:
         message: Optional[str] = None,
         **extra: Any,
     ) -> Dict[str, Any]:
-        """Write or update worker_state.json."""
+        """Write/update the worker_state snapshot."""
         rid = run_id or self.run_id
 
         payload: Dict[str, Any] = {}
         payload.update(self._now_meta())
-        payload.update({"run_id": rid, "status": str(status)})
+        payload["status"] = str(status)
+        if rid:
+            payload["run_id"] = rid
+            payload.setdefault("job_id", rid)
+            payload.setdefault("id", rid)
 
         if mode is not None:
             payload["mode"] = str(mode)
@@ -404,15 +445,23 @@ class StateEmitter:
 
         if phase_index is not None:
             payload["phase_index"] = int(phase_index)
+            payload.setdefault("phase_current", int(phase_index))
         if phase_total is not None:
             payload["phase_total"] = int(phase_total)
+            payload.setdefault("phase_count", int(phase_total))
+            payload.setdefault("total_phases", int(phase_total))
         if phase_name is not None:
             payload["phase_name"] = str(phase_name)
 
         if current is not None:
             payload["current"] = int(current)
+            payload.setdefault("cycle", int(current))
+            payload.setdefault("cycle_index", int(current))
+            payload.setdefault("current_cycle", int(current))
         if total is not None:
             payload["total"] = int(total)
+            payload.setdefault("total_cycles", int(total))
+            payload.setdefault("max_cycles", int(total))
         if effective_current is not None:
             payload["effective_current"] = int(effective_current)
         if effective_total is not None:
@@ -427,28 +476,34 @@ class StateEmitter:
         self._safe_write_many(self.paths.worker_state_paths(rid), payload)
         return payload
 
-    # --------
-    # Public: run state
-    # --------
+    # -------------------------
+    # Run state
+    # -------------------------
     def emit_run_state(self, state: Dict[str, Any], run_id: Optional[str] = None) -> Dict[str, Any]:
-        """Write or update run_state.json."""
+        """Write/update the run_state snapshot (arbitrary dict)."""
         rid = run_id or self.run_id
         payload: Dict[str, Any] = dict(state) if isinstance(state, dict) else {"state": state}
 
-        payload.setdefault("run_id", rid)
+        payload.setdefault("schema_version", _SCHEMA_VERSION)
+        if rid:
+            payload.setdefault("run_id", rid)
+            payload.setdefault("job_id", rid)
+            payload.setdefault("id", rid)
+
         payload.setdefault("timestamp", _utc_iso())
+        payload.setdefault("updated_at", payload.get("timestamp"))
         payload.setdefault("ts", float(time.time()))
+        payload.setdefault("timestamp_unix", payload.get("ts"))
 
-        # Make sure payload is JSON safe
-        payload = {k: _json_safe(v) for k, v in payload.items()}
+        payload = _json_safe(payload)  # recursive sanitize
 
-        self._last_run_state = payload
-        self._safe_write_many(self.paths.run_state_paths(rid), payload)
-        return payload
+        self._last_run_state = payload if isinstance(payload, dict) else {"state": payload}
+        self._safe_write_many(self.paths.run_state_paths(rid), self._last_run_state)
+        return self._last_run_state
 
-    # --------
-    # Public: progress JSON
-    # --------
+    # -------------------------
+    # Progress-only snapshot
+    # -------------------------
     def emit_progress(
         self,
         *,
@@ -464,7 +519,7 @@ class StateEmitter:
         message: Optional[str] = None,
         **extra: Any,
     ) -> Optional[Dict[str, Any]]:
-        """Write <run_id>_progress.json."""
+        """Write <run_id>_progress.json (small and frequently updated)."""
         rid = run_id or self.run_id
         if not rid:
             return None
@@ -472,21 +527,32 @@ class StateEmitter:
         payload: Dict[str, Any] = {}
         payload.update(self._now_meta())
         payload["run_id"] = rid
+        payload.setdefault("job_id", rid)
+        payload.setdefault("id", rid)
 
         if status is not None:
             payload["status"] = str(status)
 
         if phase_index is not None:
             payload["phase_index"] = int(phase_index)
+            payload.setdefault("phase_current", int(phase_index))
         if phase_total is not None:
             payload["phase_total"] = int(phase_total)
+            payload.setdefault("phase_count", int(phase_total))
+            payload.setdefault("total_phases", int(phase_total))
         if phase_name is not None:
             payload["phase_name"] = str(phase_name)
 
         if current is not None:
             payload["current"] = int(current)
+            payload.setdefault("cycle", int(current))
+            payload.setdefault("cycle_index", int(current))
+            payload.setdefault("current_cycle", int(current))
         if total is not None:
             payload["total"] = int(total)
+            payload.setdefault("total_cycles", int(total))
+            payload.setdefault("max_cycles", int(total))
+
         if effective_current is not None:
             payload["effective_current"] = int(effective_current)
         if effective_total is not None:
@@ -500,9 +566,9 @@ class StateEmitter:
         self._safe_write_many(self.paths.progress_paths(rid), payload)
         return payload
 
-    # --------
-    # Public: events
-    # --------
+    # -------------------------
+    # Narrative events
+    # -------------------------
     def emit_event(
         self,
         *,
@@ -519,23 +585,29 @@ class StateEmitter:
         data: Optional[Dict[str, Any]] = None,
         **extra: Any,
     ) -> Dict[str, Any]:
-        """Append an event to event_log.json (bounded to max_events).
-
-        This writes a dict container with an "events" list so Streamlit can read
-        it reliably.
-        """
+        """Append one entry into the narrative event log (bounded by max_events)."""
         rid = run_id or self.run_id
-        now = float(time.time())
+
+        now_unix = float(time.time())
+        now_iso = _utc_iso()
 
         ev: Dict[str, Any] = {
+            "schema_version": _SCHEMA_VERSION,
             "id": uuid.uuid4().hex,
-            "ts": now,
-            "timestamp": _utc_iso(),
             "kind": str(kind),
+            "type": str(kind),  # alias for some viewers
             "level": str(level),
             "message": str(message),
-            "run_id": rid,
+            "text": str(message),  # alias
+            "ts": now_unix,
+            "timestamp": now_iso,
+            "ts_iso": now_iso,
+            "unix_ts": now_unix,
         }
+        if rid:
+            ev["run_id"] = rid
+            ev.setdefault("job_id", rid)
+
         if role is not None:
             ev["role"] = str(role)
         if domain is not None:
@@ -560,7 +632,7 @@ class StateEmitter:
         events: List[Dict[str, Any]] = []
 
         if isinstance(existing, dict):
-            maybe = existing.get("events")
+            maybe = existing.get("events") or existing.get("timeline") or existing.get("items")
             if isinstance(maybe, list):
                 events = [x for x in maybe if isinstance(x, dict)]
         elif isinstance(existing, list):
@@ -571,19 +643,24 @@ class StateEmitter:
             events = events[-self.max_events :]
 
         payload: Dict[str, Any] = {
-            "updated_at": _utc_iso(),
+            "schema_version": _SCHEMA_VERSION,
+            "updated_at": now_iso,
+            "ts": now_unix,
             "run_id": rid,
             "events": events,
+            "timeline": events,  # alias
+            "items": events,  # alias
+            "count": len(events),
         }
 
         self._safe_write_many(paths, payload)
         return ev
 
-    # --------
+    # -------------------------
     # Convenience helpers
-    # --------
+    # -------------------------
     def set_run_id(self, run_id: str, mirror_to_run_dir: bool = True) -> None:
-        """Update run_id after init."""
+        """Set/replace the run id after initialization."""
         self.run_id = str(run_id)
         if mirror_to_run_dir:
             self.run_dir = self.runs_root / _safe_run_id(self.run_id)
@@ -601,9 +678,9 @@ class StateEmitter:
         domain: Optional[str] = None,
         **extra: Any,
     ) -> None:
-        """One call to make the UI show phase progress smoothly.
+        """Call at the start of each phase so the UI updates immediately.
 
-        Recommended: use 0-based phase_index with your current Streamlit UI.
+        If your UI expects 0-based phases, emit 0..phase_total-1.
         """
         self.emit_worker_state(
             status=status,
@@ -646,8 +723,10 @@ class StateEmitter:
         domain: Optional[str] = None,
         **extra: Any,
     ) -> None:
-        """Update cycle progress (optional)."""
-        msg = cycle_label or ("Cycle " + str(current) + ("/" + str(total) if isinstance(total, int) and total > 0 else ""))
+        """Optional per-cycle progress updates."""
+        msg = cycle_label or (
+            "Cycle " + str(current) + ("/" + str(total) if isinstance(total, int) and total > 0 else "")
+        )
 
         self.emit_worker_state(
             status=status,
