@@ -21,6 +21,8 @@ This module provides a JSON based persistent storage layer. It stores:
 - learning_burst (burst learning state for the TGRM loop)
 - benchmarks (ARC, math, longevity test batteries, etc.)
 - source_index (lightweight index for linking entities to citation ids)
+- replay_buffer (high value items for curriculum replay / fast recall)
+- msil_snapshots (Meta Skill Intelligence Layer snapshots for learning analytics)
 
 The memory store acts as a lightweight knowledge base for the agent and is
 referenced each cycle to retrieve prior context and to persist new findings.
@@ -34,12 +36,12 @@ Reparodynamics interpretation:
     The run_state, worker_state, watchdog, goal_index, events, discoveries,
     run_manifests, tool_events, milestones, hypothesis_evolution,
     option_c_diagnostics, swarm_contracts, learning_burst, benchmarks,
-    and source_index sections act as a meta layer: they record how the
-    system itself is running so that the agent can restart and continue
+    source_index, replay_buffer, and msil_snapshots sections act as a meta layer:
+    they record how the system itself is running so that the agent can restart and continue
     repair with minimal extra energy and give swarm level analytics
     (per role and per goal), plus a running log of key cure and treatment
-    candidates, tool behavior, benchmark performance, and learning curve
-    shaping.
+    candidates, tool behavior, benchmark performance, learning curve
+    shaping, and optional replay/curriculum artifacts.
 """
 
 from __future__ import annotations
@@ -88,6 +90,10 @@ MAX_BENCHMARKS = 100_000
 MAX_HYPOTHESIS_EVOLUTION = 20_000
 MAX_OPTION_C_DIAGNOSTICS = 20_000
 MAX_SWARM_CONTRACTS = 20_000
+
+# Replay + MSIL caps (kept separate so you can tune without touching core logs)
+MAX_REPLAY_BUFFER = 50_000
+MAX_MSIL_SNAPSHOTS = 50_000
 
 # Snapshot settings for Streamlit timeline and long runs
 DEFAULT_SNAPSHOT_SECTIONS = [
@@ -145,6 +151,8 @@ class MemoryStore:
         - "swarm_contracts":     specialization contracts for swarm roles
         - "benchmarks":          benchmark and task results such as ARC, math suites
         - "source_index":        optional index for mapping entities to citations
+        - "replay_buffer":       high value items for replay/curriculum
+        - "msil_snapshots":      MSIL snapshots (optional meta analytics)
 
     In memory (non persistent) vector memory may also be attached to
     support semantic search and time decayed retrieval if the optional
@@ -157,7 +165,7 @@ class MemoryStore:
         - worker_state and events for live status and debugging
         - bounded growth of logs (notes, cycles, hypotheses, citations,
           events, tool_events, hypothesis_evolution, option_c_diagnostics,
-          swarm_contracts, benchmarks)
+          swarm_contracts, benchmarks, replay_buffer, msil_snapshots)
         - per run manifests and milestones for report generation
 
     Advanced learning layer:
@@ -168,6 +176,8 @@ class MemoryStore:
         - hypothesis_evolution tracks how ideas refine or merge
         - option_c_diagnostics and swarm_contracts support frontier AGI runs
         - benchmarks give a persistent trace of test performance (ARC, math, etc.)
+        - replay_buffer provides durable high-value replay items
+        - msil_snapshots provides optional MSIL state traces for dashboards
     """
 
     def __init__(
@@ -264,6 +274,8 @@ class MemoryStore:
             "swarm_contracts": [],
             "benchmarks": [],
             "source_index": {},
+            "replay_buffer": [],
+            "msil_snapshots": [],
             "schema_version": MEMORY_SCHEMA_VERSION,
         }
 
@@ -323,6 +335,8 @@ class MemoryStore:
             "swarm_contracts": [],
             "benchmarks": [],
             "source_index": {},
+            "replay_buffer": [],
+            "msil_snapshots": [],
         }
         for key, default in defaults.items():
             if key not in self._data:
@@ -342,6 +356,8 @@ class MemoryStore:
                     "option_c_diagnostics",
                     "swarm_contracts",
                     "benchmarks",
+                    "replay_buffer",
+                    "msil_snapshots",
                 ):
                     if not isinstance(self._data.get(key), list):
                         self._data[key] = []
@@ -413,6 +429,8 @@ class MemoryStore:
                     "swarm_contracts": [],
                     "benchmarks": [],
                     "source_index": {},
+                    "replay_buffer": [],
+                    "msil_snapshots": [],
                     "schema_version": MEMORY_SCHEMA_VERSION,
                 }
 
@@ -687,6 +705,8 @@ class MemoryStore:
                 "swarm_contracts": len(self._data.get("swarm_contracts", [])),
                 "benchmarks": len(self._data.get("benchmarks", [])),
                 "run_manifests": len(self._data.get("run_manifests", {})),
+                "replay_buffer": len(self._data.get("replay_buffer", [])),
+                "msil_snapshots": len(self._data.get("msil_snapshots", [])),
             },
             "caps": {
                 "MAX_NOTES": MAX_NOTES,
@@ -703,6 +723,8 @@ class MemoryStore:
                 "MAX_OPTION_C_DIAGNOSTICS": MAX_OPTION_C_DIAGNOSTICS,
                 "MAX_SWARM_CONTRACTS": MAX_SWARM_CONTRACTS,
                 "MAX_BENCHMARKS": MAX_BENCHMARKS,
+                "MAX_REPLAY_BUFFER": MAX_REPLAY_BUFFER,
+                "MAX_MSIL_SNAPSHOTS": MAX_MSIL_SNAPSHOTS,
             },
             "last_save_error": self._last_save_error,
         }
@@ -745,6 +767,8 @@ class MemoryStore:
             "swarm_contracts": [],
             "benchmarks": [],
             "source_index": {},
+            "replay_buffer": [],
+            "msil_snapshots": [],
             "schema_version": MEMORY_SCHEMA_VERSION,
         }
         self._save()
@@ -785,6 +809,8 @@ class MemoryStore:
             "option_c_diagnostics": MAX_OPTION_C_DIAGNOSTICS,
             "swarm_contracts": MAX_SWARM_CONTRACTS,
             "benchmarks": MAX_BENCHMARKS,
+            "replay_buffer": MAX_REPLAY_BUFFER,
+            "msil_snapshots": MAX_MSIL_SNAPSHOTS,
         }
 
         for key, cap in caps.items():
@@ -1356,6 +1382,12 @@ class MemoryStore:
     # ------------------------------------------------------------------
     def log_cycle(self, cycle_data: Dict[str, Any]) -> None:
         """Append cycle data to the cycle log and update learning signals."""
+        # Normalize cycle index key for downstream analytics (MSIL, dashboards, etc.)
+        # Many callers use "cycle"; some use "cycle_index".
+        if isinstance(cycle_data, dict):
+            if "cycle_index" not in cycle_data and "cycle" in cycle_data:
+                cycle_data["cycle_index"] = cycle_data.get("cycle")
+
         self._data.setdefault("cycles", []).append(cycle_data)
 
         # Bound cycles growth
@@ -1369,7 +1401,9 @@ class MemoryStore:
         rye_val = cycle_data.get("RYE")
         cycle_index = None
         try:
-            if "cycle" in cycle_data:
+            if "cycle_index" in cycle_data:
+                cycle_index = int(cycle_data.get("cycle_index"))
+            elif "cycle" in cycle_data:
                 cycle_index = int(cycle_data.get("cycle"))
         except Exception:
             cycle_index = None
@@ -1477,9 +1511,26 @@ class MemoryStore:
 
         self._save()
 
-    def get_cycle_history(self) -> List[Dict[str, Any]]:
-        """Return the history of cycles."""
-        return self._data.get("cycles", [])
+    def get_cycle_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Return the history of cycles (oldest to newest).
+
+        Args:
+            limit:
+                If provided and > 0, returns only the most recent `limit` cycles,
+                still ordered oldest->newest (stable for learning windows).
+        """
+        cycles = self._data.get("cycles", [])
+        if not isinstance(cycles, list):
+            return []
+        if limit is None:
+            return list(cycles)
+        try:
+            lim = int(limit)
+        except Exception:
+            lim = 0
+        if lim <= 0:
+            return []
+        return list(cycles[-lim:])
 
     def get_cycle_history_for_goal(self, goal: str, limit: int = 200) -> List[Dict[str, Any]]:
         """Return recent cycles for a goal, oldest to newest, up to limit.
@@ -2288,7 +2339,7 @@ class MemoryStore:
                 "finished_at": finished_at,
             },
             "best_cycle": {
-                "cycle_index": best_cycle.get("cycle") if isinstance(best_cycle, dict) else None,
+                "cycle_index": best_cycle.get("cycle_index", best_cycle.get("cycle")) if isinstance(best_cycle, dict) else None,
                 "RYE": best_rye_val,
                 "timestamp": best_cycle.get("timestamp") if isinstance(best_cycle, dict) else None,
             }
@@ -2734,9 +2785,10 @@ class MemoryStore:
         early_avg = None
         late_avg = None
         if history:
+
             def _cycle_key(c: Dict[str, Any]) -> int:
                 try:
-                    return int(c.get("cycle", 0))
+                    return int(c.get("cycle_index", c.get("cycle", 0)) or 0)
                 except Exception:
                     return 0
 
@@ -2806,7 +2858,7 @@ class MemoryStore:
                 "delta": (late_avg - early_avg) if (early_avg is not None and late_avg is not None) else None,
             },
             "best_cycle": {
-                "cycle_index": best_cycle.get("cycle") if isinstance(best_cycle, dict) else None,
+                "cycle_index": best_cycle.get("cycle_index", best_cycle.get("cycle")) if isinstance(best_cycle, dict) else None,
                 "RYE": best_rye_val,
                 "timestamp": best_cycle.get("timestamp") if isinstance(best_cycle, dict) else None,
                 "equilibrium": best_cycle.get("equilibrium") if isinstance(best_cycle, dict) else None,
@@ -3578,3 +3630,314 @@ class MemoryStore:
     def get_run_overview_rows(self, limit: int = 200) -> List[Dict[str, Any]]:
         """Compatibility alias for get_run_table_rows used by some UIs."""
         return self.get_run_table_rows(limit=limit)
+
+    # ------------------------------------------------------------------
+    # Run-history compatibility helpers (used by MSIL and other analytics layers)
+    # ------------------------------------------------------------------
+    def get_run_history(self, run_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Return cycles associated with a run_id, oldest -> newest.
+
+        Notes:
+            - This is a convenience alias for analytics layers.
+            - Existing get_cycles_for_run() returns newest -> oldest.
+        """
+        if not run_id:
+            return []
+        newest_first = self.get_cycles_for_run(run_id, limit=limit)
+        return list(reversed(newest_first))
+
+    def get_run_stats(self, run_id: str) -> Dict[str, Any]:
+        """Return a compact run stats bundle for meta controllers / MSIL."""
+        if not run_id:
+            return {}
+        summary = self.get_run_summary(run_id)
+        tool_stats = self.get_tool_stats(run_id=run_id)
+        latest_msil = self.get_latest_msil_snapshot(run_id=run_id)
+        return {
+            "run_id": run_id,
+            "summary": summary,
+            "tool_stats": tool_stats,
+            "latest_msil": latest_msil,
+        }
+
+    # ------------------------------------------------------------------
+    # Replay buffer (optional; MSIL can use this when available)
+    # ------------------------------------------------------------------
+    def add_replay_item(
+        self,
+        *,
+        goal: str,
+        text: Optional[str] = None,
+        payload: Optional[Dict[str, Any]] = None,
+        rye_score: Optional[float] = None,
+        item_type: str = "cycle",
+        tags: Optional[List[str]] = None,
+        domain: Optional[str] = None,
+        role: Optional[str] = None,
+        run_id: Optional[str] = None,
+        cycle_index: Optional[int] = None,
+        source: str = "agent",
+        importance: float = 1.0,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Add a replay item (high value artifact for future recall).
+
+        This is intentionally lightweight. Prefer storing pointers (run_id,
+        cycle_index) over huge payloads to keep memory.json manageable.
+        """
+        if not goal:
+            return
+
+        entry: Dict[str, Any] = {
+            "timestamp": _utc_now_iso(),
+            "goal": goal,
+            "item_type": item_type,
+            "text": text,
+            "payload": payload or {},
+            "rye_score": float(rye_score) if isinstance(rye_score, (int, float)) else None,
+            "tags": tags or [],
+            "domain": domain,
+            "role": role,
+            "run_id": run_id,
+            "cycle_index": int(cycle_index) if isinstance(cycle_index, int) else cycle_index,
+            "source": source,
+            "importance": float(importance),
+        }
+        if extra:
+            entry["extra"] = dict(extra)
+
+        arr = self._data.setdefault("replay_buffer", [])
+        if not isinstance(arr, list):
+            arr = []
+        arr.append(entry)
+        if len(arr) > MAX_REPLAY_BUFFER:
+            arr = arr[-MAX_REPLAY_BUFFER:]
+        self._data["replay_buffer"] = arr
+        self._save()
+
+        # Optional semantic storage
+        if self.vector_memory is not None and text:
+            try:
+                meta: Dict[str, Any] = {
+                    "goal": goal,
+                    "type": "replay_item",
+                    "item_type": item_type,
+                    "rye_score": entry.get("rye_score"),
+                    "tags": entry.get("tags", []),
+                    "source": source,
+                }
+                if domain is not None:
+                    meta["domain"] = domain
+                if role is not None:
+                    meta["role"] = role
+                if run_id is not None:
+                    meta["run_id"] = run_id
+                if cycle_index is not None:
+                    meta["cycle_index"] = int(cycle_index)
+                self.vector_memory.add_item(text=text, metadata=meta)
+            except Exception:
+                pass
+
+    def get_replay_items_for_goal(
+        self,
+        goal: str,
+        *,
+        limit: int = 200,
+        min_rye: Optional[float] = None,
+        run_id: Optional[str] = None,
+        prefer_buffer: bool = True,
+    ) -> List[Dict[str, Any]]:
+        """Return replay items for a goal, most recent first.
+
+        If replay_buffer is empty (or prefer_buffer=False), this falls back to
+        deriving replay items from recent cycle history for the goal.
+        """
+        if not goal:
+            return []
+
+        # 1) Prefer explicit replay_buffer if present and non-empty
+        buf = self._data.get("replay_buffer", [])
+        if prefer_buffer and isinstance(buf, list) and buf:
+            out: List[Dict[str, Any]] = []
+            for e in reversed(buf):  # newest first (append order)
+                if not isinstance(e, dict):
+                    continue
+                if e.get("goal") != goal:
+                    continue
+                if run_id is not None and e.get("run_id") != run_id:
+                    continue
+                if min_rye is not None:
+                    rs = e.get("rye_score")
+                    if not isinstance(rs, (int, float)):
+                        continue
+                    if float(rs) < float(min_rye):
+                        continue
+                out.append(dict(e))
+                if len(out) >= max(1, int(limit)):
+                    break
+            return out
+
+        # 2) Fallback: derive from recent cycles
+        out2: List[Dict[str, Any]] = []
+        try:
+            lim = max(1, int(limit))
+        except Exception:
+            lim = 200
+        window = max(lim, 200)
+        cycles = self.get_cycle_history_for_goal(goal, limit=window)  # oldest->newest
+        for c in reversed(cycles):  # newest first
+            if not isinstance(c, dict):
+                continue
+            if run_id is not None and c.get("run_id") != run_id:
+                continue
+            v = c.get("RYE")
+            if min_rye is not None:
+                if not isinstance(v, (int, float)) or float(v) < float(min_rye):
+                    continue
+            cy_idx = c.get("cycle_index", c.get("cycle"))
+            out2.append(
+                {
+                    "timestamp": c.get("timestamp"),
+                    "goal": goal,
+                    "item_type": "cycle_history",
+                    "text": None,
+                    "payload": {},
+                    "rye_score": float(v) if isinstance(v, (int, float)) else None,
+                    "tags": [],
+                    "domain": c.get("domain"),
+                    "role": c.get("role"),
+                    "run_id": c.get("run_id"),
+                    "cycle_index": cy_idx,
+                    "source": "derived_from_cycles",
+                    "importance": 1.0,
+                }
+            )
+            if len(out2) >= lim:
+                break
+        return out2
+
+    # ------------------------------------------------------------------
+    # MSIL snapshots (optional storage for the Meta Skill Intelligence Layer)
+    # ------------------------------------------------------------------
+    def _compact_msil_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """Compact an MSIL snapshot to keep memory.json from growing too fast."""
+        if not isinstance(snapshot, dict):
+            return {}
+        # Keep the key fields used by dashboards and meta-controllers.
+        compact: Dict[str, Any] = {
+            "timestamp": snapshot.get("timestamp"),
+            "goal": snapshot.get("goal"),
+            "msil_score": snapshot.get("msil_score"),
+            "intelligence_stage": snapshot.get("intelligence_stage"),
+            "total_cycles_for_goal": snapshot.get("total_cycles_for_goal"),
+            "recent_window": snapshot.get("recent_window"),
+            "skills": snapshot.get("skills"),
+        }
+        # Keep top domain profiles only (to avoid bloat).
+        pdp = snapshot.get("per_domain_profiles")
+        if isinstance(pdp, list):
+            compact["per_domain_profiles"] = pdp[:8]
+        # Extras are usually small and useful for debugging.
+        extras = snapshot.get("extras")
+        if isinstance(extras, dict):
+            compact["extras"] = extras
+        return compact
+
+    def log_msil_snapshot(
+        self,
+        snapshot: Dict[str, Any],
+        *,
+        run_id: Optional[str] = None,
+        goal: Optional[str] = None,
+        cycle_index: Optional[int] = None,
+        compact: bool = True,
+    ) -> None:
+        """Persist an MSIL snapshot (typically called once per N cycles)."""
+        if not isinstance(snapshot, dict) or not snapshot:
+            return
+
+        snap_goal = goal or snapshot.get("goal")
+        if not isinstance(snap_goal, str) or not snap_goal:
+            return
+
+        ts = snapshot.get("timestamp")
+        if not isinstance(ts, str) or not ts:
+            ts = _utc_now_iso()
+
+        stored_snapshot = self._compact_msil_snapshot(snapshot) if compact else dict(snapshot)
+
+        entry: Dict[str, Any] = {
+            "timestamp": ts,
+            "goal": snap_goal,
+            "run_id": run_id,
+            "cycle_index": cycle_index,
+            "snapshot": stored_snapshot,
+        }
+
+        arr = self._data.setdefault("msil_snapshots", [])
+        if not isinstance(arr, list):
+            arr = []
+        arr.append(entry)
+        if len(arr) > MAX_MSIL_SNAPSHOTS:
+            arr = arr[-MAX_MSIL_SNAPSHOTS:]
+        self._data["msil_snapshots"] = arr
+
+        # Optional: mirror a few MSIL stats into goal_index for fast dashboards.
+        try:
+            msil_score = stored_snapshot.get("msil_score")
+            if isinstance(msil_score, (int, float)):
+                gi = self._data.setdefault("goal_index", {})
+                if not isinstance(gi, dict):
+                    gi = {}
+                g_entry = gi.get(snap_goal) or {}
+                if not isinstance(g_entry, dict):
+                    g_entry = {}
+                g_entry["last_msil_score"] = float(msil_score)
+                prev_best = g_entry.get("best_msil_score")
+                if not isinstance(prev_best, (int, float)) or float(msil_score) > float(prev_best):
+                    g_entry["best_msil_score"] = float(msil_score)
+                g_entry["msil_count"] = int(g_entry.get("msil_count", 0)) + 1
+                g_entry["msil_last_updated"] = _utc_now_iso()
+                gi[snap_goal] = g_entry
+                self._data["goal_index"] = gi
+        except Exception:
+            pass
+
+        self._save()
+
+    def get_msil_snapshots(
+        self,
+        *,
+        goal: Optional[str] = None,
+        run_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        """Retrieve MSIL snapshots, most recent first."""
+        arr = self._data.get("msil_snapshots", [])
+        if not isinstance(arr, list) or not arr:
+            return []
+        out: List[Dict[str, Any]] = []
+        lim = max(1, int(limit)) if isinstance(limit, int) else 200
+        for e in reversed(arr):  # newest first
+            if not isinstance(e, dict):
+                continue
+            if goal is not None and e.get("goal") != goal:
+                continue
+            if run_id is not None and e.get("run_id") != run_id:
+                continue
+            out.append(dict(e))
+            if len(out) >= lim:
+                break
+        return out
+
+    def get_latest_msil_snapshot(
+        self,
+        *,
+        goal: Optional[str] = None,
+        run_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the most recent MSIL snapshot for a goal/run_id if present."""
+        snaps = self.get_msil_snapshots(goal=goal, run_id=run_id, limit=1)
+        if snaps:
+            return snaps[0]
+        return None
