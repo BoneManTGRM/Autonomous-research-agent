@@ -3,7 +3,7 @@ services:
   # SINGLE SERVICE: STREAMLIT UI + ENGINE WORKER (started via start.sh)
   # ---------------------------------------------------------
   - type: web
-    name: reparodynamics-autonomous-agent
+    name: ara-autonomous-research-agent
     env: python
     plan: starter
 
@@ -20,7 +20,7 @@ services:
     autoDeploy: true
     healthCheckPath: /
 
-    # Shared disk for queue + results
+    # Persistent disk for queue + results + shared MemoryStore artifacts
     disk:
       name: ara-runs
       mountPath: /opt/render/project/src/runs
