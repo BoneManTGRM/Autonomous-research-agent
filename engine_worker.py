@@ -154,6 +154,10 @@ def _env_float_value(name: str, default: float) -> float:
 def _now_utc_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
 
+# Worker "started at" markers for UI (uptime)
+_WORKER_STARTED_AT_MONO: float = time.monotonic()
+_WORKER_STARTED_AT_UTC: str = _now_utc_iso()
+
 def _safe_os_getpid() -> int:
     try:
         return os.getpid()
@@ -680,6 +684,77 @@ def _to_jsonable(
         except Exception:
             return "<unjsonable>"
 
+# ---------------------------------------------------------------------------
+# Narrative event timeline (agent/event_log.py) integration (best-effort)
+# ---------------------------------------------------------------------------
+
+try:  # pragma: no cover
+    from agent.event_log import log_event as _event_log_write  # type: ignore[import]
+except Exception:  # pragma: no cover
+    _event_log_write = None  # type: ignore[assignment]
+
+_EVENT_LOG_ENABLED: bool = _env_bool("WORKER_EVENT_LOG", default=True)
+
+_EVENT_LOG_THROTTLE = _LogThrottle(
+    max_keys=_env_int("WORKER_EVENT_LOG_THROTTLE_MAX_KEYS", 1024),
+    min_interval_s=_env_float_value("WORKER_EVENT_LOG_THROTTLE_MIN_INTERVAL_SECONDS", 2.0),
+)
+
+def _event(
+    *,
+    run_id: Optional[str],
+    kind: str,
+    message: str,
+    level: str = "info",
+    role: Optional[str] = None,
+    domain: Optional[str] = None,
+    phase_index: Optional[int] = None,
+    phase_total: Optional[int] = None,
+    phase_name: Optional[str] = None,
+    cycle: Optional[int] = None,
+    data: Optional[Dict[str, Any]] = None,
+    throttle_key: Optional[str] = None,
+    throttle_min_interval_s: Optional[float] = None,
+    force: bool = False,
+) -> None:
+    """
+    Best-effort narrative event write to runs/logs/event_log.json and <run_id>_event_log.json.
+    Never raises; safe to call anywhere in the worker.
+    """
+    if not _EVENT_LOG_ENABLED or _event_log_write is None:
+        return
+
+    try:
+        if throttle_key and not force:
+            old = _EVENT_LOG_THROTTLE.min_interval_s
+            if throttle_min_interval_s is not None:
+                _EVENT_LOG_THROTTLE.min_interval_s = max(0.0, float(throttle_min_interval_s))
+            allowed = _EVENT_LOG_THROTTLE.allow(throttle_key)
+            _EVENT_LOG_THROTTLE.min_interval_s = old
+            if not allowed:
+                return
+
+        payload = _to_jsonable(data) if isinstance(data, dict) else {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        _event_log_write(
+            run_id=run_id,
+            kind=kind,
+            message=message,
+            level=level,
+            data=payload,
+            role=role,
+            domain=domain,
+            phase_index=phase_index,
+            phase_total=phase_total,
+            phase_name=phase_name,
+            cycle=cycle,
+            logs_dir=RUNS_LOGS_DIR,  # keep worker + UI aligned
+        )
+    except Exception:
+        return
+
 def _disk_write_json(
     path: Path,
     payload: Any,
@@ -745,6 +820,8 @@ def _emit_watchdog_heartbeat_file(
             "utc": _now_utc_iso(),
             "ts": time.time(),
             "monotonic": time.monotonic(),
+            "worker_started_utc": _WORKER_STARTED_AT_UTC,
+            "uptime_s": int(max(0.0, time.monotonic() - _WORKER_STARTED_AT_MONO)),
             "worker_id": WORKER_ID,
             "pid": _safe_os_getpid(),
             "hostname": _safe_hostname(),
@@ -822,6 +899,8 @@ def _emit_worker_state_file(
             "schema_version": _RUNS_ARTIFACT_SCHEMA_VERSION,
             "utc": _now_utc_iso(),
             "ts": time.time(),
+            "worker_started_utc": _WORKER_STARTED_AT_UTC,
+            "uptime_s": int(max(0.0, time.monotonic() - _WORKER_STARTED_AT_MONO)),
             "worker_id": WORKER_ID,
             "pid": _safe_os_getpid(),
             "hostname": _safe_hostname(),
@@ -1035,6 +1114,7 @@ def _boot_banner(mode: str) -> None:
         "TAVILY_API_KEY",
         "WORKER_TAVILY_KEY",
         "PYTHONUNBUFFERED",
+        "WORKER_EVENT_LOG",
     ]
     env_flags: Dict[str, Any] = {}
     for k in env_keys:
@@ -1546,6 +1626,24 @@ def _log_milestone(
             cycle_index=cycle_index,
             extra=extra,
         )
+
+        # Mirror to narrative timeline (best-effort)
+        _event(
+            run_id=run_id,
+            kind=f"milestone:{label}",
+            message=description,
+            level=str(level or "info"),
+            role=role,
+            domain=domain,
+            cycle=cycle_index,
+            data={
+                "label": label,
+                "goal": goal,
+                "extra": _to_jsonable(extra) if isinstance(extra, dict) else None,
+            },
+            force=True,
+        )
+
         if _VERBOSE_LOGS:
             log_kv("milestone_logged", level="DEBUG", run_id=run_id, label=label, milestone_level=level)
     except Exception as e:
@@ -2877,6 +2975,17 @@ class FileQueue:
 
                 recovered += 1
                 log_kv("stale_running_recovered", level="WARNING", run_id=job.run_id, age_s=int(age))
+
+                _event(
+                    run_id=job.run_id,
+                    kind="job_recovered",
+                    message=f"Recovered stale running job (age={int(age)}s)",
+                    level="warning",
+                    domain=str(job.config.get("domain") or ""),
+                    data={"age_s": int(age)},
+                    force=True,
+                )
+
             except Exception as e:
                 log_exception("stale_recovery_loop_failed", e)
                 continue
@@ -2990,7 +3099,24 @@ class FileQueue:
                 job2.state_path = dest
                 job2.status = "running"
                 job2.claim_token = claim_token
+
+                _event(
+                    run_id=job2.run_id,
+                    kind="job_claimed",
+                    message=f"Job claimed by worker {self.worker_id}",
+                    level="info",
+                    domain=str(job2.config.get("domain") or ""),
+                    data={
+                        "retry_count": job2.retry_count,
+                        "max_retries": job2.max_retries,
+                        "worker_id": self.worker_id,
+                        "pid": _safe_os_getpid(),
+                    },
+                    force=True,
+                )
+
                 return job2
+
             except Exception as e:
                 log_exception("job_claim_loop_failed", e, path=str(p))
                 continue
@@ -3075,6 +3201,22 @@ class FileQueue:
                 max_retries=job.max_retries,
                 next_run_in_s=round(delay, 2),
             )
+
+            _event(
+                run_id=job.run_id,
+                kind="job_retry",
+                message=f"Requeued for retry {new_retry_count}/{job.max_retries} (in ~{round(delay,2)}s)",
+                level="warning",
+                domain=str(job.config.get("domain") or ""),
+                data={
+                    "retry_count": new_retry_count,
+                    "max_retries": job.max_retries,
+                    "next_run_in_s": round(delay, 2),
+                    "error_summary": summary,
+                },
+                force=True,
+            )
+
             return True
         except Exception as e:
             log_exception("retry_move_failed", e, run_id=job.run_id, src=str(job.state_path), dest=str(dest))
@@ -3116,6 +3258,25 @@ class FileQueue:
         self.release_lock(job.run_id)
 
         log_kv("job_finalized_done", run_id=job.run_id, result_path=str(result_path))
+
+        try:
+            cycles_len = None
+            c = result_obj.get("cycles")
+            if isinstance(c, list):
+                cycles_len = len(c)
+        except Exception:
+            cycles_len = None
+
+        _event(
+            run_id=job.run_id,
+            kind="job_done",
+            message="Job finished successfully",
+            level="info",
+            domain=str(job.config.get("domain") or ""),
+            data={"cycles": cycles_len, "elapsed_seconds": result_obj.get("elapsed_seconds")},
+            force=True,
+        )
+
         return True
 
     def finalize_failure(self, job: QueueJobRecord, *, error_payload: Dict[str, Any]) -> bool:
@@ -3158,6 +3319,17 @@ class FileQueue:
         self.release_lock(job.run_id)
 
         log_kv("job_finalized_failed", level="ERROR", run_id=job.run_id, error_path=str(err_path))
+
+        _event(
+            run_id=job.run_id,
+            kind="job_failed",
+            message=summary,
+            level="error",
+            domain=str(job.config.get("domain") or ""),
+            data={"retry_count": job.retry_count, "max_retries": job.max_retries},
+            force=True,
+        )
+
         return True
 
     def mark_recoverable_shutdown(self, job: QueueJobRecord, reason: str) -> None:
@@ -3185,6 +3357,17 @@ class FileQueue:
                 pass
             self.release_lock(job.run_id)
             log_kv("job_requeued_on_shutdown", level="WARNING", run_id=job.run_id, reason=reason_s)
+
+            _event(
+                run_id=job.run_id,
+                kind="job_shutdown_requeue",
+                message=f"Requeued on shutdown: {reason_s}",
+                level="warning",
+                domain=str(job.config.get("domain") or ""),
+                data={"reason": reason_s},
+                force=True,
+            )
+
         except Exception as e:
             log_exception("job_shutdown_requeue_failed", e, run_id=job.run_id, reason=reason_s)
 
@@ -3590,6 +3773,11 @@ def _job_wall_time_guard(seconds: Optional[float]) -> Any:
     This prevents runaway jobs from blocking forever; watchdog may also force-exit.
     """
     if seconds is None or seconds <= 0:
+        yield
+        return
+
+    # Windows / some platforms: SIGALRM + itimer not available
+    if not (hasattr(signal, "SIGALRM") and hasattr(signal, "ITIMER_REAL") and hasattr(signal, "setitimer") and hasattr(signal, "getitimer")):
         yield
         return
 
@@ -4393,7 +4581,7 @@ def run_job_queue_worker() -> None:
     except Exception as e:
         log_exception("startup_stale_recovery_failed", e)
 
-    stats = WorkerStats()
+    stats = WorkerStats(started_at_mono=_WORKER_STARTED_AT_MONO, started_at_utc=_WORKER_STARTED_AT_UTC)
     heartbeat_interval_s = _env_float_value("WORKER_HEARTBEAT_SECONDS", 30.0)
     heartbeat_stall_s = _env_float_value("WORKER_WATCHDOG_HEARTBEAT_STALL_SECONDS", max(90.0, heartbeat_interval_s * 3.0))
 
@@ -4456,6 +4644,22 @@ def run_job_queue_worker() -> None:
         max_retries=queue.default_max_retries,
         retry_base_s=queue.retry_base_seconds,
         retry_max_s=queue.retry_max_seconds,
+    )
+
+    _event(
+        run_id=None,
+        kind="worker_start",
+        message="Queue worker started",
+        level="info",
+        data={
+            "mode": "queue",
+            "worker_id": WORKER_ID,
+            "pid": _safe_os_getpid(),
+            "hostname": _safe_hostname(),
+            "base_dir": str(BASE_DIR),
+            "runs_logs_dir": str(RUNS_LOGS_DIR),
+        },
+        force=True,
     )
 
     # Initial Streamlit artifacts for idle state
@@ -5694,6 +5898,8 @@ def _adjust_phase_from_stats(phase_cfg: Dict[str, Any], stats: Dict[str, Any], r
 def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     _boot_banner("meta")
     while True:
+        run_id: Optional[str] = None
+        domain: str = "general"
         try:
             goal, domain = build_goal_and_domain()
             preset_cfg = get_preset(domain)
@@ -5785,6 +5991,19 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 tool_web=tool_flags["web"],
                 tool_sandbox=tool_flags["sandbox"],
                 fingerprint=experiment_fingerprint,
+            )
+
+            _event(
+                run_id=run_id,
+                kind="run_start",
+                message="Meta engine started",
+                level="info",
+                domain=domain,
+                phase_index=1,
+                phase_total=3,
+                phase_name="exploration",
+                data={"preferred_mode": preferred_mode, "budget_minutes": total_budget_minutes},
+                force=True,
             )
 
             # Meta phases for UI
@@ -5930,6 +6149,24 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     effective_minutes = _clamp_minutes(effective_minutes, "meta.segment") or time_left
                     if stop_rye_env is not None:
                         effective_stop_rye = stop_rye_env
+
+                    _event(
+                        run_id=run_id,
+                        kind="phase_start",
+                        message=f"Phase {phase_index_ui}/3: {phase_name_s}",
+                        level="info",
+                        domain=domain,
+                        phase_index=phase_index_ui,
+                        phase_total=3,
+                        phase_name=phase_name_s,
+                        data={
+                            "phase_mode": phase_mode,
+                            "runtime_profile": phase_profile,
+                            "segment_index": seg_index + 1,
+                            "minutes": effective_minutes,
+                        },
+                        force=True,
+                    )
 
                     if phase_mode == "swarm":
                         segment_summaries = agent.run_swarm_continuous(
@@ -6122,6 +6359,23 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     force=True,
                 )
 
+                _event(
+                    run_id=run_id,
+                    kind="run_end",
+                    message="Meta engine finished",
+                    level="info",
+                    domain=domain,
+                    phase_index=3,
+                    phase_total=3,
+                    phase_name="refinement",
+                    data={
+                        "segments": len(segments_run),
+                        "cycles": len(normalized_cycles),
+                        "rye_last": (diag or {}).get("rye_last") if isinstance(diag, dict) else None,
+                    },
+                    force=True,
+                )
+
                 log_kv("meta_engine_done", run_id=run_id, segments=len(segments_run), summaries=len(normalized_cycles))
                 return
 
@@ -6136,6 +6390,17 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
         except Exception as e:
             log_exception("meta_engine_crash", e)
+
+            _event(
+                run_id=run_id or _current_run_id("meta"),
+                kind="run_error",
+                message=_compact_error_summary(e),
+                level="error",
+                domain=domain,
+                data={"error": str(e)},
+                force=True,
+            )
+
             try:
                 _emit_run_progress_file(
                     run_id=_current_run_id("meta"),
