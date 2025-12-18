@@ -97,6 +97,7 @@ are missing or misconfigured.
 
 from __future__ import annotations
 
+import inspect
 import os
 import time
 from datetime import datetime
@@ -248,13 +249,13 @@ def compute_energy(
         - optional swarm scaling (size and layer)
     """
     base_actions = max(1, len(actions_taken))
-    external_calls = web_calls + pubmed_calls + semantic_calls + pdf_ingestions
-    token_cost = tokens_estimate / 1000.0
+    external_calls = int(web_calls) + int(pubmed_calls) + int(semantic_calls) + int(pdf_ingestions)
+    token_cost = float(tokens_estimate) / 1000.0
 
     energy = 0.5 * base_actions + 0.75 * external_calls + 0.2 * token_cost
 
     if swarm_size:
-        energy *= 1.0 + min(2.0, max(0.0, (swarm_size - 1) / 32.0))
+        energy *= 1.0 + min(2.0, max(0.0, (int(swarm_size) - 1) / 32.0))
 
     if swarm_layer:
         layer = str(swarm_layer).lower()
@@ -280,8 +281,6 @@ class _NullWebTool:
     """
 
     def __init__(self) -> None:
-        # core_web_search is injected from tools.py if the import succeeded.
-        # If it is None we fall back to an empty stub.
         self._web_search_fn = core_web_search
 
     def search(self, query: str, **kwargs: Any) -> List[Dict[str, Any]]:
@@ -289,26 +288,65 @@ class _NullWebTool:
         if self._web_search_fn is None:
             return []
 
-        # Clamp to Tavily-safe length
         query = _clamp_query(query)
 
-        # Respect max_results if provided, otherwise default to 8.
         max_results = kwargs.get("max_results")
         if not isinstance(max_results, int) or max_results <= 0:
             max_results = 8
 
+        # Prefer explicit search_depth; fall back from a "level" convention.
+        search_depth = kwargs.get("search_depth")
+        if not isinstance(search_depth, str) or not search_depth:
+            level = kwargs.get("level")
+            if isinstance(level, int) and level <= 1:
+                search_depth = "basic"
+            else:
+                search_depth = "advanced"
+
+        topic = kwargs.get("topic")
+        if not isinstance(topic, str) or not topic:
+            topic = "general"
+
+        local_usage = ToolUsage()
+
+        # Try the most complete signature first, then degrade gracefully.
         try:
             res = self._web_search_fn(
                 query=query,
-                tool_usage=None,
+                tool_usage=local_usage,
                 max_results=max_results,
-                search_depth="advanced",
+                search_depth=search_depth,
+                topic=topic,
             )
+        except TypeError:
+            try:
+                res = self._web_search_fn(
+                    query=query,
+                    tool_usage=local_usage,
+                    max_results=max_results,
+                    search_depth=search_depth,
+                )
+            except TypeError:
+                try:
+                    res = self._web_search_fn(
+                        query=query,
+                        max_results=max_results,
+                        search_depth=search_depth,
+                    )
+                except Exception:
+                    return []
+            except Exception:
+                return []
         except Exception:
             return []
 
+        if not isinstance(res, dict):
+            return []
+
         items: List[Dict[str, Any]] = []
-        for item in res.get("results", []):
+        for item in (res.get("results") or []):
+            if not isinstance(item, dict):
+                continue
             items.append(
                 {
                     "title": item.get("title") or "",
@@ -587,11 +625,12 @@ class TGRMLoop:
                 s = line.strip()
                 if not s:
                     continue
+                s_lower = s.lower()
                 if "?" in s:
                     counts["question_lines"] += 1
-                if "TODO" in s or "todo" in s:
+                if "todo" in s_lower:
                     counts["todo_lines"] += 1
-                if "CONTRADICTION" in s or "contradiction" in s.lower():
+                if "contradiction" in s_lower:
                     counts["contradiction_lines"] += 1
         return counts
 
@@ -938,6 +977,8 @@ class TGRMLoop:
                 "browser_actions": 0,
                 "code_execs": 0,
                 "data_loads": 0,
+                "interrupted": False,
+                "stop_reason": None,
             }
 
         tool_usage: ToolUsage = self._usage_factory()
@@ -1021,7 +1062,7 @@ class TGRMLoop:
         for code in issues:
             if code in {"question_mark", "todo_item", "contradiction"}:
                 continue
-            issue_code_counts_before[code] = max(1, int(issue_code_counts_before.get(code, 0)))
+            issue_code_counts_before[code] = max(1, int(issue_code_counts_before.get(code, 0) or 0))
 
         domain_issue_codes = [
             "missing_biomarkers",
@@ -1074,7 +1115,7 @@ class TGRMLoop:
             for code in issues_after:
                 if code in {"question_mark", "todo_item", "contradiction"}:
                     continue
-                issue_code_counts_after[code] = max(1, int(issue_code_counts_after.get(code, 0)))
+                issue_code_counts_after[code] = max(1, int(issue_code_counts_after.get(code, 0) or 0))
 
             domain_issue_flags_after = {code: (code in issues_after) for code in domain_issue_codes}
             has_questions_after = "question_mark" in issues_after
@@ -1138,7 +1179,7 @@ class TGRMLoop:
             for code in issues_after:
                 if code in {"question_mark", "todo_item", "contradiction"}:
                     continue
-                issue_code_counts_after[code] = max(1, int(issue_code_counts_after.get(code, 0)))
+                issue_code_counts_after[code] = max(1, int(issue_code_counts_after.get(code, 0) or 0))
 
             domain_issue_flags_after = {code: (code in issues_after) for code in domain_issue_codes}
             has_questions_after = "question_mark" in issues_after
@@ -1158,7 +1199,7 @@ class TGRMLoop:
                 conf = None
             elif isinstance(h, dict):
                 text = str(h.get("text") or h.get("title") or "")
-                conf = h.get("confidence") or h.get("score")
+                conf = _first_numeric(h, ("confidence", "score"))
             else:
                 text = str(h)
                 conf = None
@@ -1228,7 +1269,7 @@ class TGRMLoop:
             pubmed_calls=stats.get("pubmed_calls", 0),
             semantic_calls=stats.get("semantic_calls", 0),
             pdf_ingestions=stats.get("pdf_ingestions", 0),
-            tokens_estimate=tool_usage.approx_tokens,
+            tokens_estimate=getattr(tool_usage, "approx_tokens", 0),
             swarm_size=(swarm_profile or {}).get("swarm_size"),
             swarm_layer=(swarm_profile or {}).get("layer"),
         )
@@ -1431,12 +1472,12 @@ class TGRMLoop:
             "discovery": discovery_snapshot,
             # Tool usage details for this cycle
             "tool_usage": {
-                "web_calls": tool_usage.web_calls,
-                "browser_actions": tool_usage.browser_actions,
+                "web_calls": getattr(tool_usage, "web_calls", 0),
+                "browser_actions": getattr(tool_usage, "browser_actions", 0),
                 "code_execs": getattr(tool_usage, "code_execs", 0),
                 "sql_queries": getattr(tool_usage, "sql_queries", 0),
-                "data_loads": tool_usage.data_loads,
-                "approx_tokens": tool_usage.approx_tokens,
+                "data_loads": getattr(tool_usage, "data_loads", 0),
+                "approx_tokens": getattr(tool_usage, "approx_tokens", 0),
             },
             # Long run context snapshot
             "avg_rye_for_goal_before_cycle": avg_rye,
@@ -1723,6 +1764,39 @@ class TGRMLoop:
             "stop_reason": None,
         }
 
+        def _merge_issue_stats(issue_stats: Dict[str, Any]) -> None:
+            """Merge per-issue stats safely (no None+int, no stop_reason summation)."""
+            if not isinstance(issue_stats, dict):
+                return
+            # numeric counters
+            numeric_keys = {
+                "web_calls",
+                "pubmed_calls",
+                "semantic_calls",
+                "pdf_ingestions",
+                "contradictions_resolved",
+                "sources_used",
+                "browser_actions",
+                "code_execs",
+                "data_loads",
+            }
+            for k in numeric_keys:
+                if k in issue_stats:
+                    try:
+                        stats[k] = int(stats.get(k, 0) or 0) + int(issue_stats.get(k, 0) or 0)
+                    except Exception:
+                        # best-effort: leave unchanged if types are weird
+                        pass
+
+            if issue_stats.get("interrupted"):
+                stats["interrupted"] = True
+                # Prefer a specific reason if present; otherwise keep existing, then fallback.
+                reason = issue_stats.get("stop_reason")
+                if isinstance(reason, str) and reason:
+                    stats["stop_reason"] = reason
+                elif stats.get("stop_reason") is None:
+                    stats["stop_reason"] = "time_limit"
+
         if maintenance_mode:
             base_max_issues = 2
         else:
@@ -1782,12 +1856,13 @@ class TGRMLoop:
                 notes_added.append(note_text)
                 citations.extend(new_cites)
                 _log_citations(new_cites)
-
-                for k, v in issue_stats.items():
-                    stats[k] = stats.get(k, 0) + v
+                _merge_issue_stats(issue_stats)
 
                 if tool_usage is not None:
                     tool_usage.approx_tokens += self._estimate_tokens(note_text)
+
+                if issue_stats.get("interrupted"):
+                    break
 
             elif issue in {"question_mark", "todo_item"}:
                 questions = self._extract_questions(goal, issue_type=issue)
@@ -1822,16 +1897,12 @@ class TGRMLoop:
                 notes_added.append(note_text)
                 citations.extend(new_cites)
                 _log_citations(new_cites)
-
-                for k, v in issue_stats.items():
-                    stats[k] = stats.get(k, 0) + v
+                _merge_issue_stats(issue_stats)
 
                 if tool_usage is not None:
                     tool_usage.approx_tokens += self._estimate_tokens(note_text)
 
                 if issue_stats.get("interrupted"):
-                    stats["interrupted"] = True
-                    stats["stop_reason"] = issue_stats.get("stop_reason") or "time_limit"
                     break
 
             elif issue == "contradiction":
@@ -1858,16 +1929,12 @@ class TGRMLoop:
                 notes_added.append(note_text)
                 citations.extend(new_cites)
                 _log_citations(new_cites)
-
-                for k, v in issue_stats.items():
-                    stats[k] = stats.get(k, 0) + v
+                _merge_issue_stats(issue_stats)
 
                 if tool_usage is not None:
                     tool_usage.approx_tokens += self._estimate_tokens(note_text)
 
                 if issue_stats.get("interrupted"):
-                    stats["interrupted"] = True
-                    stats["stop_reason"] = issue_stats.get("stop_reason") or "time_limit"
                     break
 
             elif issue == "under_cited":
@@ -1893,14 +1960,12 @@ class TGRMLoop:
                 notes_added.append(note_text)
                 citations.extend(new_cites)
                 _log_citations(new_cites)
-                for k, v in issue_stats.items():
-                    stats[k] = stats.get(k, 0) + v
+                _merge_issue_stats(issue_stats)
+
                 if tool_usage is not None:
                     tool_usage.approx_tokens += self._estimate_tokens(note_text)
 
                 if issue_stats.get("interrupted"):
-                    stats["interrupted"] = True
-                    stats["stop_reason"] = issue_stats.get("stop_reason") or "time_limit"
                     break
 
             elif issue in {"missing_biomarkers", "missing_mechanisms", "missing_formalism", "missing_connections"}:
@@ -1928,14 +1993,12 @@ class TGRMLoop:
                 notes_added.append(note_text)
                 citations.extend(new_cites)
                 _log_citations(new_cites)
-                for k, v in issue_stats.items():
-                    stats[k] = stats.get(k, 0) + v
+                _merge_issue_stats(issue_stats)
+
                 if tool_usage is not None:
                     tool_usage.approx_tokens += self._estimate_tokens(note_text)
 
                 if issue_stats.get("interrupted"):
-                    stats["interrupted"] = True
-                    stats["stop_reason"] = issue_stats.get("stop_reason") or "time_limit"
                     break
 
             else:
@@ -1958,6 +2021,7 @@ class TGRMLoop:
                 if tool_usage is not None:
                     tool_usage.approx_tokens += self._estimate_tokens(note)
 
+        # Always recompute sources_used from citations to avoid double counting
         unique_sources = set()
         for c in citations:
             if not isinstance(c, dict):
@@ -1983,7 +2047,7 @@ class TGRMLoop:
             "biomarkers": False,
         }
         if not source_controls:
-            return explained_defaults := defaults
+            return defaults
         merged = defaults.copy()
         merged.update({k: bool(v) for k, v in source_controls.items()})
         return merged
@@ -2015,7 +2079,16 @@ class TGRMLoop:
         purpose: str,
         search_energy: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Hybrid mode selection of web search level and size."""
+        """Hybrid mode selection of web search parameters.
+
+        Returns a superset of common kwargs and lets _web_search filter what
+        the underlying WebResearchTool.search(...) supports:
+            - max_results
+            - search_depth
+            - topic
+            - include_raw_content
+            - level (legacy)
+        """
         role_lower = (role or "agent").lower()
         dom = (domain or "general").lower()
 
@@ -2052,8 +2125,10 @@ class TGRMLoop:
 
         if level == 1:
             max_results = min(base_max, 3)
+            search_depth = "basic"
         else:
             max_results = base_max
+            search_depth = "advanced"
 
         if search_energy is None:
             try:
@@ -2073,7 +2148,47 @@ class TGRMLoop:
             max_cap = max(max_results, base_max * 2)
             max_results = max(1, min(scaled, max_cap))
 
-        return {"level": level, "max_results": max_results, "topic": topic}
+        params: Dict[str, Any] = {
+            "max_results": max_results,
+            "topic": topic,
+            "search_depth": search_depth,
+            "level": level,  # legacy / optional
+        }
+        if level >= 3:
+            params["include_raw_content"] = True
+
+        return params
+
+    def _web_search(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """Safely call self.web_tool.search with only supported kwargs.
+
+        This prevents TypeError when different WebResearchTool implementations
+        accept different keyword sets (e.g. level vs search_depth).
+        """
+        query = _clamp_query(query)
+        params = dict(params or {})
+
+        # If tool supports **kwargs, we can pass through.
+        filtered = params
+        try:
+            sig = inspect.signature(self.web_tool.search)  # type: ignore[attr-defined]
+            has_varkw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+            if not has_varkw:
+                allowed = set(sig.parameters.keys())
+                filtered = {k: v for k, v in params.items() if k in allowed}
+        except Exception:
+            filtered = params
+
+        try:
+            return self.web_tool.search(query, **filtered)  # type: ignore[misc]
+        except TypeError:
+            # Last resort: try a no-kwargs call
+            try:
+                return self.web_tool.search(query)  # type: ignore[misc]
+            except Exception:
+                return []
+        except Exception:
+            return []
 
     def _initial_research(
         self,
@@ -2085,10 +2200,10 @@ class TGRMLoop:
         maintenance_mode: bool,
         tool_usage: Optional[ToolUsage] = None,
         deadline_ts: Optional[float] = None,
-    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
+    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
         """Perform the initial multi source research when there are no notes."""
         citations: List[Dict[str, Any]] = []
-        stats: Dict[str, int] = {
+        stats: Dict[str, Any] = {
             "web_calls": 0,
             "pubmed_calls": 0,
             "semantic_calls": 0,
@@ -2098,7 +2213,8 @@ class TGRMLoop:
             "browser_actions": 0,
             "code_execs": 0,
             "data_loads": 0,
-            "interrupted": 0,
+            "interrupted": False,
+            "stop_reason": None,
         }
 
         note_lines: List[str] = []
@@ -2107,7 +2223,8 @@ class TGRMLoop:
         note_lines.append("")
 
         if self._deadline_hit(deadline_ts):
-            stats["interrupted"] = 1
+            stats["interrupted"] = True
+            stats["stop_reason"] = "time_limit"
             note_lines.append("Time limit reached before initial research; skipping external calls this cycle.")
             return "\n".join(note_lines), citations, stats
 
@@ -2122,7 +2239,7 @@ class TGRMLoop:
             )
             search_query = _clamp_query(goal)
             try:
-                web_results = self.web_tool.search(search_query, **web_params)
+                web_results = self._web_search(search_query, web_params)
             except Exception:
                 web_results = []
                 note_lines.append("Web search failed for initial research; continuing without web results.")
@@ -2158,7 +2275,8 @@ class TGRMLoop:
                 note_lines.append("")
 
         if self._deadline_hit(deadline_ts):
-            stats["interrupted"] = 1
+            stats["interrupted"] = True
+            stats["stop_reason"] = "time_limit"
             note_lines.append("Time limit hit; skipping remaining initial research sources.")
             return "\n".join(note_lines), citations, stats
 
@@ -2202,7 +2320,7 @@ class TGRMLoop:
                 citations.extend(pubmed_cites)
 
                 if tool_usage is not None:
-                    titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
+                    titles = " ".join((r.get("title", "") or "") for r in pubmed_results if isinstance(r, dict))
                     tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                 note_lines.append("PubMed sources:")
@@ -2215,7 +2333,9 @@ class TGRMLoop:
                 sem_results = self.semantic_tool.search(goal, max_results=5)
             except Exception:
                 sem_results = []
-                note_lines.append("Semantic Scholar search failed for initial research; continuing without Semantic Scholar results.")
+                note_lines.append(
+                    "Semantic Scholar search failed for initial research; continuing without Semantic Scholar results."
+                )
                 note_lines.append("")
             else:
                 stats["semantic_calls"] += 1
@@ -2229,7 +2349,7 @@ class TGRMLoop:
                 citations.extend(sem_cites)
 
                 if tool_usage is not None:
-                    titles = " ".join(r.get("title", "") or "" for r in sem_results)
+                    titles = " ".join((r.get("title", "") or "") for r in sem_results if isinstance(r, dict))
                     tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                 note_lines.append("Semantic Scholar sources:")
@@ -2269,11 +2389,12 @@ class TGRMLoop:
                 line_strip = line.strip()
                 if not line_strip:
                     continue
+                lower = line_strip.lower()
                 if issue_type == "question_mark":
                     if "?" in line_strip and len(line_strip) > 10:
                         candidates.append(line_strip)
                 elif issue_type == "todo_item":
-                    if ("TODO" in line_strip or "todo" in line_strip) and len(line_strip) > 10:
+                    if "todo" in lower and len(line_strip) > 10:
                         candidates.append(line_strip)
 
         seen_local = set()
@@ -2310,10 +2431,10 @@ class TGRMLoop:
         domain: Optional[str] = None,
         tool_usage: Optional[ToolUsage] = None,
         deadline_ts: Optional[float] = None,
-    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
+    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
         """Perform focused multi source research on open questions or TODOs."""
         citations: List[Dict[str, Any]] = []
-        stats: Dict[str, int] = {
+        stats: Dict[str, Any] = {
             "web_calls": 0,
             "pubmed_calls": 0,
             "semantic_calls": 0,
@@ -2323,8 +2444,8 @@ class TGRMLoop:
             "browser_actions": 0,
             "code_execs": 0,
             "data_loads": 0,
-            "interrupted": 0,
-            "stop_reason": 0,
+            "interrupted": False,
+            "stop_reason": None,
         }
 
         if questions is None:
@@ -2351,8 +2472,8 @@ class TGRMLoop:
 
         for q in questions:
             if self._deadline_hit(deadline_ts):
-                stats["interrupted"] = 1
-                stats["stop_reason"] = 1
+                stats["interrupted"] = True
+                stats["stop_reason"] = "time_limit"
                 note_lines.append("Time limit hit during targeted research; stopping remaining searches.")
                 break
 
@@ -2369,10 +2490,12 @@ class TGRMLoop:
                 )
                 search_query = _clamp_query(q)
                 try:
-                    web_results = self.web_tool.search(search_query, **web_params)
+                    web_results = self._web_search(search_query, web_params)
                 except Exception:
                     web_results = []
-                    note_lines.append("Web search failed for this question; continuing without web results for this item.")
+                    note_lines.append(
+                        "Web search failed for this question; continuing without web results for this item."
+                    )
                     note_lines.append("")
                 else:
                     stats["web_calls"] += 1
@@ -2401,8 +2524,8 @@ class TGRMLoop:
                     note_lines.append("")
 
             if self._deadline_hit(deadline_ts):
-                stats["interrupted"] = 1
-                stats["stop_reason"] = 1
+                stats["interrupted"] = True
+                stats["stop_reason"] = "time_limit"
                 note_lines.append("Time limit hit; skipping PubMed/Semantic Scholar for remaining items.")
                 break
 
@@ -2411,7 +2534,9 @@ class TGRMLoop:
                     pubmed_results = self.pubmed_tool.search(q, max_results=5)
                 except Exception:
                     pubmed_results = []
-                    note_lines.append("PubMed search failed for this question; continuing without PubMed results for this item.")
+                    note_lines.append(
+                        "PubMed search failed for this question; continuing without PubMed results for this item."
+                    )
                     note_lines.append("")
                 else:
                     stats["pubmed_calls"] += 1
@@ -2425,7 +2550,7 @@ class TGRMLoop:
                     citations.extend(pubmed_cites)
 
                     if tool_usage is not None:
-                        titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
+                        titles = " ".join((r.get("title", "") or "") for r in pubmed_results if isinstance(r, dict))
                         tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                     note_lines.append("PubMed sources:")
@@ -2438,7 +2563,9 @@ class TGRMLoop:
                     sem_results = self.semantic_tool.search(q, max_results=5)
                 except Exception:
                     sem_results = []
-                    note_lines.append("Semantic Scholar search failed for this question; continuing without Semantic Scholar results for this item.")
+                    note_lines.append(
+                        "Semantic Scholar search failed for this question; continuing without Semantic Scholar results for this item."
+                    )
                     note_lines.append("")
                 else:
                     stats["semantic_calls"] += 1
@@ -2452,7 +2579,7 @@ class TGRMLoop:
                     citations.extend(sem_cites)
 
                     if tool_usage is not None:
-                        titles = " ".join(r.get("title", "") or "" for r in sem_results)
+                        titles = " ".join((r.get("title", "") or "") for r in sem_results if isinstance(r, dict))
                         tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                     note_lines.append("Semantic Scholar sources:")
@@ -2470,10 +2597,10 @@ class TGRMLoop:
         domain: Optional[str],
         tool_usage: Optional[ToolUsage] = None,
         deadline_ts: Optional[float] = None,
-    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
+    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
         """Specialized repair step for 'under_cited' issues."""
         citations: List[Dict[str, Any]] = []
-        stats: Dict[str, int] = {
+        stats: Dict[str, Any] = {
             "web_calls": 0,
             "pubmed_calls": 0,
             "semantic_calls": 0,
@@ -2483,8 +2610,8 @@ class TGRMLoop:
             "browser_actions": 0,
             "code_execs": 0,
             "data_loads": 0,
-            "interrupted": 0,
-            "stop_reason": 0,
+            "interrupted": False,
+            "stop_reason": None,
         }
 
         note_lines: List[str] = []
@@ -2493,8 +2620,8 @@ class TGRMLoop:
         note_lines.append("")
 
         if self._deadline_hit(deadline_ts):
-            stats["interrupted"] = 1
-            stats["stop_reason"] = 1
+            stats["interrupted"] = True
+            stats["stop_reason"] = "time_limit"
             note_lines.append("Time limit reached; skipping citation strengthening this cycle.")
             return "\n".join(note_lines), citations, stats
 
@@ -2511,7 +2638,7 @@ class TGRMLoop:
             )
             search_query = _clamp_query(query)
             try:
-                web_results = self.web_tool.search(search_query, **web_params)
+                web_results = self._web_search(search_query, web_params)
             except Exception:
                 web_results = []
                 note_lines.append("Web search failed while strengthening citations; continuing without web results.")
@@ -2543,8 +2670,8 @@ class TGRMLoop:
                 note_lines.append("")
 
         if self._deadline_hit(deadline_ts):
-            stats["interrupted"] = 1
-            stats["stop_reason"] = 1
+            stats["interrupted"] = True
+            stats["stop_reason"] = "time_limit"
             note_lines.append("Time limit hit; skipping PubMed/Semantic Scholar strengthening.")
             return "\n".join(note_lines), citations, stats
 
@@ -2553,7 +2680,9 @@ class TGRMLoop:
                 pubmed_results = self.pubmed_tool.search(query, max_results=10)
             except Exception:
                 pubmed_results = []
-                note_lines.append("PubMed search failed while strengthening citations; continuing without PubMed results.")
+                note_lines.append(
+                    "PubMed search failed while strengthening citations; continuing without PubMed results."
+                )
                 note_lines.append("")
             else:
                 stats["pubmed_calls"] += 1
@@ -2567,7 +2696,7 @@ class TGRMLoop:
                 citations.extend(pubmed_cites)
 
                 if tool_usage is not None:
-                    titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
+                    titles = " ".join((r.get("title", "") or "") for r in pubmed_results if isinstance(r, dict))
                     tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                 note_lines.append("PubMed sources (stronger evidence):")
@@ -2580,7 +2709,9 @@ class TGRMLoop:
                 sem_results = self.semantic_tool.search(query, max_results=10)
             except Exception:
                 sem_results = []
-                note_lines.append("Semantic Scholar search failed while strengthening citations; continuing without Semantic Scholar results.")
+                note_lines.append(
+                    "Semantic Scholar search failed while strengthening citations; continuing without Semantic Scholar results."
+                )
                 note_lines.append("")
             else:
                 stats["semantic_calls"] += 1
@@ -2594,7 +2725,7 @@ class TGRMLoop:
                 citations.extend(sem_cites)
 
                 if tool_usage is not None:
-                    titles = " ".join(r.get("title", "") or "" for r in sem_results)
+                    titles = " ".join((r.get("title", "") or "") for r in sem_results if isinstance(r, dict))
                     tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                 note_lines.append("Semantic Scholar sources (stronger evidence):")
@@ -2614,11 +2745,11 @@ class TGRMLoop:
         domain: Optional[str],
         tool_usage: Optional[ToolUsage] = None,
         deadline_ts: Optional[float] = None,
-    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
+    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
         """Generic helper to fill domain specific gaps."""
         dom = (domain or "general").lower()
         citations: List[Dict[str, Any]] = []
-        stats: Dict[str, int] = {
+        stats: Dict[str, Any] = {
             "web_calls": 0,
             "pubmed_calls": 0,
             "semantic_calls": 0,
@@ -2628,8 +2759,8 @@ class TGRMLoop:
             "browser_actions": 0,
             "code_execs": 0,
             "data_loads": 0,
-            "interrupted": 0,
-            "stop_reason": 0,
+            "interrupted": False,
+            "stop_reason": None,
         }
 
         note_lines: List[str] = []
@@ -2641,8 +2772,8 @@ class TGRMLoop:
         note_lines.append("")
 
         if self._deadline_hit(deadline_ts):
-            stats["interrupted"] = 1
-            stats["stop_reason"] = 1
+            stats["interrupted"] = True
+            stats["stop_reason"] = "time_limit"
             note_lines.append("Time limit reached; skipping gap repair searches this cycle.")
             return "\n".join(note_lines), citations, stats
 
@@ -2675,7 +2806,7 @@ class TGRMLoop:
             )
             search_query = _clamp_query(query)
             try:
-                web_results = self.web_tool.search(search_query, **web_params)
+                web_results = self._web_search(search_query, web_params)
             except Exception:
                 web_results = []
                 note_lines.append("Web search failed during gap repair; continuing without web results.")
@@ -2707,8 +2838,8 @@ class TGRMLoop:
                 note_lines.append("")
 
         if self._deadline_hit(deadline_ts):
-            stats["interrupted"] = 1
-            stats["stop_reason"] = 1
+            stats["interrupted"] = True
+            stats["stop_reason"] = "time_limit"
             note_lines.append("Time limit hit; skipping PubMed/Semantic Scholar gap repair.")
             return "\n".join(note_lines), citations, stats
 
@@ -2731,7 +2862,7 @@ class TGRMLoop:
                 citations.extend(pubmed_cites)
 
                 if tool_usage is not None:
-                    titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
+                    titles = " ".join((r.get("title", "") or "") for r in pubmed_results if isinstance(r, dict))
                     tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                 note_lines.append("PubMed sources (gap repair):")
@@ -2744,7 +2875,9 @@ class TGRMLoop:
                 sem_results = self.semantic_tool.search(query, max_results=10)
             except Exception:
                 sem_results = []
-                note_lines.append("Semantic Scholar search failed during gap repair; continuing without Semantic Scholar results.")
+                note_lines.append(
+                    "Semantic Scholar search failed during gap repair; continuing without Semantic Scholar results."
+                )
                 note_lines.append("")
             else:
                 stats["semantic_calls"] += 1
@@ -2758,7 +2891,7 @@ class TGRMLoop:
                 citations.extend(sem_cites)
 
                 if tool_usage is not None:
-                    titles = " ".join(r.get("title", "") or "" for r in sem_results)
+                    titles = " ".join((r.get("title", "") or "") for r in sem_results if isinstance(r, dict))
                     tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                 note_lines.append("Semantic Scholar sources (gap repair):")
@@ -2781,7 +2914,7 @@ class TGRMLoop:
                 s = line.strip()
                 if not s:
                     continue
-                if "CONTRADICTION" in s or "contradiction" in s.lower():
+                if "contradiction" in s.lower():
                     if s not in seen:
                         seen.add(s)
                         snippets.append(s)
@@ -2798,14 +2931,14 @@ class TGRMLoop:
         maintenance_mode: bool,
         tool_usage: Optional[ToolUsage] = None,
         deadline_ts: Optional[float] = None,
-    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
+    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, Any]]:
         """Attempt to resolve contradictions using additional sources.
 
         Minimal but real: extract contradiction snippets, run targeted web search,
         and write a short "best current resolution" note with citations.
         """
         citations: List[Dict[str, Any]] = []
-        stats: Dict[str, int] = {
+        stats: Dict[str, Any] = {
             "web_calls": 0,
             "pubmed_calls": 0,
             "semantic_calls": 0,
@@ -2815,8 +2948,8 @@ class TGRMLoop:
             "browser_actions": 0,
             "code_execs": 0,
             "data_loads": 0,
-            "interrupted": 0,
-            "stop_reason": 0,
+            "interrupted": False,
+            "stop_reason": None,
         }
 
         note_lines: List[str] = []
@@ -2825,8 +2958,8 @@ class TGRMLoop:
         note_lines.append("")
 
         if self._deadline_hit(deadline_ts):
-            stats["interrupted"] = 1
-            stats["stop_reason"] = 1
+            stats["interrupted"] = True
+            stats["stop_reason"] = "time_limit"
             note_lines.append("Time limit reached; contradiction resolution deferred.")
             return "\n".join(note_lines), citations, stats
 
@@ -2847,8 +2980,8 @@ class TGRMLoop:
 
         for s in snippets:
             if self._deadline_hit(deadline_ts):
-                stats["interrupted"] = 1
-                stats["stop_reason"] = 1
+                stats["interrupted"] = True
+                stats["stop_reason"] = "time_limit"
                 note_lines.append("Time limit hit mid-contradiction resolution; stopping.")
                 break
 
@@ -2866,7 +2999,7 @@ class TGRMLoop:
                 )
                 search_query = _clamp_query(q)
                 try:
-                    web_results = self.web_tool.search(search_query, **web_params)
+                    web_results = self._web_search(search_query, web_params)
                 except Exception:
                     web_results = []
                     note_lines.append("Web search failed for contradiction resolution; continuing.")
@@ -2966,7 +3099,7 @@ class TGRMLoop:
             except Exception:
                 return 0.0
 
-        sorted_hypotheses = sorted(hypotheses, key=hyp_score, reverse=True)
+        sorted_hypotheses = sorted([h for h in hypotheses if isinstance(h, dict)], key=hyp_score, reverse=True)
         top_hypotheses = sorted_hypotheses[:5]
 
         for idx, h in enumerate(top_hypotheses):
