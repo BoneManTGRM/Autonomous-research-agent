@@ -3288,8 +3288,8 @@ def main() -> None:
     event_log0, event_src0 = load_event_log_unified(active_run_id)
     narrative_events = event_log0 if event_log0 else build_narrative_events_from_history(history_preview, limit=LIVE_EVENTS_LIMIT)
 
-    # Top sticky heartbeat bar
-    render_topbar(ws0, watchdog0, progress_view0, autonomy_view0)
+    # Sticky topbar removed (was rendering as raw HTML on some clients)
+    # render_topbar(ws0, watchdog0, progress_view0, autonomy_view0)
 
     # Header: ARA with gradient and powered by pill
     st.markdown(
