@@ -47,6 +47,9 @@ Streamlit integration (runs_root/logs/*.json):
         <runs_root>/logs/watchdog_heartbeat.json
         <runs_root>/logs/run_state.json
         <runs_root>/logs/<run_id>_progress.json
+    - Narrative timeline (best-effort, optional):
+        <runs_root>/logs/event_log.json
+        <runs_root>/logs/<run_id>_event_log.json
 
 You can start it with commands like:
     WORKER_GOAL="Long run test on reparodynamics" \
@@ -1107,6 +1110,7 @@ def _boot_banner(mode: str) -> None:
         "WORKER_VERBOSE_LOGS",
         "WORKER_DISABLE_WEB",
         "DISABLE_WEB_SEARCH",
+        "WORKER_EVENT_LOG",
         "ARA_RUNS_DIR",
         "ARA_RUNS_LOGS_DIR",
         "ARA_RUNS_LOG_DIR",
@@ -1114,7 +1118,6 @@ def _boot_banner(mode: str) -> None:
         "TAVILY_API_KEY",
         "WORKER_TAVILY_KEY",
         "PYTHONUNBUFFERED",
-        "WORKER_EVENT_LOG",
     ]
     env_flags: Dict[str, Any] = {}
     for k in env_keys:
@@ -2985,7 +2988,6 @@ class FileQueue:
                     data={"age_s": int(age)},
                     force=True,
                 )
-
             except Exception as e:
                 log_exception("stale_recovery_loop_failed", e)
                 continue
@@ -3116,7 +3118,6 @@ class FileQueue:
                 )
 
                 return job2
-
             except Exception as e:
                 log_exception("job_claim_loop_failed", e, path=str(p))
                 continue
@@ -3367,7 +3368,6 @@ class FileQueue:
                 data={"reason": reason_s},
                 force=True,
             )
-
         except Exception as e:
             log_exception("job_shutdown_requeue_failed", e, run_id=job.run_id, reason=reason_s)
 
@@ -4581,7 +4581,7 @@ def run_job_queue_worker() -> None:
     except Exception as e:
         log_exception("startup_stale_recovery_failed", e)
 
-    stats = WorkerStats(started_at_mono=_WORKER_STARTED_AT_MONO, started_at_utc=_WORKER_STARTED_AT_UTC)
+    stats = WorkerStats()
     heartbeat_interval_s = _env_float_value("WORKER_HEARTBEAT_SECONDS", 30.0)
     heartbeat_stall_s = _env_float_value("WORKER_WATCHDOG_HEARTBEAT_STALL_SECONDS", max(90.0, heartbeat_interval_s * 3.0))
 
@@ -5898,8 +5898,6 @@ def _adjust_phase_from_stats(phase_cfg: Dict[str, Any], stats: Dict[str, Any], r
 def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
     _boot_banner("meta")
     while True:
-        run_id: Optional[str] = None
-        domain: str = "general"
         try:
             goal, domain = build_goal_and_domain()
             preset_cfg = get_preset(domain)
@@ -6391,12 +6389,14 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
         except Exception as e:
             log_exception("meta_engine_crash", e)
 
+            rid = run_id if "run_id" in locals() else _current_run_id("meta")
+            dom = domain if "domain" in locals() else None
             _event(
-                run_id=run_id or _current_run_id("meta"),
+                run_id=rid,
                 kind="run_error",
                 message=_compact_error_summary(e),
                 level="error",
-                domain=domain,
+                domain=dom,
                 data={"error": str(e)},
                 force=True,
             )
