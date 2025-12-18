@@ -57,7 +57,6 @@ Note:
 from __future__ import annotations
 
 import base64
-import glob
 import html
 import json
 import os
@@ -100,6 +99,12 @@ RUNS_ERROR_DIR: Optional[Path] = None
 # Optional: run_jobs result loader (covers legacy filenames too)
 _queue_load_job_result = None  # type: ignore[assignment]
 
+# Optional: report generators (some deployments omit these; UI will fall back to history-based reports)
+generate_report = None  # type: ignore[assignment]
+generate_report_pdf = None  # type: ignore[assignment]
+generate_findings_report = None  # type: ignore[assignment]
+generate_findings_report_pdf = None  # type: ignore[assignment]
+
 # -------------------------------------------------------------------
 # Imports: prefer package layout agent.*, guarded flat fallback
 # -------------------------------------------------------------------
@@ -107,13 +112,21 @@ try:
     # Package layout (recommended, what you have on Render)
     from agent.memory_store import MemoryStore
     from agent.presets import PRESETS, RUNTIME_PROFILES, get_preset
-    from agent.report_builder import build_agent_report
-    from agent.report_generator import (
-        generate_findings_report,
-        generate_findings_report_pdf,
-        generate_report,
-        generate_report_pdf,
-    )
+
+    # Report generator is optional; degrade gracefully if missing
+    try:
+        from agent.report_generator import (  # type: ignore[import]
+            generate_findings_report,
+            generate_findings_report_pdf,
+            generate_report,
+            generate_report_pdf,
+        )
+    except Exception:  # pragma: no cover
+        generate_report = None  # type: ignore[assignment]
+        generate_report_pdf = None  # type: ignore[assignment]
+        generate_findings_report = None  # type: ignore[assignment]
+        generate_findings_report_pdf = None  # type: ignore[assignment]
+
     # Only import the rye_metrics symbols that are actually used here
     from agent.rye_metrics import (
         autonomy_safety_envelope,
@@ -162,7 +175,7 @@ try:
 
     # Job queue abstraction: import paths from run_jobs so UI and worker share the exact same directories
     try:
-        from agent.run_jobs import (
+        from agent.run_jobs import (  # type: ignore[import]
             ACTIVE_DIR as RUNS_ACTIVE_DIR,
             BASE_DIR as RUNS_BASE_DIR,
             ERROR_DIR as RUNS_ERROR_DIR,
@@ -204,13 +217,21 @@ except ModuleNotFoundError as e:
     # Flat layout fallback: all modules live next to this file
     from memory_store import MemoryStore
     from presets import PRESETS, RUNTIME_PROFILES, get_preset  # type: ignore[no-redef]
-    from report_builder import build_agent_report  # type: ignore[no-redef]
-    from report_generator import (  # type: ignore[no-redef]
-        generate_findings_report,
-        generate_findings_report_pdf,
-        generate_report,
-        generate_report_pdf,
-    )
+
+    # Report generator is optional; degrade gracefully if missing
+    try:
+        from report_generator import (  # type: ignore[no-redef]
+            generate_findings_report,
+            generate_findings_report_pdf,
+            generate_report,
+            generate_report_pdf,
+        )
+    except Exception:  # pragma: no cover
+        generate_report = None  # type: ignore[assignment]
+        generate_report_pdf = None  # type: ignore[assignment]
+        generate_findings_report = None  # type: ignore[assignment]
+        generate_findings_report_pdf = None  # type: ignore[assignment]
+
     from rye_metrics import (  # type: ignore[no-redef]
         autonomy_safety_envelope,
         breakthrough_likelihood_90d,
@@ -411,6 +432,11 @@ def _format_metric_value(v: Any, decimals: int = 3) -> str:
 
 def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
     """Load YAML settings file into a dictionary."""
+    # Allow env override (useful on platforms like Render)
+    env_path = os.getenv("ARA_SETTINGS_PATH")
+    if env_path:
+        config_path = env_path
+
     if not os.path.exists(config_path):
         return {}
     with open(config_path, "r", encoding="utf-8") as f:
@@ -531,7 +557,7 @@ def load_job_result(run_id: str) -> Optional[Dict[str, Any]]:
         except Exception:
             pass
 
-    if result_path is None:
+    if "result_path" not in globals() or result_path is None:
         return None
     fp = result_path(run_id)
     if not fp.exists():
@@ -860,6 +886,79 @@ def render_job_summary(job: Any) -> None:
 
 
 # -------------------------------------------------------------------
+# run_jobs compatibility wrappers
+# -------------------------------------------------------------------
+def _safe_list_jobs(status: Optional[str] = None) -> List[Any]:
+    """List jobs with best-effort support for differing run_jobs.list_jobs signatures."""
+    if list_run_jobs is None:
+        return []
+    if status is None:
+        try:
+            out = list_run_jobs()  # type: ignore[misc]
+            return out if isinstance(out, list) else []
+        except Exception:
+            return []
+    # Prefer keyword argument
+    try:
+        out = list_run_jobs(status=status)  # type: ignore[misc]
+        return out if isinstance(out, list) else []
+    except TypeError:
+        # Positional fallback
+        try:
+            out = list_run_jobs(status)  # type: ignore[misc]
+            return out if isinstance(out, list) else []
+        except Exception:
+            return []
+    except Exception:
+        return []
+
+
+def _list_jobs_by_status_candidates(status_candidates: List[str]) -> List[Any]:
+    """Union jobs across multiple status labels (dedup by run_id)."""
+    seen: Set[str] = set()
+    out: List[Any] = []
+    for s in status_candidates:
+        for job in _safe_list_jobs(status=s):
+            jid = _get_job_id(job)
+            if jid in seen:
+                continue
+            seen.add(jid)
+            out.append(job)
+    return out
+
+
+def _safe_create_job(config: Dict[str, Any], meta: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Create job with best-effort support for differing run_jobs.create_job signatures."""
+    if create_job is None:
+        return None
+
+    # Prefer keyword signature (most common)
+    try:
+        rid = create_job(config=config, meta=meta)  # type: ignore[misc]
+        return str(rid) if rid is not None else None
+    except TypeError:
+        pass
+    except Exception:
+        return None
+
+    # Positional fallbacks
+    try:
+        rid = create_job(config, meta)  # type: ignore[misc]
+        return str(rid) if rid is not None else None
+    except TypeError:
+        pass
+    except Exception:
+        return None
+
+    # Minimal fallback: config only
+    try:
+        rid = create_job(config)  # type: ignore[misc]
+        return str(rid) if rid is not None else None
+    except Exception:
+        return None
+
+
+# -------------------------------------------------------------------
 # Run-result → cycle-history helpers (used for citation table fallback)
 # -------------------------------------------------------------------
 def _extract_cycles_from_run_result(
@@ -963,18 +1062,7 @@ def load_history_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]
     cycle history, for example when the queue mode worker only writes
     per run result JSON and does not stream cycles into MemoryStore.
     """
-    if list_run_jobs is not None:
-        try:
-            jobs = list_run_jobs(status="finished")
-        except TypeError:
-            try:
-                jobs = list_run_jobs()  # type: ignore[call-arg]
-            except Exception:
-                jobs = []
-        except Exception:
-            jobs = []
-    else:
-        jobs = []
+    jobs = _list_jobs_by_status_candidates(["finished", "done", "completed", "complete", "success"])
 
     if not jobs:
         return []
@@ -1679,9 +1767,9 @@ def load_progress_unified(run_id: Optional[str]) -> Tuple[Optional[Dict[str, Any
     try:
         runs_root = Path(get_runs_root())
         queue_root = Path(get_queue_root())
-        glob_candidates = []
-        glob_candidates.extend(runs_root.glob(f"**/{run_id}*progress*.json"))
-        glob_candidates.extend(queue_root.glob(f"**/{run_id}*progress*.json"))
+        glob_candidates: List[Path] = []
+        glob_candidates.extend(list(runs_root.glob(f"**/{run_id}*progress*.json")))
+        glob_candidates.extend(list(queue_root.glob(f"**/{run_id}*progress*.json")))
         for gp in glob_candidates[:10]:
             data = _load_json_file(gp)
             if isinstance(data, dict) and data:
@@ -1777,6 +1865,7 @@ def compute_progress_view(
     worker_state: Optional[Dict[str, Any]],
     progress_state: Optional[Dict[str, Any]],
     watchdog: Optional[Dict[str, Any]],
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Compute a robust (current, total, fraction, label) progress view.
 
@@ -1784,9 +1873,24 @@ def compute_progress_view(
     - phase_index/phase_total (preferred if present)
     - current/total cycles
     - fallbacks based on progress JSON naming variants
+
+    Update: fixes common off-by-one for phase progress by remembering whether a given run
+    appears to be zero-indexed (per run_id) based on observing an initial 0 while running.
     """
     status = (worker_state or {}).get("status") or (progress_state or {}).get("status") or "unknown"
     status_s = str(status).lower()
+
+    if run_id is None:
+        run_id = (
+            (worker_state or {}).get("run_id")
+            or (progress_state or {}).get("run_id")
+            or (worker_state or {}).get("job_id")
+            or (progress_state or {}).get("job_id")
+        )
+        if run_id is not None:
+            run_id = str(run_id)
+
+    finished_like = status_s in {"finished", "done", "completed", "complete", "success"}
 
     # Preferred: phase progress (3-phase pipeline etc.)
     phase_cur = (
@@ -1826,24 +1930,40 @@ def compute_progress_view(
         c = _safe_int(phase_cur, 0) or 0
         t = use_phase
 
-        # Heuristic: if worker emits 0-based phase indices, shift to 1-based display
-        # We detect 0-based by seeing 0 <= c < t AND status indicates active work.
-        if status_s in {"running", "active", "in_progress", "working"} and 0 <= c < t:
-            # Many workers store phase_index as 0..t-1
-            # If c==0 and we already have any heartbeat activity, display 1
-            if c == 0:
-                hb_count = _safe_int((watchdog or {}).get("count"), 0) or 0
-                hb_last = (watchdog or {}).get("last_beat")
-                if hb_count > 0 or hb_last:
-                    c_disp = 1
-                else:
-                    c_disp = 0
-            else:
-                # if 0-based, c==1 should display 2, etc.
-                # This does not break 1-based if your worker never emits 0.
-                c_disp = min(c + 1, t)
+        # If finished, clamp to full
+        if finished_like:
+            c_disp = t
         else:
-            c_disp = min(max(c, 0), t)
+            # Remember whether this run looks zero-indexed for phase progress
+            key = f"ara_phase_zero_indexed::{run_id or 'global'}"
+            zero_indexed = bool(st.session_state.get(key, False))
+
+            hb_count = _safe_int((watchdog or {}).get("count"), 0) or 0
+            hb_last = (watchdog or {}).get("last_beat")
+            started = bool(hb_count > 0 or hb_last)
+
+            # If we observe phase_cur==0 while actively running, treat as 0-based and mark it
+            running_like = status_s in {"running", "active", "in_progress", "working"}
+            if running_like and c == 0 and started:
+                st.session_state[key] = True
+                zero_indexed = True
+
+            if zero_indexed:
+                # 0-based indices 0..t-1
+                if c < 0:
+                    c_disp = 0
+                elif c >= t:
+                    c_disp = t
+                else:
+                    # display 1..t
+                    c_disp = min(c + 1, t)
+            else:
+                # 1-based or already-display-ready
+                c_disp = min(max(c, 0), t)
+
+            # Small UX: if running, started, and c_disp==0, show 1 as "in progress"
+            if running_like and started and c_disp == 0 and t > 0:
+                c_disp = 1
 
         frac = float(c_disp) / float(t) if t > 0 else None
         return {
@@ -1860,22 +1980,20 @@ def compute_progress_view(
     if c2 is None or t2 is None or t2 <= 0:
         return {"kind": "none", "current": None, "total": None, "fraction": None, "label": ""}
 
-    # Common worker convention: current = completed cycles (0..total)
-    # If you want the UI to show 1/3 as soon as cycle 1 starts, you need either:
-    # - progress JSON per cycle, or
-    # - auto-refresh + worker_state updates per cycle, or
-    # - a "started" flag/phase_index.
-    c_disp2 = min(max(c2, 0), t2)
-    frac2 = float(c_disp2) / float(t2) if t2 > 0 else None
+    # If finished, clamp to full
+    if finished_like:
+        c_disp2 = t2
+    else:
+        c_disp2 = min(max(c2, 0), t2)
 
-    # Small improvement: if run is active and current == 0 but we have heartbeat activity, show "1" as "in progress"
-    if status_s in {"running", "active", "in_progress", "working"} and c_disp2 == 0 and t2 > 0:
+        # Small improvement: if run is active and current == 0 but we have heartbeat activity, show "1" as "in progress"
         hb_count = _safe_int((watchdog or {}).get("count"), 0) or 0
         hb_last = (watchdog or {}).get("last_beat")
-        if hb_count > 0 or hb_last:
-            c_disp2 = 1
-            frac2 = float(c_disp2) / float(t2)
+        if status_s in {"running", "active", "in_progress", "working"} and c_disp2 == 0 and t2 > 0:
+            if hb_count > 0 or hb_last:
+                c_disp2 = 1
 
+    frac2 = float(c_disp2) / float(t2) if t2 > 0 else None
     return {
         "kind": "cycle",
         "current": c_disp2,
@@ -2174,7 +2292,11 @@ def compute_autonomy_view(
     # Feature flags
     has_tools = bool(source_controls.get("web") or source_controls.get("sandbox") or source_controls.get("tavily_enabled"))
     is_multi = bool(cfg.get("multi_agent_pair") or (_safe_int(swarm_cfg.get("swarm_size"), 1) or 1) > 1)
-    is_monitored = bool(monitoring.get("heartbeat_enabled", True) or monitoring.get("run_state_enabled", True) or monitoring.get("snapshots_enabled", False))
+    is_monitored = bool(
+        monitoring.get("heartbeat_enabled", True)
+        or monitoring.get("run_state_enabled", True)
+        or monitoring.get("snapshots_enabled", False)
+    )
 
     # Observed stability (optional)
     stable_signal = False
@@ -2405,7 +2527,10 @@ def render_narrative_feed(events: List[Dict[str, Any]], source_label: str = "") 
     st.markdown('<div class="ara-card-sub">A readable timeline. Raw logs stay optional.</div>', unsafe_allow_html=True)
 
     if not events:
-        st.markdown('<div class="ara-feed"><div class="ara-event"><div class="ara-event-msg">No events yet.</div></div></div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="ara-feed"><div class="ara-event"><div class="ara-event-msg">No events yet.</div></div></div>',
+            unsafe_allow_html=True,
+        )
         st.markdown("</div>", unsafe_allow_html=True)
         return
 
@@ -2958,19 +3083,7 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
 
 def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
     """Extract citations from finished run JSONs as a fallback for the citation viewer."""
-    if list_run_jobs is None:
-        return []
-
-    try:
-        jobs = list_run_jobs(status="finished")
-    except TypeError:
-        try:
-            jobs = list_run_jobs()  # type: ignore[call-arg]
-        except Exception:
-            jobs = []
-    except Exception:
-        jobs = []
-
+    jobs = _list_jobs_by_status_candidates(["finished", "done", "completed", "complete", "success"])
     if not jobs:
         return []
 
@@ -3058,19 +3171,7 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
 
 def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
     """Extract discovery entries from finished run JSONs as a fallback for the discovery tab."""
-    if list_run_jobs is None:
-        return []
-
-    try:
-        jobs = list_run_jobs(status="finished")
-    except TypeError:
-        try:
-            jobs = list_run_jobs()  # type: ignore[call-arg]
-        except Exception:
-            jobs = []
-    except Exception:
-        jobs = []
-
+    jobs = _list_jobs_by_status_candidates(["finished", "done", "completed", "complete", "success"])
     if not jobs:
         return []
 
@@ -3145,14 +3246,17 @@ def main() -> None:
     # Shared MemoryStore instance (read-only UI)
     memory = init_memory_store()
 
-    # Determine active run id as early as possible (worker_state run_id > queue scan)
+    # Determine active run id as early as possible (worker_state run_id > last queued hint > queue scan)
     ws0, ws_src0 = load_worker_state_unified(memory)
-    active_run_id = (ws0 or {}).get("run_id") or _derive_active_run_id_from_queue()
+    active_run_hint = st.session_state.get("active_run_id_hint")
+    if active_run_hint is not None:
+        active_run_hint = str(active_run_hint)
+    active_run_id = (ws0 or {}).get("run_id") or active_run_hint or _derive_active_run_id_from_queue()
 
     # Diagnostics sources (for top bar + live console)
     watchdog0, watchdog_src0 = load_watchdog_info_unified(memory, run_id=active_run_id)
     progress0_raw, progress_src0 = load_progress_unified(active_run_id)
-    progress_view0 = compute_progress_view(ws0, progress0_raw, watchdog0)
+    progress_view0 = compute_progress_view(ws0, progress0_raw, watchdog0, run_id=active_run_id)
 
     # Light history preview for narrative synthesis and stability/autonomy (last ~25 only)
     history_preview: List[Dict[str, Any]] = []
@@ -3596,7 +3700,11 @@ def main() -> None:
             }
 
             snapshots_target_dir = str(Path(get_runs_root()) / "logs" / "snapshots")
-            snapshot_config: Dict[str, Any] = {"enabled": bool(enable_snapshots), "every_n_cycles": int(snapshot_interval), "target_dir": snapshots_target_dir}
+            snapshot_config: Dict[str, Any] = {
+                "enabled": bool(enable_snapshots),
+                "every_n_cycles": int(snapshot_interval),
+                "target_dir": snapshots_target_dir,
+            }
             runtime_hints["snapshot_config"] = snapshot_config
 
             monitoring_config: Dict[str, Any] = {
@@ -3682,15 +3790,21 @@ def main() -> None:
                 "ui_metadata": {"requested_from": "streamlit", "client_version": "v4-live-console-diagnostics"},
             }
 
-            run_id = create_job(config=run_config, meta=meta)
-
-            st.success(f"Run request queued with run id `{run_id}`.")
-            if RUNS_PENDING_DIR is not None:
-                st.caption(f"Pending job written to `{RUNS_PENDING_DIR / (str(run_id) + '_job.json')}`")
+            run_id = _safe_create_job(config=run_config, meta=meta)
+            if not run_id:
+                st.error("Failed to queue job (create_job did not return a run id). Check server logs.")
             else:
-                st.caption(
-                    f"Job was queued via run_jobs.create_job. The engine worker should watch `{queue_pending_dir}` for new `*_job.json` files."
-                )
+                # Persist as a hint so the topbar can immediately track it even before worker_state appears
+                st.session_state["active_run_id_hint"] = str(run_id)
+                st.session_state["last_queued_run_id"] = str(run_id)
+
+                st.success(f"Run request queued with run id `{run_id}`.")
+                if RUNS_PENDING_DIR is not None:
+                    st.caption(f"Pending job written to `{RUNS_PENDING_DIR / (str(run_id) + '_job.json')}`")
+                else:
+                    st.caption(
+                        f"Job was queued via run_jobs.create_job. The engine worker should watch `{queue_pending_dir}` for new `*_job.json` files."
+                    )
 
     # ------------------------------
     # Runs and job queue (queued or finished via run_jobs.py)
@@ -3734,33 +3848,9 @@ def main() -> None:
         _debug_list_dir("finished", RUNS_FINISHED_DIR)
         _debug_list_dir("error", RUNS_ERROR_DIR)
 
-    finished_jobs: List[Any] = []
-    pending_jobs: List[Any] = []
-    active_jobs: List[Any] = []
-
-    if list_run_jobs is not None:
-        try:
-            finished_jobs = list_run_jobs(status="finished")
-        except TypeError:
-            finished_jobs = list_run_jobs()  # type: ignore[call-arg]
-        except Exception:
-            finished_jobs = []
-
-        try:
-            pending_jobs = list_run_jobs(status="queued")
-            if not pending_jobs:
-                pending_jobs = list_run_jobs(status="pending")
-        except TypeError:
-            pending_jobs = []
-        except Exception:
-            pending_jobs = []
-
-        try:
-            active_jobs = list_run_jobs(status="active")
-        except TypeError:
-            active_jobs = []
-        except Exception:
-            active_jobs = []
+    finished_jobs: List[Any] = _list_jobs_by_status_candidates(["finished", "done", "completed", "complete", "success"])
+    pending_jobs: List[Any] = _list_jobs_by_status_candidates(["queued", "pending", "waiting"])
+    active_jobs: List[Any] = _list_jobs_by_status_candidates(["active", "running", "in_progress", "working"])
 
     try:
         finished_jobs = sorted(finished_jobs, key=_job_created_at_ts, reverse=True)
@@ -4393,7 +4483,9 @@ def main() -> None:
                         rye_series.append(eq["rye_avg"])
                 if rye_series:
                     st.markdown("#### Snapshot RYE timeline")
-                    st.line_chart({"RYE avg": rye_series})
+                    # Use a dataframe so Streamlit renders consistently
+                    df_rye = pd.DataFrame({"snapshot_index": list(range(1, len(rye_series) + 1)), "RYE avg": rye_series}).set_index("snapshot_index")
+                    st.line_chart(df_rye)
 
                 col_sel1, col_sel2 = st.columns(2)
                 with col_sel1:
@@ -4611,7 +4703,7 @@ def main() -> None:
                     st.info(f"Graphviz could not render this graph: {e}")
 
     # ------------------------------
-    # Run diagnostics (FIXED: unified loaders + sources + progress)
+    # Run diagnostics (unified loaders + sources + progress)
     # ------------------------------
     st.markdown("---")
     st.subheader("Run diagnostics")
@@ -4626,7 +4718,7 @@ def main() -> None:
     watchdog, watchdog_src = load_watchdog_info_unified(memory, run_id=run_id)
     run_state, run_state_src = load_run_state_unified(memory, run_id_hint=run_id)
     progress_raw, progress_src = load_progress_unified(run_id)
-    progress_view = compute_progress_view(ws, progress_raw, watchdog)
+    progress_view = compute_progress_view(ws, progress_raw, watchdog, run_id=run_id)
 
     col_state, col_watchdog = st.columns(2)
 
@@ -4683,11 +4775,11 @@ def main() -> None:
                 if domain_ws:
                     st.write(f"Domain: `{domain_ws}`")
             with cols_ws[2]:
-                cur = progress_view.get("current")
-                tot = progress_view.get("total")
-                if isinstance(cur, int) and isinstance(tot, int) and tot > 0:
-                    pct = (cur / tot) * 100.0
-                    st.write(f"Progress: {cur}/{tot} ({pct:.1f}%)")
+                cur_p = progress_view.get("current")
+                tot_p = progress_view.get("total")
+                if isinstance(cur_p, int) and isinstance(tot_p, int) and tot_p > 0:
+                    pct = (cur_p / tot_p) * 100.0
+                    st.write(f"Progress: {cur_p}/{tot_p} ({pct:.1f}%)")
                 else:
                     st.write("Progress: n/a")
 
@@ -4725,7 +4817,7 @@ def main() -> None:
             st.write("\n".join(shown))
 
     # ------------------------------
-    # Report generation (original)
+    # Report generation
     # ------------------------------
     st.markdown("---")
     st.subheader("Generate report")
@@ -4758,19 +4850,24 @@ def main() -> None:
             if not history_for_reports:
                 st.info("No cycles logged yet, nothing to report.")
             else:
-                report_md = build_outcome_summary(history_for_reports) if used_fallback_history else generate_report(memory_store=memory, goal=None)
+                if used_fallback_history or not callable(generate_report):
+                    report_md = build_outcome_summary(history_for_reports)
+                else:
+                    report_md = generate_report(memory_store=memory, goal=None)  # type: ignore[misc]
                 st.markdown(report_md)
                 st.download_button("Download full report (Markdown)", data=report_md, file_name="autonomous_research_report.md", mime="text/markdown")
 
-                if not used_fallback_history:
+                if not used_fallback_history and callable(generate_report_pdf):
                     try:
-                        pdf_path = generate_report_pdf(memory_store=memory, goal=None, output_path="autonomous_research_report.pdf")
+                        pdf_path = generate_report_pdf(memory_store=memory, goal=None, output_path="autonomous_research_report.pdf")  # type: ignore[misc]
                         with open(pdf_path, "rb") as f:
                             st.download_button("Download full report (PDF)", data=f, file_name="autonomous_research_report.pdf", mime="application/pdf")
                     except RuntimeError as e:
                         st.info(str(e))
                     except Exception:
                         st.info("PDF generation failed unexpectedly. Check server logs for details.")
+                elif not callable(generate_report_pdf):
+                    st.info("PDF export not available (report generator module missing or PDF backend unavailable).")
 
         if st.button("Full Option C learning speed report", key="option_c_report_btn"):
             if not history_for_reports:
@@ -4804,19 +4901,24 @@ def main() -> None:
             if not history_for_reports:
                 st.info("No cycles logged yet, findings report is empty.")
             else:
-                findings_md = build_findings_report_from_history(history_for_reports) if used_fallback_history else generate_findings_report(memory_store=memory, goal=None)
+                if used_fallback_history or not callable(generate_findings_report):
+                    findings_md = build_findings_report_from_history(history_for_reports)
+                else:
+                    findings_md = generate_findings_report(memory_store=memory, goal=None)  # type: ignore[misc]
                 st.markdown(findings_md)
                 st.download_button("Download findings report (Markdown)", data=findings_md, file_name="findings_report.md", mime="text/markdown")
 
-                if not used_fallback_history:
+                if not used_fallback_history and callable(generate_findings_report_pdf):
                     try:
-                        pdf_path_f = generate_findings_report_pdf(memory_store=memory, goal=None, output_path="findings_report.pdf")
+                        pdf_path_f = generate_findings_report_pdf(memory_store=memory, goal=None, output_path="findings_report.pdf")  # type: ignore[misc]
                         with open(pdf_path_f, "rb") as f:
                             st.download_button("Download findings report (PDF)", data=f, file_name="findings_report.pdf", mime="application/pdf")
                     except RuntimeError as e:
                         st.info(str(e))
                     except Exception:
                         st.info("PDF generation failed unexpectedly. Check server logs for details.")
+                elif not callable(generate_findings_report_pdf):
+                    st.info("PDF export not available (report generator module missing or PDF backend unavailable).")
 
     with col_rep3:
         if st.button("Breakthrough snapshot report", key="breakthrough_snapshot_btn"):
