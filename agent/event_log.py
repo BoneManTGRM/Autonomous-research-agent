@@ -17,8 +17,8 @@ This module provides a simple, robust event timeline that supports:
 
 Files written (default)
 -----------------------
-<ARA_RUNS_DIR or run_jobs.BASE_DIR>/logs/event_log.json
-<ARA_RUNS_DIR or run_jobs.BASE_DIR>/logs/<run_id>_event_log.json
+<run_jobs.BASE_DIR or ARA_RUNS_DIR>/logs/event_log.json
+<run_jobs.BASE_DIR or ARA_RUNS_DIR>/logs/<run_id>_event_log.json
 
 JSON format (dict container)
 ----------------------------
@@ -56,7 +56,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional
 
 # Best-effort POSIX file locks (Render is Linux; Windows will just skip locking)
 try:  # pragma: no cover
@@ -67,9 +67,10 @@ except Exception:  # pragma: no cover
 
 JsonObj = Dict[str, Any]
 
-
 DEFAULT_MAX_EVENTS: int = int(os.getenv("ARA_EVENT_LOG_MAX", "1000"))
-DEFAULT_MIRROR_GLOBAL: bool = os.getenv("ARA_EVENT_LOG_MIRROR_GLOBAL", "1").strip() not in {"0", "false", "False"}
+DEFAULT_MIRROR_GLOBAL: bool = (
+    os.getenv("ARA_EVENT_LOG_MIRROR_GLOBAL", "1").strip() not in {"0", "false", "False"}
+)
 
 
 def _utc_now_iso() -> str:
@@ -84,16 +85,15 @@ def _resolve_repo_root() -> Path:
 def resolve_runs_root() -> Path:
     """Resolve the shared runs root directory.
 
+    IMPORTANT: this order is chosen to match app_streamlit.py, so the worker and UI
+    always agree about where shared artifacts live.
+
     Preference order:
-    1) ARA_RUNS_DIR env var
-    2) agent.run_jobs.BASE_DIR (if available)
+    1) agent.run_jobs.BASE_DIR (if available)
+    2) ARA_RUNS_DIR env var
     3) <repo_root>/runs
     """
-    env = os.getenv("ARA_RUNS_DIR")
-    if env:
-        return Path(env)
-
-    # Try to use run_jobs.BASE_DIR if present so worker/UI share the same dirs
+    # 1) Prefer run_jobs.BASE_DIR so worker/UI stay in sync
     try:
         from .run_jobs import BASE_DIR as _BASE_DIR  # type: ignore
 
@@ -104,6 +104,12 @@ def resolve_runs_root() -> Path:
     except Exception:
         pass
 
+    # 2) Env fallback
+    env = os.getenv("ARA_RUNS_DIR")
+    if env:
+        return Path(env)
+
+    # 3) Repo fallback
     return _resolve_repo_root() / "runs"
 
 
@@ -144,11 +150,7 @@ def _safe_json_load(path: Path) -> Optional[Any]:
 def _coerce_container(data: Any) -> JsonObj:
     """Normalize log file into a dict container with an 'events' list."""
     if isinstance(data, dict):
-        # ensure events key exists and is list
         ev = data.get("events")
-        if isinstance(ev, list):
-            return data
-        # some other container; preserve but normalize
         out = dict(data)
         out["events"] = ev if isinstance(ev, list) else []
         return out
@@ -165,6 +167,12 @@ def _atomic_write_json(path: Path, obj: Any) -> None:
     tmp = path.with_suffix(path.suffix + f".tmp.{uuid.uuid4().hex}")
     with tmp.open("w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
+        try:
+            f.flush()
+            os.fsync(f.fileno())
+        except Exception:
+            # Not fatal; some environments may not support fsync.
+            pass
     # Atomic replace on POSIX if same filesystem
     tmp.replace(path)
 
@@ -198,13 +206,49 @@ def _file_lock(lock_path: Path):
                 pass
 
 
+def _safe_int(v: Any) -> Optional[int]:
+    """Best-effort convert to int. Never raises."""
+    if v is None:
+        return None
+    try:
+        if isinstance(v, bool):
+            return int(v)
+        if isinstance(v, int):
+            return v
+        if isinstance(v, float):
+            return int(v)
+        if isinstance(v, str):
+            s = v.strip()
+            if not s:
+                return None
+            return int(float(s))  # handles "1.0"
+        return int(v)
+    except Exception:
+        return None
+
+
 def _sanitize_jsonable(value: Any) -> Any:
-    """Convert non-JSON-serializable objects into strings."""
+    """Recursively convert non-JSON-serializable objects into strings.
+
+    Keeps structure for dicts/lists instead of collapsing whole containers into strings.
+    """
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for k, v in value.items():
+            try:
+                key = str(k)
+            except Exception:
+                key = repr(k)
+            out[key] = _sanitize_jsonable(v)
+        return out
+
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_jsonable(v) for v in value]
+
     try:
         json.dumps(value)
         return value
     except Exception:
-        # fallback for datetimes, Paths, custom classes, etc.
         try:
             return str(value)
         except Exception:
@@ -220,12 +264,15 @@ def make_event(
     data: Optional[Dict[str, Any]] = None,
     role: Optional[str] = None,
     domain: Optional[str] = None,
-    phase_index: Optional[int] = None,
-    phase_total: Optional[int] = None,
+    phase_index: Optional[Any] = None,
+    phase_total: Optional[Any] = None,
     phase_name: Optional[str] = None,
-    cycle: Optional[int] = None,
+    cycle: Optional[Any] = None,
 ) -> JsonObj:
-    """Create a normalized event dict."""
+    """Create a normalized event dict.
+
+    This must be "never crash" — logging should not bring down the worker.
+    """
     ev: JsonObj = {
         "id": uuid.uuid4().hex,
         "ts": float(time.time()),
@@ -236,10 +283,10 @@ def make_event(
         "message": str(message or ""),
         "role": str(role) if role is not None else None,
         "domain": str(domain) if domain is not None else None,
-        "phase_index": int(phase_index) if isinstance(phase_index, int) else (int(phase_index) if phase_index is not None else None),
-        "phase_total": int(phase_total) if isinstance(phase_total, int) else (int(phase_total) if phase_total is not None else None),
+        "phase_index": _safe_int(phase_index),
+        "phase_total": _safe_int(phase_total),
         "phase_name": str(phase_name) if phase_name is not None else None,
-        "cycle": int(cycle) if isinstance(cycle, int) else (int(cycle) if cycle is not None else None),
+        "cycle": _safe_int(cycle),
         "data": _sanitize_jsonable(data) if data is not None else {},
     }
     return ev
@@ -270,8 +317,8 @@ def append_event_to_file(
 
         container["events"] = events
         container["updated_at"] = _utc_now_iso()
-        if run_id:
-            container["run_id"] = str(run_id)
+        # Explicitly set run_id on container (None for global file, string for per-run file)
+        container["run_id"] = str(run_id) if run_id else None
 
         _atomic_write_json(path, container)
 
@@ -285,10 +332,10 @@ def log_event(
     data: Optional[Dict[str, Any]] = None,
     role: Optional[str] = None,
     domain: Optional[str] = None,
-    phase_index: Optional[int] = None,
-    phase_total: Optional[int] = None,
+    phase_index: Optional[Any] = None,
+    phase_total: Optional[Any] = None,
     phase_name: Optional[str] = None,
-    cycle: Optional[int] = None,
+    cycle: Optional[Any] = None,
     logs_dir: Optional[Path] = None,
     mirror_global: bool = DEFAULT_MIRROR_GLOBAL,
     max_events: int = DEFAULT_MAX_EVENTS,
@@ -382,10 +429,10 @@ class EventLogger:
         data: Optional[Dict[str, Any]] = None,
         role: Optional[str] = None,
         domain: Optional[str] = None,
-        phase_index: Optional[int] = None,
-        phase_total: Optional[int] = None,
+        phase_index: Optional[Any] = None,
+        phase_total: Optional[Any] = None,
         phase_name: Optional[str] = None,
-        cycle: Optional[int] = None,
+        cycle: Optional[Any] = None,
     ) -> JsonObj:
         return log_event(
             run_id=self.run_id,
