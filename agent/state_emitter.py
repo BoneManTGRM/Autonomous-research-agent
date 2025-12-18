@@ -5,43 +5,43 @@ State emitter for the ARA engine worker.
 
 Purpose
 -------
-This module writes small JSON "state artifacts" to disk so Streamlit can show:
-- A sticky heartbeat/status bar (always visible)
-- Live progress (1/3 → 2/3 → 3/3) via phase_index/phase_total
+This module writes small JSON state artifacts to disk so Streamlit can show:
+- A sticky heartbeat status bar
+- Live progress (1/3 then 2/3 then 3/3) via phase_index and phase_total
 - Run diagnostics (worker_state, run_state, heartbeat)
 - Optional narrative event feed (event_log.json)
 
 Design goals
 ------------
-- File-based and Render/shared-disk friendly
-- Atomic writes (no half-written JSON that breaks Streamlit reads)
-- Safe: failures to write state must NEVER crash the worker
+- File-based and shared-disk friendly
+- Atomic writes (Streamlit never reads half a JSON file)
+- Safe: failures to write state must never crash the worker
 
 Canonical locations written
 ---------------------------
 <runs_root>/logs/watchdog_heartbeat.json
 <runs_root>/logs/worker_state.json
 <runs_root>/logs/run_state.json
-<runs_root>/logs/event_log.json (optional)
-<runs_root>/logs/<run_id>_progress.json (optional)
+<runs_root>/logs/event_log.json
+<runs_root>/logs/<run_id>_progress.json
 
-Also writes a few aliases that the UI searches for:
+Also writes aliases that the UI searches for:
 - heartbeat.json, worker_heartbeat.json
 - engine_worker_state.json, worker_status.json
 - last_run_state.json
-- events.json
+- events.json, timeline.json
 - per-run variants: <run_id>_worker_state.json, <run_id>_run_state.json, <run_id>_event_log.json, <run_id>_heartbeat.json
 - per-run dir variants: <runs_root>/<run_id>/state.json, worker_state.json, run_state.json, heartbeat.json, progress.json, event_log.json
 
 Phase indexing
 --------------
-The Streamlit UI you shared contains a heuristic that assumes phases might be
-0-based (0..phase_total-1) and will display them as 1..phase_total.
+Your Streamlit UI includes a heuristic for 0-based phases.
+If you use 0-based indices, the UI can display 1..phase_total smoothly.
 
-So: emit phase_index as 0-based for best results:
-- exploration:     phase_index=0, phase_total=3
-- stabilization:   phase_index=1, phase_total=3
-- refinement:      phase_index=2, phase_total=3
+Recommended:
+- exploration:     phase_index = 0, phase_total = 3
+- stabilization:   phase_index = 1, phase_total = 3
+- refinement:      phase_index = 2, phase_total = 3
 """
 
 from __future__ import annotations
@@ -54,7 +54,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 
 # -----------------------------
@@ -73,21 +73,22 @@ def get_runs_root() -> Path:
     2) env var ARA_RUNS_DIR
     3) <repo_root>/runs
     """
-    # Try to reuse run_jobs constants without creating hard import cycles.
+    # Avoid hard dependency at import time. If run_jobs imports this module,
+    # importing run_jobs here would create a cycle, so we keep this inside try.
     try:
         from . import run_jobs as _rj  # type: ignore
 
         base = getattr(_rj, "BASE_DIR", None)
         if isinstance(base, Path):
             return base
-        if isinstance(base, str) and base:
-            return Path(base)
+        if isinstance(base, str) and base.strip():
+            return Path(base.strip())
     except Exception:
         pass
 
     env = os.getenv("ARA_RUNS_DIR")
-    if env:
-        return Path(env)
+    if env and env.strip():
+        return Path(env.strip())
 
     return _repo_root() / "runs"
 
@@ -106,8 +107,8 @@ def get_queue_root() -> Path:
         qr = getattr(_rj, "QUEUE_ROOT", None)
         if isinstance(qr, Path):
             return qr
-        if isinstance(qr, str) and qr:
-            return Path(qr)
+        if isinstance(qr, str) and qr.strip():
+            return Path(qr.strip())
 
         pending = getattr(_rj, "PENDING_DIR", None)
         if isinstance(pending, Path):
@@ -116,8 +117,8 @@ def get_queue_root() -> Path:
         pass
 
     env = os.getenv("ARA_QUEUE_ROOT")
-    if env:
-        return Path(env)
+    if env and env.strip():
+        return Path(env.strip())
 
     return get_runs_root() / "queue"
 
@@ -127,7 +128,6 @@ def _utc_iso(timespec: str = "seconds") -> str:
 
 
 def _safe_run_id(run_id: str) -> str:
-    # Prevent odd filenames if someone passes a weird run_id.
     rid = str(run_id).strip()
     rid = re.sub(r"[^a-zA-Z0-9_\-]", "_", rid)
     return rid or "run"
@@ -137,22 +137,19 @@ def _ensure_dir(path: Path) -> None:
     try:
         path.mkdir(parents=True, exist_ok=True)
     except Exception:
-        # Never crash worker on directory creation issues
         pass
 
 
 def _atomic_write_json(path: Path, payload: Any) -> None:
     """Atomically write JSON so Streamlit never reads half a file."""
     _ensure_dir(path.parent)
-
     tmp = path.with_suffix(path.suffix + f".tmp_{os.getpid()}_{uuid.uuid4().hex}")
     try:
         with tmp.open("w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
             f.write("\n")
-        os.replace(tmp, path)  # atomic on POSIX
+        os.replace(tmp, path)
     finally:
-        # If something went wrong before replace, try cleanup
         try:
             if tmp.exists():
                 tmp.unlink()
@@ -168,6 +165,17 @@ def _read_json(path: Path) -> Optional[Any]:
             return json.load(f)
     except Exception:
         return None
+
+
+def _json_safe(value: Any) -> Any:
+    try:
+        json.dumps(value)
+        return value
+    except Exception:
+        try:
+            return str(value)
+        except Exception:
+            return repr(value)
 
 
 # -----------------------------
@@ -243,7 +251,6 @@ class EmitPaths:
             return []
         rid = _safe_run_id(run_id)
         paths: List[Path] = [self.logs_dir / f"{rid}_progress.json"]
-        # also mirror to queue root because Streamlit checks there
         if self.mirror_to_queue and self.queue_root:
             paths.extend(
                 [
@@ -275,7 +282,7 @@ class EmitPaths:
 
 
 class StateEmitter:
-    """Writes worker heartbeat/state/progress artifacts to disk (safe + atomic)."""
+    """Writes worker heartbeat, state, progress, and event artifacts to disk."""
 
     def __init__(
         self,
@@ -312,7 +319,6 @@ class StateEmitter:
             mirror_to_queue=mirror_to_queue,
         )
 
-        # Keep a small cache for convenience (doesn't affect writes)
         self._last_worker_state: Dict[str, Any] = {}
         self._last_run_state: Dict[str, Any] = {}
 
@@ -326,7 +332,6 @@ class StateEmitter:
                 _atomic_write_json(p, payload)
             except Exception as e:
                 last_err = e
-                # keep going; state is best-effort
                 continue
         if last_err and self.raise_on_error:
             raise last_err
@@ -334,30 +339,27 @@ class StateEmitter:
     def _now_meta(self) -> Dict[str, Any]:
         return {
             "timestamp": _utc_iso(),
-            "ts": time.time(),
-            "pid": os.getpid(),
+            "ts": float(time.time()),
+            "pid": int(os.getpid()),
         }
 
     # --------
     # Public: heartbeat
     # --------
     def emit_heartbeat(self, status: str = "running", run_id: Optional[str] = None, **extra: Any) -> Dict[str, Any]:
-        """Write/update watchdog heartbeat JSON.
-
-        Streamlit uses this to compute "seconds since last beat".
-        """
+        """Write or update watchdog heartbeat JSON."""
         rid = run_id or self.run_id
         self._heartbeat_count += 1
 
         payload: Dict[str, Any] = {
             "last_beat": _utc_iso(),
-            "ts": time.time(),
+            "ts": float(time.time()),
             "count": int(self._heartbeat_count),
             "run_id": rid,
-            "status": status,
-            "uptime_seconds": max(0.0, time.time() - self._start_ts),
+            "status": str(status),
+            "uptime_seconds": max(0.0, float(time.time() - self._start_ts)),
         }
-        payload.update(extra)
+        payload.update({k: _json_safe(v) for k, v in extra.items()})
 
         self._safe_write_many(self.paths.heartbeat_paths(rid), payload)
         return payload
@@ -374,11 +376,9 @@ class StateEmitter:
         domain: Optional[str] = None,
         goal: Optional[str] = None,
         role: Optional[str] = None,
-        # Phase progress (recommended for 1/3 → 2/3 → 3/3)
         phase_index: Optional[int] = None,
         phase_total: Optional[int] = None,
         phase_name: Optional[str] = None,
-        # Cycle progress (optional)
         current: Optional[int] = None,
         total: Optional[int] = None,
         effective_current: Optional[int] = None,
@@ -386,28 +386,22 @@ class StateEmitter:
         message: Optional[str] = None,
         **extra: Any,
     ) -> Dict[str, Any]:
-        """Write/update worker_state.json."""
+        """Write or update worker_state.json."""
         rid = run_id or self.run_id
 
         payload: Dict[str, Any] = {}
         payload.update(self._now_meta())
-        payload.update(
-            {
-                "run_id": rid,
-                "status": status,
-            }
-        )
+        payload.update({"run_id": rid, "status": str(status)})
 
         if mode is not None:
-            payload["mode"] = mode
+            payload["mode"] = str(mode)
         if domain is not None:
-            payload["domain"] = domain
+            payload["domain"] = str(domain)
         if goal is not None:
-            payload["goal"] = goal
+            payload["goal"] = str(goal)
         if role is not None:
-            payload["role"] = role
+            payload["role"] = str(role)
 
-        # Phase progress
         if phase_index is not None:
             payload["phase_index"] = int(phase_index)
         if phase_total is not None:
@@ -415,7 +409,6 @@ class StateEmitter:
         if phase_name is not None:
             payload["phase_name"] = str(phase_name)
 
-        # Cycle progress
         if current is not None:
             payload["current"] = int(current)
         if total is not None:
@@ -428,42 +421,42 @@ class StateEmitter:
         if message is not None:
             payload["message"] = str(message)
 
-        payload.update(extra)
+        payload.update({k: _json_safe(v) for k, v in extra.items()})
 
         self._last_worker_state = payload
         self._safe_write_many(self.paths.worker_state_paths(rid), payload)
         return payload
 
     # --------
-    # Public: run state (resume/diagnostics)
+    # Public: run state
     # --------
     def emit_run_state(self, state: Dict[str, Any], run_id: Optional[str] = None) -> Dict[str, Any]:
-        """Write/update run_state.json (arbitrary dict; used for resume and diagnostics)."""
+        """Write or update run_state.json."""
         rid = run_id or self.run_id
         payload: Dict[str, Any] = dict(state) if isinstance(state, dict) else {"state": state}
 
-        # Normalize a few common fields
         payload.setdefault("run_id", rid)
         payload.setdefault("timestamp", _utc_iso())
-        payload.setdefault("ts", time.time())
+        payload.setdefault("ts", float(time.time()))
+
+        # Make sure payload is JSON safe
+        payload = {k: _json_safe(v) for k, v in payload.items()}
 
         self._last_run_state = payload
         self._safe_write_many(self.paths.run_state_paths(rid), payload)
         return payload
 
     # --------
-    # Public: progress JSON (smooth progress updates)
+    # Public: progress JSON
     # --------
     def emit_progress(
         self,
         *,
         run_id: Optional[str] = None,
         status: Optional[str] = None,
-        # Phase
         phase_index: Optional[int] = None,
         phase_total: Optional[int] = None,
         phase_name: Optional[str] = None,
-        # Cycle
         current: Optional[int] = None,
         total: Optional[int] = None,
         effective_current: Optional[int] = None,
@@ -471,12 +464,7 @@ class StateEmitter:
         message: Optional[str] = None,
         **extra: Any,
     ) -> Optional[Dict[str, Any]]:
-        """Write <run_id>_progress.json.
-
-        This file is intentionally tiny and should be written:
-        - at phase start
-        - at cycle start/end (optional)
-        """
+        """Write <run_id>_progress.json."""
         rid = run_id or self.run_id
         if not rid:
             return None
@@ -486,7 +474,7 @@ class StateEmitter:
         payload["run_id"] = rid
 
         if status is not None:
-            payload["status"] = status
+            payload["status"] = str(status)
 
         if phase_index is not None:
             payload["phase_index"] = int(phase_index)
@@ -507,13 +495,13 @@ class StateEmitter:
         if message is not None:
             payload["message"] = str(message)
 
-        payload.update(extra)
+        payload.update({k: _json_safe(v) for k, v in extra.items()})
 
         self._safe_write_many(self.paths.progress_paths(rid), payload)
         return payload
 
     # --------
-    # Public: events (narrative timeline)
+    # Public: events
     # --------
     def emit_event(
         self,
@@ -521,42 +509,56 @@ class StateEmitter:
         kind: str,
         message: str,
         run_id: Optional[str] = None,
+        level: str = "info",
         role: Optional[str] = None,
         domain: Optional[str] = None,
+        phase_index: Optional[int] = None,
+        phase_total: Optional[int] = None,
         phase_name: Optional[str] = None,
         cycle: Optional[int] = None,
         data: Optional[Dict[str, Any]] = None,
         **extra: Any,
     ) -> Dict[str, Any]:
-        """Append an event to event_log.json (bounded to max_events)."""
+        """Append an event to event_log.json (bounded to max_events).
+
+        This writes a dict container with an "events" list so Streamlit can read
+        it reliably.
+        """
         rid = run_id or self.run_id
+        now = float(time.time())
 
         ev: Dict[str, Any] = {
-            "ts": _utc_iso(),
+            "id": uuid.uuid4().hex,
+            "ts": now,
+            "timestamp": _utc_iso(),
             "kind": str(kind),
+            "level": str(level),
             "message": str(message),
+            "run_id": rid,
         }
-        if rid:
-            ev["run_id"] = rid
         if role is not None:
-            ev["role"] = role
+            ev["role"] = str(role)
         if domain is not None:
-            ev["domain"] = domain
+            ev["domain"] = str(domain)
+        if phase_index is not None:
+            ev["phase_index"] = int(phase_index)
+        if phase_total is not None:
+            ev["phase_total"] = int(phase_total)
         if phase_name is not None:
-            ev["phase_name"] = phase_name
+            ev["phase_name"] = str(phase_name)
         if cycle is not None:
             ev["cycle"] = int(cycle)
-        if data is not None and isinstance(data, dict):
-            ev["data"] = data
+        if data is not None:
+            ev["data"] = _json_safe(data)
 
-        ev.update(extra)
+        ev.update({k: _json_safe(v) for k, v in extra.items()})
 
-        # Load existing events (best-effort), append, keep tail, write atomically
         paths = self.paths.event_log_paths(rid)
         primary = paths[0] if paths else (self.logs_dir / "event_log.json")
-        existing = _read_json(primary)
 
+        existing = _read_json(primary)
         events: List[Dict[str, Any]] = []
+
         if isinstance(existing, dict):
             maybe = existing.get("events")
             if isinstance(maybe, list):
@@ -568,23 +570,24 @@ class StateEmitter:
         if self.max_events > 0 and len(events) > self.max_events:
             events = events[-self.max_events :]
 
-        payload: Union[List[Dict[str, Any]], Dict[str, Any]]
-        # Keep it simple: just a list
-        payload = events
+        payload: Dict[str, Any] = {
+            "updated_at": _utc_iso(),
+            "run_id": rid,
+            "events": events,
+        }
 
         self._safe_write_many(paths, payload)
         return ev
 
     # --------
-    # Convenience helpers for the worker
+    # Convenience helpers
     # --------
     def set_run_id(self, run_id: str, mirror_to_run_dir: bool = True) -> None:
-        """Update run_id after init (useful if emitter created before job is claimed)."""
+        """Update run_id after init."""
         self.run_id = str(run_id)
         if mirror_to_run_dir:
             self.run_dir = self.runs_root / _safe_run_id(self.run_id)
             _ensure_dir(self.run_dir)
-            # update paths to include run_dir
             self.paths.run_dir = self.run_dir
 
     def mark_phase_start(
@@ -594,11 +597,13 @@ class StateEmitter:
         phase_total: int,
         phase_name: str,
         status: str = "running",
+        role: Optional[str] = None,
+        domain: Optional[str] = None,
         **extra: Any,
     ) -> None:
-        """One call to make the UI show 1/3 → 2/3 → 3/3 smoothly.
+        """One call to make the UI show phase progress smoothly.
 
-        NOTE: Use 0-based phase_index (0..phase_total-1) with your current Streamlit UI.
+        Recommended: use 0-based phase_index with your current Streamlit UI.
         """
         self.emit_worker_state(
             status=status,
@@ -606,6 +611,8 @@ class StateEmitter:
             phase_index=phase_index,
             phase_total=phase_total,
             phase_name=phase_name,
+            role=role,
+            domain=domain,
             **extra,
         )
         self.emit_progress(
@@ -616,7 +623,17 @@ class StateEmitter:
             phase_name=phase_name,
             **extra,
         )
-        self.emit_event(kind="phase_start", message=f"Phase {phase_index + 1}/{phase_total}: {phase_name}", **extra)
+        self.emit_event(
+            kind="phase_start",
+            message=f"Phase {phase_index + 1}/{phase_total}: {phase_name}",
+            run_id=self.run_id,
+            role=role,
+            domain=domain,
+            phase_index=phase_index,
+            phase_total=phase_total,
+            phase_name=phase_name,
+            **extra,
+        )
 
     def mark_cycle(
         self,
@@ -625,16 +642,21 @@ class StateEmitter:
         total: Optional[int] = None,
         status: str = "running",
         cycle_label: Optional[str] = None,
+        role: Optional[str] = None,
+        domain: Optional[str] = None,
         **extra: Any,
     ) -> None:
         """Update cycle progress (optional)."""
-        msg = cycle_label or f"Cycle {current}" + (f"/{total}" if isinstance(total, int) and total > 0 else "")
+        msg = cycle_label or ("Cycle " + str(current) + ("/" + str(total) if isinstance(total, int) and total > 0 else ""))
+
         self.emit_worker_state(
             status=status,
             run_id=self.run_id,
             current=current,
             total=total,
             message=msg,
+            role=role,
+            domain=domain,
             **extra,
         )
         self.emit_progress(
@@ -645,4 +667,12 @@ class StateEmitter:
             message=msg,
             **extra,
         )
-        self.emit_event(kind="cycle", message=msg, cycle=current, **extra)
+        self.emit_event(
+            kind="cycle",
+            message=msg,
+            run_id=self.run_id,
+            role=role,
+            domain=domain,
+            cycle=current,
+            **extra,
+        )
