@@ -41,6 +41,13 @@ Queue mode using agent/run_jobs.py:
     - You can also force queue mode with WORKER_QUEUE_MODE=1.
     - The worker polls the job queue, executes jobs, and writes results.
 
+Streamlit integration (runs_root/logs/*.json):
+    - The worker emits small JSON artifacts for the UI:
+        <runs_root>/logs/worker_state.json
+        <runs_root>/logs/watchdog_heartbeat.json
+        <runs_root>/logs/run_state.json
+        <runs_root>/logs/<run_id>_progress.json
+
 You can start it with commands like:
     WORKER_GOAL="Long run test on reparodynamics" \
     WORKER_RUNTIME_PROFILE="8_hours" \
@@ -562,6 +569,370 @@ def _resolve_base_dir() -> Path:
 BASE_DIR: Path = _resolve_base_dir()
 
 # ---------------------------------------------------------------------------
+# Streamlit-facing run/worker artifacts (runs_root/logs/*.json)
+# ---------------------------------------------------------------------------
+
+_RUNS_ARTIFACT_SCHEMA_VERSION: int = 1
+
+def _resolve_runs_logs_dir(base_dir: Path) -> Path:
+    """
+    Where to write Streamlit-facing artifacts:
+      - Default: <runs_root>/logs
+      - Override: ARA_RUNS_LOGS_DIR / ARA_RUNS_LOG_DIR / ARA_LOGS_DIR
+    """
+    raw = (
+        os.getenv("ARA_RUNS_LOGS_DIR")
+        or os.getenv("ARA_RUNS_LOG_DIR")
+        or os.getenv("ARA_LOGS_DIR")
+    )
+    if raw and isinstance(raw, str) and raw.strip():
+        p = Path(raw.strip())
+    else:
+        p = Path(base_dir) / "logs"
+
+    try:
+        p = p.expanduser().resolve()
+    except Exception:
+        p = Path(str(p))
+    return p
+
+RUNS_LOGS_DIR: Path = _resolve_runs_logs_dir(BASE_DIR)
+
+_DISK_ARTIFACT_THROTTLE = _LogThrottle(
+    max_keys=_env_int("WORKER_DISK_THROTTLE_MAX_KEYS", 512),
+    min_interval_s=_env_float_value("WORKER_DISK_THROTTLE_MIN_INTERVAL_SECONDS", 0.5),
+)
+
+def _ensure_runs_logs_dir() -> Path:
+    d = RUNS_LOGS_DIR
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        log_kv(
+            "runs_logs_dir_mkdir_failed",
+            level="WARNING",
+            throttle_key="runs_logs_dir_mkdir_failed",
+            throttle_min_interval_s=30.0,
+            path=str(d),
+            error_summary=_compact_error_summary(e),
+        )
+    return d
+
+def _safe_hostname() -> str:
+    try:
+        return socket.gethostname()
+    except Exception:
+        return "unknown-host"
+
+def _to_jsonable(
+    obj: Any,
+    *,
+    max_str_chars: int = 800,
+    max_list_items: int = 50,
+    max_dict_keys: int = 100,
+    depth: int = 0,
+    max_depth: int = 3,
+) -> Any:
+    """
+    Convert arbitrary objects into JSON-serializable, bounded structures.
+    Keeps artifacts small and robust for Streamlit polling.
+    """
+    try:
+        if obj is None or isinstance(obj, (bool, int, float)):
+            return obj
+        if isinstance(obj, str):
+            return _truncate_text(obj, max_str_chars)
+        if isinstance(obj, bytes):
+            return {"__type__": "bytes", "len": len(obj)}
+        if isinstance(obj, Path):
+            return str(obj)
+        if isinstance(obj, (list, tuple, set)):
+            seq = list(obj)
+            out: List[Any] = []
+            for item in seq[:max_list_items]:
+                out.append(_to_jsonable(item, max_str_chars=max_str_chars, max_list_items=max_list_items, max_dict_keys=max_dict_keys, depth=depth + 1, max_depth=max_depth))
+            if len(seq) > max_list_items:
+                out.append(f"...(+{len(seq) - max_list_items} items)")
+            return out
+        if isinstance(obj, dict):
+            out_d: Dict[str, Any] = {}
+            keys = list(obj.keys())
+            try:
+                keys_sorted = sorted(keys, key=lambda x: str(x))
+            except Exception:
+                keys_sorted = keys
+            for k in keys_sorted[:max_dict_keys]:
+                sk = str(k)
+                try:
+                    out_d[sk] = _to_jsonable(obj.get(k), max_str_chars=max_str_chars, max_list_items=max_list_items, max_dict_keys=max_dict_keys, depth=depth + 1, max_depth=max_depth)
+                except Exception:
+                    out_d[sk] = safe_repr(obj.get(k), max_str_chars)
+            if len(keys) > max_dict_keys:
+                out_d["__more_keys__"] = len(keys) - max_dict_keys
+            return out_d
+        if depth >= max_depth:
+            return safe_repr(obj, max_str_chars)
+        return safe_repr(obj, max_str_chars)
+    except Exception:
+        # last resort, never crash
+        try:
+            return safe_repr(obj, max_str_chars)
+        except Exception:
+            return "<unjsonable>"
+
+def _disk_write_json(
+    path: Path,
+    payload: Any,
+    *,
+    throttle_key: Optional[str] = None,
+    throttle_min_interval_s: Optional[float] = None,
+    force: bool = False,
+) -> bool:
+    """
+    Disk artifact writer with light throttling (separate from stdout logs).
+    """
+    try:
+        if throttle_key and not force:
+            now_mono = time.monotonic()
+            if throttle_min_interval_s is not None:
+                old = _DISK_ARTIFACT_THROTTLE.min_interval_s
+                _DISK_ARTIFACT_THROTTLE.min_interval_s = max(0.0, float(throttle_min_interval_s))
+                allowed = _DISK_ARTIFACT_THROTTLE.allow(throttle_key, now=now_mono)
+                _DISK_ARTIFACT_THROTTLE.min_interval_s = old
+            else:
+                allowed = _DISK_ARTIFACT_THROTTLE.allow(throttle_key, now=now_mono)
+            if not allowed:
+                return False
+        return atomic_write_json(path, payload, indent=2)
+    except Exception as e:
+        log_exception("disk_artifact_write_failed", e, path=str(path))
+        return False
+
+def _worker_state_file_path() -> Path:
+    return _ensure_runs_logs_dir() / "worker_state.json"
+
+def _watchdog_heartbeat_file_path() -> Path:
+    return _ensure_runs_logs_dir() / "watchdog_heartbeat.json"
+
+def _run_state_file_path() -> Path:
+    return _ensure_runs_logs_dir() / "run_state.json"
+
+def _run_progress_file_path(run_id: str) -> Path:
+    return _ensure_runs_logs_dir() / f"{run_id}_progress.json"
+
+def _emit_watchdog_heartbeat_file(
+    *,
+    label: str,
+    run_id: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+) -> None:
+    """
+    Writes <runs_root>/logs/watchdog_heartbeat.json for Streamlit health checks.
+    """
+    try:
+        shutdown_requested = False
+        shutdown_signal = None
+        try:
+            shutdown_requested = _SHUTDOWN_REQUESTED.is_set()  # type: ignore[name-defined]
+            shutdown_signal = _SHUTDOWN_SIGNAL  # type: ignore[name-defined]
+        except Exception:
+            shutdown_requested = False
+            shutdown_signal = None
+
+        payload: Dict[str, Any] = {
+            "schema_version": _RUNS_ARTIFACT_SCHEMA_VERSION,
+            "utc": _now_utc_iso(),
+            "ts": time.time(),
+            "monotonic": time.monotonic(),
+            "worker_id": WORKER_ID,
+            "pid": _safe_os_getpid(),
+            "hostname": _safe_hostname(),
+            "label": label,
+            "run_id": run_id,
+            "rss_mb": _rss_mb(),
+            "shutdown_requested": shutdown_requested,
+            "shutdown_signal": shutdown_signal,
+            "in_atomic_write": _IN_ATOMIC_WRITE.is_set(),
+            "extra": _to_jsonable(extra) if isinstance(extra, dict) else None,
+        }
+
+        _disk_write_json(
+            _watchdog_heartbeat_file_path(),
+            payload,
+            throttle_key="watchdog_heartbeat_file",
+            throttle_min_interval_s=_env_float_value("WORKER_WATCHDOG_HEARTBEAT_FILE_MIN_INTERVAL_SECONDS", 0.25),
+            force=force,
+        )
+    except Exception as e:
+        log_exception("watchdog_heartbeat_file_failed", e)
+
+def _emit_worker_state_file(
+    *,
+    status: str,
+    mode: str,
+    goal: str,
+    domain: str,
+    roles: Optional[List[str]] = None,
+    runtime_profile: Optional[str] = None,
+    stop_rye: Optional[float] = None,
+    max_minutes: Optional[float] = None,
+    run_id: Optional[str] = None,
+    experiment_mode: Optional[str] = None,
+    current: Optional[int] = None,
+    total: Optional[int] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+) -> None:
+    """
+    Writes <runs_root>/logs/worker_state.json so Streamlit can show worker status.
+    """
+    try:
+        shutdown_requested = False
+        shutdown_signal = None
+        try:
+            shutdown_requested = _SHUTDOWN_REQUESTED.is_set()  # type: ignore[name-defined]
+            shutdown_signal = _SHUTDOWN_SIGNAL  # type: ignore[name-defined]
+        except Exception:
+            shutdown_requested = False
+            shutdown_signal = None
+
+        # Keep "extra" small; it may contain job config, etc.
+        extra_small: Optional[Dict[str, Any]] = None
+        if isinstance(extra, dict) and extra:
+            allow_keys = {
+                "experiment_fingerprint",
+                "final_diagnostics",
+                "progress",
+                "phase",
+                "queue",
+                "note",
+                "error_summary",
+                "job_meta",
+            }
+            compact: Dict[str, Any] = {}
+            for k in list(extra.keys())[:50]:
+                sk = str(k)
+                if sk in allow_keys:
+                    compact[sk] = _to_jsonable(extra.get(k))
+            if compact:
+                extra_small = compact
+
+        payload: Dict[str, Any] = {
+            "schema_version": _RUNS_ARTIFACT_SCHEMA_VERSION,
+            "utc": _now_utc_iso(),
+            "ts": time.time(),
+            "worker_id": WORKER_ID,
+            "pid": _safe_os_getpid(),
+            "hostname": _safe_hostname(),
+            "engine_worker_version": _ENGINE_WORKER_VERSION,
+            "status": status,
+            "mode": mode,
+            "run_id": run_id,
+            "goal": _truncate_text(goal, 1200) if isinstance(goal, str) else goal,
+            "domain": domain,
+            "roles": roles,
+            "runtime_profile": runtime_profile,
+            "stop_rye": stop_rye,
+            "max_minutes": max_minutes,
+            "experiment_mode": experiment_mode,
+            "current": current,
+            "total": total,
+            # compatibility aliases (some UIs use these)
+            "current_cycle": current,
+            "total_cycles": total,
+            "rss_mb": _rss_mb(),
+            "shutdown_requested": shutdown_requested,
+            "shutdown_signal": shutdown_signal,
+            "in_atomic_write": _IN_ATOMIC_WRITE.is_set(),
+            "extra": extra_small,
+        }
+
+        terminalish = str(status).lower() in {"error", "failed", "stopped"} or (current is not None and total is not None and current == total)
+        _disk_write_json(
+            _worker_state_file_path(),
+            payload,
+            throttle_key="worker_state_file",
+            throttle_min_interval_s=_env_float_value("WORKER_WORKER_STATE_FILE_MIN_INTERVAL_SECONDS", 0.5),
+            force=force or terminalish,
+        )
+    except Exception as e:
+        log_exception("worker_state_file_failed", e, status=status, mode=mode, run_id=run_id)
+
+def _emit_run_progress_file(
+    *,
+    run_id: str,
+    status: str,
+    note: str = "",
+    current: Optional[int] = None,
+    total: Optional[int] = None,
+    goal: Optional[str] = None,
+    domain: Optional[str] = None,
+    mode: Optional[str] = None,
+    phase_total: Optional[int] = None,
+    phase_index: Optional[int] = None,
+    phase_name: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+) -> None:
+    """
+    Writes:
+      - <runs_root>/logs/<run_id>_progress.json
+      - <runs_root>/logs/run_state.json  (current run snapshot)
+    """
+    if not run_id:
+        return
+
+    try:
+        payload: Dict[str, Any] = {
+            "schema_version": _RUNS_ARTIFACT_SCHEMA_VERSION,
+            "run_id": run_id,
+            "status": status,
+            "phase_total": phase_total,
+            "phase_index": phase_index,
+            "phase_name": phase_name,
+            "current": current,
+            "total": total,
+            # compatibility aliases
+            "current_cycle": current,
+            "total_cycles": total,
+            "notes": _truncate_text(note, 1200) if isinstance(note, str) else note,
+            "goal": _truncate_text(goal, 1200) if isinstance(goal, str) else goal,
+            "domain": domain,
+            "mode": mode,
+            "worker_id": WORKER_ID,
+            "pid": _safe_os_getpid(),
+            "hostname": _safe_hostname(),
+            "last_update_utc": _now_utc_iso(),
+            "ts": time.time(),
+            "extra": _to_jsonable(extra) if isinstance(extra, dict) else None,
+        }
+
+        terminalish = str(status).lower() in {"finished", "done", "error", "failed", "stopped"} or (current is not None and total is not None and current == total)
+
+        # Per-run progress file
+        _disk_write_json(
+            _run_progress_file_path(run_id),
+            payload,
+            throttle_key=f"run_progress_file:{run_id}",
+            throttle_min_interval_s=_env_float_value("WORKER_RUN_PROGRESS_FILE_MIN_INTERVAL_SECONDS", 0.25),
+            force=force or terminalish,
+        )
+
+        # Current run state snapshot
+        run_state_payload = dict(payload)
+        run_state_payload["active_run_id"] = run_id
+        _disk_write_json(
+            _run_state_file_path(),
+            run_state_payload,
+            throttle_key="run_state_file",
+            throttle_min_interval_s=_env_float_value("WORKER_RUN_STATE_FILE_MIN_INTERVAL_SECONDS", 0.25),
+            force=force or terminalish,
+        )
+    except Exception as e:
+        log_exception("run_progress_file_failed", e, run_id=run_id, status=status)
+
+# ---------------------------------------------------------------------------
 # Hard safety caps and forever mode (unchanged behavior)
 # ---------------------------------------------------------------------------
 
@@ -658,6 +1029,9 @@ def _boot_banner(mode: str) -> None:
         "WORKER_DISABLE_WEB",
         "DISABLE_WEB_SEARCH",
         "ARA_RUNS_DIR",
+        "ARA_RUNS_LOGS_DIR",
+        "ARA_RUNS_LOG_DIR",
+        "ARA_LOGS_DIR",
         "TAVILY_API_KEY",
         "WORKER_TAVILY_KEY",
         "PYTHONUNBUFFERED",
@@ -678,6 +1052,11 @@ def _boot_banner(mode: str) -> None:
     except Exception:
         base_dir_str = str(BASE_DIR)
 
+    try:
+        runs_logs_dir_str = str(RUNS_LOGS_DIR.expanduser().resolve())
+    except Exception:
+        runs_logs_dir_str = str(RUNS_LOGS_DIR)
+
     log_kv(
         "boot",
         version=_ENGINE_WORKER_VERSION,
@@ -687,6 +1066,7 @@ def _boot_banner(mode: str) -> None:
         machine=_platform.machine(),
         cwd=os.getcwd(),
         base_dir=base_dir_str,
+        runs_logs_dir=runs_logs_dir_str,
         hard_max_cycles=HARD_MAX_CYCLES,
         hard_max_rounds=HARD_MAX_ROUNDS,
         hard_max_minutes=HARD_MAX_MINUTES,
@@ -723,13 +1103,27 @@ def ensure_directories() -> None:
     """Ensure that log directories exist, same pattern as the Streamlit app."""
     logs_path = Path("logs")
     sessions_path = logs_path / "sessions"
+    runs_logs_path = RUNS_LOGS_DIR
     try:
         logs_path.mkdir(exist_ok=True)
         sessions_path.mkdir(exist_ok=True)
+        runs_logs_path.mkdir(parents=True, exist_ok=True)
         if _VERBOSE_LOGS:
-            log_kv("paths_ready", level="DEBUG", logs=str(logs_path), sessions=str(sessions_path))
+            log_kv(
+                "paths_ready",
+                level="DEBUG",
+                logs=str(logs_path),
+                sessions=str(sessions_path),
+                runs_logs=str(runs_logs_path),
+            )
     except Exception as e:
-        log_exception("paths_ensure_failed", e, logs=str(logs_path), sessions=str(sessions_path))
+        log_exception(
+            "paths_ensure_failed",
+            e,
+            logs=str(logs_path),
+            sessions=str(sessions_path),
+            runs_logs=str(runs_logs_path),
+        )
 
 def _env_float(name: str) -> Optional[float]:
     val = os.getenv(name)
@@ -948,13 +1342,24 @@ def _current_run_id(mode: str) -> str:
 
 def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> None:
     """
-    Best effort heartbeat into the MemoryStore so the UI can see that the
-    worker is alive.
+    Best effort heartbeat into the MemoryStore and also <runs_root>/logs/watchdog_heartbeat.json
+    so the UI can see that the worker is alive.
     """
     try:
         ts = _now_utc_iso()
         rid = run_id or "n_a"
         _emit_log_line(f"[HB] {ts} label={label} run_id={rid} worker_id={WORKER_ID}")
+    except Exception:
+        pass
+
+    # Streamlit watchdog heartbeat file
+    try:
+        _emit_watchdog_heartbeat_file(
+            label=label,
+            run_id=run_id,
+            extra=None,
+            force=False,
+        )
     except Exception:
         pass
 
@@ -1163,11 +1568,33 @@ def _update_worker_state(
     total: Optional[int] = None,
     extra: Optional[Dict[str, Any]] = None,
 ) -> None:
+    """
+    Updates MemoryStore state if available AND always emits Streamlit-facing worker_state.json.
+    """
     ms = _get_memory_store(agent)
-    if ms is None or not hasattr(ms, "update_worker_state"):
-        return
+    if ms is not None and hasattr(ms, "update_worker_state"):
+        try:
+            ms.update_worker_state(
+                status=status,
+                mode=mode,
+                goal=goal,
+                domain=domain,
+                roles=roles,
+                runtime_profile=runtime_profile,
+                stop_rye=stop_rye,
+                max_minutes=max_minutes,
+                run_id=run_id,
+                experiment_mode=experiment_mode,
+                current=current,
+                total=total,
+                extra=extra,
+            )
+        except Exception as e:
+            log_exception("worker_state_update_failed", e, status=status, mode=mode, run_id=run_id)
+
+    # Streamlit artifact: worker_state.json
     try:
-        ms.update_worker_state(
+        _emit_worker_state_file(
             status=status,
             mode=mode,
             goal=goal,
@@ -1181,9 +1608,10 @@ def _update_worker_state(
             current=current,
             total=total,
             extra=extra,
+            force=False,
         )
-    except Exception as e:
-        log_exception("worker_state_update_failed", e, status=status, mode=mode, run_id=run_id)
+    except Exception:
+        pass
 
 def _write_cycles_and_run_state(
     agent: CoreAgent,
@@ -1263,6 +1691,26 @@ def _write_cycles_and_run_state(
 
     except Exception as e:
         log_exception("run_state_write_failed", e, run_id=run_id)
+
+    # Streamlit artifact: run_state.json snapshot + per-run progress terminal update
+    try:
+        _emit_run_progress_file(
+            run_id=run_id,
+            status="finished",
+            note="Run state written",
+            current=len(cycles),
+            total=len(cycles),
+            goal=goal,
+            domain=domain,
+            mode=mode,
+            phase_total=1,
+            phase_index=1,
+            phase_name="run",
+            extra={"diagnostics": diag_local} if isinstance(diag_local, dict) else None,
+            force=True,
+        )
+    except Exception:
+        pass
 
 def _write_snapshot(
     agent: CoreAgent,
@@ -1622,6 +2070,23 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         fingerprint=experiment_fingerprint,
     )
 
+    # Streamlit artifacts: initialize run_state + progress
+    _emit_run_progress_file(
+        run_id=run_id,
+        status="active",
+        note="Direct job started",
+        current=0,
+        total=macro_total,
+        goal=goal,
+        domain=domain,
+        mode=mode,
+        phase_total=1,
+        phase_index=1,
+        phase_name="run",
+        extra={"experiment_fingerprint": experiment_fingerprint},
+        force=True,
+    )
+
     _update_worker_state(
         agent,
         status="running_job",
@@ -1826,6 +2291,23 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             },
         )
 
+        # Streamlit artifacts: final progress
+        _emit_run_progress_file(
+            run_id=run_id,
+            status="finished",
+            note="Direct job finished",
+            current=macro_total,
+            total=macro_total,
+            goal=goal,
+            domain=domain,
+            mode=mode,
+            phase_total=1,
+            phase_index=1,
+            phase_name="run",
+            extra={"final_diagnostics": diag} if isinstance(diag, dict) else None,
+            force=True,
+        )
+
         log_kv("direct_job_done", run_id=run_id, cycles=len(normalized_cycles))
         return result_obj
 
@@ -1893,6 +2375,23 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             current=None,
             total=macro_total,
             extra=error_payload,
+        )
+
+        # Streamlit artifacts: error progress
+        _emit_run_progress_file(
+            run_id=run_id,
+            status="error",
+            note=_compact_error_summary(e),
+            current=None,
+            total=macro_total,
+            goal=goal,
+            domain=domain,
+            mode=mode,
+            phase_total=1,
+            phase_index=1,
+            phase_name="run",
+            extra={"error": str(e)},
+            force=True,
         )
 
         return {
@@ -2994,7 +3493,7 @@ def _write_job_progress(
     prompt_details: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
-    Best effort progress writer for queue jobs (atomic).
+    Best effort progress writer for queue jobs (atomic) + Streamlit artifacts.
     """
     try:
         if progress_path is not None:
@@ -3016,6 +3515,36 @@ def _write_job_progress(
         }
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_json(path, payload, indent=2)
+
+        # Streamlit artifacts: per-run progress + run_state snapshot
+        try:
+            mode_local: Optional[str] = None
+            if isinstance(prompt_details, dict):
+                m = prompt_details.get("mode")
+                if isinstance(m, str):
+                    mode_local = m
+            if mode_local is None and isinstance(job_config, dict):
+                m2 = job_config.get("mode") or job_config.get("engine_mode")
+                if isinstance(m2, str):
+                    mode_local = m2
+
+            _emit_run_progress_file(
+                run_id=run_id,
+                status=status,
+                note=note,
+                current=current,
+                total=total,
+                goal=goal,
+                domain=domain,
+                mode=mode_local,
+                phase_total=1,
+                phase_index=1,
+                phase_name="run",
+                extra=None,
+                force=status.lower() in {"finished", "error", "failed", "stopped", "retrying"},
+            )
+        except Exception:
+            pass
 
         if _should_log_progress(run_id, status):
             parts: List[str] = [
@@ -3850,6 +4379,12 @@ def run_job_queue_worker() -> None:
             agent = None
             continue
 
+    # Establish default goal/domain for idle worker_state.json
+    try:
+        default_goal, default_domain = build_goal_and_domain()
+    except Exception:
+        default_goal, default_domain = ("", "general")
+
     # stale running recovery at startup
     try:
         recovered = queue.recover_stale_running()
@@ -3923,6 +4458,44 @@ def run_job_queue_worker() -> None:
         retry_max_s=queue.retry_max_seconds,
     )
 
+    # Initial Streamlit artifacts for idle state
+    try:
+        _emit_watchdog_heartbeat_file(label="queue_worker_started", run_id=None, extra={"counts": queue.scan_counts()}, force=True)
+        _emit_worker_state_file(
+            status="idle",
+            mode="queue",
+            goal=default_goal,
+            domain=default_domain,
+            roles=None,
+            runtime_profile=None,
+            stop_rye=None,
+            max_minutes=None,
+            run_id=None,
+            experiment_mode="queue_worker",
+            current=None,
+            total=None,
+            extra={"queue": {"counts": queue.scan_counts()}},
+            force=True,
+        )
+        _disk_write_json(
+            _run_state_file_path(),
+            {
+                "schema_version": _RUNS_ARTIFACT_SCHEMA_VERSION,
+                "status": "idle",
+                "active_run_id": None,
+                "worker_id": WORKER_ID,
+                "pid": _safe_os_getpid(),
+                "hostname": _safe_hostname(),
+                "utc": _now_utc_iso(),
+                "ts": time.time(),
+            },
+            throttle_key="run_state_file",
+            throttle_min_interval_s=0.0,
+            force=True,
+        )
+    except Exception:
+        pass
+
     # Main forever loop with top-level crash shield
     while True:
         stats.cycles += 1
@@ -3956,6 +4529,52 @@ def run_job_queue_worker() -> None:
                     scan_ms=round(stats.last_scan_ms, 2) if stats.last_scan_ms is not None else None,
                     shutdown=_SHUTDOWN_REQUESTED.is_set(),
                 )
+
+                # Streamlit artifacts heartbeat while idle
+                try:
+                    counts_now = stats.last_counts if isinstance(stats.last_counts, dict) and stats.last_counts else queue.scan_counts()
+                    _emit_watchdog_heartbeat_file(
+                        label="queue_worker_heartbeat",
+                        run_id=None,
+                        extra={"counts": counts_now, "uptime_s": int(uptime_s), "rss_mb": rss},
+                        force=False,
+                    )
+                    _emit_worker_state_file(
+                        status="idle" if not _SHUTDOWN_REQUESTED.is_set() else "shutdown_requested",
+                        mode="queue",
+                        goal=default_goal,
+                        domain=default_domain,
+                        roles=None,
+                        runtime_profile=None,
+                        stop_rye=None,
+                        max_minutes=None,
+                        run_id=None,
+                        experiment_mode="queue_worker",
+                        current=None,
+                        total=None,
+                        extra={"queue": {"counts": counts_now, "uptime_s": int(uptime_s)}},
+                        force=False,
+                    )
+                    # Keep run_state.json showing no active run while idle
+                    _disk_write_json(
+                        _run_state_file_path(),
+                        {
+                            "schema_version": _RUNS_ARTIFACT_SCHEMA_VERSION,
+                            "status": "idle" if not _SHUTDOWN_REQUESTED.is_set() else "shutdown_requested",
+                            "active_run_id": None,
+                            "worker_id": WORKER_ID,
+                            "pid": _safe_os_getpid(),
+                            "hostname": _safe_hostname(),
+                            "utc": _now_utc_iso(),
+                            "ts": time.time(),
+                            "queue_counts": _to_jsonable(counts_now),
+                        },
+                        throttle_key="run_state_file",
+                        throttle_min_interval_s=_env_float_value("WORKER_RUN_STATE_FILE_MIN_INTERVAL_SECONDS", 0.25),
+                        force=False,
+                    )
+                except Exception:
+                    pass
 
             # Periodic stale recovery (nested crash shield)
             if now_mono - last_stale_recover_mono >= float(stale_recover_interval_s):
@@ -4029,6 +4648,26 @@ def run_job_queue_worker() -> None:
                 max_retries=job.max_retries,
                 claim_token=job.claim_token,
             )
+
+            # Streamlit artifacts: show active run claimed (pre-exec)
+            try:
+                _emit_run_progress_file(
+                    run_id=job.run_id,
+                    status="claimed",
+                    note="Job claimed by worker",
+                    current=0,
+                    total=None,
+                    goal=str(job.config.get("goal") or default_goal),
+                    domain=str(job.config.get("domain") or default_domain),
+                    mode=str(job.config.get("mode") or job.config.get("engine_mode") or "single"),
+                    phase_total=1,
+                    phase_index=1,
+                    phase_name="run",
+                    extra={"retry_count": job.retry_count, "max_retries": job.max_retries},
+                    force=True,
+                )
+            except Exception:
+                pass
 
             # Execute job (nested crash shield)
             _set_current_job(job)
@@ -4297,6 +4936,23 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 fingerprint=experiment_fingerprint,
             )
 
+            # Streamlit artifacts: start
+            _emit_run_progress_file(
+                run_id=run_id,
+                status="active",
+                note="Single engine started",
+                current=0,
+                total=max_cycles,
+                goal=goal,
+                domain=domain,
+                mode="single",
+                phase_total=1,
+                phase_index=1,
+                phase_name="run",
+                extra={"experiment_fingerprint": experiment_fingerprint},
+                force=True,
+            )
+
             _update_worker_state(
                 agent,
                 status="running",
@@ -4437,6 +5093,24 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         "snapshot": snapshot_cfg,
                     },
                 )
+
+                # Streamlit artifacts: finished
+                _emit_run_progress_file(
+                    run_id=run_id,
+                    status="finished",
+                    note="Single engine finished",
+                    current=len(normalized_cycles),
+                    total=max_cycles,
+                    goal=goal,
+                    domain=domain,
+                    mode="single",
+                    phase_total=1,
+                    phase_index=1,
+                    phase_name="run",
+                    extra={"final_diagnostics": diag} if isinstance(diag, dict) else None,
+                    force=True,
+                )
+
                 log_kv("single_engine_done", run_id=run_id, cycles=len(normalized_cycles))
                 return
 
@@ -4451,6 +5125,24 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
         except Exception as e:
             log_exception("single_engine_crash", e)
+            try:
+                _emit_run_progress_file(
+                    run_id=_current_run_id("single"),
+                    status="error",
+                    note=_compact_error_summary(e),
+                    current=None,
+                    total=None,
+                    goal=None,
+                    domain=None,
+                    mode="single",
+                    phase_total=1,
+                    phase_index=1,
+                    phase_name="run",
+                    extra=None,
+                    force=True,
+                )
+            except Exception:
+                pass
             # Always-on behavior: restart unless explicitly disabled
             if _env_bool("WORKER_RESTART_ON_CRASH", default=True):
                 time.sleep(2.0)
@@ -4583,6 +5275,23 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 tool_web=tool_flags["web"],
                 tool_sandbox=tool_flags["sandbox"],
                 fingerprint=experiment_fingerprint,
+            )
+
+            # Streamlit artifacts: start
+            _emit_run_progress_file(
+                run_id=run_id,
+                status="active",
+                note="Swarm engine started",
+                current=0,
+                total=max_rounds,
+                goal=goal,
+                domain=domain,
+                mode="swarm",
+                phase_total=1,
+                phase_index=1,
+                phase_name="run",
+                extra={"experiment_fingerprint": experiment_fingerprint},
+                force=True,
             )
 
             _update_worker_state(
@@ -4782,6 +5491,23 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     },
                 )
 
+                # Streamlit artifacts: finished
+                _emit_run_progress_file(
+                    run_id=run_id,
+                    status="finished",
+                    note="Swarm engine finished",
+                    current=len(normalized_cycles),
+                    total=max_rounds,
+                    goal=goal,
+                    domain=domain,
+                    mode="swarm",
+                    phase_total=1,
+                    phase_index=1,
+                    phase_name="run",
+                    extra={"final_diagnostics": diag} if isinstance(diag, dict) else None,
+                    force=True,
+                )
+
                 log_kv("swarm_engine_done", run_id=run_id, summaries=len(normalized_cycles))
                 return
 
@@ -4796,6 +5522,24 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
         except Exception as e:
             log_exception("swarm_engine_crash", e)
+            try:
+                _emit_run_progress_file(
+                    run_id=_current_run_id("swarm"),
+                    status="error",
+                    note=_compact_error_summary(e),
+                    current=None,
+                    total=None,
+                    goal=None,
+                    domain=None,
+                    mode="swarm",
+                    phase_total=1,
+                    phase_index=1,
+                    phase_name="run",
+                    extra=None,
+                    force=True,
+                )
+            except Exception:
+                pass
             if _env_bool("WORKER_RESTART_ON_CRASH", default=True):
                 time.sleep(2.0)
                 continue
@@ -5043,6 +5787,28 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 fingerprint=experiment_fingerprint,
             )
 
+            # Meta phases for UI
+            meta_plan = _initial_meta_plan(goal=goal, domain=domain, preferred_mode=preferred_mode, total_budget_minutes=total_budget_minutes)
+            phase_total_ui = 3
+            phase_index_map = {"exploration": 1, "stabilization": 2, "refinement": 3}
+
+            # Streamlit artifacts: start meta run at phase 1
+            _emit_run_progress_file(
+                run_id=run_id,
+                status="active",
+                note="Meta engine started",
+                current=0,
+                total=meta_max_segments_int,
+                goal=goal,
+                domain=domain,
+                mode="meta",
+                phase_total=phase_total_ui,
+                phase_index=1,
+                phase_name="exploration",
+                extra={"experiment_fingerprint": experiment_fingerprint},
+                force=True,
+            )
+
             _update_worker_state(
                 agent,
                 status="running",
@@ -5065,8 +5831,6 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 },
             )
             _heartbeat(agent, label="worker_meta_start", run_id=run_id)
-
-            meta_plan = _initial_meta_plan(goal=goal, domain=domain, preferred_mode=preferred_mode, total_budget_minutes=total_budget_minutes)
 
             segments_run: List[Dict[str, Any]] = []
             recent_avg_rye: Optional[float] = None
@@ -5110,6 +5874,49 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     phase_profile = phase_cfg.get("runtime_profile")
                     if runtime_profile_env and phase_profile is None:
                         phase_profile = runtime_profile_env
+
+                    # Phase info for UI (1/3, 2/3, 3/3)
+                    phase_name_s = str(phase_name)
+                    phase_index_ui = phase_index_map.get(phase_name_s.lower(), min(seg_index + 1, phase_total_ui))
+                    if phase_index_ui > phase_total_ui:
+                        phase_index_ui = phase_total_ui
+
+                    # Streamlit artifacts: before each segment start
+                    _emit_run_progress_file(
+                        run_id=run_id,
+                        status="active",
+                        note=f"Starting phase: {phase_name_s}",
+                        current=seg_index,
+                        total=meta_max_segments_int,
+                        goal=goal,
+                        domain=domain,
+                        mode="meta",
+                        phase_total=phase_total_ui,
+                        phase_index=phase_index_ui,
+                        phase_name=phase_name_s,
+                        extra={"segment_index": seg_index + 1, "phase_mode": phase_mode, "runtime_profile": phase_profile},
+                        force=True,
+                    )
+
+                    _update_worker_state(
+                        agent,
+                        status="running",
+                        mode="meta",
+                        goal=goal,
+                        domain=domain,
+                        roles=list(roles_for_swarm),
+                        runtime_profile=phase_profile,
+                        stop_rye=stop_rye_env,
+                        max_minutes=total_budget_minutes,
+                        run_id=run_id,
+                        experiment_mode="meta_controller",
+                        current=seg_index,
+                        total=meta_max_segments_int,
+                        extra={
+                            "experiment_fingerprint": experiment_fingerprint,
+                            "phase": {"name": phase_name_s, "index": phase_index_ui, "total": phase_total_ui, "mode": phase_mode},
+                        },
+                    )
 
                     effective_minutes, effective_stop_rye = _adjust_phase_from_stats(
                         phase_cfg=phase_cfg,
@@ -5298,6 +6105,23 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     },
                 )
 
+                # Streamlit artifacts: finished meta run
+                _emit_run_progress_file(
+                    run_id=run_id,
+                    status="finished",
+                    note="Meta engine finished",
+                    current=len(segments_run),
+                    total=meta_max_segments_int,
+                    goal=goal,
+                    domain=domain,
+                    mode="meta",
+                    phase_total=phase_total_ui,
+                    phase_index=phase_total_ui,
+                    phase_name="refinement",
+                    extra={"final_diagnostics": diag} if isinstance(diag, dict) else None,
+                    force=True,
+                )
+
                 log_kv("meta_engine_done", run_id=run_id, segments=len(segments_run), summaries=len(normalized_cycles))
                 return
 
@@ -5312,6 +6136,24 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
         except Exception as e:
             log_exception("meta_engine_crash", e)
+            try:
+                _emit_run_progress_file(
+                    run_id=_current_run_id("meta"),
+                    status="error",
+                    note=_compact_error_summary(e),
+                    current=None,
+                    total=None,
+                    goal=None,
+                    domain=None,
+                    mode="meta",
+                    phase_total=3,
+                    phase_index=None,
+                    phase_name=None,
+                    extra=None,
+                    force=True,
+                )
+            except Exception:
+                pass
             if _env_bool("WORKER_RESTART_ON_CRASH", default=True):
                 time.sleep(2.0)
                 continue
@@ -5411,6 +6253,11 @@ if __name__ == "__main__":
                         rss_mb=round(rss, 2) if rss is not None else None,
                         shutdown=_SHUTDOWN_REQUESTED.is_set(),
                     )
+                    # Keep Streamlit watchdog heartbeat fresh even in keepalive
+                    try:
+                        _emit_watchdog_heartbeat_file(label="keepalive", run_id=None, extra={"rss_mb": rss}, force=False)
+                    except Exception:
+                        pass
                     time.sleep(_env_float_value("WORKER_KEEPALIVE_HEARTBEAT_SECONDS", 30.0))
             break
         except KeyboardInterrupt:
