@@ -1,11 +1,12 @@
 services:
   # ---------------------------------------------------------
-  # SINGLE SERVICE: STREAMLIT UI + ENGINE WORKER (started via start.sh)
+  # SINGLE SERVICE: STREAMLIT UI + ENGINE WORKER (watchdog keeps worker alive)
   # ---------------------------------------------------------
   - type: web
     name: ara-autonomous-research-agent
     env: python
     plan: starter
+    numInstances: 1
 
     rootDir: .
 
@@ -14,8 +15,30 @@ services:
       pip install -r requirements.txt
       chmod +x start.sh
 
-    # start.sh must start engine_worker.py (background) + streamlit (foreground)
-    startCommand: ./start.sh
+    # Start Streamlit as usual, but also run a watchdog that restarts engine_worker.py if it dies
+    startCommand: |
+      set -euo pipefail
+
+      echo "Boot: ensuring runs + queue directories exist"
+      mkdir -p "${ARA_RUNS_DIR}" "${ARA_QUEUE_ROOT}"
+
+      # Worker watchdog: if engine_worker.py crashes/exits, bring it back.
+      (
+        echo "[watchdog] started"
+        # Give start.sh time to start the worker (prevents double-start in most cases)
+        sleep 10
+        while true; do
+          if pgrep -f "agent/engine_worker.py" >/dev/null 2>&1; then
+            sleep 5
+          else
+            echo "[watchdog] engine worker not running; starting..."
+            python -u agent/engine_worker.py &
+            sleep 5
+          fi
+        done
+      ) &
+
+      exec ./start.sh
 
     autoDeploy: true
     healthCheckPath: /
@@ -29,6 +52,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: "3.11"
+      - key: PYTHONUNBUFFERED
+        value: "1"
 
       # Shared runs dir (single source of truth)
       - key: ARA_RUNS_DIR
