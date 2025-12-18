@@ -117,13 +117,27 @@ def _clamp_query(q: str, limit: int = MAX_WEB_QUERY_LEN) -> str:
     """Clamp web search queries to Tavily-safe length.
 
     Preserves core meaning while preventing "Query is too long" errors.
+    Ensures the returned string length never exceeds `limit`.
     """
     if not isinstance(q, str):
         return ""
     text = q.strip().replace("\n", " ")
     if len(text) <= limit:
         return text
-    return text[:limit] + "..."
+    if limit <= 3:
+        return text[:limit]
+    return text[: (limit - 3)].rstrip() + "..."
+
+
+def _first_numeric(d: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[float]:
+    """Return the first numeric value found for any of the provided keys.
+
+    IMPORTANT: Unlike `dict.get(...) or ...`, this correctly preserves 0.0.
+    """
+    for k in keys:
+        if k in d and isinstance(d[k], (int, float)):
+            return float(d[k])
+    return None
 
 
 # Optional stability kernel integration
@@ -309,7 +323,6 @@ class _NullWebTool:
     def summarize_results(self, results: List[Dict[str, Any]]) -> str:
         """Simple text summary of top web results for note logging."""
         if not results:
-            # Preserve old behavior but clarify that search ran.
             return "Web search returned no usable results for this cycle."
 
         lines: List[str] = []
@@ -412,7 +425,6 @@ class TGRMLoop:
         # Usage tracker factory so we can always track energy even if tools
         # is just a dict or a minimal Toolbelt without tracking.
         if hasattr(self.tools, "new_usage_tracker"):
-            # Toolbelt style API
             self._usage_factory = self.tools.new_usage_tracker  # type: ignore[assignment]
         else:
 
@@ -426,7 +438,6 @@ class TGRMLoop:
             if WebResearchTool is not None:
                 self.web_tool = WebResearchTool()  # type: ignore[call-arg]
             else:
-                # Use the Tavily aware null tool which wraps tools.web_search.
                 self.web_tool = _NullWebTool()
         except Exception:
             self.web_tool = _NullWebTool()
@@ -479,29 +490,45 @@ class TGRMLoop:
             except Exception:
                 self.discovery_manager = None
 
-        # Long run optimization: track which questions have already been
-        # researched so we do not re query the same text many times during
-        # 8 hour or 24 hour sessions.
-        self._seen_questions: set[str] = set()
+        # Long run optimization: track which questions have already been researched.
+        # IMPORTANT: This is scoped PER GOAL and uses a TTL so that failures can retry later.
+        self._seen_questions: Dict[str, Dict[str, float]] = {}
+        try:
+            self._seen_question_ttl_s = float(self.config.get("seen_question_ttl_s", 6 * 3600))
+        except Exception:
+            self._seen_question_ttl_s = float(6 * 3600)
 
         # TGRM level: 1 (basic), 2 (targeted), 3 (domain plus swarm aware).
-        # If not set in config, default to level 3 to unlock full power.
         try:
             self.tgrm_level = int(self.config.get("tgrm_level", 3))
         except Exception:
             self.tgrm_level = 3
 
         # Sliding window size for short term RYE gradient estimates
-        self.rye_window_size = int(self.config.get("rye_window_size", 20))
+        try:
+            self.rye_window_size = int(self.config.get("rye_window_size", 20))
+        except Exception:
+            self.rye_window_size = 20
 
         # Ultra speed mode and strict pipeline flag (used by meta controller and UI)
         self.ultra_speed = bool(self.config.get("ultra_speed", False))
         self.strict_pipeline = bool(self.config.get("strict_pipeline", True))
 
+        # Under-cited trigger threshold: citation_markers / notes_count
+        try:
+            self.under_cited_ratio = float(self.config.get("under_cited_ratio", 0.5))
+        except Exception:
+            self.under_cited_ratio = 0.5
+        self.under_cited_ratio = max(0.0, min(1.0, self.under_cited_ratio))
+
+        # Maximum note size to store (prevents runaway memory/disk growth)
+        try:
+            self.max_note_chars = int(self.config.get("max_note_chars", 12000))
+        except Exception:
+            self.max_note_chars = 12000
+        self.max_note_chars = max(1000, self.max_note_chars)
+
         # Dynamic search energy controls for Tavily and web usage.
-        # Mode:
-        #   "auto"  -> TGRM adjusts search intensity using RYE and history.
-        #   "fixed" -> always use search_energy_base as a constant multiplier.
         self.search_energy_mode = str(self.config.get("search_energy_mode", "auto")).lower()
         try:
             self.search_energy_base = float(self.config.get("search_energy_base", 1.0))
@@ -515,18 +542,58 @@ class TGRMLoop:
             self.search_energy_max = float(self.config.get("search_energy_max", 1.6))
         except Exception:
             self.search_energy_max = 1.6
+
         # Per cycle value updated inside run_cycle.
         self.search_energy: float = self.search_energy_base
 
     # ------------------------------------------------------------------
-    # Small helper for token estimation (for energy accounting)
+    # Small helpers
     # ------------------------------------------------------------------
+    def _deadline_hit(self, deadline_ts: Optional[float]) -> bool:
+        return deadline_ts is not None and time.time() >= deadline_ts
+
+    def _cap_note_text(self, note_text: str) -> str:
+        """Cap note size so long runs do not accumulate unbounded note bodies."""
+        if not isinstance(note_text, str):
+            return ""
+        if len(note_text) <= self.max_note_chars:
+            return note_text
+        truncated = note_text[: self.max_note_chars].rstrip()
+        return truncated + "\n\n[truncated]\n"
+
     def _estimate_tokens(self, text: str) -> int:
         """Very rough token estimate from text length."""
         if not text:
             return 0
-        # Rough heuristic: about 4 characters per token
         return max(1, len(text) // 4)
+
+    def _scan_notes_for_basic_markers(self, notes: List[Dict[str, Any]]) -> Dict[str, int]:
+        """Scan notes and count markers in a way that supports stable diagnostics.
+
+        Returns counts:
+            - question_lines: number of lines containing '?'
+            - todo_lines: number of lines containing 'TODO'/'todo'
+            - contradiction_lines: number of lines containing 'CONTRADICTION'/'contradiction'
+        """
+        counts = {"question_lines": 0, "todo_lines": 0, "contradiction_lines": 0}
+        if not notes:
+            return counts
+
+        for note in notes:
+            content = str(note.get("content", "") or "")
+            if not content:
+                continue
+            for line in content.splitlines():
+                s = line.strip()
+                if not s:
+                    continue
+                if "?" in s:
+                    counts["question_lines"] += 1
+                if "TODO" in s or "todo" in s:
+                    counts["todo_lines"] += 1
+                if "CONTRADICTION" in s or "contradiction" in s.lower():
+                    counts["contradiction_lines"] += 1
+        return counts
 
     # ------------------------------------------------------------------
     # Citation helpers
@@ -540,22 +607,14 @@ class TGRMLoop:
         channel: str,
         phase: str,
     ) -> List[Dict[str, Any]]:
-        """Ensure every citation has minimal provenance fields.
-
-        Fields added:
-            - goal: research goal for this cycle
-            - query: text used to fetch this citation
-            - channel: "web", "pubmed", "semantic", "pdf", etc
-            - phase: "initial", "targeted", "strengthen", "gap_repair"
-            - created_at: ISO timestamp
-        """
+        """Ensure every citation has minimal provenance fields."""
         stamped: List[Dict[str, Any]] = []
         created_at = datetime.utcnow().isoformat() + "Z"
 
         for c in citations or []:
             if not isinstance(c, dict):
                 c = {"title": str(c)}
-            c = dict(c)  # shallow copy
+            c = dict(c)
             c.setdefault("goal", goal)
             c.setdefault("query", query)
             c.setdefault("channel", channel)
@@ -575,10 +634,7 @@ class TGRMLoop:
         goal: str,
         limit: int = 200,
     ) -> List[Dict[str, Any]]:
-        """Return recent history rows for this goal if the store supports it.
-
-        Falls back to empty list if not implemented.
-        """
+        """Return recent history rows for this goal if the store supports it."""
         try:
             if hasattr(self.memory_store, "get_cycle_history_for_goal"):
                 rows = self.memory_store.get_cycle_history_for_goal(goal, limit=limit)  # type: ignore[attr-defined]
@@ -591,7 +647,7 @@ class TGRMLoop:
             if hasattr(self.memory_store, "get_cycle_history"):
                 full = self.memory_store.get_cycle_history()  # type: ignore[attr-defined]
                 if isinstance(full, list):
-                    filtered = [r for r in full if r.get("goal") == goal]
+                    filtered = [r for r in full if isinstance(r, dict) and r.get("goal") == goal]
                     return filtered[-limit:]
         except Exception:
             pass
@@ -606,15 +662,7 @@ class TGRMLoop:
         energy_e: float,
         domain: str,
     ) -> Dict[str, Any]:
-        """Compute short term RYE gradient, equilibrium status, and stability score.
-
-        This uses recent history from MemoryStore but never raises even if
-        history is missing. It is meant to give higher level components
-        an approximate sense of whether the system is:
-            - climbing (improving RYE)
-            - plateaued (near equilibrium)
-            - oscillating or unstable
-        """
+        """Compute short term RYE gradient, equilibrium status, and stability score."""
         result: Dict[str, Any] = {
             "rye_gradient": None,
             "rye_window_mean": None,
@@ -627,14 +675,15 @@ class TGRMLoop:
         if current_rye is None:
             return result
 
-        history = self._get_recent_history_for_goal(
-            goal, limit=max(self.rye_window_size, 10)
-        )
+        history = self._get_recent_history_for_goal(goal, limit=max(self.rye_window_size, 10))
+
         rye_values: List[float] = []
         for row in history:
-            val = row.get("RYE") or row.get("rye") or row.get("rye_value")
-            if isinstance(val, (int, float)):
-                rye_values.append(float(val))
+            if not isinstance(row, dict):
+                continue
+            v = _first_numeric(row, ("RYE", "rye", "rye_value"))
+            if v is not None:
+                rye_values.append(v)
 
         # Include the current cycle in the window
         rye_values.append(float(current_rye))
@@ -654,16 +703,10 @@ class TGRMLoop:
         result["rye_window_std"] = std_val
 
         # Simple gradient estimate using last and first in window
-        if n > 1:
-            gradient = (window[-1] - window[0]) / max(1, n - 1)
-        else:
-            gradient = 0.0
+        gradient = (window[-1] - window[0]) / max(1, n - 1) if n > 1 else 0.0
         result["rye_gradient"] = gradient
 
-        # Equilibrium heuristics:
-        #   - high mean RYE with low variance -> stable high equilibrium
-        #   - moderate mean with low variance -> stable plateau
-        #   - low mean or high variance -> unstable or oscillating
+        # Equilibrium heuristics
         low_std_threshold = 0.08
         high_std_threshold = 0.25
         high_mean_threshold = 0.82
@@ -687,8 +730,7 @@ class TGRMLoop:
         else:
             label = "transient"
 
-        # Tiny domain adjustment: longevity work often tolerates lower RYE
-        # because primary evidence is harder to obtain. Math expects higher.
+        # Tiny domain adjustment
         dom_lower = (domain or "general").lower()
         if dom_lower == "longevity":
             equilibrium_score *= 1.05
@@ -717,16 +759,7 @@ class TGRMLoop:
         hypotheses: List[Dict[str, Any]],
         citations: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Heuristic breakthrough score on a 0 to 1 scale.
-
-        This is not a claim of real discovery. It is a reparodynamic
-        internal signal indicating whether the system believes it has
-        crossed a meaningful threshold for:
-            - sustained RYE
-            - reduced open issues
-            - rich and diverse citations
-            - a focused, small set of high value hypotheses
-        """
+        """Heuristic breakthrough score on a 0 to 1 scale."""
         info: Dict[str, Any] = {
             "breakthrough_score": None,
             "flags": [],
@@ -740,8 +773,12 @@ class TGRMLoop:
         flags: List[str] = []
 
         rye_val = float(current_rye)
-        mean_window = equilibrium_info.get("rye_window_mean") or rye_val
-        std_window = equilibrium_info.get("rye_window_std") or 0.0
+        mean_window = equilibrium_info.get("rye_window_mean")
+        if mean_window is None:
+            mean_window = rye_val
+        std_window = equilibrium_info.get("rye_window_std")
+        if std_window is None:
+            std_window = 0.0
 
         # 1. Current and window RYE
         if rye_val >= 0.85:
@@ -757,15 +794,10 @@ class TGRMLoop:
             score += 0.15
 
         # 2. Issue reduction
-        total_before = sum(issue_code_counts_before.values()) or 0
-        total_after = sum(issue_code_counts_after.values()) or 0
+        total_before = sum(int(v) for v in issue_code_counts_before.values()) if issue_code_counts_before else 0
+        total_after = sum(int(v) for v in issue_code_counts_after.values()) if issue_code_counts_after else 0
 
-        if total_before > 0:
-            reduction = max(0.0, float(total_before - total_after)) / float(
-                total_before
-            )
-        else:
-            reduction = 0.0
+        reduction = (max(0.0, float(total_before - total_after)) / float(total_before)) if total_before > 0 else 0.0
 
         if reduction >= 0.7 and total_after <= 3:
             score += 0.2
@@ -776,6 +808,8 @@ class TGRMLoop:
         # 3. Citation richness
         unique_sources = set()
         for c in citations:
+            if not isinstance(c, dict):
+                continue
             key = (c.get("source"), c.get("url"))
             unique_sources.add(key)
         source_count = len(unique_sources)
@@ -802,13 +836,10 @@ class TGRMLoop:
             score -= 0.05
 
         # Domain adjustments
-        dom_lower = domain.lower()
-        if dom_lower == "longevity":
-            score *= 1.05
-        elif dom_lower == "math":
+        dom_lower = (domain or "general").lower()
+        if dom_lower in {"longevity", "math"}:
             score *= 1.05
 
-        # Clamp and finalize
         score = max(0.0, min(1.0, score))
         info["breakthrough_score"] = score
         info["flags"] = flags
@@ -826,20 +857,9 @@ class TGRMLoop:
         maintenance_mode: bool,
         domain: str,
     ) -> float:
-        """Compute a per cycle search_energy multiplier for web usage.
-
-        This is a reparodynamic control knob:
-
-            search_energy > 1.0  -> more aggressive web and paper search
-            search_energy ~ 1.0  -> normal behavior
-            search_energy < 1.0  -> reduced external calls, more synthesis
-
-        The rule is intentionally simple and only depends on history level
-        signals so it is safe to run before this cycle's metrics exist.
-        """
+        """Compute a per cycle search_energy multiplier for web usage."""
         base = self.search_energy_base
 
-        # Fixed mode gives a stable value for debugging or careful runs.
         if self.search_energy_mode == "fixed":
             return max(self.search_energy_min, min(self.search_energy_max, base))
 
@@ -850,27 +870,20 @@ class TGRMLoop:
         if avg_rye is None or total_cycles_for_goal < 3:
             energy *= 1.05
         else:
-            # If RYE is low for this goal, push exploration a bit.
             if avg_rye < 0.4:
                 energy *= 1.15
-            # If RYE is quite high and we have many cycles, favor compression.
             elif avg_rye > 0.8 and total_cycles_for_goal >= 15:
                 energy *= 0.75
 
-        # Stage hints: verify runs tend to need fewer new sources.
         if stage_tag == "verify":
             energy *= 0.8
 
-        # Maintenance mode is already a sign of saturation.
         if maintenance_mode:
             energy *= 0.7
 
-        # Longevity tends to be data starved, so allow a bit more exploration
-        # when RYE is not obviously high.
         if dom == "longevity" and avg_rye is not None and avg_rye < 0.6:
             energy *= 1.1
 
-        # Clamp inside safe training envelope.
         energy = max(self.search_energy_min, min(self.search_energy_max, energy))
         return float(energy)
 
@@ -900,77 +913,7 @@ class TGRMLoop:
         deadline_ts: Optional[float] = None,
         experiment_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Run one TGRM cycle for a given research goal.
-
-        Args:
-            goal:
-                Human readable research goal for this cycle.
-            cycle_index:
-                Global cycle index used for logging and history.
-            role:
-                Logical role such as "agent", "researcher", or "critic".
-            source_controls:
-                Optional switches like:
-                    {
-                      "web": True,
-                      "pubmed": True,
-                      "semantic": True,
-                      "pdf": True,
-                      "biomarkers": False,
-                    }
-                If None, defaults are used.
-            pdf_bytes:
-                Optional PDF content that can be ingested as part of the
-                Repair phase if "pdf" is enabled.
-            biomarker_snapshot:
-                Optional dict of biomarker or lab values. Reserved for future
-                longevity analysis.
-            domain:
-                Optional domain tag such as "general", "longevity", or "math".
-                Preserved in the log for future domain specific behavior.
-            msil_mode:
-                Optional tag for the MSIL mode used by higher level agents.
-            msil_track_mode:
-                Optional tag indicating how MSIL tracks this goal.
-            rye_mode:
-                Optional tag indicating which RYE metric family is in use.
-            stage:
-                Optional TGRM stage hint for longevity style two stage runs:
-                "idea" or "verify". Defaults to "idea".
-            hallmark:
-                Optional hallmark label for longevity runs, such as
-                "mitochondria" or "senescence".
-            subgoal:
-                Optional sub target such as "mito_membrane_potential".
-            replay_buffer:
-                Optional ReplayBuffer like object where high value hypotheses
-                and patterns can be stored for curriculum learning.
-            curriculum_state:
-                Optional dict with curriculum hints such as phase name,
-                progress fraction, or active pathway focus.
-            run_id:
-                Optional id of the long running experiment or swarm run.
-            agent_id:
-                Optional id of the agent within a swarm.
-            swarm_profile:
-                Optional dict describing swarm context such as size, layer,
-                and role weights. Safe to omit.
-            deadline_ts:
-                Optional absolute wall-clock deadline (time.time() seconds).
-                If provided, the cycle will avoid starting heavy repair work
-                after this time and mark itself as interrupted if hit.
-            experiment_mode:
-                Optional tag for higher level experiment labeling.
-        Returns:
-            Dict with:
-                {
-                  "summary": human facing summary,
-                  "log":     full cycle log,
-                  "tool_stats": per cycle tool stats,
-                  "citations": list of citation dicts
-                }
-        """
-        # Consistent per cycle timestamps (used by MemoryStore, run tables, replay)
+        """Run one TGRM cycle for a given research goal."""
         cycle_started_ts = time.time()
         cycle_started_iso = datetime.utcfromtimestamp(cycle_started_ts).isoformat() + "Z"
 
@@ -981,12 +924,8 @@ class TGRMLoop:
         if stage_tag not in {"idea", "verify"}:
             stage_tag = "idea"
 
-        # Interrupt flags for time limit or other future reasons
         interrupted: bool = False
         stop_reason: Optional[str] = None
-
-        def _deadline_hit() -> bool:
-            return deadline_ts is not None and time.time() >= deadline_ts
 
         def _empty_stats() -> Dict[str, Any]:
             return {
@@ -1001,7 +940,6 @@ class TGRMLoop:
                 "data_loads": 0,
             }
 
-        # Per cycle tool usage tracker (for energy E and diagnostics)
         tool_usage: ToolUsage = self._usage_factory()
 
         # Long run context: fetch RYE stats for this goal if available
@@ -1009,34 +947,23 @@ class TGRMLoop:
         total_cycles_for_goal: int = 0
         try:
             if hasattr(self.memory_store, "get_rye_stats"):
-                avg, _min_rye, _max_rye, count = self.memory_store.get_rye_stats(
-                    goal=goal
-                )  # type: ignore[attr-defined]
+                avg, _min_rye, _max_rye, count = self.memory_store.get_rye_stats(goal=goal)  # type: ignore[attr-defined]
                 avg_rye = avg
                 total_cycles_for_goal = count
         except Exception:
             avg_rye = None
             total_cycles_for_goal = 0
 
-        # Per goal cycle counter: how many cycles for this goal including this one
-        try:
-            cycle_number_for_goal = (total_cycles_for_goal or 0) + 1
-        except Exception:
-            cycle_number_for_goal = 1
+        cycle_number_for_goal = (total_cycles_for_goal or 0) + 1
 
-        # Maintenance mode:
-        # If there are many cycles on this goal and RYE is high, avoid heavy
-        # repeated external calls and focus on light refinement.
-        maintenance_mode = False
-        if (
+        maintenance_mode = bool(
             self.tgrm_level >= 1
             and avg_rye is not None
             and total_cycles_for_goal >= 20
             and avg_rye >= 0.8
-        ):
-            maintenance_mode = True
+        )
 
-        # Dynamic search energy for this cycle, used by web search helpers.
+        # Dynamic search energy for this cycle
         self.search_energy = self._compute_search_energy(
             avg_rye=avg_rye,
             total_cycles_for_goal=total_cycles_for_goal,
@@ -1045,7 +972,6 @@ class TGRMLoop:
             domain=domain_tag,
         )
 
-        # Strict pipeline phase log for Ultra mode and debugging
         phases: Dict[str, Any] = {
             "stage": stage_tag,
             "hallmark": hallmark,
@@ -1063,9 +989,8 @@ class TGRMLoop:
         status_report = self._test(goal, prior_notes)
         phases["test_before"] = {
             "known_notes_count": status_report.get("known_notes_count", 0),
-            "approx_citation_markers": status_report.get(
-                "approx_citation_markers"
-            ),
+            "approx_citation_markers": status_report.get("approx_citation_markers"),
+            "marker_counts": status_report.get("marker_counts", {}),
         }
 
         # DETECT phase
@@ -1075,10 +1000,28 @@ class TGRMLoop:
             "issue_descriptions": issue_descriptions,
         }
 
-        # Discovery friendly issue structure before repair
+        # Issue counts (use marker_counts for question/todo/contradiction)
         issue_code_counts_before: Dict[str, int] = {}
+        marker_counts_before = status_report.get("marker_counts", {}) or {}
+        if isinstance(marker_counts_before, dict):
+            qn = int(marker_counts_before.get("question_lines", 0) or 0)
+            td = int(marker_counts_before.get("todo_lines", 0) or 0)
+            cd = int(marker_counts_before.get("contradiction_lines", 0) or 0)
+        else:
+            qn, td, cd = 0, 0, 0
+
+        if "question_mark" in issues:
+            issue_code_counts_before["question_mark"] = qn if qn > 0 else 1
+        if "todo_item" in issues:
+            issue_code_counts_before["todo_item"] = td if td > 0 else 1
+        if "contradiction" in issues:
+            issue_code_counts_before["contradiction"] = cd if cd > 0 else 1
+
+        # Count remaining issue types as presence=1
         for code in issues:
-            issue_code_counts_before[code] = issue_code_counts_before.get(code, 0) + 1
+            if code in {"question_mark", "todo_item", "contradiction"}:
+                continue
+            issue_code_counts_before[code] = max(1, int(issue_code_counts_before.get(code, 0)))
 
         domain_issue_codes = [
             "missing_biomarkers",
@@ -1092,9 +1035,8 @@ class TGRMLoop:
         has_todos_before = "todo_item" in issues
         has_contradictions_before = "contradiction" in issues
 
-        # If the wall-clock deadline is already hit, skip heavy REPAIR/VERIFY
-        # and finish the cycle with zero delta_R and minimal energy.
-        if _deadline_hit():
+        # If deadline already hit, skip heavy work
+        if self._deadline_hit(deadline_ts):
             interrupted = True
             stop_reason = "time_limit"
 
@@ -1103,40 +1045,45 @@ class TGRMLoop:
             citations: List[Dict[str, Any]] = []
             stats: Dict[str, Any] = _empty_stats()
 
-            # Re-test quickly to get an "after" view; we did no repairs,
-            # so this should match the "before" state in most cases.
             new_notes = self.memory_store.get_notes(goal)
             new_status_report = self._test(goal, new_notes)
-            issues_after, _ = self._detect(new_status_report, domain=domain_tag)
+            issues_after, issue_descriptions_after = self._detect(new_status_report, domain=domain_tag)
 
             phases["test_after"] = {
-                "known_notes_count": new_status_report.get(
-                    "known_notes_count", len(new_notes)
-                ),
+                "known_notes_count": new_status_report.get("known_notes_count", len(new_notes)),
+                "marker_counts": new_status_report.get("marker_counts", {}),
             }
-            phases["detect_after"] = {
-                "issue_codes": issues_after,
-            }
+            phases["detect_after"] = {"issue_codes": issues_after}
 
             issue_code_counts_after: Dict[str, int] = {}
-            for code in issues_after:
-                issue_code_counts_after[code] = issue_code_counts_after.get(code, 0) + 1
+            marker_counts_after = new_status_report.get("marker_counts", {}) or {}
+            if isinstance(marker_counts_after, dict):
+                qn_a = int(marker_counts_after.get("question_lines", 0) or 0)
+                td_a = int(marker_counts_after.get("todo_lines", 0) or 0)
+                cd_a = int(marker_counts_after.get("contradiction_lines", 0) or 0)
+            else:
+                qn_a, td_a, cd_a = 0, 0, 0
 
-            domain_issue_flags_after = {
-                code: (code in issues_after) for code in domain_issue_codes
-            }
+            if "question_mark" in issues_after:
+                issue_code_counts_after["question_mark"] = qn_a if qn_a > 0 else 1
+            if "todo_item" in issues_after:
+                issue_code_counts_after["todo_item"] = td_a if td_a > 0 else 1
+            if "contradiction" in issues_after:
+                issue_code_counts_after["contradiction"] = cd_a if cd_a > 0 else 1
+
+            for code in issues_after:
+                if code in {"question_mark", "todo_item", "contradiction"}:
+                    continue
+                issue_code_counts_after[code] = max(1, int(issue_code_counts_after.get(code, 0)))
+
+            domain_issue_flags_after = {code: (code in issues_after) for code in domain_issue_codes}
             has_questions_after = "question_mark" in issues_after
             has_todos_after = "todo_item" in issues_after
             has_contradictions_after = "contradiction" in issues_after
 
         else:
-            # REPAIR phase (tool aware)
-            (
-                repair_actions,
-                notes_added,
-                citations,
-                stats,
-            ) = self._repair(
+            # REPAIR phase
+            repair_actions, notes_added, citations, stats = self._repair(
                 goal=goal,
                 issues=issues,
                 descriptions=issue_descriptions,
@@ -1146,43 +1093,61 @@ class TGRMLoop:
                 maintenance_mode=maintenance_mode,
                 domain=domain_tag,
                 tool_usage=tool_usage,
+                deadline_ts=deadline_ts,
             )
+
+            if stats.get("interrupted"):
+                interrupted = True
+                stop_reason = stats.get("stop_reason") or "time_limit"
+
             phases["repair"] = {
                 "handled_issue_codes": [a.get("issue") for a in repair_actions],
                 "notes_added_count": len(notes_added),
                 "citations_added_count": len(citations),
+                "interrupted": interrupted,
+                "stop_reason": stop_reason,
             }
 
             # VERIFY phase
             new_notes = self.memory_store.get_notes(goal)
             new_status_report = self._test(goal, new_notes)
-            issues_after, _ = self._detect(new_status_report, domain=domain_tag)
+            issues_after, issue_descriptions_after = self._detect(new_status_report, domain=domain_tag)
 
             phases["test_after"] = {
-                "known_notes_count": new_status_report.get(
-                    "known_notes_count", len(new_notes)
-                ),
+                "known_notes_count": new_status_report.get("known_notes_count", len(new_notes)),
+                "marker_counts": new_status_report.get("marker_counts", {}),
             }
-            phases["detect_after"] = {
-                "issue_codes": issues_after,
-            }
+            phases["detect_after"] = {"issue_codes": issues_after}
 
-            issue_code_counts_after: Dict[str, int] = {}
+            issue_code_counts_after = {}
+            marker_counts_after = new_status_report.get("marker_counts", {}) or {}
+            if isinstance(marker_counts_after, dict):
+                qn_a = int(marker_counts_after.get("question_lines", 0) or 0)
+                td_a = int(marker_counts_after.get("todo_lines", 0) or 0)
+                cd_a = int(marker_counts_after.get("contradiction_lines", 0) or 0)
+            else:
+                qn_a, td_a, cd_a = 0, 0, 0
+
+            if "question_mark" in issues_after:
+                issue_code_counts_after["question_mark"] = qn_a if qn_a > 0 else 1
+            if "todo_item" in issues_after:
+                issue_code_counts_after["todo_item"] = td_a if td_a > 0 else 1
+            if "contradiction" in issues_after:
+                issue_code_counts_after["contradiction"] = cd_a if cd_a > 0 else 1
+
             for code in issues_after:
-                issue_code_counts_after[code] = issue_code_counts_after.get(code, 0) + 1
+                if code in {"question_mark", "todo_item", "contradiction"}:
+                    continue
+                issue_code_counts_after[code] = max(1, int(issue_code_counts_after.get(code, 0)))
 
-            domain_issue_flags_after = {
-                code: (code in issues_after) for code in domain_issue_codes
-            }
+            domain_issue_flags_after = {code: (code in issues_after) for code in domain_issue_codes}
             has_questions_after = "question_mark" in issues_after
             has_todos_after = "todo_item" in issues_after
             has_contradictions_after = "contradiction" in issues_after
 
-        # Hypothesis generation (now structured for discovery and learning)
+        # Hypothesis generation
         max_h = 3 if self.tgrm_level == 1 else 5
-        raw_hypotheses = generate_hypotheses(
-            goal, new_notes, citations, max_hypotheses=max_h
-        )
+        raw_hypotheses = generate_hypotheses(goal, new_notes, citations, max_hypotheses=max_h)
 
         hypotheses: List[Dict[str, Any]] = []
         candidate_hypotheses: List[Dict[str, Any]] = []
@@ -1225,13 +1190,11 @@ class TGRMLoop:
                 }
             )
 
-            # Store minimal hypothesis text in MemoryStore for long run learning
             try:
                 self.memory_store.add_hypothesis(goal, text, score=conf)
             except Exception:
                 pass
 
-        # Candidate interventions
         candidate_interventions = self._extract_candidate_interventions(
             goal=goal,
             domain=domain_tag,
@@ -1240,24 +1203,25 @@ class TGRMLoop:
         )
 
         # Metrics (Reparodynamics: delta_R / E)
-        # We break delta_R into components for richer analysis.
+        issues_before_count = sum(int(v) for v in issue_code_counts_before.values()) if issue_code_counts_before else 0
+        issues_after_count = sum(int(v) for v in issue_code_counts_after.values()) if issue_code_counts_after else 0
+
         delta_r_components = {
-            "issue_reduction": max(0, len(issues) - len(issues_after)),
+            "issue_reduction": max(0, issues_before_count - issues_after_count),
             "repairs_applied": len(repair_actions),
             "hypotheses": len(hypotheses),
             "sources_used": stats.get("sources_used", 0),
             "contradictions_resolved": stats.get("contradictions_resolved", 0),
         }
         delta_r = compute_delta_r(
-            issues_before=len(issues),
-            issues_after=len(issues_after),
+            issues_before=issues_before_count,
+            issues_after=issues_after_count,
             repairs_applied=len(repair_actions),
             contradictions_resolved=stats.get("contradictions_resolved", 0),
             hypotheses_generated=len(hypotheses),
             sources_used=stats.get("sources_used", 0),
         )
 
-        # Include tokens from this cycle in energy accounting
         energy_e = compute_energy(
             actions_taken=repair_actions,
             web_calls=stats.get("web_calls", 0),
@@ -1270,7 +1234,6 @@ class TGRMLoop:
         )
         rye_value = compute_rye(delta_r, energy_e)
 
-        # RYE gradient and equilibrium status
         equilibrium_info = self._compute_rye_gradient_and_equilibrium(
             goal=goal,
             current_rye=rye_value,
@@ -1279,7 +1242,6 @@ class TGRMLoop:
             domain=domain_tag,
         )
 
-        # Breakthrough score
         breakthrough_info = self._compute_breakthrough_score(
             goal=goal,
             domain=domain_tag,
@@ -1293,7 +1255,6 @@ class TGRMLoop:
             citations=citations,
         )
 
-        # Optional stability kernel snapshot
         stability_snapshot: Optional[Dict[str, Any]] = None
         if self.stability_kernel is not None:
             try:
@@ -1318,7 +1279,6 @@ class TGRMLoop:
             except Exception:
                 stability_snapshot = None
 
-        # Optional discovery manager snapshot
         discovery_snapshot: Optional[Dict[str, Any]] = None
         if self.discovery_manager is not None:
             try:
@@ -1341,7 +1301,6 @@ class TGRMLoop:
             except Exception:
                 discovery_snapshot = None
 
-        # Short structured view - tuned for Ultra mode and UI
         short_view = {
             "cycle": cycle_index,
             "cycle_number_for_goal": cycle_number_for_goal,
@@ -1365,9 +1324,7 @@ class TGRMLoop:
             "equilibrium_label": equilibrium_info.get("equilibrium_label"),
             "breakthrough_score": breakthrough_info.get("breakthrough_score"),
             "stability_index": (stability_snapshot or {}).get("stability_index"),
-            "recovery_momentum": (stability_snapshot or {}).get(
-                "recovery_momentum"
-            ),
+            "recovery_momentum": (stability_snapshot or {}).get("recovery_momentum"),
             "discovery_tier": (discovery_snapshot or {}).get("tier"),
             "interrupted": interrupted,
             "stop_reason": stop_reason,
@@ -1380,7 +1337,6 @@ class TGRMLoop:
             "ts_epoch": cycle_started_ts,
         }
 
-        # Meta controller friendly signals
         meta_signals = {
             "cycle": cycle_index,
             "cycle_number_for_goal": cycle_number_for_goal,
@@ -1413,7 +1369,6 @@ class TGRMLoop:
             "ts_epoch": cycle_started_ts,
         }
 
-        # Machine facing log
         cycle_summary: Dict[str, Any] = {
             "cycle": cycle_index,
             "cycle_number_for_goal": cycle_number_for_goal,
@@ -1436,10 +1391,15 @@ class TGRMLoop:
             "experiment_mode": experiment_mode,
             # Issues before and after
             "issues_before": issue_descriptions,
-            "issues_after": issues_after,
+            "issues_after": issues_after,  # kept for backwards compatibility (codes)
+            "issue_descriptions_before": issue_descriptions,
+            "issue_descriptions_after": issue_descriptions_after,
             "issue_codes_before": issues,
+            "issue_codes_after": issues_after,
             "issue_code_counts_before": issue_code_counts_before,
             "issue_code_counts_after": issue_code_counts_after,
+            "implied_issue_count_before": issues_before_count,
+            "implied_issue_count_after": issues_after_count,
             "domain_issue_flags_before": domain_issue_flags_before,
             "domain_issue_flags_after": domain_issue_flags_after,
             "has_open_questions_before": has_questions_before,
@@ -1460,7 +1420,7 @@ class TGRMLoop:
             "delta_R": delta_r,
             "delta_R_components": delta_r_components,
             "energy_E": energy_e,
-            "Energy": energy_e,  # mirror CoreAgent expectations
+            "Energy": energy_e,
             "RYE": rye_value,
             "search_energy": self.search_energy,
             # RYE gradient and equilibrium and breakthrough
@@ -1495,7 +1455,6 @@ class TGRMLoop:
             "stop_reason": stop_reason,
         }
 
-        # Replay buffer logging and metadata tagging for longevity aware loops
         replay_item_ids = self._log_replay_candidate(cycle_summary, replay_buffer)
         self._tag_cycle_metadata(
             cycle_summary,
@@ -1506,10 +1465,8 @@ class TGRMLoop:
             replay_item_ids=replay_item_ids,
         )
 
-        # Log cycle into memory
         self.memory_store.log_cycle(cycle_summary)
 
-        # Human readable summary
         human_summary = {
             "cycle": cycle_index,
             "cycle_number_for_goal": cycle_number_for_goal,
@@ -1526,6 +1483,7 @@ class TGRMLoop:
             "goal": goal,
             "issues_before": issue_descriptions,
             "issues_after": issues_after,
+            "issue_descriptions_after": issue_descriptions_after,
             "issue_codes_before": issues,
             "issue_codes_after": issues_after,
             "issue_code_counts_before": issue_code_counts_before,
@@ -1533,7 +1491,7 @@ class TGRMLoop:
             "repairs": [a.get("description", "") for a in repair_actions],
             "delta_R": delta_r,
             "energy_E": energy_e,
-            "Energy": energy_e,  # mirror CoreAgent discovery expectations
+            "Energy": energy_e,
             "RYE": rye_value,
             "search_energy": self.search_energy,
             "delta_R_components": delta_r_components,
@@ -1563,8 +1521,6 @@ class TGRMLoop:
             "rye_mode": rye_mode,
         }
 
-        # Expose stats and citations at the top level so CoreAgent and the UI
-        # can see them without digging into the machine log.
         return {
             "summary": human_summary,
             "log": cycle_summary,
@@ -1576,29 +1532,23 @@ class TGRMLoop:
     # TGRM phases
     # ------------------------------------------------------------------
     def _test(self, goal: str, notes: List[Dict[str, Any]]) -> Dict[str, Any]:
-        """Evaluate the current state of research for this goal.
-
-        Level 1:
-            - Count notes only.
-        Level 2:
-            - Also track approximate citation density.
-        Level 3:
-            - Placeholder for per domain diagnostic stats.
-        """
+        """Evaluate the current state of research for this goal."""
         known_notes_count = len(notes)
 
-        # Basic diagnostics: citation markers inside notes
         citation_markers = 0
         if self.tgrm_level >= 2:
             for note in notes:
-                content = note.get("content", "")
+                content = str(note.get("content", "") or "")
                 if "[" in content and "]" in content:
                     citation_markers += 1
+
+        marker_counts = self._scan_notes_for_basic_markers(notes)
 
         report: Dict[str, Any] = {
             "goal": goal,
             "known_notes_count": known_notes_count,
             "notes": notes,
+            "marker_counts": marker_counts,
         }
         if self.tgrm_level >= 2:
             report["approx_citation_markers"] = citation_markers
@@ -1610,59 +1560,45 @@ class TGRMLoop:
         status_report: Dict[str, Any],
         domain: Optional[str] = None,
     ) -> Tuple[List[str], List[str]]:
-        """Identify issues or gaps to be repaired.
-
-        Base (Level 1) behavior:
-            - no_notes
-            - question_mark
-            - todo_item
-            - contradiction
-
-        Level 2:
-            - reacts to low citation density.
-
-        Level 3:
-            - adds domain aware issues for longevity and math.
-        """
+        """Identify issues or gaps to be repaired."""
         issues: List[str] = []
         descriptions: List[str] = []
         notes = status_report.get("notes", [])
 
-        # Core generic issues
+        marker_counts = status_report.get("marker_counts") or {}
+        if not isinstance(marker_counts, dict):
+            marker_counts = {}
+
+        question_lines = int(marker_counts.get("question_lines", 0) or 0)
+        todo_lines = int(marker_counts.get("todo_lines", 0) or 0)
+        contradiction_lines = int(marker_counts.get("contradiction_lines", 0) or 0)
+
         if not notes:
             issues.append("no_notes")
             descriptions.append("No prior notes found; initial research required.")
         else:
-            for note in notes:
-                content: str = note.get("content", "")
-                content_lower = content.lower()
-                if "?" in content:
-                    issues.append("question_mark")
-                    descriptions.append("Unanswered question detected in notes.")
-                if "TODO" in content or "todo" in content:
-                    issues.append("todo_item")
-                    descriptions.append(
-                        "TODO item detected in notes; missing information."
-                    )
-                if "CONTRADICTION" in content or "contradiction" in content_lower:
-                    issues.append("contradiction")
-                    descriptions.append(
-                        "Marked contradiction in notes; needs resolution."
-                    )
+            if question_lines > 0:
+                issues.append("question_mark")
+                descriptions.append(f"{question_lines} unanswered question line(s) detected in notes.")
+            if todo_lines > 0:
+                issues.append("todo_item")
+                descriptions.append(f"{todo_lines} TODO line(s) detected in notes; missing information.")
+            if contradiction_lines > 0:
+                issues.append("contradiction")
+                descriptions.append(f"{contradiction_lines} contradiction marker line(s) detected; needs resolution.")
 
-        # Level 2: citation level diagnostics
         if self.tgrm_level >= 2 and notes:
-            citation_markers = status_report.get("approx_citation_markers", 0)
-            if citation_markers < len(notes):
+            citation_markers = int(status_report.get("approx_citation_markers", 0) or 0)
+            ratio = citation_markers / max(1, len(notes))
+            if ratio < self.under_cited_ratio:
                 issues.append("under_cited")
                 descriptions.append(
-                    "Evidence base may be thin: fewer citation markers than notes; "
+                    f"Evidence base may be thin: citation marker ratio {ratio:.2f} below {self.under_cited_ratio:.2f}; "
                     "prioritize finding stronger primary sources."
                 )
 
-        # Level 3: domain aware issues
         if self.tgrm_level >= 3 and notes and domain:
-            dom = domain.lower()
+            dom = str(domain).lower()
             if dom == "longevity":
                 self._detect_longevity_issues(notes, issues, descriptions)
             elif dom == "math":
@@ -1677,7 +1613,7 @@ class TGRMLoop:
         descriptions: List[str],
     ) -> None:
         """Add extra issue types for longevity or anti aging research."""
-        text = "\n".join(n.get("content", "") for n in notes)
+        text = "\n".join(str(n.get("content", "") or "") for n in notes)
 
         if all(
             kw.lower() not in text.lower()
@@ -1691,28 +1627,29 @@ class TGRMLoop:
                 "triglyceride",
             ]
         ):
-            issues.append("missing_biomarkers")
-            descriptions.append(
-                "Longevity notes lack explicit biomarker discussion; "
-                "identify concrete measurable markers and how interventions affect them."
-            )
+            if "missing_biomarkers" not in issues:
+                issues.append("missing_biomarkers")
+                descriptions.append(
+                    "Longevity notes lack explicit biomarker discussion; identify measurable markers and how interventions affect them."
+                )
 
         if all(
             kw.lower() not in text.lower()
             for kw in [
                 "mechanism",
                 "pathway",
-                "mTOR",
+                "mtor",
                 "autophagy",
                 "senescence",
-                "NAD+",
+                "nad+",
                 "hallmarks of aging",
             ]
         ):
-            issues.append("missing_mechanisms")
-            descriptions.append(
-                "Mechanisms of action are underspecified; map interventions to pathways and aging hallmarks."
-            )
+            if "missing_mechanisms" not in issues:
+                issues.append("missing_mechanisms")
+                descriptions.append(
+                    "Mechanisms of action are underspecified; map interventions to pathways and aging hallmarks."
+                )
 
     def _detect_math_issues(
         self,
@@ -1721,15 +1658,16 @@ class TGRMLoop:
         descriptions: List[str],
     ) -> None:
         """Add extra issue types for math or theory research."""
-        text = "\n".join(n.get("content", "") for n in notes)
+        text = "\n".join(str(n.get("content", "") or "") for n in notes)
 
         has_definition = "definition" in text.lower()
         has_theorem = "theorem" in text.lower() or "lemma" in text.lower()
         if not (has_definition and has_theorem):
-            issues.append("missing_formalism")
-            descriptions.append(
-                "Mathematical formalism is incomplete; add explicit definitions and at least one theorem or lemma."
-            )
+            if "missing_formalism" not in issues:
+                issues.append("missing_formalism")
+                descriptions.append(
+                    "Mathematical formalism is incomplete; add explicit definitions and at least one theorem or lemma."
+                )
 
         if all(
             kw.lower() not in text.lower()
@@ -1742,11 +1680,11 @@ class TGRMLoop:
                 "ergodic",
             ]
         ):
-            issues.append("missing_connections")
-            descriptions.append(
-                "Connections to existing mathematical frameworks are thin; "
-                "relate Reparodynamics to known stability, control, or information theories."
-            )
+            if "missing_connections" not in issues:
+                issues.append("missing_connections")
+                descriptions.append(
+                    "Connections to existing frameworks are thin; relate Reparodynamics to known stability, control, or information theories."
+                )
 
     def _repair(
         self,
@@ -1759,6 +1697,7 @@ class TGRMLoop:
         maintenance_mode: bool = False,
         domain: Optional[str] = None,
         tool_usage: Optional[ToolUsage] = None,
+        deadline_ts: Optional[float] = None,
     ) -> Tuple[
         List[Dict[str, str]],
         List[str],
@@ -1770,7 +1709,6 @@ class TGRMLoop:
         notes_added: List[str] = []
         citations: List[Dict[str, Any]] = []
 
-        # Stats for RYE energy and improvement
         stats: Dict[str, Any] = {
             "web_calls": 0,
             "pubmed_calls": 0,
@@ -1778,23 +1716,21 @@ class TGRMLoop:
             "pdf_ingestions": 0,
             "contradictions_resolved": 0,
             "sources_used": 0,
-            # extra tool related stats
             "browser_actions": 0,
             "code_execs": 0,
             "data_loads": 0,
+            "interrupted": False,
+            "stop_reason": None,
         }
 
-        # Base cap per cycle
         if maintenance_mode:
             base_max_issues = 2
         else:
             base_max_issues = 5
 
-        # Ultra mode pushes a bit harder before maintenance
         if self.ultra_speed and not maintenance_mode:
             base_max_issues += 2
 
-        # Role based adjustment
         role_lower = (role or "agent").lower()
         if role_lower in {"researcher", "explorer"}:
             max_issues = base_max_issues + 2
@@ -1808,7 +1744,6 @@ class TGRMLoop:
         issues_to_handle = issues[:max_issues]
         descriptions_to_handle = descriptions[:max_issues]
 
-        # Helper to register citations into MemoryStore
         def _log_citations(cites: List[Dict[str, Any]]) -> None:
             for c in cites:
                 try:
@@ -1817,6 +1752,11 @@ class TGRMLoop:
                     pass
 
         for issue, desc in zip(issues_to_handle, descriptions_to_handle):
+            if self._deadline_hit(deadline_ts):
+                stats["interrupted"] = True
+                stats["stop_reason"] = "time_limit"
+                break
+
             if issue == "no_notes":
                 note_text, new_cites, issue_stats = self._initial_research(
                     goal=goal,
@@ -1826,7 +1766,9 @@ class TGRMLoop:
                     domain=domain,
                     maintenance_mode=maintenance_mode,
                     tool_usage=tool_usage,
+                    deadline_ts=deadline_ts,
                 )
+                note_text = self._cap_note_text(note_text)
                 try:
                     self.memory_store.add_note(goal, note_text, role=role)
                 except Exception:
@@ -1860,8 +1802,10 @@ class TGRMLoop:
                     maintenance_mode=maintenance_mode,
                     domain=domain,
                     tool_usage=tool_usage,
+                    deadline_ts=deadline_ts,
                 )
 
+                note_text = self._cap_note_text(note_text)
                 try:
                     self.memory_store.add_note(goal, note_text, role=role)
                 except Exception:
@@ -1885,25 +1829,46 @@ class TGRMLoop:
                 if tool_usage is not None:
                     tool_usage.approx_tokens += self._estimate_tokens(note_text)
 
+                if issue_stats.get("interrupted"):
+                    stats["interrupted"] = True
+                    stats["stop_reason"] = issue_stats.get("stop_reason") or "time_limit"
+                    break
+
             elif issue == "contradiction":
-                note = (
-                    f"[{role}] Reminder: contradiction flagged in notes. "
-                    "Future cycles should prioritise resolving this with additional sources."
+                note_text, new_cites, issue_stats = self._resolve_contradictions(
+                    goal=goal,
+                    role=role,
+                    source_controls=source_controls,
+                    domain=domain,
+                    maintenance_mode=maintenance_mode,
+                    tool_usage=tool_usage,
+                    deadline_ts=deadline_ts,
                 )
+                note_text = self._cap_note_text(note_text)
                 try:
-                    self.memory_store.add_note(goal, note, role=role)
+                    self.memory_store.add_note(goal, note_text, role=role)
                 except Exception:
                     pass
                 repair_actions.append(
                     {
                         "issue": issue,
-                        "description": f"[{role}] Acknowledged contradiction; queued for deeper resolution.",
+                        "description": f"[{role}] Attempted contradiction resolution with additional sources.",
                     }
                 )
-                notes_added.append(note)
-                stats["contradictions_resolved"] += 0
+                notes_added.append(note_text)
+                citations.extend(new_cites)
+                _log_citations(new_cites)
+
+                for k, v in issue_stats.items():
+                    stats[k] = stats.get(k, 0) + v
+
                 if tool_usage is not None:
-                    tool_usage.approx_tokens += self._estimate_tokens(note)
+                    tool_usage.approx_tokens += self._estimate_tokens(note_text)
+
+                if issue_stats.get("interrupted"):
+                    stats["interrupted"] = True
+                    stats["stop_reason"] = issue_stats.get("stop_reason") or "time_limit"
+                    break
 
             elif issue == "under_cited":
                 note_text, new_cites, issue_stats = self._strengthen_citations(
@@ -1912,7 +1877,9 @@ class TGRMLoop:
                     source_controls=source_controls,
                     domain=domain,
                     tool_usage=tool_usage,
+                    deadline_ts=deadline_ts,
                 )
+                note_text = self._cap_note_text(note_text)
                 try:
                     self.memory_store.add_note(goal, note_text, role=role)
                 except Exception:
@@ -1931,7 +1898,12 @@ class TGRMLoop:
                 if tool_usage is not None:
                     tool_usage.approx_tokens += self._estimate_tokens(note_text)
 
-            elif issue in {"missing_biomarkers", "missing_mechanisms"}:
+                if issue_stats.get("interrupted"):
+                    stats["interrupted"] = True
+                    stats["stop_reason"] = issue_stats.get("stop_reason") or "time_limit"
+                    break
+
+            elif issue in {"missing_biomarkers", "missing_mechanisms", "missing_formalism", "missing_connections"}:
                 note_text, new_cites, issue_stats = self._domain_gap_research(
                     goal=goal,
                     role=role,
@@ -1940,7 +1912,9 @@ class TGRMLoop:
                     source_controls=source_controls,
                     domain=domain,
                     tool_usage=tool_usage,
+                    deadline_ts=deadline_ts,
                 )
+                note_text = self._cap_note_text(note_text)
                 try:
                     self.memory_store.add_note(goal, note_text, role=role)
                 except Exception:
@@ -1948,7 +1922,7 @@ class TGRMLoop:
                 repair_actions.append(
                     {
                         "issue": issue,
-                        "description": f"[{role}] Filled longevity gap: {desc}",
+                        "description": f"[{role}] Filled domain gap: {desc}",
                     }
                 )
                 notes_added.append(note_text)
@@ -1959,39 +1933,17 @@ class TGRMLoop:
                 if tool_usage is not None:
                     tool_usage.approx_tokens += self._estimate_tokens(note_text)
 
-            elif issue in {"missing_formalism", "missing_connections"}:
-                note_text, new_cites, issue_stats = self._domain_gap_research(
-                    goal=goal,
-                    role=role,
-                    issue=issue,
-                    description=desc,
-                    source_controls=source_controls,
-                    domain=domain,
-                    tool_usage=tool_usage,
-                )
-                try:
-                    self.memory_store.add_note(goal, note_text, role=role)
-                except Exception:
-                    pass
-                repair_actions.append(
-                    {
-                        "issue": issue,
-                        "description": f"[{role}] Filled math gap: {desc}",
-                    }
-                )
-                notes_added.append(note_text)
-                citations.extend(new_cites)
-                _log_citations(new_cites)
-                for k, v in issue_stats.items():
-                    stats[k] = stats.get(k, 0) + v
-                if tool_usage is not None:
-                    tool_usage.approx_tokens += self._estimate_tokens(note_text)
+                if issue_stats.get("interrupted"):
+                    stats["interrupted"] = True
+                    stats["stop_reason"] = issue_stats.get("stop_reason") or "time_limit"
+                    break
 
             else:
                 note = (
                     f"[{role}] Encountered issue '{issue}' with description: {desc}. "
                     "This issue type is not yet fully handled; marking as TODO for future cycles."
                 )
+                note = self._cap_note_text(note)
                 try:
                     self.memory_store.add_note(goal, note, role=role)
                 except Exception:
@@ -2006,9 +1958,10 @@ class TGRMLoop:
                 if tool_usage is not None:
                     tool_usage.approx_tokens += self._estimate_tokens(note)
 
-        # Count unique sources used for this cycle
         unique_sources = set()
         for c in citations:
+            if not isinstance(c, dict):
+                continue
             key = (c.get("source"), c.get("url"))
             unique_sources.add(key)
         stats["sources_used"] = len(unique_sources)
@@ -2030,19 +1983,13 @@ class TGRMLoop:
             "biomarkers": False,
         }
         if not source_controls:
-            return defaults
+            return explained_defaults := defaults
         merged = defaults.copy()
         merged.update({k: bool(v) for k, v in source_controls.items()})
         return merged
 
     def _should_use_web(self, purpose: str, maintenance_mode: bool) -> bool:
-        """Decide whether to perform a web search for this purpose.
-
-        purpose in {"initial", "targeted", "strengthen", "gap_repair"}.
-        This is a cheap gate driven by the current search_energy so that
-        heavily saturated phases do not waste Tavily credits.
-        """
-        # Hard kill switch via env if needed
+        """Decide whether to perform a web search for this purpose."""
         disable_env = os.getenv("DISABLE_WEB_SEARCH", "").strip().lower()
         if disable_env in {"1", "true", "yes", "on"}:
             return False
@@ -2052,16 +1999,10 @@ class TGRMLoop:
         except Exception:
             energy_val = 1.0
 
-        # If search energy is extremely low, skip web entirely.
         if energy_val <= 0.2:
             return False
 
-        # In maintenance mode, aggressively trim secondary web usage.
-        if maintenance_mode and energy_val < 0.6 and purpose in {
-            "targeted",
-            "strengthen",
-            "gap_repair",
-        }:
+        if maintenance_mode and energy_val < 0.6 and purpose in {"targeted", "strengthen", "gap_repair"}:
             return False
 
         return True
@@ -2074,18 +2015,10 @@ class TGRMLoop:
         purpose: str,
         search_energy: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Hybrid mode selection of web search level and size.
-
-        purpose in {"initial", "targeted", "strengthen", "gap_repair"}.
-
-        Tavily only supports topics: "general", "news", or "finance".
-        This helper always clamps to that set and then applies a light
-        scaling with search_energy to modulate result counts.
-        """
+        """Hybrid mode selection of web search level and size."""
         role_lower = (role or "agent").lower()
         dom = (domain or "general").lower()
 
-        # Map domain to one of Tavily's allowed topics
         if dom in {"macro", "markets", "trading", "finance", "economics"}:
             topic = "finance"
         elif dom in {"policy", "geopolitics", "news", "world"}:
@@ -2100,18 +2033,10 @@ class TGRMLoop:
             level = base_level - 1
 
         if purpose in {"initial", "gap_repair", "strengthen"}:
-            if (
-                not maintenance_mode
-                and base_level == 3
-                and role_lower in {"researcher", "explorer"}
-            ):
+            if (not maintenance_mode and base_level == 3 and role_lower in {"researcher", "explorer"}):
                 level = 3
         elif purpose == "targeted":
-            if (
-                not maintenance_mode
-                and base_level >= 2
-                and role_lower in {"researcher", "explorer"}
-            ):
+            if (not maintenance_mode and base_level >= 2 and role_lower in {"researcher", "explorer"}):
                 level = min(3, base_level)
             elif role_lower in {"critic", "planner", "synthesizer", "integrator"}:
                 level = max(1, min(base_level, 2))
@@ -2130,7 +2055,6 @@ class TGRMLoop:
         else:
             max_results = base_max
 
-        # Apply search_energy scaling as a gentle multiplier on max_results.
         if search_energy is None:
             try:
                 search_energy = float(getattr(self, "search_energy", 1.0))
@@ -2146,7 +2070,6 @@ class TGRMLoop:
             scaled = int(round(max_results * search_energy))
             if scaled < 1:
                 scaled = 1
-            # Allow at most a doubling to avoid runaway result counts.
             max_cap = max(max_results, base_max * 2)
             max_results = max(1, min(scaled, max_cap))
 
@@ -2161,6 +2084,7 @@ class TGRMLoop:
         domain: Optional[str],
         maintenance_mode: bool,
         tool_usage: Optional[ToolUsage] = None,
+        deadline_ts: Optional[float] = None,
     ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """Perform the initial multi source research when there are no notes."""
         citations: List[Dict[str, Any]] = []
@@ -2174,6 +2098,7 @@ class TGRMLoop:
             "browser_actions": 0,
             "code_execs": 0,
             "data_loads": 0,
+            "interrupted": 0,
         }
 
         note_lines: List[str] = []
@@ -2181,9 +2106,13 @@ class TGRMLoop:
         note_lines.append(goal)
         note_lines.append("")
 
+        if self._deadline_hit(deadline_ts):
+            stats["interrupted"] = 1
+            note_lines.append("Time limit reached before initial research; skipping external calls this cycle.")
+            return "\n".join(note_lines), citations, stats
+
         first_url: Optional[str] = None
 
-        # Web search
         if source_controls.get("web", True) and self._should_use_web("initial", maintenance_mode):
             web_params = self._select_web_search_params(
                 role=role,
@@ -2228,7 +2157,11 @@ class TGRMLoop:
                         first_url = url
                 note_lines.append("")
 
-        # Optional headless browser deep dive on the top URL (only if browser exists)
+        if self._deadline_hit(deadline_ts):
+            stats["interrupted"] = 1
+            note_lines.append("Time limit hit; skipping remaining initial research sources.")
+            return "\n".join(note_lines), citations, stats
+
         if first_url and hasattr(self.tools, "browser"):
             try:
                 browser = self.tools.browser  # type: ignore[attr-defined]
@@ -2240,9 +2173,7 @@ class TGRMLoop:
                         getattr(browser_result, "text_snippet", "") or ""
                     )
 
-                note_lines.append(
-                    f"Browser deep dive snippet from: {browser_result.url}"
-                )
+                note_lines.append(f"Browser deep dive snippet from: {browser_result.url}")
                 if getattr(browser_result, "error", None):
                     note_lines.append(f"(Browser error: {browser_result.error})")
                 else:
@@ -2250,11 +2181,9 @@ class TGRMLoop:
                     note_lines.append(snippet[:2000])
                 note_lines.append("")
             except Exception:
-                # Browser failures must not break the cycle
                 pass
 
-        # PubMed search
-        if source_controls.get("pubmed", False):
+        if source_controls.get("pubmed", False) and not self._deadline_hit(deadline_ts):
             try:
                 pubmed_results = self.pubmed_tool.search(goal, max_results=5)
             except Exception:
@@ -2281,8 +2210,7 @@ class TGRMLoop:
                     note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
                 note_lines.append("")
 
-        # Semantic Scholar search
-        if source_controls.get("semantic", False):
+        if source_controls.get("semantic", False) and not self._deadline_hit(deadline_ts):
             try:
                 sem_results = self.semantic_tool.search(goal, max_results=5)
             except Exception:
@@ -2309,8 +2237,7 @@ class TGRMLoop:
                     note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
                 note_lines.append("")
 
-        # Optional PDF ingestion if provided
-        if source_controls.get("pdf", False) and pdf_bytes:
+        if source_controls.get("pdf", False) and pdf_bytes and not self._deadline_hit(deadline_ts):
             try:
                 if hasattr(self.paper_tool, "ingest_bytes"):
                     text = self.paper_tool.ingest_bytes(pdf_bytes)  # type: ignore[attr-defined]
@@ -2328,21 +2255,25 @@ class TGRMLoop:
         return note_text, citations, stats
 
     def _extract_questions(self, goal: str, issue_type: str) -> List[str]:
-        """Extract concrete question or TODO lines from stored notes."""
+        """Extract concrete question or TODO lines from stored notes.
+
+        Uses a per-goal TTL cache so that repeated long runs do not keep
+        re-querying the same question string forever.
+        """
         notes = self.memory_store.get_notes(goal)
         candidates: List[str] = []
 
         for note in notes:
-            content = note.get("content", "")
+            content = str(note.get("content", "") or "")
             for line in content.splitlines():
                 line_strip = line.strip()
-                if issue_type == "question_mark" and "?" in line_strip:
-                    if len(line_strip) > 10:
+                if not line_strip:
+                    continue
+                if issue_type == "question_mark":
+                    if "?" in line_strip and len(line_strip) > 10:
                         candidates.append(line_strip)
-                elif issue_type == "todo_item" and (
-                    "TODO" in line_strip or "todo" in line_strip
-                ):
-                    if len(line_strip) > 10:
+                elif issue_type == "todo_item":
+                    if ("TODO" in line_strip or "todo" in line_strip) and len(line_strip) > 10:
                         candidates.append(line_strip)
 
         seen_local = set()
@@ -2352,11 +2283,17 @@ class TGRMLoop:
                 seen_local.add(q)
                 unique_questions.append(q)
 
+        now = time.time()
+        ttl = max(0.0, float(self._seen_question_ttl_s))
+        seen_for_goal = self._seen_questions.setdefault(goal, {})
+
         fresh_questions: List[str] = []
         for q in unique_questions:
-            if q not in self._seen_questions:
-                self._seen_questions.add(q)
-                fresh_questions.append(q)
+            last = seen_for_goal.get(q)
+            if last is not None and (now - float(last)) < ttl:
+                continue
+            fresh_questions.append(q)
+            seen_for_goal[q] = now
 
         max_q = 3 if self.tgrm_level == 1 else 5
         return fresh_questions[:max_q]
@@ -2372,6 +2309,7 @@ class TGRMLoop:
         maintenance_mode: bool = False,
         domain: Optional[str] = None,
         tool_usage: Optional[ToolUsage] = None,
+        deadline_ts: Optional[float] = None,
     ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """Perform focused multi source research on open questions or TODOs."""
         citations: List[Dict[str, Any]] = []
@@ -2385,28 +2323,25 @@ class TGRMLoop:
             "browser_actions": 0,
             "code_execs": 0,
             "data_loads": 0,
+            "interrupted": 0,
+            "stop_reason": 0,
         }
 
         if questions is None:
             questions = [f"{goal} - focus on: {issue_description}"]
         elif len(questions) == 0:
             note_lines: List[str] = []
-            note_lines.append(
-                f"[{role}] Maintenance pass on open items ({issue}) for goal:"
-            )
+            note_lines.append(f"[{role}] Maintenance pass on open items ({issue}) for goal:")
             note_lines.append(goal)
             note_lines.append("")
             note_lines.append(
                 "No new unresolved questions were found beyond what has already been researched. "
                 "This cycle performs a light consolidation of existing knowledge without new web or paper calls."
             )
-            note_text = "\n".join(note_lines)
-            return note_text, citations, stats
+            return "\n".join(note_lines), citations, stats
 
         note_lines: List[str] = []
-        note_lines.append(
-            f"[{role}] Targeted research on open items ({issue}) for goal:"
-        )
+        note_lines.append(f"[{role}] Targeted research on open items ({issue}) for goal:")
         note_lines.append(goal)
         note_lines.append("")
         note_lines.append("Questions or TODOs considered:")
@@ -2415,13 +2350,17 @@ class TGRMLoop:
         note_lines.append("")
 
         for q in questions:
+            if self._deadline_hit(deadline_ts):
+                stats["interrupted"] = 1
+                stats["stop_reason"] = 1
+                note_lines.append("Time limit hit during targeted research; stopping remaining searches.")
+                break
+
             note_lines.append("### Question focused search:")
             note_lines.append(q)
             note_lines.append("")
 
-            if source_controls.get("web", True) and self._should_use_web(
-                "targeted", maintenance_mode
-            ):
+            if source_controls.get("web", True) and self._should_use_web("targeted", maintenance_mode):
                 web_params = self._select_web_search_params(
                     role=role,
                     maintenance_mode=maintenance_mode,
@@ -2461,6 +2400,12 @@ class TGRMLoop:
                         note_lines.append(f"- {c.get('title', '')} ({c.get('url', '')})")
                     note_lines.append("")
 
+            if self._deadline_hit(deadline_ts):
+                stats["interrupted"] = 1
+                stats["stop_reason"] = 1
+                note_lines.append("Time limit hit; skipping PubMed/Semantic Scholar for remaining items.")
+                break
+
             if source_controls.get("pubmed", False):
                 try:
                     pubmed_results = self.pubmed_tool.search(q, max_results=5)
@@ -2480,9 +2425,7 @@ class TGRMLoop:
                     citations.extend(pubmed_cites)
 
                     if tool_usage is not None:
-                        titles = " ".join(
-                            r.get("title", "") or "" for r in pubmed_results
-                        )
+                        titles = " ".join(r.get("title", "") or "" for r in pubmed_results)
                         tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                     note_lines.append("PubMed sources:")
@@ -2509,9 +2452,7 @@ class TGRMLoop:
                     citations.extend(sem_cites)
 
                     if tool_usage is not None:
-                        titles = " ".join(
-                            r.get("title", "") or "" for r in sem_results
-                        )
+                        titles = " ".join(r.get("title", "") or "" for r in sem_results)
                         tool_usage.approx_tokens += self._estimate_tokens(titles)
 
                     note_lines.append("Semantic Scholar sources:")
@@ -2519,8 +2460,7 @@ class TGRMLoop:
                         note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
                     note_lines.append("")
 
-        note_text = "\n".join(note_lines)
-        return note_text, citations, stats
+        return "\n".join(note_lines), citations, stats
 
     def _strengthen_citations(
         self,
@@ -2529,6 +2469,7 @@ class TGRMLoop:
         source_controls: Dict[str, bool],
         domain: Optional[str],
         tool_usage: Optional[ToolUsage] = None,
+        deadline_ts: Optional[float] = None,
     ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """Specialized repair step for 'under_cited' issues."""
         citations: List[Dict[str, Any]] = []
@@ -2542,6 +2483,8 @@ class TGRMLoop:
             "browser_actions": 0,
             "code_execs": 0,
             "data_loads": 0,
+            "interrupted": 0,
+            "stop_reason": 0,
         }
 
         note_lines: List[str] = []
@@ -2549,13 +2492,17 @@ class TGRMLoop:
         note_lines.append(goal)
         note_lines.append("")
 
+        if self._deadline_hit(deadline_ts):
+            stats["interrupted"] = 1
+            stats["stop_reason"] = 1
+            note_lines.append("Time limit reached; skipping citation strengthening this cycle.")
+            return "\n".join(note_lines), citations, stats
+
         query = f"{goal} primary sources randomized trial benchmark formal paper"
         note_lines.append(f"Search query for stronger evidence: {query}")
         note_lines.append("")
 
-        if source_controls.get("web", True) and self._should_use_web(
-            "strengthen", maintenance_mode=False
-        ):
+        if source_controls.get("web", True) and self._should_use_web("strengthen", maintenance_mode=False):
             web_params = self._select_web_search_params(
                 role=role,
                 maintenance_mode=False,
@@ -2594,6 +2541,12 @@ class TGRMLoop:
                 for c in web_cites:
                     note_lines.append(f"- {c.get('title', '')} ({c.get('url', '')})")
                 note_lines.append("")
+
+        if self._deadline_hit(deadline_ts):
+            stats["interrupted"] = 1
+            stats["stop_reason"] = 1
+            note_lines.append("Time limit hit; skipping PubMed/Semantic Scholar strengthening.")
+            return "\n".join(note_lines), citations, stats
 
         if source_controls.get("pubmed", False):
             try:
@@ -2649,8 +2602,7 @@ class TGRMLoop:
                     note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
                 note_lines.append("")
 
-        note_text = "\n".join(note_lines)
-        return note_text, citations, stats
+        return "\n".join(note_lines), citations, stats
 
     def _domain_gap_research(
         self,
@@ -2661,6 +2613,7 @@ class TGRMLoop:
         source_controls: Dict[str, bool],
         domain: Optional[str],
         tool_usage: Optional[ToolUsage] = None,
+        deadline_ts: Optional[float] = None,
     ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
         """Generic helper to fill domain specific gaps."""
         dom = (domain or "general").lower()
@@ -2675,6 +2628,8 @@ class TGRMLoop:
             "browser_actions": 0,
             "code_execs": 0,
             "data_loads": 0,
+            "interrupted": 0,
+            "stop_reason": 0,
         }
 
         note_lines: List[str] = []
@@ -2685,28 +2640,24 @@ class TGRMLoop:
         note_lines.append(description)
         note_lines.append("")
 
+        if self._deadline_hit(deadline_ts):
+            stats["interrupted"] = 1
+            stats["stop_reason"] = 1
+            note_lines.append("Time limit reached; skipping gap repair searches this cycle.")
+            return "\n".join(note_lines), citations, stats
+
         if dom == "longevity":
             if issue == "missing_biomarkers":
-                query = (
-                    f"biomarkers panel clinical endpoints for {goal} healthspan longevity all-cause mortality"
-                )
+                query = f"biomarkers panel clinical endpoints for {goal} healthspan longevity all-cause mortality"
             elif issue == "missing_mechanisms":
-                query = (
-                    f"mechanisms pathways hallmarks of aging for interventions related to {goal}"
-                )
+                query = f"mechanisms pathways hallmarks of aging for interventions related to {goal}"
             else:
                 query = f"{goal} biomarkers mechanisms healthspan longevity"
         elif dom == "math":
             if issue == "missing_formalism":
-                query = (
-                    "formal definition theorem stability framework similar to "
-                    "reparodynamics and RYE"
-                )
+                query = "formal definition theorem stability framework similar to reparodynamics and RYE"
             elif issue == "missing_connections":
-                query = (
-                    "connections between stability theory Lyapunov control "
-                    "Markov processes and repair dynamics"
-                )
+                query = "connections between stability theory Lyapunov control Markov processes and repair dynamics"
             else:
                 query = f"{goal} mathematical stability formalization"
         else:
@@ -2715,9 +2666,7 @@ class TGRMLoop:
         note_lines.append(f"Focused query used for gap repair: {query}")
         note_lines.append("")
 
-        if source_controls.get("web", True) and self._should_use_web(
-            "gap_repair", maintenance_mode=False
-        ):
+        if source_controls.get("web", True) and self._should_use_web("gap_repair", maintenance_mode=False):
             web_params = self._select_web_search_params(
                 role=role,
                 maintenance_mode=False,
@@ -2756,6 +2705,12 @@ class TGRMLoop:
                 for c in web_cites:
                     note_lines.append(f"- {c.get('title', '')} ({c.get('url', '')})")
                 note_lines.append("")
+
+        if self._deadline_hit(deadline_ts):
+            stats["interrupted"] = 1
+            stats["stop_reason"] = 1
+            note_lines.append("Time limit hit; skipping PubMed/Semantic Scholar gap repair.")
+            return "\n".join(note_lines), citations, stats
 
         if dom == "longevity" and source_controls.get("pubmed", False):
             try:
@@ -2811,8 +2766,144 @@ class TGRMLoop:
                     note_lines.append(f"- {r.get('title', '')} ({r.get('url', '')})")
                 note_lines.append("")
 
-        note_text = "\n".join(note_lines)
-        return note_text, citations, stats
+        return "\n".join(note_lines), citations, stats
+
+    # ------------------------------------------------------------------
+    # Contradiction resolver
+    # ------------------------------------------------------------------
+    def _extract_contradiction_snippets(self, goal: str, limit: int = 3) -> List[str]:
+        notes = self.memory_store.get_notes(goal)
+        snippets: List[str] = []
+        seen = set()
+        for note in notes:
+            content = str(note.get("content", "") or "")
+            for line in content.splitlines():
+                s = line.strip()
+                if not s:
+                    continue
+                if "CONTRADICTION" in s or "contradiction" in s.lower():
+                    if s not in seen:
+                        seen.add(s)
+                        snippets.append(s)
+                if len(snippets) >= limit:
+                    return snippets
+        return snippets
+
+    def _resolve_contradictions(
+        self,
+        goal: str,
+        role: str,
+        source_controls: Dict[str, bool],
+        domain: Optional[str],
+        maintenance_mode: bool,
+        tool_usage: Optional[ToolUsage] = None,
+        deadline_ts: Optional[float] = None,
+    ) -> Tuple[str, List[Dict[str, Any]], Dict[str, int]]:
+        """Attempt to resolve contradictions using additional sources.
+
+        Minimal but real: extract contradiction snippets, run targeted web search,
+        and write a short "best current resolution" note with citations.
+        """
+        citations: List[Dict[str, Any]] = []
+        stats: Dict[str, int] = {
+            "web_calls": 0,
+            "pubmed_calls": 0,
+            "semantic_calls": 0,
+            "pdf_ingestions": 0,
+            "contradictions_resolved": 0,
+            "sources_used": 0,
+            "browser_actions": 0,
+            "code_execs": 0,
+            "data_loads": 0,
+            "interrupted": 0,
+            "stop_reason": 0,
+        }
+
+        note_lines: List[str] = []
+        note_lines.append(f"[{role}] Contradiction resolution pass for goal:")
+        note_lines.append(goal)
+        note_lines.append("")
+
+        if self._deadline_hit(deadline_ts):
+            stats["interrupted"] = 1
+            stats["stop_reason"] = 1
+            note_lines.append("Time limit reached; contradiction resolution deferred.")
+            return "\n".join(note_lines), citations, stats
+
+        snippets = self._extract_contradiction_snippets(goal, limit=3)
+        if not snippets:
+            note_lines.append(
+                "Contradiction was flagged by detection, but no explicit contradiction lines were extractable from notes. "
+                "Consider marking contradictions with a 'CONTRADICTION:' prefix in notes for better automated resolution."
+            )
+            return "\n".join(note_lines), citations, stats
+
+        note_lines.append("Contradiction snippets:")
+        for s in snippets:
+            note_lines.append(f"- {s}")
+        note_lines.append("")
+
+        resolved_any = False
+
+        for s in snippets:
+            if self._deadline_hit(deadline_ts):
+                stats["interrupted"] = 1
+                stats["stop_reason"] = 1
+                note_lines.append("Time limit hit mid-contradiction resolution; stopping.")
+                break
+
+            q = f"{goal} evidence resolve contradiction: {s}"
+            note_lines.append("### Evidence search:")
+            note_lines.append(q)
+            note_lines.append("")
+
+            if source_controls.get("web", True) and self._should_use_web("targeted", maintenance_mode):
+                web_params = self._select_web_search_params(
+                    role=role,
+                    maintenance_mode=maintenance_mode,
+                    domain=domain,
+                    purpose="targeted",
+                )
+                search_query = _clamp_query(q)
+                try:
+                    web_results = self.web_tool.search(search_query, **web_params)
+                except Exception:
+                    web_results = []
+                    note_lines.append("Web search failed for contradiction resolution; continuing.")
+                    note_lines.append("")
+                else:
+                    stats["web_calls"] += 1
+                    if tool_usage is not None:
+                        tool_usage.web_calls += 1
+
+                    web_summary = self.web_tool.summarize_results(web_results)
+                    web_cites_raw = self.web_tool.to_citations(web_results)
+                    web_cites = self._tag_citations(
+                        web_cites_raw,
+                        goal=goal,
+                        query=search_query,
+                        channel="web",
+                        phase="contradiction",
+                    )
+                    citations.extend(web_cites)
+
+                    if tool_usage is not None:
+                        tool_usage.approx_tokens += self._estimate_tokens(web_summary)
+
+                    note_lines.append("Web summary (contradiction evidence):")
+                    note_lines.append(web_summary)
+                    note_lines.append("Web sources:")
+                    for c in web_cites:
+                        note_lines.append(f"- {c.get('title', '')} ({c.get('url', '')})")
+                    note_lines.append("")
+
+                    if web_cites:
+                        resolved_any = True
+
+        if resolved_any:
+            stats["contradictions_resolved"] = 1
+
+        return "\n".join(note_lines), citations, stats
 
     # ------------------------------------------------------------------
     # Longevity replay helpers
@@ -2852,15 +2943,7 @@ class TGRMLoop:
         cycle_log: Dict[str, Any],
         replay_buffer: Optional[Any],
     ) -> List[str]:
-        """Push top hypotheses and patterns from this cycle into a replay buffer.
-
-        The replay_buffer can be:
-            - an object with .add_item(item: dict) -> Any
-            - a callable that accepts a single item dict
-
-        Returns:
-            List of item ids that were created for this cycle.
-        """
+        """Push top hypotheses and patterns from this cycle into a replay buffer."""
         item_ids: List[str] = []
         if replay_buffer is None:
             return item_ids
@@ -2876,7 +2959,6 @@ class TGRMLoop:
         timestamp = cycle_log.get("timestamp")
         cycle_idx = cycle_log.get("cycle")
 
-        # Select up to a few best hypotheses by confidence if available
         def hyp_score(h: Dict[str, Any]) -> float:
             val = h.get("confidence")
             try:
@@ -2888,12 +2970,7 @@ class TGRMLoop:
         top_hypotheses = sorted_hypotheses[:5]
 
         for idx, h in enumerate(top_hypotheses):
-            text = (
-                h.get("text")
-                or h.get("description")
-                or h.get("title")
-                or ""
-            )
+            text = h.get("text") or h.get("description") or h.get("title") or ""
             if not text:
                 continue
 
@@ -2921,10 +2998,8 @@ class TGRMLoop:
                     replay_buffer.add_item(item)  # type: ignore[attr-defined]
                 elif callable(replay_buffer):
                     replay_buffer(item)
-                # Only append if we did not raise
                 item_ids.append(item_id)
             except Exception:
-                # Replay logging must never break the main loop
                 continue
 
         return item_ids
@@ -2944,6 +3019,8 @@ class TGRMLoop:
         seen_titles: set[str] = set()
 
         for c in citations:
+            if not isinstance(c, dict):
+                continue
             title = (c.get("title") or "").strip()
             if not title:
                 continue
@@ -2963,7 +3040,7 @@ class TGRMLoop:
         return candidates
 
     # ------------------------------------------------------------------
-    # Multi goal helpers (optional but used by CoreAgent when available)
+    # Multi goal helpers
     # ------------------------------------------------------------------
     def run_multi_goal_cycle(
         self,
@@ -2980,12 +3057,7 @@ class TGRMLoop:
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Convenience wrapper for running one cycle across multiple goals.
-
-        Default behavior: combine goals into a single composite goal string
-        so older CoreAgent logic still works and all job level metadata gets
-        recorded in one place.
-        """
+        """Convenience wrapper for running one cycle across multiple goals."""
         if not goals:
             composite_goal = ""
         else:
@@ -3031,11 +3103,7 @@ class TGRMLoop:
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Simple multi goal training burst.
-
-        Rotates across goals, running total_cycles cycles in sequence and
-        returning the list of cycle summaries plus a tiny aggregate view.
-        """
+        """Simple multi goal training burst."""
         goals_list = list(goals) or [""]
 
         cycles: List[Dict[str, Any]] = []
@@ -3066,17 +3134,8 @@ class TGRMLoop:
             )
             cycles.append(res["summary"])
 
-        # Tiny aggregate for quick UI or job logs
-        rye_values = [
-            c.get("RYE")
-            for c in cycles
-            if isinstance(c.get("RYE"), (int, float))
-        ]
-        avg_rye = (
-            sum(float(v) for v in rye_values) / len(rye_values)
-            if rye_values
-            else None
-        )
+        rye_values = [c.get("RYE") for c in cycles if isinstance(c.get("RYE"), (int, float))]
+        avg_rye = (sum(float(v) for v in rye_values) / len(rye_values)) if rye_values else None
 
         return {
             "goals": goals_list,
