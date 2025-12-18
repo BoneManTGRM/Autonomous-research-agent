@@ -69,35 +69,66 @@ def _safe_float(value: Any) -> Optional[float]:
     """
     Convert to float whenever possible.
 
-    Accepts ints, floats, and numeric strings.
-    Returns None when conversion fails or value is NaN/Inf.
+    Accepts ints, floats, and numeric strings. Returns None when conversion
+    fails, or when the result is NaN/Inf.
 
     This makes the module more robust to mixed-type histories.
     """
     try:
         if value is None:
             return None
-        # Avoid bool leaking as 1.0/0.0
-        if isinstance(value, bool):
+        v = float(value)
+        if not math.isfinite(v):
             return None
-        f = float(value)
-        if not math.isfinite(f):
-            return None
-        return f
+        return v
     except Exception:
         return None
 
 
+def _extract_rye_from_entry(entry: Dict[str, Any]) -> Optional[float]:
+    """
+    Extract RYE from a history entry.
+
+    Priority:
+      1) direct RYE fields ("RYE" or "rye")
+      2) derived from delta_r / energy_e (or common alternates)
+    """
+    v = _safe_float(entry.get("RYE"))
+    if v is None:
+        v = _safe_float(entry.get("rye"))
+    if v is not None:
+        return v
+
+    # Derived fields (common keys used across agent logs)
+    delta = _safe_float(entry.get("delta_r"))
+    if delta is None:
+        delta = _safe_float(entry.get("delta_R"))
+    if delta is None:
+        delta = _safe_float(entry.get("rye_delta"))
+
+    energy = _safe_float(entry.get("energy_e"))
+    if energy is None:
+        energy = _safe_float(entry.get("energy_cost"))
+    if energy is None:
+        energy = _safe_float(entry.get("E"))
+    if energy is None:
+        energy = _safe_float(entry.get("energy"))
+
+    if delta is None or energy is None or energy <= 0:
+        return None
+
+    return float(delta) / float(energy)
+
+
 def normalize_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
-    Normalize history to only entries that contain numeric RYE.
+    Normalize history to entries that contain numeric RYE.
+
+    Upgrade:
+      - If "RYE" is missing, derive it from delta_r/energy_e when possible.
 
     This makes downstream metrics more robust and predictable for long runs
     where some cycles might be missing RYE or contain partial data.
-
-    Upgrades:
-        - Accepts both "RYE" and "rye"
-        - If RYE is missing but delta/energy is present, computes RYE = ΔR / E
 
     Note:
         This operates on the canonical "RYE" key. Learning adjusted
@@ -112,22 +143,12 @@ def normalize_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         if not isinstance(entry, dict):
             continue
 
-        v = _safe_float(entry.get("RYE"))
-        if v is None:
-            v = _safe_float(entry.get("rye"))
-
-        # If RYE isn't stored, try to derive it from delta/energy
-        if v is None:
-            delta_r = _safe_float(entry.get("delta_r"))
-            energy_e = _safe_float(entry.get("energy_e"))
-            if delta_r is not None and energy_e is not None and energy_e > 0:
-                v = delta_r / energy_e
-
-        if v is None:
+        rye = _extract_rye_from_entry(entry)
+        if rye is None:
             continue
 
         e = dict(entry)
-        e["RYE"] = float(v)
+        e["RYE"] = float(rye)
         norm.append(e)
 
     return norm
@@ -138,7 +159,7 @@ def _extract_rye_series(values_or_history: List[Any]) -> List[float]:
     Flexible extractor used by many metrics.
 
     Accepts either:
-        - a list of history dicts with "RYE" fields
+        - a list of history dicts with "RYE" fields (or with delta_r/energy_e)
         - a list of raw numeric values
         - a mixed list of both
 
@@ -147,10 +168,6 @@ def _extract_rye_series(values_or_history: List[Any]) -> List[float]:
     This is what makes the module compatible with both:
         - history style callers (TGRM, CoreAgent, Streamlit UI)
         - vector style callers (msil.py, IQ probes, etc)
-
-    Upgrade:
-        If a dict entry does not contain RYE, we try to derive it from
-        {delta_r, energy_e} when available.
     """
     if not isinstance(values_or_history, list) or not values_or_history:
         return []
@@ -158,14 +175,7 @@ def _extract_rye_series(values_or_history: List[Any]) -> List[float]:
     out: List[float] = []
     for item in values_or_history:
         if isinstance(item, dict):
-            v = _safe_float(item.get("RYE"))
-            if v is None:
-                v = _safe_float(item.get("rye"))
-            if v is None:
-                delta_r = _safe_float(item.get("delta_r"))
-                energy_e = _safe_float(item.get("energy_e"))
-                if delta_r is not None and energy_e is not None and energy_e > 0:
-                    v = delta_r / energy_e
+            v = _extract_rye_from_entry(item)
         else:
             v = _safe_float(item)
 
@@ -198,28 +208,19 @@ def compute_delta_r(
 
     All original parameters still work as before.
     """
-    ib = int(_safe_float(issues_before) or 0)
-    ia = int(_safe_float(issues_after) or 0)
-    ra = int(_safe_float(repairs_applied) or 0)
-    cr = int(_safe_float(contradictions_resolved) or 0)
-    hg = int(_safe_float(hypotheses_generated) or 0)
-    su = int(_safe_float(sources_used) or 0)
+    base = max(issues_before - issues_after, 0)
 
-    base = max(ib - ia, 0)
+    contradiction_gain = contradictions_resolved * 0.5
+    hypothesis_gain = hypotheses_generated * 0.2
+    source_gain = min(max(sources_used, 0), 20) * 0.05
 
-    contradiction_gain = cr * 0.5
-    hypothesis_gain = hg * 0.2
-    source_gain = min(max(su, 0), 20) * 0.05
-
-    ns = _safe_float(novelty_score) or 0.0
-    cg = _safe_float(coherence_gain) or 0.0
-    bonus = max(ns * 0.4, 0.0) + max(cg * 0.3, 0.0)
+    bonus = max(novelty_score * 0.4, 0.0) + max(coherence_gain * 0.3, 0.0)
 
     delta = float(base + contradiction_gain + hypothesis_gain + source_gain + bonus)
 
     # Maintenance credit (avoid ΔR = 0 with real work)
-    if ib == 0 and delta == 0 and ra > 0:
-        delta = ra * 0.1
+    if issues_before == 0 and delta == 0 and repairs_applied > 0:
+        delta = repairs_applied * 0.1
 
     return float(delta)
 
@@ -252,22 +253,16 @@ def compute_energy(
     # Base cost from actions and core calls
     base_cost = float(len(actions_taken)) if actions_taken else 1.0
 
-    wc = int(_safe_float(web_calls) or 0)
-    pc = int(_safe_float(pubmed_calls) or 0)
-    sc = int(_safe_float(semantic_calls) or 0)
-    pi = int(_safe_float(pdf_ingestions) or 0)
-
-    cost_web = max(wc, 0) * 1.5
-    cost_pubmed = max(pc, 0) * 2.0
-    cost_sem = max(sc, 0) * 2.0
-    cost_pdf = max(pi, 0) * 2.5
+    cost_web = max(web_calls, 0) * 1.5
+    cost_pubmed = max(pubmed_calls, 0) * 2.0
+    cost_sem = max(semantic_calls, 0) * 2.0
+    cost_pdf = max(pdf_ingestions, 0) * 2.5
 
     total = base_cost + cost_web + cost_pubmed + cost_sem + cost_pdf
 
     # Soft token costing
-    te = _safe_float(tokens_estimate) if tokens_estimate is not None else None
-    if te is not None and te > 0:
-        total += float(te) / 1000.0
+    if tokens_estimate is not None and tokens_estimate > 0:
+        total += float(tokens_estimate) / 1000.0
 
     # Swarm penalty (prevents cheating via infinite agent spawning)
     swarm_size_eff = swarm_size if isinstance(swarm_size, int) and swarm_size > 0 else 1
@@ -291,8 +286,8 @@ def compute_energy(
 def compute_rye(delta_r: float, energy_e: float) -> float:
     """RYE = ΔR / E, with a defensive zero floor for bad E."""
     dr = _safe_float(delta_r) or 0.0
-    e = _safe_float(energy_e) or 0.0
-    if e <= 0:
+    e = _safe_float(energy_e)
+    if e is None or e <= 0:
         return 0.0
     return float(dr) / float(e)
 
@@ -880,7 +875,6 @@ def compute_tool_rye(
             "ratios": [],
             "ratios_learning": [],
             "last_timestamp": None,
-            "delta_seen": False,
         }
 
         t["events"] = int(t.get("events", 0)) + 1
@@ -896,7 +890,6 @@ def compute_tool_rye(
         lsf = _safe_float(ev.get("learning_speed_factor"))
 
         if delta_r is not None:
-            t["delta_seen"] = True
             t["sum_delta_r"] = float(t.get("sum_delta_r", 0.0)) + delta_r
         if energy_e is not None and energy_e > 0:
             t["sum_energy"] = float(t.get("sum_energy", 0.0)) + energy_e
@@ -932,7 +925,6 @@ def compute_tool_rye(
 
         sum_energy = float(t.get("sum_energy", 0.0))
         sum_delta_r = float(t.get("sum_delta_r", 0.0))
-        delta_seen = bool(t.get("delta_seen", False))
 
         rye_avg: Optional[float] = None
         rye_median_val: Optional[float] = None
@@ -941,7 +933,8 @@ def compute_tool_rye(
         rye_median_learning: Optional[float] = None
         rye_last_learning: Optional[float] = None
 
-        if sum_energy > 0 and delta_seen:
+        # NOTE: compute avg even if sum_delta_r == 0 (so avg can be 0.0)
+        if sum_energy > 0:
             rye_avg = sum_delta_r / sum_energy
 
         if ratios:
