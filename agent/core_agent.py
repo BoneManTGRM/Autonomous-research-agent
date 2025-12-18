@@ -188,15 +188,26 @@ Citation tracking:
     returned by TGRMLoop into per cycle summaries, run state, and
     continuous run metadata so that the UI and report generator can
     display clear source provenance.
+
+Live UI state + event log (Render shared disk friendly):
+    CoreAgent can emit:
+        - a merged "worker_state.json" snapshot for always-visible UI status bars
+        - an append-only "event_log.jsonl" narrative timeline feed
+
+    These are optional, backward compatible, and designed to be safe
+    even when other components (engine_worker) also write phase fields
+    into the same state file (via deep-merge writes).
 """
 
 from __future__ import annotations
 
 import json
+import math
+import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .memory_store import MemoryStore
 from .tgrm_loop import TGRMLoop
@@ -220,6 +231,32 @@ try:
     from . import rye_metrics as _rye_metrics_mod  # type: ignore
 except Exception:
     _rye_metrics_mod = None  # type: ignore
+
+# Optional UI / state emission modules (keep optional to avoid breaking older repos)
+try:
+    from . import state_emitter as _state_emitter_mod  # type: ignore
+except Exception:
+    _state_emitter_mod = None  # type: ignore
+
+try:
+    from . import event_log as _event_log_mod  # type: ignore
+except Exception:
+    _event_log_mod = None  # type: ignore
+
+try:
+    from . import autonomy_levels as _autonomy_levels_mod  # type: ignore
+except Exception:
+    _autonomy_levels_mod = None  # type: ignore
+
+try:
+    from . import scoring as _scoring_mod  # type: ignore
+except Exception:
+    _scoring_mod = None  # type: ignore
+
+try:
+    from . import diagnostics as _diagnostics_mod  # type: ignore
+except Exception:
+    _diagnostics_mod = None  # type: ignore
 
 # Optional intelligence profiles for tuning thresholds and behavior
 try:
@@ -289,6 +326,155 @@ from .snapshot_generator import SnapshotGenerator
 from .verification_engine import VerificationEngine
 
 
+# ---------------------------------------------------------------------
+# Small, dependency-free persistence helpers (safe for Render shared disk)
+# ---------------------------------------------------------------------
+def _json_default(obj: Any) -> str:
+    """JSON serializer fallback."""
+    try:
+        return str(obj)
+    except Exception:
+        return "<unserializable>"
+
+
+def _load_json_file(path: Path) -> Dict[str, Any]:
+    try:
+        if not path.exists():
+            return {}
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _atomic_write_json(path: Path, payload: Dict[str, Any]) -> None:
+    """Atomic JSON write via temp file + replace (POSIX atomic in same dir)."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + f".tmp-{uuid.uuid4().hex[:8]}")
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=_json_default)
+        tmp.replace(path)
+    except Exception:
+        return
+
+
+def _append_jsonl(path: Path, payload: Dict[str, Any]) -> None:
+    """Append one JSON object per line."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(payload, ensure_ascii=False, default=_json_default)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except Exception:
+        return
+
+
+def _deep_merge(base: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
+    """Deep-merge dicts (nested dicts merge; scalars/lists override)."""
+    out: Dict[str, Any] = dict(base)
+    for k, v in update.items():
+        if v is None:
+            # Never overwrite existing keys with None (important when multiple writers share worker_state.json)
+            continue
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out.get(k, {}), v)  # type: ignore[arg-type]
+        else:
+            out[k] = v
+    return out
+
+
+def _clamp01(x: float) -> float:
+    if x < 0.0:
+        return 0.0
+    if x > 1.0:
+        return 1.0
+    return x
+
+
+def _safe_float(x: Any) -> Optional[float]:
+    try:
+        if isinstance(x, bool):
+            return None
+        if isinstance(x, (int, float)):
+            return float(x)
+        if isinstance(x, str) and x.strip():
+            return float(x.strip())
+    except Exception:
+        return None
+    return None
+
+
+def _safe_int(x: Any) -> Optional[int]:
+    try:
+        if isinstance(x, bool):
+            return None
+        if isinstance(x, int):
+            return int(x)
+        if isinstance(x, float) and math.isfinite(x):
+            return int(x)
+        if isinstance(x, str) and x.strip():
+            return int(float(x.strip()))
+    except Exception:
+        return None
+    return None
+
+
+def _brief_summary(summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep worker_state.json small and stable."""
+    out: Dict[str, Any] = {}
+    for k in (
+        "cycle_index",
+        "role",
+        "domain",
+        "run_id",
+        "experiment_mode",
+        "timestamp",
+        "started_at_ts",
+        "completed_at_ts",
+        "RYE",
+        "delta_R",
+        "Energy",
+        "energy",
+        "contradictions",
+        "status",
+    ):
+        if k in summary:
+            out[k] = summary.get(k)
+
+    citations = summary.get("citations")
+    if isinstance(citations, list):
+        out["citations_count"] = len(citations)
+
+    # Common "headline" fields some loops emit
+    for k in ("headline", "title", "summary", "one_liner", "note"):
+        v = summary.get(k)
+        if isinstance(v, str) and v.strip():
+            out[k] = v.strip()
+            break
+
+    return out
+
+
+def _linear_regression_slope(values: List[float]) -> Optional[float]:
+    """Simple slope estimate over index vs value."""
+    try:
+        n = len(values)
+        if n < 2:
+            return None
+        xs = list(range(n))
+        x_mean = sum(xs) / n
+        y_mean = sum(values) / n
+        num = sum((xs[i] - x_mean) * (values[i] - y_mean) for i in range(n))
+        den = sum((xs[i] - x_mean) ** 2 for i in range(n))
+        if den == 0:
+            return None
+        return num / den
+    except Exception:
+        return None
+
+
 class CoreAgent:
     """High level controller for the autonomous research agent.
 
@@ -326,6 +512,77 @@ class CoreAgent:
         self.config = config or {}
 
         # ------------------------------------------------------------------
+        # Live UI state / event log (for Streamlit "top bar" + timeline feed)
+        # ------------------------------------------------------------------
+        self.state_emit_enabled: bool = bool(self.config.get("state_emit_enabled", True))
+        self.event_log_enabled: bool = bool(self.config.get("event_log_enabled", True))
+        self.presence_enabled: bool = bool(self.config.get("presence_enabled", True))
+
+        # Allow a shared base directory (Render persistent disk, etc.)
+        shared_dir_raw = self.config.get("shared_dir") or self.config.get("runs_dir") or self.config.get("shared_disk_dir")
+        shared_base = Path(str(shared_dir_raw)) if shared_dir_raw else Path(".")
+
+        worker_state_file = self.config.get("worker_state_file") or self.config.get("shared_state_file") or "logs/worker_state.json"
+        event_log_file = self.config.get("event_log_file") or "logs/event_log.jsonl"
+
+        self.worker_state_path = Path(str(worker_state_file))
+        if not self.worker_state_path.is_absolute():
+            self.worker_state_path = shared_base / self.worker_state_path
+
+        self.event_log_path = Path(str(event_log_file))
+        if not self.event_log_path.is_absolute():
+            self.event_log_path = shared_base / self.event_log_path
+
+        self._live_io_lock = threading.Lock()
+        self._presence_state: Dict[str, Dict[str, Any]] = {}
+        self._active_run_context: Dict[str, Any] = {
+            "run_id": None,
+            "mode": None,
+            "started_at_ts": None,
+        }
+
+        # External emitters (optional). We keep this extremely defensive:
+        # if your repo has StateEmitter / EventLogger, we use them; otherwise
+        # we use file-based helpers above.
+        self._external_state_emitter: Optional[Any] = None
+        self._external_event_logger: Optional[Any] = None
+
+        if _state_emitter_mod is not None:
+            # Try common naming patterns without assuming signatures.
+            candidate = getattr(_state_emitter_mod, "StateEmitter", None) or getattr(_state_emitter_mod, "StateEmitterWriter", None)
+            if candidate is not None:
+                for kwargs in (
+                    {"config": self.config, "state_path": self.worker_state_path, "event_path": self.event_log_path},
+                    {"config": self.config},
+                    {"state_path": self.worker_state_path, "event_path": self.event_log_path},
+                    {},
+                ):
+                    try:
+                        self._external_state_emitter = candidate(**kwargs)  # type: ignore[misc]
+                        break
+                    except TypeError:
+                        continue
+                    except Exception:
+                        continue
+
+        if _event_log_mod is not None:
+            candidate = getattr(_event_log_mod, "EventLogger", None) or getattr(_event_log_mod, "EventLog", None)
+            if candidate is not None:
+                for kwargs in (
+                    {"path": self.event_log_path, "config": self.config},
+                    {"path": self.event_log_path},
+                    {"config": self.config},
+                    {},
+                ):
+                    try:
+                        self._external_event_logger = candidate(**kwargs)  # type: ignore[misc]
+                        break
+                    except TypeError:
+                        continue
+                    except Exception:
+                        continue
+
+        # ------------------------------------------------------------------
         # Tools and tool registry
         # ------------------------------------------------------------------
         # Snapshot of the TOOL_REGISTRY mapping if available.
@@ -334,7 +591,7 @@ class CoreAgent:
         else:
             self.tool_registry = {}
 
-        # Prefer TOOL_REGISTRY (so Tavily + mail tools are visible),
+        # Prefer TOOL_REGISTRY (so tools are visible),
         # and expose legacy Toolbelt under a namespaced key if present.
         if self.tool_registry:
             self.tools: Any = dict(self.tool_registry)
@@ -657,6 +914,334 @@ class CoreAgent:
 
         self._apply_intelligence_profile()
 
+        # Initialize presence entries as idle so UI has stable structure
+        if self.presence_enabled:
+            for r in self.get_agent_roles():
+                self._presence_state.setdefault(r, {"status": "idle", "last_update_ts": time.time()})
+
+        # Best-effort initial state snapshot (idle)
+        self._emit_live_state(
+            {
+                "schema_version": 1,
+                "status": "idle",
+                "heartbeat_state": "idle",
+                "heartbeat_ts": time.time(),
+                "last_update_ts": time.time(),
+                "mode": None,
+                "run_id": None,
+                "agent_presence": self._presence_state if self.presence_enabled else {},
+            },
+            merge=True,
+        )
+
+    # ------------------------------------------------------------------
+    # Lightweight local helpers
+    # ------------------------------------------------------------------
+    def _get_cycle_history_safe(self) -> List[Dict[str, Any]]:
+        try:
+            history = self.memory_store.get_cycle_history()
+            return history if isinstance(history, list) else []
+        except Exception:
+            return []
+
+    def _set_active_run_context(self, *, run_id: Optional[str], mode: Optional[str], started_at_ts: Optional[float]) -> None:
+        try:
+            self._active_run_context["run_id"] = run_id
+            self._active_run_context["mode"] = mode
+            self._active_run_context["started_at_ts"] = started_at_ts
+        except Exception:
+            return
+
+    def _emit_live_state(self, update: Dict[str, Any], *, merge: bool = True) -> None:
+        """Write merged worker_state.json for Streamlit top bar / panels."""
+        if not self.state_emit_enabled:
+            return
+
+        # Drop None values to avoid clobbering other writers (engine_worker phases).
+        clean_update: Dict[str, Any] = {k: v for k, v in update.items() if v is not None}
+
+        with self._live_io_lock:
+            base = _load_json_file(self.worker_state_path) if merge else {}
+            merged = _deep_merge(base, clean_update)
+
+            # Ensure stable timestamp fields
+            merged.setdefault("schema_version", 1)
+            merged.setdefault("last_update_ts", time.time())
+            merged.setdefault("heartbeat_ts", merged.get("last_update_ts", time.time()))
+
+            # Prefer an external emitter if present and compatible
+            if self._external_state_emitter is not None:
+                try:
+                    fn = (
+                        getattr(self._external_state_emitter, "emit_state", None)
+                        or getattr(self._external_state_emitter, "update_state", None)
+                        or getattr(self._external_state_emitter, "emit", None)
+                    )
+                    if callable(fn):
+                        try:
+                            fn(merged)  # type: ignore[misc]
+                            return
+                        except TypeError:
+                            fn(state=merged)  # type: ignore[misc]
+                            return
+                except Exception:
+                    pass
+
+            _atomic_write_json(self.worker_state_path, merged)
+
+    def _emit_event(
+        self,
+        kind: str,
+        message: str,
+        *,
+        level: str = "info",
+        run_id: Optional[str] = None,
+        mode: Optional[str] = None,
+        domain: Optional[str] = None,
+        role: Optional[str] = None,
+        cycle_index: Optional[int] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Append narrative event log entry (JSONL)."""
+        if not self.event_log_enabled:
+            return
+
+        rid = run_id or self._active_run_context.get("run_id")
+        md = mode or self._active_run_context.get("mode")
+
+        evt: Dict[str, Any] = {
+            "ts": time.time(),
+            "level": str(level),
+            "kind": str(kind),
+            "message": str(message),
+            "run_id": rid,
+            "mode": md,
+        }
+        if domain is not None:
+            evt["domain"] = domain
+        if role is not None:
+            evt["role"] = role
+        if cycle_index is not None:
+            evt["cycle_index"] = int(cycle_index)
+        if isinstance(extra, dict) and extra:
+            evt["extra"] = extra
+
+        # Prefer external logger if present
+        if self._external_event_logger is not None:
+            try:
+                fn = (
+                    getattr(self._external_event_logger, "append", None)
+                    or getattr(self._external_event_logger, "log", None)
+                    or getattr(self._external_event_logger, "emit", None)
+                )
+                if callable(fn):
+                    try:
+                        fn(evt)  # type: ignore[misc]
+                        return
+                    except TypeError:
+                        fn(**evt)  # type: ignore[misc]
+                        return
+            except Exception:
+                pass
+
+        _append_jsonl(self.event_log_path, evt)
+
+    def _set_presence(self, role: str, status: str, *, detail: Optional[str] = None) -> None:
+        """Track role presence for the UI (agent presence visualization)."""
+        if not self.presence_enabled:
+            return
+        r = str(role or "agent")
+        entry: Dict[str, Any] = {
+            "status": str(status),
+            "last_update_ts": time.time(),
+        }
+        if detail:
+            entry["detail"] = str(detail)
+        self._presence_state[r] = entry
+
+        self._emit_live_state(
+            {
+                "agent_presence": {r: entry},
+                "last_update_ts": time.time(),
+            },
+            merge=True,
+        )
+
+    def _compute_autonomy_snapshot(
+        self,
+        *,
+        mode: Optional[str],
+        experiment_mode: Optional[str],
+        speed_mode: str,
+        stability_status: Optional[Dict[str, Any]] = None,
+        recent_rye: Optional[List[float]] = None,
+    ) -> Dict[str, Any]:
+        """Compute autonomy level/state (used by UI indicator)."""
+        # Preferred: autonomy_levels module if present
+        if _autonomy_levels_mod is not None:
+            for fn_name in ("compute_autonomy", "compute_autonomy_level", "get_autonomy_level", "classify_autonomy"):
+                fn = getattr(_autonomy_levels_mod, fn_name, None)
+                if callable(fn):
+                    try:
+                        result = fn(
+                            mode=mode,
+                            experiment_mode=experiment_mode,
+                            speed_mode=speed_mode,
+                            stability_status=stability_status,
+                            recent_rye=recent_rye,
+                            config=self.config,
+                        )
+                        if isinstance(result, dict):
+                            return result
+                        if isinstance(result, str):
+                            return {"label": result}
+                    except Exception:
+                        pass
+
+        # Fallback heuristic (conservative)
+        level = int(self.config.get("autonomy_level", 2)) if isinstance(self.config.get("autonomy_level"), int) else 2
+        label = "Assisted"
+
+        if speed_mode == "accelerated":
+            level = max(level, 3)
+            label = "Accelerated"
+        elif speed_mode == "ultra":
+            level = max(level, 4)
+            label = "Ultra"
+
+        if experiment_mode == "training":
+            level = min(level, 2)
+            label = "Training"
+
+        if stability_status:
+            # If kernel says caution/backoff, lower autonomy
+            state = stability_status.get("state") if isinstance(stability_status, dict) else None
+            if isinstance(state, str) and state.lower() in {"backoff", "caution", "halt"}:
+                level = min(level, 1)
+                label = "Backoff"
+
+        return {"level": level, "label": label}
+
+    def _compute_discovery_snapshot(self, summary: Dict[str, Any]) -> Dict[str, Any]:
+        """Compute a discovery score/confidence for UI cards (fallback safe)."""
+        # If scoring module exists and exposes a function, prefer it
+        if _scoring_mod is not None:
+            for fn_name in ("score_discovery", "compute_discovery_score", "compute_discovery", "score_cycle"):
+                fn = getattr(_scoring_mod, fn_name, None)
+                if callable(fn):
+                    try:
+                        out = fn(summary=summary, config=self.config)  # type: ignore[misc]
+                        if isinstance(out, dict):
+                            return out
+                        if isinstance(out, (int, float)):
+                            return {"score": float(out)}
+                    except TypeError:
+                        try:
+                            out = fn(summary)  # type: ignore[misc]
+                            if isinstance(out, dict):
+                                return out
+                            if isinstance(out, (int, float)):
+                                return {"score": float(out)}
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+        # Fallback: derive from RYE, citations, contradictions (0..1)
+        rye = _safe_float(summary.get("RYE"))
+        delta_r = _safe_float(summary.get("delta_R"))
+        energy = _safe_float(summary.get("Energy") or summary.get("energy"))
+        contr = _safe_float(summary.get("contradictions"))
+        citations = summary.get("citations")
+        citations_n = len(citations) if isinstance(citations, list) else 0
+
+        score = 0.0
+        if rye is not None:
+            score += 0.65 * _clamp01(rye)  # assumes rye ~ [0,1] in many configs; clamp anyway
+        if delta_r is not None and energy is not None and energy > 0:
+            # normalize delta_r/energy a bit; keep bounded
+            try:
+                ratio = float(delta_r) / float(energy)
+                score += 0.15 * _clamp01(ratio)
+            except Exception:
+                pass
+        score += 0.10 * _clamp01(citations_n / 5.0)
+        if contr is not None:
+            score -= 0.10 * _clamp01(contr / 5.0)
+        score = _clamp01(score)
+
+        confidence = score
+        if citations_n >= 2:
+            confidence = _clamp01(confidence + 0.10)
+        if contr is not None and contr >= 3:
+            confidence = _clamp01(confidence - 0.10)
+
+        tier = "tier_1"
+        if score >= 0.80:
+            tier = "tier_3"
+        elif score >= 0.50:
+            tier = "tier_2"
+
+        return {"score": score, "confidence": confidence, "tier": tier, "citations_count": citations_n}
+
+    def _compute_basic_run_diagnostics(
+        self,
+        summaries: List[Dict[str, Any]],
+        *,
+        domain: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Always-available diagnostics (fixes 'diagnostics never worked' in UI)."""
+        diag: Dict[str, Any] = {
+            "domain": domain or "general",
+            "cycles": len(summaries),
+            "rye": {},
+            "contradictions": {},
+            "citations": {},
+            "energy": {},
+        }
+
+        rye_vals: List[float] = []
+        contra_vals: List[float] = []
+        energy_vals: List[float] = []
+        citations_total = 0
+
+        for s in summaries:
+            rv = _safe_float(s.get("RYE"))
+            if rv is not None:
+                rye_vals.append(rv)
+            cv = _safe_float(s.get("contradictions"))
+            if cv is not None:
+                contra_vals.append(cv)
+            ev = _safe_float(s.get("Energy") or s.get("energy"))
+            if ev is not None:
+                energy_vals.append(ev)
+            cits = s.get("citations")
+            if isinstance(cits, list):
+                citations_total += len(cits)
+
+        if rye_vals:
+            diag["rye"] = {
+                "last": rye_vals[-1],
+                "avg": sum(rye_vals) / len(rye_vals),
+                "min": min(rye_vals),
+                "max": max(rye_vals),
+                "trend_slope": _linear_regression_slope(rye_vals),
+            }
+        if contra_vals:
+            diag["contradictions"] = {
+                "last": contra_vals[-1],
+                "avg": sum(contra_vals) / len(contra_vals),
+                "max": max(contra_vals),
+            }
+        if energy_vals:
+            diag["energy"] = {
+                "last": energy_vals[-1],
+                "avg": sum(energy_vals) / len(energy_vals),
+                "sum": sum(energy_vals),
+            }
+        diag["citations"] = {"total": citations_total}
+        return diag
+
     # ------------------------------------------------------------------
     # Intelligence profile helpers
     # ------------------------------------------------------------------
@@ -828,10 +1413,7 @@ class CoreAgent:
             "diagnostics": None,
         }
 
-        try:
-            history = self.memory_store.get_cycle_history()
-        except Exception:
-            history = []
+        history = self._get_cycle_history_safe()
 
         if not history or len(history) < self.min_training_history:
             self.learned_from_memory = learned
@@ -850,6 +1432,9 @@ class CoreAgent:
                 )
             except Exception:
                 diagnostics = None
+        else:
+            # Always-available fallback diagnostics
+            diagnostics = self._compute_basic_run_diagnostics(history, domain=effective_domain)
 
         learned["diagnostics"] = diagnostics
 
@@ -857,9 +1442,9 @@ class CoreAgent:
         recommended_stop_rye: Optional[float] = None
 
         if isinstance(diagnostics, dict):
-            avg = diagnostics.get("rye_avg")
+            avg = diagnostics.get("rye_avg") or (diagnostics.get("rye") or {}).get("avg")
             stab = diagnostics.get("stability_index")
-            slope = diagnostics.get("trend_slope")
+            slope = diagnostics.get("trend_slope") or (diagnostics.get("rye") or {}).get("trend_slope")
             mid = diagnostics.get("mid_percentile")
 
             if isinstance(avg, (int, float)) and isinstance(stab, (int, float)):
@@ -869,9 +1454,20 @@ class CoreAgent:
                     recommended_profile = "8_hours"
                 else:
                     recommended_profile = "1_hour"
+            elif isinstance(avg, (int, float)):
+                if avg >= 0.5:
+                    recommended_profile = "24_hours"
+                elif avg >= 0.2:
+                    recommended_profile = "8_hours"
+                else:
+                    recommended_profile = "1_hour"
 
             if isinstance(mid, (int, float)):
                 recommended_stop_rye = float(mid) * 0.5
+            else:
+                # fallback: use a conservative fraction of avg
+                if isinstance(avg, (int, float)):
+                    recommended_stop_rye = float(avg) * 0.5
 
             if isinstance(slope, (int, float)) and slope < 0 and recommended_profile == "24_hours":
                 recommended_profile = "8_hours"
@@ -905,13 +1501,10 @@ class CoreAgent:
             return None
 
     def _save_checkpoint(self, state: Dict[str, Any]) -> None:
-        """Persist checkpoint state to disk for auto resume and watchdog."""
-        try:
-            self.checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
-            with self.checkpoint_path.open("w", encoding="utf-8") as f:
-                json.dump(state, f, ensure_ascii=False, indent=2)
-        except Exception:
+        """Persist checkpoint state to disk for auto resume and watchdog (atomic)."""
+        if not isinstance(state, dict):
             return
+        _atomic_write_json(self.checkpoint_path, state)
 
     def _clear_checkpoint(self) -> None:
         """Remove checkpoint file when a continuous run completes cleanly."""
@@ -967,6 +1560,18 @@ class CoreAgent:
         experiment_mode: Optional[str],
     ) -> None:
         """Inspect a cycle summary and log discovery related signals."""
+        # Ensure run_id wiring for discovery stack
+        try:
+            if run_id is not None:
+                self.discovery_logger.run_id = run_id
+                self.hypothesis_manager.run_id = run_id
+                self.memory_pruner.run_id = run_id
+                self.snapshot_generator.run_id = run_id
+                self.verification_engine.run_id = run_id
+        except Exception:
+            pass
+
+        # Let discovery engine observe cycles (if present)
         if self.discovery_engine is not None:
             try:
                 context = {
@@ -980,15 +1585,8 @@ class CoreAgent:
             except Exception:
                 pass
 
-        try:
-            if run_id is not None:
-                self.discovery_logger.run_id = run_id
-                self.hypothesis_manager.run_id = run_id
-                self.memory_pruner.run_id = run_id
-                self.snapshot_generator.run_id = run_id
-                self.verification_engine.run_id = run_id
-        except Exception:
-            pass
+        # Capture previous RYE BEFORE updating (fixes "rye_before" bug)
+        previous_rye = self._last_rye
 
         # 1) RYE spike logging
         try:
@@ -998,13 +1596,12 @@ class CoreAgent:
 
             if isinstance(rye_val, (int, float)):
                 rye_float = float(rye_val)
-                previous = self._last_rye
 
                 min_rye_spike = float(self.config.get("rye_spike_min", 0.5))
                 spike = False
-                if previous is None and rye_float >= min_rye_spike:
+                if previous_rye is None and rye_float >= min_rye_spike:
                     spike = True
-                elif previous is not None and rye_float >= max(min_rye_spike, previous * 1.25):
+                elif previous_rye is not None and rye_float >= max(min_rye_spike, previous_rye * 1.25):
                     spike = True
 
                 if spike:
@@ -1026,7 +1623,7 @@ class CoreAgent:
                         description=desc,
                         cycle_index=cycle_index,
                         agent_role=role,
-                        rye_before=previous if isinstance(previous, (int, float)) else None,
+                        rye_before=previous_rye if isinstance(previous_rye, (int, float)) else None,
                         rye_after=rye_float,
                         delta_r=float(delta_r) if isinstance(delta_r, (int, float)) else None,
                         energy=float(energy) if isinstance(energy, (int, float)) else None,
@@ -1034,20 +1631,16 @@ class CoreAgent:
                         extra={"summary": summary},
                     )
 
+                # Update last RYE AFTER spike detection
                 self._last_rye = rye_float
         except Exception:
             pass
 
         # 2) Hypothesis registration
         try:
-            raw_hyp_list = (
-                summary.get("candidate_hypotheses")
-                or summary.get("hypotheses")
-                or []
-            )
-
+            raw_hyp_list = (summary.get("candidate_hypotheses") or summary.get("hypotheses") or [])
             if not isinstance(raw_hyp_list, list):
-                return
+                raw_hyp_list = []
 
             for item in raw_hyp_list:
                 if isinstance(item, str):
@@ -1069,7 +1662,7 @@ class CoreAgent:
                     description=description,
                     cycle_index=cycle_index,
                     agent_role=role,
-                    rye_before=None if self._last_rye is None else float(self._last_rye),
+                    rye_before=None if previous_rye is None else float(previous_rye),
                     rye_after=summary.get("RYE") if isinstance(summary.get("RYE"), (int, float)) else None,
                     delta_r=summary.get("delta_R") if isinstance(summary.get("delta_R"), (int, float)) else None,
                     energy=summary.get("Energy") if isinstance(summary.get("Energy"), (int, float)) else None,
@@ -1204,6 +1797,10 @@ class CoreAgent:
         except Exception:
             pass
         return status
+
+    def get_presence_state(self) -> Dict[str, Any]:
+        """Expose current role presence state for UI."""
+        return dict(self._presence_state)
 
     def apply_swarm_profile(self, profile_name: str) -> List[str]:
         """Apply a swarm profile to agent roles if a manager is available."""
@@ -1472,52 +2069,117 @@ class CoreAgent:
     # ------------------------------------------------------------------
     def load_state_from_storage(self) -> Dict[str, Any]:
         """Load the latest engine run state from persistent storage."""
+        # 1) Prefer MemoryStore run state if supported
         try:
             if hasattr(self.memory_store, "load_run_state"):
                 state = self.memory_store.load_run_state()  # type: ignore[attr-defined]
-            else:
-                state = self._load_checkpoint()
+                if isinstance(state, dict):
+                    return state
         except Exception:
-            state = None
+            pass
 
-        if not isinstance(state, dict):
-            return {}
-        return state
+        # 2) Next, try worker_state.json (UI snapshot)
+        state2 = _load_json_file(self.worker_state_path)
+        if state2:
+            return state2
+
+        # 3) Finally, try the continuous checkpoint
+        state3 = self._load_checkpoint()
+        if isinstance(state3, dict):
+            return state3
+
+        return {}
 
     def save_state_to_storage(self, state: Dict[str, Any]) -> None:
-        """Save engine run state to persistent storage."""
+        """Save engine run state to persistent storage + update live UI snapshot."""
         if not isinstance(state, dict):
             return
 
         payload: Dict[str, Any] = dict(state)
 
+        # 1) Save to MemoryStore if available
         try:
             if hasattr(self.memory_store, "save_run_state"):
                 self.memory_store.save_run_state(payload)  # type: ignore[attr-defined]
-                return
         except Exception:
             pass
 
+        # 2) Save checkpoint ONLY if in_progress (avoid recreating checkpoints after completion)
+        in_progress = bool(payload.get("in_progress", True))
+        if in_progress:
+            try:
+                checkpoint_state: Dict[str, Any] = {
+                    "version": 1,
+                    "in_progress": True,
+                    "mode": payload.get("mode", "single"),
+                    "goal": payload.get("goal"),
+                    "role": payload.get("role", "agent"),
+                    "domain": payload.get("domain", "general"),
+                    "run_id": payload.get("run_id"),
+                    "experiment_mode": payload.get("experiment_mode"),
+                    "cycle_index": payload.get("cycle_index"),
+                    "cycles_completed": payload.get("cycles_completed"),
+                    "last_rye": payload.get("last_rye"),
+                    "last_update_ts": payload.get("last_update_ts", time.time()),
+                    "runtime_profile": payload.get("runtime_profile"),
+                    "raw_state": payload,
+                }
+                self._save_checkpoint(checkpoint_state)
+            except Exception:
+                pass
+        else:
+            # Ensure checkpoint is cleared when a run is marked completed
+            self._clear_checkpoint()
+
+        # 3) Update worker_state.json (deep-merge) for live UI
         try:
-            checkpoint_state: Dict[str, Any] = {
-                "version": 1,
-                "in_progress": bool(payload.get("in_progress", True)),
-                "mode": payload.get("mode", "single"),
-                "goal": payload.get("goal"),
-                "role": payload.get("role", "agent"),
-                "domain": payload.get("domain", "general"),
-                "run_id": payload.get("run_id"),
-                "experiment_mode": payload.get("experiment_mode"),
-                "cycle_index": payload.get("cycle_index"),
-                "cycles_completed": payload.get("cycles_completed"),
-                "last_rye": payload.get("last_rye"),
-                "last_update_ts": payload.get("last_update_ts", time.time()),
-                "runtime_profile": payload.get("runtime_profile"),
-                "raw_state": payload,
-            }
-            self._save_checkpoint(checkpoint_state)
+            status = "running" if in_progress else "idle"
+            heartbeat_state = "healthy" if in_progress else "idle"
+
+            last_summary = payload.get("last_summary")
+            last_summary_brief = _brief_summary(last_summary) if isinstance(last_summary, dict) else None
+
+            # Autonomy snapshot (best effort)
+            stability_status = self.get_stability_status()
+            recent_rye = None
+            try:
+                recent_rye = (self._meta_state.get("single_run_stats") or {}).get("recent_rye", None)
+            except Exception:
+                recent_rye = None
+
+            autonomy = self._compute_autonomy_snapshot(
+                mode=str(payload.get("mode")) if payload.get("mode") else None,
+                experiment_mode=payload.get("experiment_mode"),
+                speed_mode=self.speed_mode,
+                stability_status=stability_status if isinstance(stability_status, dict) else None,
+                recent_rye=recent_rye if isinstance(recent_rye, list) else None,
+            )
+
+            self._emit_live_state(
+                {
+                    "schema_version": 1,
+                    "status": status,
+                    "heartbeat_state": heartbeat_state,
+                    "heartbeat_ts": time.time(),
+                    "last_update_ts": payload.get("last_update_ts", time.time()),
+                    "mode": payload.get("mode"),
+                    "goal": payload.get("goal"),
+                    "domain": payload.get("domain"),
+                    "role": payload.get("role"),
+                    "roles": payload.get("roles"),
+                    "run_id": payload.get("run_id"),
+                    "experiment_mode": payload.get("experiment_mode"),
+                    "cycle_index": payload.get("cycle_index"),
+                    "cycles_completed": payload.get("cycles_completed"),
+                    "last_rye": payload.get("last_rye"),
+                    "last_summary": last_summary_brief,
+                    "agent_presence": self._presence_state if self.presence_enabled else {},
+                    "autonomy": autonomy,
+                },
+                merge=True,
+            )
         except Exception:
-            return
+            pass
 
     def run_one_cycle_and_return_state(
         self,
@@ -1534,7 +2196,7 @@ class CoreAgent:
     ) -> Dict[str, Any]:
         """Run exactly one TGRM cycle and return updated state plus summary."""
         if state is None:
-            history = self.memory_store.get_cycle_history()
+            history = self._get_cycle_history_safe()
             next_index = len(history)
             resolved_run_id = run_id or self._generate_run_id()
             state = {
@@ -1558,6 +2220,9 @@ class CoreAgent:
 
         effective_run_id: str = run_id or state.get("run_id") or self._generate_run_id()
         state["run_id"] = effective_run_id
+
+        # Update active run context for consistent eventing
+        self._set_active_run_context(run_id=effective_run_id, mode=state.get("mode", "single"), started_at_ts=state.get("created_at_ts"))
 
         if experiment_mode is None:
             experiment_mode = state.get("experiment_mode")
@@ -1587,7 +2252,7 @@ class CoreAgent:
             if ci < 0:
                 ci = 0
         except Exception:
-            history = self.memory_store.get_cycle_history()
+            history = self._get_cycle_history_safe()
             ci = len(history)
         state["cycle_index"] = ci
 
@@ -1595,6 +2260,18 @@ class CoreAgent:
             effective_pdf_bytes = self._attached_pdf_bytes
         else:
             effective_pdf_bytes = pdf_bytes
+
+        # Presence + event
+        self._set_presence(effective_role, "running")
+        self._emit_event(
+            "cycle_start",
+            f"Cycle {ci} started (role={effective_role}).",
+            run_id=effective_run_id,
+            mode="single",
+            domain=effective_domain,
+            role=effective_role,
+            cycle_index=ci,
+        )
 
         result = self.run_cycle(
             goal=effective_goal,
@@ -1646,6 +2323,37 @@ class CoreAgent:
 
         state["in_progress"] = True
 
+        # Discovery + autonomy UI fields into state (help diagnostics panel)
+        try:
+            discovery = self._compute_discovery_snapshot(summary if isinstance(summary, dict) else {})
+            state["last_discovery"] = discovery
+            autonomy = self._compute_autonomy_snapshot(
+                mode="single",
+                experiment_mode=experiment_mode,
+                speed_mode=self.speed_mode,
+                stability_status=self.get_stability_status(),
+                recent_rye=(self._meta_state.get("single_run_stats") or {}).get("recent_rye", None),
+            )
+            state["autonomy"] = autonomy
+        except Exception:
+            pass
+
+        # Persist state so Streamlit can read it even if the caller forgets.
+        self.save_state_to_storage(state)
+
+        # Presence + event
+        self._set_presence(effective_role, "idle")
+        self._emit_event(
+            "cycle_end",
+            f"Cycle {ci} completed (role={effective_role}).",
+            run_id=effective_run_id,
+            mode="single",
+            domain=effective_domain,
+            role=effective_role,
+            cycle_index=ci,
+            extra={"rye": summary.get("RYE"), "delta_R": summary.get("delta_R")},
+        )
+
         return {
             "state": state,
             "summary": summary,
@@ -1684,9 +2392,40 @@ class CoreAgent:
         if source_controls:
             effective_source_controls.update(source_controls)
 
-        effective_pdf_bytes: Optional[bytes] = (
-            pdf_bytes if pdf_bytes is not None else self._attached_pdf_bytes
-        )
+        effective_pdf_bytes: Optional[bytes] = pdf_bytes if pdf_bytes is not None else self._attached_pdf_bytes
+
+        effective_domain = domain or "general"
+        effective_run_id = run_id or self._active_run_context.get("run_id") or self._generate_run_id()
+
+        # Emit a "cycle_start" heartbeat + presence for UI
+        try:
+            self._set_presence(role, "running")
+            self._emit_live_state(
+                {
+                    "status": "running",
+                    "heartbeat_state": "healthy",
+                    "heartbeat_ts": time.time(),
+                    "mode": self._active_run_context.get("mode") or "single",
+                    "run_id": effective_run_id,
+                    "goal": goal,
+                    "domain": effective_domain,
+                    "role": role,
+                    "cycle_in_progress": cycle_index,
+                    "last_cycle_started_at_ts": cycle_started_at_ts,
+                },
+                merge=True,
+            )
+            self._emit_event(
+                "cycle_start",
+                f"Cycle {cycle_index} started (role={role}).",
+                run_id=effective_run_id,
+                mode=self._active_run_context.get("mode") or "single",
+                domain=effective_domain,
+                role=role,
+                cycle_index=cycle_index,
+            )
+        except Exception:
+            pass
 
         # Preferred advanced signature with MSIL and RYE mode hooks
         try:
@@ -1697,11 +2436,11 @@ class CoreAgent:
                 source_controls=effective_source_controls,
                 pdf_bytes=effective_pdf_bytes,
                 biomarker_snapshot=biomarker_snapshot,
-                domain=domain,
+                domain=effective_domain,
                 msil_mode=self.msil_mode,             # type: ignore[arg-type]
                 msil_track_mode=self.msil_track_mode, # type: ignore[arg-type]
                 rye_mode=self.rye_mode,               # type: ignore[arg-type]
-                run_id=run_id,
+                run_id=effective_run_id,
                 experiment_mode=experiment_mode,
             )
         except TypeError:
@@ -1714,7 +2453,7 @@ class CoreAgent:
                     source_controls=effective_source_controls,
                     pdf_bytes=effective_pdf_bytes,
                     biomarker_snapshot=biomarker_snapshot,
-                    domain=domain,
+                    domain=effective_domain,
                 )
             except TypeError:
                 try:
@@ -1736,15 +2475,13 @@ class CoreAgent:
                 summary = {"raw_result": result}
             result = {"summary": summary}
 
-        # Enrich summary with core metadata so MemoryStore and UI have stable fields
+        # Normalize/augment summary for stability and diagnostics
         if isinstance(summary, dict):
-            if "cycle_index" not in summary:
-                summary["cycle_index"] = cycle_index
+            # Stable keys
+            summary.setdefault("cycle_index", cycle_index)
             summary.setdefault("role", role)
-            if domain is not None:
-                summary.setdefault("domain", domain)
-            if run_id is not None:
-                summary.setdefault("run_id", run_id)
+            summary.setdefault("domain", effective_domain)
+            summary.setdefault("run_id", effective_run_id)
             if experiment_mode is not None:
                 summary.setdefault("experiment_mode", experiment_mode)
             if goal:
@@ -1752,8 +2489,13 @@ class CoreAgent:
 
             summary.setdefault("started_at_ts", cycle_started_at_ts)
             summary.setdefault("completed_at_ts", time.time())
-            if "timestamp" not in summary:
-                summary["timestamp"] = summary.get("completed_at_ts")
+            summary.setdefault("timestamp", summary.get("completed_at_ts"))
+
+            # Normalize Energy/energy
+            if "Energy" in summary and "energy" not in summary:
+                summary["energy"] = summary.get("Energy")
+            if "energy" in summary and "Energy" not in summary:
+                summary["Energy"] = summary.get("energy")
 
             # Attach tool stats if present on the raw result
             tool_stats = result.get("tool_stats")
@@ -1766,13 +2508,39 @@ class CoreAgent:
                 if isinstance(citations, list):
                     summary.setdefault("citations", citations)
 
+            # Discovery cards (score/confidence) + autonomy indicator fields for UI
+            try:
+                discovery = self._compute_discovery_snapshot(summary)
+                summary.setdefault("discovery_score", discovery.get("score"))
+                summary.setdefault("discovery_confidence", discovery.get("confidence"))
+                summary.setdefault("discovery_tier", discovery.get("tier"))
+            except Exception:
+                pass
+
+            try:
+                autonomy = self._compute_autonomy_snapshot(
+                    mode=self._active_run_context.get("mode") or "single",
+                    experiment_mode=experiment_mode,
+                    speed_mode=self.speed_mode,
+                    stability_status=self.get_stability_status(),
+                    recent_rye=(self._meta_state.get("single_run_stats") or {}).get("recent_rye", None),
+                )
+                if isinstance(autonomy, dict):
+                    if "level" in autonomy:
+                        summary.setdefault("autonomy_level", autonomy.get("level"))
+                    if "label" in autonomy:
+                        summary.setdefault("autonomy_label", autonomy.get("label"))
+                    summary.setdefault("autonomy", autonomy)
+            except Exception:
+                pass
+
             # Discovery hooks (RYE spikes, hypotheses, etc.)
             self._handle_post_cycle_discovery(
                 summary,
                 cycle_index=cycle_index,
                 role=role,
-                domain=domain,
-                run_id=run_id,
+                domain=effective_domain,
+                run_id=effective_run_id,
                 experiment_mode=experiment_mode,
             )
 
@@ -1789,8 +2557,36 @@ class CoreAgent:
                     # Generic append helper some stores may implement
                     self.memory_store.append_cycle_log(summary)  # type: ignore[attr-defined]
             except Exception:
-                # Logging failures should never break the main loop
                 pass
+
+        # Emit "cycle_end" + state snapshot
+        try:
+            self._set_presence(role, "idle")
+            self._emit_event(
+                "cycle_end",
+                f"Cycle {cycle_index} completed (role={role}).",
+                run_id=effective_run_id,
+                mode=self._active_run_context.get("mode") or "single",
+                domain=effective_domain,
+                role=role,
+                cycle_index=cycle_index,
+                extra={"rye": summary.get("RYE"), "delta_R": summary.get("delta_R")},
+            )
+            self._emit_live_state(
+                {
+                    "heartbeat_ts": time.time(),
+                    "last_update_ts": time.time(),
+                    "run_id": effective_run_id,
+                    "domain": effective_domain,
+                    "role": role,
+                    "last_summary": _brief_summary(summary) if isinstance(summary, dict) else None,
+                    "last_rye": summary.get("RYE") if isinstance(summary, dict) else None,
+                    "cycle_last_completed": cycle_index,
+                },
+                merge=True,
+            )
+        except Exception:
+            pass
 
         return result
 
@@ -1835,6 +2631,9 @@ class CoreAgent:
 
                 eff_pdf_bytes = pdf_bytes if pdf_bytes is not None else self._attached_pdf_bytes
 
+                effective_domain = domain or "general"
+                effective_run_id = run_id or self._active_run_context.get("run_id") or self._generate_run_id()
+
                 result = self.tgrm_loop.run_multi_goal_cycle(  # type: ignore[attr-defined]
                     goals=goals_list,
                     cycle_index=cycle_index,
@@ -1842,29 +2641,37 @@ class CoreAgent:
                     source_controls=effective_source_controls,
                     pdf_bytes=eff_pdf_bytes,
                     biomarker_snapshot=biomarker_snapshot,
-                    domain=domain,
+                    domain=effective_domain,
                     msil_mode=self.msil_mode,
                     msil_track_mode=self.msil_track_mode,
                     rye_mode=self.rye_mode,
-                    run_id=run_id,
+                    run_id=effective_run_id,
                     experiment_mode=experiment_mode,
                 )
                 summary = result.get("summary", {})
                 if isinstance(summary, dict):
-                    if run_id is not None:
-                        summary.setdefault("run_id", run_id)
+                    summary.setdefault("run_id", effective_run_id)
                     if experiment_mode is not None:
                         summary.setdefault("experiment_mode", experiment_mode)
-                    if domain is not None:
-                        summary.setdefault("domain", domain)
+                    summary.setdefault("domain", effective_domain)
                     summary.setdefault("role", role)
                     summary.setdefault("cycle_index", cycle_index)
+
+                    # Discovery / autonomy UI fields
+                    try:
+                        discovery = self._compute_discovery_snapshot(summary)
+                        summary.setdefault("discovery_score", discovery.get("score"))
+                        summary.setdefault("discovery_confidence", discovery.get("confidence"))
+                        summary.setdefault("discovery_tier", discovery.get("tier"))
+                    except Exception:
+                        pass
+
                     self._handle_post_cycle_discovery(
                         summary,
                         cycle_index=cycle_index,
                         role=role,
-                        domain=domain,
-                        run_id=run_id,
+                        domain=effective_domain,
+                        run_id=effective_run_id,
                         experiment_mode=experiment_mode,
                     )
                 return result
@@ -1939,6 +2746,8 @@ class CoreAgent:
         effective_run_id = run_id or self._generate_run_id()
         run_started_at_ts = time.time()
 
+        self._set_active_run_context(run_id=effective_run_id, mode="single", started_at_ts=run_started_at_ts)
+
         # Global failsafe on cycles
         try:
             max_cycles_failsafe = int(CONTINUOUS_MODE_DEFAULTS.get("max_cycles_failsafe", 10_000_000))
@@ -1954,9 +2763,7 @@ class CoreAgent:
         preset_cfg = get_preset(effective_domain)
 
         try:
-            default_watchdog = float(
-                CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes)
-            )
+            default_watchdog = float(CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes))
         except Exception:
             default_watchdog = watchdog_interval_minutes
         if watchdog_interval_minutes == 5.0:
@@ -2004,9 +2811,6 @@ class CoreAgent:
                 elif runtime_profile == "90_days":
                     max_minutes = 90 * 24 * 60.0
                 elif runtime_profile == "forever":
-                    # Treat "forever" as a long but still finite hint
-                    # If no explicit max_minutes, we simply leave it None
-                    # and rely on cycle caps and failsafe.
                     pass
 
             if isinstance(est_cycles, (int, float)) and max_cycles <= 100:
@@ -2030,7 +2834,6 @@ class CoreAgent:
                 max_minutes = 1440.0
                 max_cycles = 1_000_000
             elif max_cycles >= max_cycles_failsafe:
-                # Clamp to failsafe but do not enable forever
                 max_cycles = max_cycles_failsafe
 
         # Checkpoint resume (finite only)
@@ -2049,7 +2852,7 @@ class CoreAgent:
                         if max_minutes is None or max_minutes > float(remaining):
                             max_minutes = float(remaining)
 
-        history = self.memory_store.get_cycle_history()
+        history = self._get_cycle_history_safe()
         start_index = len(history)
 
         start_time = time.monotonic()
@@ -2063,6 +2866,36 @@ class CoreAgent:
         # Default experiment mode for Breakthrough Hunter
         if experiment_mode is None and self.breakthrough_hunter_enabled:
             experiment_mode = "breakthrough"
+
+        # Run start event + live state
+        self._set_presence(role, "running")
+        self._emit_event(
+            "run_start",
+            f"Continuous run started (role={role}, domain={effective_domain}).",
+            run_id=effective_run_id,
+            mode="single",
+            domain=effective_domain,
+            role=role,
+            extra={"runtime_profile": runtime_profile, "max_cycles": max_cycles, "max_minutes": max_minutes},
+        )
+        self._emit_live_state(
+            {
+                "status": "running",
+                "heartbeat_state": "healthy",
+                "heartbeat_ts": time.time(),
+                "mode": "single",
+                "run_id": effective_run_id,
+                "goal": goal,
+                "domain": effective_domain,
+                "role": role,
+                "runtime_profile": runtime_profile,
+                "experiment_mode": experiment_mode,
+                "cycles_completed": 0,
+                "cycle_index": start_index,
+                "uptime_s": 0.0,
+            },
+            merge=True,
+        )
 
         while True:
             if i >= max_cycles:
@@ -2108,6 +2941,21 @@ class CoreAgent:
                     self.memory_store.heartbeat(label=heartbeat_label)
                 except Exception:
                     pass
+
+                # Live state heartbeat tick (keeps top bar "alive")
+                self._emit_live_state(
+                    {
+                        "heartbeat_ts": time.time(),
+                        "status": "running",
+                        "heartbeat_state": "healthy",
+                        "run_id": effective_run_id,
+                        "cycles_completed": len(summaries),
+                        "cycle_index": start_index + i,
+                        "uptime_s": max(0.0, time.time() - run_started_at_ts),
+                        "recent_rye": recent_rye[-10:],
+                    },
+                    merge=True,
+                )
                 last_watchdog_update = now
 
             ci = start_index + i
@@ -2125,15 +2973,34 @@ class CoreAgent:
             summary = result.get("summary", {})
             summaries.append(summary)
 
-            rye_val = summary.get("RYE")
+            rye_val = summary.get("RYE") if isinstance(summary, dict) else None
             if isinstance(rye_val, (int, float)):
                 recent_rye.append(float(rye_val))
                 if len(recent_rye) > 10:
                     recent_rye.pop(0)
 
+            # Update live state after each cycle (fixes “0 of N then jump” behavior in UI)
+            try:
+                self._emit_live_state(
+                    {
+                        "heartbeat_ts": time.time(),
+                        "status": "running",
+                        "heartbeat_state": "healthy",
+                        "run_id": effective_run_id,
+                        "cycles_completed": len(summaries),
+                        "cycle_index": ci + 1,
+                        "last_rye": rye_val,
+                        "last_summary": _brief_summary(summary) if isinstance(summary, dict) else None,
+                        "uptime_s": max(0.0, time.time() - run_started_at_ts),
+                    },
+                    merge=True,
+                )
+            except Exception:
+                pass
+
             # Stability Kernel guard
             action = self._apply_stability_kernel(
-                summary,
+                summary if isinstance(summary, dict) else {},
                 mode="single",
                 goal=goal,
                 domain=effective_domain,
@@ -2178,13 +3045,15 @@ class CoreAgent:
             "completed_at_ts": run_completed_at_ts,
         }
 
-        if _rye_metrics_mod is not None:
-            try:
-                if hasattr(_rye_metrics_mod, "run_health_score"):
-                    health_score = _rye_metrics_mod.run_health_score(summaries)  # type: ignore[attr-defined]
-                    run_metadata["run_health_score"] = health_score
-            except Exception:
-                pass
+        # Diagnostics (always attach something)
+        try:
+            if _rye_metrics_mod is not None and hasattr(_rye_metrics_mod, "run_health_score"):
+                health_score = _rye_metrics_mod.run_health_score(summaries)  # type: ignore[attr-defined]
+                run_metadata["run_health_score"] = health_score
+        except Exception:
+            pass
+
+        run_metadata["run_diagnostics"] = self._compute_basic_run_diagnostics(summaries, domain=effective_domain)
 
         if self.citations_enabled:
             total_citations = 0
@@ -2211,6 +3080,38 @@ class CoreAgent:
             run_metadata=run_metadata,
             summaries=summaries,
         )
+
+        # Run end event + live state
+        self._set_presence(role, "idle")
+        self._emit_event(
+            "run_end",
+            f"Continuous run ended (reason={stop_reason}).",
+            run_id=effective_run_id,
+            mode="single",
+            domain=effective_domain,
+            role=role,
+            extra={"stop_reason": stop_reason, "cycles_completed": len(summaries)},
+        )
+        self._emit_live_state(
+            {
+                "status": "idle",
+                "heartbeat_state": "idle" if stop_reason != "stability_guard" else "backoff",
+                "heartbeat_ts": time.time(),
+                "mode": "single",
+                "run_id": effective_run_id,
+                "goal": goal,
+                "domain": effective_domain,
+                "role": role,
+                "cycles_completed": len(summaries),
+                "cycle_index": start_index + len(summaries),
+                "stop_reason": stop_reason,
+                "run_metadata": run_metadata,
+            },
+            merge=True,
+        )
+
+        # Clear active run context
+        self._set_active_run_context(run_id=None, mode=None, started_at_ts=None)
 
         return summaries
 
@@ -2266,6 +3167,8 @@ class CoreAgent:
         preset_cfg = get_preset(effective_domain)
         run_started_at_ts = time.time()
 
+        self._set_active_run_context(run_id=effective_run_id, mode="swarm", started_at_ts=run_started_at_ts)
+
         # Hard override: no true forever runs at CoreAgent level
         forever = False
 
@@ -2276,6 +3179,10 @@ class CoreAgent:
         roles_list: List[str] = [str(r) for r in roles_seq][: self.max_agents]
         if not roles_list:
             roles_list = ["agent"]
+
+        # Mark all roles idle initially
+        for r in roles_list:
+            self._set_presence(r, "idle")
 
         # Global failsafe on rounds
         try:
@@ -2299,9 +3206,7 @@ class CoreAgent:
                 pass
 
         try:
-            default_watchdog = float(
-                CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes)
-            )
+            default_watchdog = float(CONTINUOUS_MODE_DEFAULTS.get("watchdog_interval_minutes", watchdog_interval_minutes))
         except Exception:
             default_watchdog = watchdog_interval_minutes
         if watchdog_interval_minutes == 5.0:
@@ -2354,10 +3259,6 @@ class CoreAgent:
                     max_minutes = 24 * 60.0
                 elif runtime_profile == "90_days":
                     max_minutes = 90 * 24 * 60.0
-                elif runtime_profile == "forever":
-                    # Treat "forever" as a long but still finite hint.
-                    # We leave max_minutes unchanged and rely on max_rounds.
-                    pass
 
             if stop_rye is None and isinstance(profile_stop_rye, (int, float)):
                 stop_rye = float(profile_stop_rye)
@@ -2371,17 +3272,13 @@ class CoreAgent:
         if resume_from_checkpoint and self.auto_resume_enabled:
             checkpoint = self._load_checkpoint()
             if checkpoint and checkpoint.get("in_progress"):
-                if (
-                    checkpoint.get("goal") == goal
-                    and checkpoint.get("mode") == "swarm"
-                    and checkpoint.get("domain") == effective_domain
-                ):
+                if checkpoint.get("goal") == goal and checkpoint.get("mode") == "swarm" and checkpoint.get("domain") == effective_domain:
                     remaining = checkpoint.get("remaining_minutes")
                     if isinstance(remaining, (int, float)) and remaining > 0:
                         if max_minutes is None or max_minutes > float(remaining):
                             max_minutes = float(remaining)
 
-        history = self.memory_store.get_cycle_history()
+        history = self._get_cycle_history_safe()
         start_index = len(history)
 
         start_time = time.monotonic()
@@ -2394,6 +3291,34 @@ class CoreAgent:
 
         if experiment_mode is None and self.breakthrough_hunter_enabled:
             experiment_mode = "breakthrough"
+
+        # Run start state + event
+        self._emit_event(
+            "run_start",
+            f"Swarm run started (domain={effective_domain}, roles={len(roles_list)}).",
+            run_id=effective_run_id,
+            mode="swarm",
+            domain=effective_domain,
+            extra={"roles": roles_list, "runtime_profile": runtime_profile, "max_rounds": max_rounds, "max_minutes": max_minutes},
+        )
+        self._emit_live_state(
+            {
+                "status": "running",
+                "heartbeat_state": "healthy",
+                "heartbeat_ts": time.time(),
+                "mode": "swarm",
+                "run_id": effective_run_id,
+                "goal": goal,
+                "domain": effective_domain,
+                "roles": roles_list,
+                "runtime_profile": runtime_profile,
+                "experiment_mode": experiment_mode,
+                "rounds_completed": 0,
+                "round_index": 0,
+                "uptime_s": 0.0,
+            },
+            merge=True,
+        )
 
         while True:
             if round_idx >= max_rounds:
@@ -2439,9 +3364,29 @@ class CoreAgent:
                     self.memory_store.heartbeat(label=heartbeat_label)
                 except Exception:
                     pass
+
+                # UI heartbeat tick
+                self._emit_live_state(
+                    {
+                        "heartbeat_ts": time.time(),
+                        "status": "running",
+                        "heartbeat_state": "healthy",
+                        "run_id": effective_run_id,
+                        "rounds_completed": round_idx,
+                        "round_index": round_idx,
+                        "uptime_s": max(0.0, time.time() - run_started_at_ts),
+                        "recent_round_rye": recent_round_rye[-10:],
+                    },
+                    merge=True,
+                )
+
                 last_watchdog_update = now
 
             base_ci = start_index + round_idx * max(1, len(roles_list))
+
+            # Mark roles running as we iterate
+            for r in roles_list:
+                self._set_presence(r, "running")
 
             round_summaries = self.run_multi_agent_round(
                 goal=goal,
@@ -2454,6 +3399,10 @@ class CoreAgent:
                 run_id=effective_run_id,
                 experiment_mode=experiment_mode,
             )
+
+            # Mark roles idle after round
+            for r in roles_list:
+                self._set_presence(r, "idle")
 
             all_summaries.extend(round_summaries)
 
@@ -2479,6 +3428,22 @@ class CoreAgent:
                 avg_round_contra = sum(round_contras) / len(round_contras)
 
             self._meta_note_swarm_round(avg_round_rye, avg_round_contra)
+
+            # Update UI after each round
+            self._emit_live_state(
+                {
+                    "heartbeat_ts": time.time(),
+                    "status": "running",
+                    "heartbeat_state": "healthy",
+                    "run_id": effective_run_id,
+                    "rounds_completed": round_idx + 1,
+                    "round_index": round_idx + 1,
+                    "last_round_avg_rye": avg_round_rye,
+                    "recent_round_rye": recent_round_rye[-10:],
+                    "uptime_s": max(0.0, time.time() - run_started_at_ts),
+                },
+                merge=True,
+            )
 
             # Stability Kernel guard
             if round_summaries:
@@ -2527,13 +3492,14 @@ class CoreAgent:
             "completed_at_ts": run_completed_at_ts,
         }
 
-        if _rye_metrics_mod is not None:
-            try:
-                if hasattr(_rye_metrics_mod, "run_health_score"):
-                    health_score = _rye_metrics_mod.run_health_score(all_summaries)  # type: ignore[attr-defined]
-                    run_metadata["run_health_score"] = health_score
-            except Exception:
-                pass
+        try:
+            if _rye_metrics_mod is not None and hasattr(_rye_metrics_mod, "run_health_score"):
+                health_score = _rye_metrics_mod.run_health_score(all_summaries)  # type: ignore[attr-defined]
+                run_metadata["run_health_score"] = health_score
+        except Exception:
+            pass
+
+        run_metadata["run_diagnostics"] = self._compute_basic_run_diagnostics(all_summaries, domain=effective_domain)
 
         if self.citations_enabled:
             total_citations = 0
@@ -2561,6 +3527,34 @@ class CoreAgent:
             summaries=all_summaries,
         )
 
+        # Run end event + state
+        self._emit_event(
+            "run_end",
+            f"Swarm run ended (reason={stop_reason}).",
+            run_id=effective_run_id,
+            mode="swarm",
+            domain=effective_domain,
+            extra={"stop_reason": stop_reason, "rounds_completed": round_idx, "cycles_total": len(all_summaries)},
+        )
+        self._emit_live_state(
+            {
+                "status": "idle",
+                "heartbeat_state": "idle" if stop_reason != "stability_guard" else "backoff",
+                "heartbeat_ts": time.time(),
+                "mode": "swarm",
+                "run_id": effective_run_id,
+                "goal": goal,
+                "domain": effective_domain,
+                "roles": roles_list,
+                "rounds_completed": round_idx,
+                "stop_reason": stop_reason,
+                "run_metadata": run_metadata,
+            },
+            merge=True,
+        )
+
+        self._set_active_run_context(run_id=None, mode=None, started_at_ts=None)
+
         return all_summaries
 
     # ------------------------------------------------------------------
@@ -2585,10 +3579,15 @@ class CoreAgent:
 
         for i, role in enumerate(roles):
             ci = base_cycle_index + i
+            r = str(role)
+
+            # Presence indicator updates for UI
+            self._set_presence(r, "running")
+
             result = self.run_cycle(
                 goal=goal,
                 cycle_index=ci,
-                role=str(role),
+                role=r,
                 source_controls=source_controls,
                 pdf_bytes=pdf_bytes,
                 biomarker_snapshot=biomarker_snapshot,
@@ -2598,6 +3597,8 @@ class CoreAgent:
             )
             summary = result.get("summary", {})
             summaries.append(summary)
+
+            self._set_presence(r, "idle")
 
         return summaries
 
@@ -2652,7 +3653,7 @@ class CoreAgent:
     ) -> Optional[Path]:
         """Generate a weekly snapshot report using SnapshotGenerator."""
         try:
-            history = self.memory_store.get_cycle_history()
+            history = self._get_cycle_history_safe()
             cycle_stats = {
                 "cycles_total": len(history),
             }
@@ -2726,11 +3727,8 @@ class CoreAgent:
             "speed_mode": self.speed_mode,
             "citations_enabled": self.citations_enabled,
         }
-        try:
-            history = self.memory_store.get_cycle_history()
-            status["total_cycles"] = len(history)
-        except Exception:
-            status["total_cycles"] = None
+        history = self._get_cycle_history_safe()
+        status["total_cycles"] = len(history)
 
         try:
             status["meta_state"] = {
@@ -2769,11 +3767,7 @@ class CoreAgent:
             profile["burst_rye_avg"] = sum(rye_vals) / len(rye_vals)
             profile["burst_rye_last"] = rye_vals[-1]
 
-        history: List[Dict[str, Any]] = []
-        try:
-            history = self.memory_store.get_cycle_history()
-        except Exception:
-            history = []
+        history = self._get_cycle_history_safe()
 
         diag: Optional[Dict[str, Any]] = None
         option_c: Optional[Dict[str, Any]] = None
@@ -2798,6 +3792,8 @@ class CoreAgent:
                     )
             except Exception:
                 option_c = None
+        else:
+            diag = self._compute_basic_run_diagnostics(history, domain=effective_domain)
 
         if diag is not None:
             profile["diagnostics"] = diag
@@ -2908,7 +3904,7 @@ class CoreAgent:
 
             summaries: List[Dict[str, Any]] = []
             start_time = time.monotonic()
-            history = self.memory_store.get_cycle_history()
+            history = self._get_cycle_history_safe()
             base_index = len(history)
 
             for i in range(max_cycles):
@@ -2978,9 +3974,7 @@ class CoreAgent:
         }
 
         if not self.learning_enabled:
-            plan["actions"].append(
-                "Learning is disabled in config (learning_enabled=False). Enable it to train the agent."
-            )
+            plan["actions"].append("Learning is disabled in config (learning_enabled=False). Enable it to train the agent.")
             self.learning_plan = plan
             return plan
 
@@ -2990,7 +3984,7 @@ class CoreAgent:
         option_c = None
         if _rye_metrics_mod is not None and hasattr(_rye_metrics_mod, "build_option_c_signature"):
             try:
-                history = self.memory_store.get_cycle_history()
+                history = self._get_cycle_history_safe()
                 if history:
                     option_c = _rye_metrics_mod.build_option_c_signature(  # type: ignore[attr-defined]
                         history,
@@ -3014,13 +4008,9 @@ class CoreAgent:
             )
         else:
             if isinstance(rec_profile, str):
-                actions.append(
-                    f"Use runtime profile '{rec_profile}' for the next training burst in domain '{plan['domain']}'."
-                )
+                actions.append(f"Use runtime profile '{rec_profile}' for the next training burst in domain '{plan['domain']}'.")
             if isinstance(rec_stop, (int, float)):
-                actions.append(
-                    f"Start with a conservative RYE stop threshold around {rec_stop:.3f} for diagnostic runs."
-                )
+                actions.append(f"Start with a conservative RYE stop threshold around {rec_stop:.3f} for diagnostic runs.")
 
         if option_c:
             try:
@@ -3033,15 +4023,9 @@ class CoreAgent:
             except Exception:
                 pass
 
-        actions.append(
-            "Use run_training_burst(...) with focused goals to teach the agent on compact, high signal problems."
-        )
-        actions.append(
-            "Periodically call prune_memory(...) to keep MemoryStore healthy and avoid dilution of high value traces."
-        )
-        actions.append(
-            "After major bursts, regenerate snapshots with generate_snapshot(...) to track skill buildup over weeks."
-        )
+        actions.append("Use run_training_burst(...) with focused goals to teach the agent on compact, high signal problems.")
+        actions.append("Periodically call prune_memory(...) to keep MemoryStore healthy and avoid dilution of high value traces.")
+        actions.append("After major bursts, regenerate snapshots with generate_snapshot(...) to track skill buildup over weeks.")
 
         plan["actions"] = actions
         self.learning_plan = plan
@@ -3188,3 +4172,146 @@ class CoreAgent:
             "enabled": True,
             "items": [],
         }
+
+    # ------------------------------------------------------------------
+    # Protocol synthesizer helpers (optional)
+    # ------------------------------------------------------------------
+    def synthesize_protocols_from_validated(
+        self,
+        *,
+        max_items: int = 10,
+        run_id: Optional[str] = None,
+        domain: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Turn validated hypotheses + diagnostics into candidate protocols (if available)."""
+        if self.protocol_synthesizer is None:
+            return {"enabled": False, "protocols": [], "reason": "protocol_synthesizer_not_available"}
+
+        rid = run_id or self._active_run_context.get("run_id") or self._generate_run_id()
+        effective_domain = domain or "general"
+
+        # Collect inputs
+        try:
+            hyp_summary = self.hypothesis_manager.summary_strings()
+            validated = hyp_summary.get("validated", []) if isinstance(hyp_summary, dict) else []
+        except Exception:
+            validated = []
+
+        history = self._get_cycle_history_safe()
+        diagnostics = None
+        if _rye_metrics_mod is not None and hasattr(_rye_metrics_mod, "build_run_diagnostics"):
+            try:
+                diagnostics = _rye_metrics_mod.build_run_diagnostics(history, domain=effective_domain)  # type: ignore[attr-defined]
+            except Exception:
+                diagnostics = None
+        if diagnostics is None:
+            diagnostics = self._compute_basic_run_diagnostics(history, domain=effective_domain)
+
+        try:
+            fn = (
+                getattr(self.protocol_synthesizer, "synthesize_from_validated", None)
+                or getattr(self.protocol_synthesizer, "synthesize_protocols_from_validated", None)
+                or getattr(self.protocol_synthesizer, "synthesize", None)
+            )
+            if callable(fn):
+                try:
+                    result = fn(validated=validated, diagnostics=diagnostics, max_items=max_items, run_id=rid, domain=effective_domain)  # type: ignore[misc]
+                except TypeError:
+                    result = fn(validated, diagnostics, max_items)  # type: ignore[misc]
+                if isinstance(result, dict):
+                    result.setdefault("enabled", True)
+                    return result
+                if isinstance(result, list):
+                    return {"enabled": True, "protocols": result, "run_id": rid, "domain": effective_domain}
+        except Exception as exc:
+            return {"enabled": True, "protocols": [], "error": str(exc), "run_id": rid, "domain": effective_domain}
+
+        return {"enabled": True, "protocols": [], "run_id": rid, "domain": effective_domain}
+
+    # ------------------------------------------------------------------
+    # Run diagnostics + UI data access helpers
+    # ------------------------------------------------------------------
+    def get_run_diagnostics(
+        self,
+        *,
+        run_id: Optional[str] = None,
+        domain: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Compute run diagnostics (robust fallback if rye_metrics/diagnostics module missing)."""
+        history = self._get_cycle_history_safe()
+        if run_id:
+            history = [h for h in history if isinstance(h, dict) and h.get("run_id") == run_id]
+
+        if limit is not None and isinstance(limit, int) and limit > 0:
+            history = history[-limit:]
+
+        effective_domain = domain or (history[-1].get("domain") if history else "general")  # type: ignore[union-attr]
+
+        # 1) Prefer diagnostics module if present
+        if _diagnostics_mod is not None:
+            for fn_name in ("build_run_diagnostics", "compute_run_diagnostics", "run_diagnostics"):
+                fn = getattr(_diagnostics_mod, fn_name, None)
+                if callable(fn):
+                    try:
+                        out = fn(history=history, domain=effective_domain, config=self.config)  # type: ignore[misc]
+                        if isinstance(out, dict):
+                            return out
+                    except TypeError:
+                        try:
+                            out = fn(history, effective_domain)  # type: ignore[misc]
+                            if isinstance(out, dict):
+                                return out
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+        # 2) Next prefer rye_metrics
+        if _rye_metrics_mod is not None and hasattr(_rye_metrics_mod, "build_run_diagnostics"):
+            try:
+                out = _rye_metrics_mod.build_run_diagnostics(history, domain=effective_domain)  # type: ignore[attr-defined]
+                if isinstance(out, dict):
+                    return out
+            except Exception:
+                pass
+
+        # 3) Fallback
+        return self._compute_basic_run_diagnostics(history, domain=effective_domain)
+
+    def get_recent_events(
+        self,
+        *,
+        limit: int = 200,
+        run_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Read the JSONL event log for the narrative timeline feed."""
+        try:
+            if limit <= 0:
+                limit = 1
+        except Exception:
+            limit = 200
+
+        try:
+            if not self.event_log_path.exists():
+                return []
+            # Read tail-ish by loading all; acceptable for small logs.
+            # If you expect huge logs, rotate on the worker side.
+            lines = self.event_log_path.read_text(encoding="utf-8").splitlines()
+            out: List[Dict[str, Any]] = []
+            for line in lines[-limit:]:
+                try:
+                    obj = json.loads(line)
+                    if isinstance(obj, dict):
+                        out.append(obj)
+                except Exception:
+                    continue
+            if run_id:
+                out = [e for e in out if e.get("run_id") == run_id]
+            return out
+        except Exception:
+            return []
+
+    def get_live_worker_state(self) -> Dict[str, Any]:
+        """Read worker_state.json (as Streamlit sees it)."""
+        return _load_json_file(self.worker_state_path)
