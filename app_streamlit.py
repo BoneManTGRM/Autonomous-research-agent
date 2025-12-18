@@ -50,6 +50,7 @@ import os
 import re
 import sys
 import glob
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, Optional, Set
 from datetime import datetime
@@ -70,10 +71,14 @@ if str(REPO_ROOT) not in sys.path:
 
 # These will be filled from run_jobs imports when available
 RUNS_BASE_DIR: Optional[Path] = None
+RUNS_QUEUE_ROOT: Optional[Path] = None
 RUNS_PENDING_DIR: Optional[Path] = None
 RUNS_ACTIVE_DIR: Optional[Path] = None
 RUNS_FINISHED_DIR: Optional[Path] = None
 RUNS_ERROR_DIR: Optional[Path] = None
+
+# Optional: run_jobs result loader (covers legacy filenames too)
+_queue_load_job_result = None  # type: ignore[assignment]
 
 # -------------------------------------------------------------------
 # Imports: prefer package layout agent.*, guarded flat fallback
@@ -141,7 +146,9 @@ try:
             create_job,
             list_jobs as list_run_jobs,
             result_path,
+            load_job_result as _queue_load_job_result,
             BASE_DIR as RUNS_BASE_DIR,
+            QUEUE_ROOT as RUNS_QUEUE_ROOT,
             PENDING_DIR as RUNS_PENDING_DIR,
             ACTIVE_DIR as RUNS_ACTIVE_DIR,
             FINISHED_DIR as RUNS_FINISHED_DIR,
@@ -152,10 +159,12 @@ try:
         list_run_jobs = None  # type: ignore[assignment]
         result_path = None  # type: ignore[assignment]
         RUNS_BASE_DIR = None
+        RUNS_QUEUE_ROOT = None
         RUNS_PENDING_DIR = None
         RUNS_ACTIVE_DIR = None
         RUNS_FINISHED_DIR = None
         RUNS_ERROR_DIR = None
+        _queue_load_job_result = None  # type: ignore[assignment]
 
 except ModuleNotFoundError as e:
     # If the *agent package itself* is missing, allow flat layout fallback.
@@ -231,7 +240,9 @@ except ModuleNotFoundError as e:
             create_job,
             list_jobs as list_run_jobs,
             result_path,
+            load_job_result as _queue_load_job_result,
             BASE_DIR as RUNS_BASE_DIR,
+            QUEUE_ROOT as RUNS_QUEUE_ROOT,
             PENDING_DIR as RUNS_PENDING_DIR,
             ACTIVE_DIR as RUNS_ACTIVE_DIR,
             FINISHED_DIR as RUNS_FINISHED_DIR,
@@ -242,10 +253,12 @@ except ModuleNotFoundError as e:
         list_run_jobs = None  # type: ignore[assignment]
         result_path = None  # type: ignore[assignment]
         RUNS_BASE_DIR = None
+        RUNS_QUEUE_ROOT = None
         RUNS_PENDING_DIR = None
         RUNS_ACTIVE_DIR = None
         RUNS_FINISHED_DIR = None
         RUNS_ERROR_DIR = None
+        _queue_load_job_result = None  # type: ignore[assignment]
 
 
 # Use absolute path for default config relative to repo root
@@ -330,18 +343,10 @@ def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
         return yaml.safe_load(f) or {}
 
 
-def ensure_directories() -> None:
-    """Ensure that log directories exist."""
-    logs_path = REPO_ROOT / "logs"
-    sessions_path = logs_path / "sessions"
-    logs_path.mkdir(exist_ok=True)
-    sessions_path.mkdir(exist_ok=True)
-
-
 def get_runs_root() -> str:
-    """Return the root directory used for ARA run jobs.
+    """Return the base directory used for ARA run artifacts.
 
-    Primary source is run_jobs.BASE_DIR so that UI and worker are always in sync.
+    Primary source is run_jobs.BASE_DIR so UI and worker are always in sync.
     If that is not available, fall back to ARA_RUNS_DIR or <repo_root>/runs.
     """
     if isinstance(RUNS_BASE_DIR, Path):
@@ -352,20 +357,106 @@ def get_runs_root() -> str:
     return str(REPO_ROOT / "runs")
 
 
+def get_queue_root() -> str:
+    """Return the canonical queue root directory used for job files.
+
+    Primary source is run_jobs.QUEUE_ROOT (or run_jobs.PENDING_DIR parent).
+    Falls back to ARA_QUEUE_ROOT or <runs_root>/queue.
+    """
+    if isinstance(RUNS_QUEUE_ROOT, Path):
+        return str(RUNS_QUEUE_ROOT)
+    if isinstance(RUNS_PENDING_DIR, Path):
+        try:
+            return str(RUNS_PENDING_DIR.parent)
+        except Exception:
+            pass
+    env = os.getenv("ARA_QUEUE_ROOT")
+    if env:
+        return env
+    return str(Path(get_runs_root()) / "queue")
+
+
+def ensure_directories() -> None:
+    """Ensure that log directories exist.
+
+    Creates both:
+    - Repo-local logs (useful for local dev)
+    - Shared runs-root logs (preferred for worker/UI shared artifacts)
+    """
+    # Repo-local (legacy / dev convenience)
+    repo_logs_path = REPO_ROOT / "logs"
+    repo_sessions_path = repo_logs_path / "sessions"
+    repo_logs_path.mkdir(parents=True, exist_ok=True)
+    repo_sessions_path.mkdir(parents=True, exist_ok=True)
+
+    # Shared runs-root logs (recommended)
+    try:
+        runs_logs_path = Path(get_runs_root()) / "logs"
+        runs_sessions_path = runs_logs_path / "sessions"
+        runs_logs_path.mkdir(parents=True, exist_ok=True)
+        runs_sessions_path.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        # Non-fatal (e.g. permission issues in constrained environments)
+        pass
+
+
 @st.cache_resource
 def init_memory_store(config_path: str = CONFIG_PATH_DEFAULT) -> MemoryStore:
-    """Create a single MemoryStore instance for the Streamlit app (read only)."""
+    """Create a single MemoryStore instance for the Streamlit app (read only).
+
+    IMPORTANT:
+    Prefer a MemoryStore file under the runs root so the UI and the engine worker
+    naturally share the same state/cycle history on disk.
+    """
     ensure_directories()
     config = load_settings(config_path)
-    memory_file = config.get("memory_file", "logs/sessions/default_memory.json")
-    if not os.path.isabs(memory_file):
-        memory_file = str(REPO_ROOT / memory_file)
-    memory = MemoryStore(memory_file)
+
+    # Default relative location (resolved below)
+    memory_file_cfg = config.get("memory_file", "logs/sessions/default_memory.json")
+
+    # Resolve memory path:
+    # - absolute paths are used as-is
+    # - relative paths prefer runs-root (shared), but keep backward-compat by using
+    #   an existing repo-root file if that is where the current memory lives.
+    if isinstance(memory_file_cfg, str) and os.path.isabs(memory_file_cfg):
+        resolved = Path(memory_file_cfg)
+    else:
+        rel = str(memory_file_cfg) if memory_file_cfg is not None else "logs/sessions/default_memory.json"
+        runs_candidate = Path(get_runs_root()) / rel
+        repo_candidate = REPO_ROOT / rel
+
+        if runs_candidate.exists():
+            resolved = runs_candidate
+        elif repo_candidate.exists():
+            resolved = repo_candidate
+        else:
+            # Prefer shared runs-root for new deployments
+            resolved = runs_candidate
+
+    # Ensure parent directory exists
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    memory = MemoryStore(str(resolved))
     return memory
 
 
 def load_job_result(run_id: str) -> Optional[Dict[str, Any]]:
-    """Load a finished job result using run_jobs.result_path."""
+    """Load a finished job result.
+
+    Uses run_jobs.load_job_result when available (supports legacy result filenames),
+    with a strict fallback to run_jobs.result_path when needed.
+    """
+    if callable(_queue_load_job_result):
+        try:
+            data = _queue_load_job_result(run_id)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+
     if result_path is None:
         return None
     fp = result_path(run_id)
@@ -1377,15 +1468,34 @@ def _load_json_file(path: Path) -> Optional[Any]:
 
 def load_discovery_log() -> List[Dict[str, Any]]:
     """Try to load discovery log entries from standard locations."""
-    candidates = [
-        REPO_ROOT / "logs" / "discovery_log.json",
-        REPO_ROOT / "logs" / "discovery" / "discovery_log.json",
-        REPO_ROOT / "logs" / "discovery" / "discoveries.json",
-    ]
+    candidates: List[Path] = []
+
+    # Prefer shared runs-root logs, then repo-root logs
+    try:
+        runs_logs = Path(get_runs_root()) / "logs"
+        candidates.extend(
+            [
+                runs_logs / "discovery_log.json",
+                runs_logs / "discovery" / "discovery_log.json",
+                runs_logs / "discovery" / "discoveries.json",
+            ]
+        )
+    except Exception:
+        pass
+
+    candidates.extend(
+        [
+            REPO_ROOT / "logs" / "discovery_log.json",
+            REPO_ROOT / "logs" / "discovery" / "discovery_log.json",
+            REPO_ROOT / "logs" / "discovery" / "discoveries.json",
+        ]
+    )
+
     for p in candidates:
         data = _load_json_file(p)
         if isinstance(data, list):
             return [d for d in data if isinstance(d, dict)]
+
     # If discovery module exposes a helper, use it
     if _discovery_module is not None:
         try:
@@ -1405,10 +1515,26 @@ def load_snapshots() -> List[Dict[str, Any]]:
     Looks in legacy logs paths and also under run specific snapshot
     directories such as <runs_root>/<run_id>/snapshots when present.
     """
-    snapshot_dir_candidates: List[Path] = [
-        REPO_ROOT / "logs" / "snapshots",
-        REPO_ROOT / "logs" / "snapshot",
-    ]
+    snapshot_dir_candidates: List[Path] = []
+
+    # Prefer shared runs-root logs, then repo-root logs
+    try:
+        runs_logs = Path(get_runs_root()) / "logs"
+        snapshot_dir_candidates.extend(
+            [
+                runs_logs / "snapshots",
+                runs_logs / "snapshot",
+            ]
+        )
+    except Exception:
+        pass
+
+    snapshot_dir_candidates.extend(
+        [
+            REPO_ROOT / "logs" / "snapshots",
+            REPO_ROOT / "logs" / "snapshot",
+        ]
+    )
 
     # Also look under the runs root for per run snapshot folders
     try:
@@ -1568,11 +1694,29 @@ def extract_citation_rows_from_history(history: List[Dict[str, Any]]) -> List[Di
 
 def load_verification_log() -> List[Dict[str, Any]]:
     """Try to load verification log entries from standard locations."""
-    candidates = [
-        REPO_ROOT / "logs" / "verification_log.json",
-        REPO_ROOT / "logs" / "verification" / "verification_log.json",
-        REPO_ROOT / "logs" / "verification" / "results.json",
-    ]
+    candidates: List[Path] = []
+
+    # Prefer shared runs-root logs, then repo-root logs
+    try:
+        runs_logs = Path(get_runs_root()) / "logs"
+        candidates.extend(
+            [
+                runs_logs / "verification_log.json",
+                runs_logs / "verification" / "verification_log.json",
+                runs_logs / "verification" / "results.json",
+            ]
+        )
+    except Exception:
+        pass
+
+    candidates.extend(
+        [
+            REPO_ROOT / "logs" / "verification_log.json",
+            REPO_ROOT / "logs" / "verification" / "verification_log.json",
+            REPO_ROOT / "logs" / "verification" / "results.json",
+        ]
+    )
+
     for p in candidates:
         data = _load_json_file(p)
         if isinstance(data, list):
@@ -2101,6 +2245,11 @@ def main() -> None:
         layout="wide",
     )
 
+    # Resolve base + queue paths once for UI display
+    runs_base_dir = get_runs_root()
+    queue_root_dir = get_queue_root()
+    queue_pending_dir = str(Path(queue_root_dir) / "pending")
+
     # Header: ARA with yellow orange red gradient and powered by Reparodynamics pill
     st.markdown(
         """
@@ -2152,7 +2301,7 @@ def main() -> None:
     )
 
     st.caption(
-        "Finite mode only • Queue based runs • Engine worker processes jobs from ARA_RUNS_DIR/pending for *_job.json files.\n"
+        f"Finite mode only • Queue based runs • Engine worker processes jobs from `{queue_pending_dir}` for `*_job.json` files.\n"
         "This UI never runs TGRM loops directly. It only queues jobs and visualizes finished artifacts."
     )
 
@@ -2557,13 +2706,27 @@ def main() -> None:
                 "cycles_per_hour_estimate": CYCLES_PER_HOUR_ESTIMATE,
             }
 
-            # Snapshot configuration for the worker and Snapshots tab
+            # Shared snapshot target directory (runs-root preferred)
+            snapshots_target_dir = str(Path(get_runs_root()) / "logs" / "snapshots")
+
+            # Snapshot configuration for the worker and Snapshots tab (legacy compatibility)
             snapshot_config: Dict[str, Any] = {
                 "enabled": bool(enable_snapshots),
                 "every_n_cycles": int(snapshot_interval),
-                "target_dir": str(REPO_ROOT / "logs" / "snapshots"),
+                "target_dir": snapshots_target_dir,
             }
             runtime_hints["snapshot_config"] = snapshot_config
+
+            # Monitoring block (canonical, aligns with run_jobs defaults + worker expectations)
+            monitoring_config: Dict[str, Any] = {
+                "snapshots_enabled": bool(enable_snapshots),
+                "snapshot_interval_cycles": int(snapshot_interval) if enable_snapshots else None,
+                "snapshot_interval_minutes": None,
+                "snapshot_max_to_keep": 50,
+                "heartbeat_enabled": True,
+                "heartbeat_interval_seconds": 60,
+                "run_state_enabled": True,
+            }
 
             # Swarm configuration for the worker
             if enable_swarm:
@@ -2630,6 +2793,8 @@ def main() -> None:
                 "use_biomarkers": bool(use_biomarkers),
                 "multi_agent_pair": bool(multi_agent),
                 "notes": (run_label or "experiment").strip(),
+                # Canonical monitoring config (newer workers / run_jobs defaults)
+                "monitoring": monitoring_config,
             }
 
             if pdf_payload is not None:
@@ -2655,7 +2820,7 @@ def main() -> None:
             }
 
             # Single source of truth: register job through run_jobs.create_job.
-            # This writes the JSON into PENDING_DIR (and legacy queue) using the same BASE_DIR as the worker.
+            # This writes the JSON into PENDING_DIR (and legacy shadow copies) using the same queue root as the worker.
             run_id = create_job(config=run_config, meta=meta)
 
             st.success(f"Run request queued with run id `{run_id}`.")
@@ -2663,8 +2828,8 @@ def main() -> None:
                 st.caption(f"Pending job written to `{RUNS_PENDING_DIR / (str(run_id) + '_job.json')}`")
             else:
                 st.caption(
-                    "Job was queued via run_jobs.create_job. "
-                    "The engine worker should watch ARA_RUNS_DIR/pending for new *_job.json files."
+                    f"Job was queued via run_jobs.create_job. "
+                    f"The engine worker should watch `{queue_pending_dir}` for new `*_job.json` files."
                 )
 
     # ------------------------------
@@ -2674,8 +2839,8 @@ def main() -> None:
     st.subheader("Runs and job queue")
 
     # Debug view of what the UI actually sees on disk for the queue
-    runs_root = get_runs_root()
-    st.caption(f"DEBUG runs root: `{runs_root}`")
+    st.caption(f"DEBUG runs base dir: `{runs_base_dir}`")
+    st.caption(f"DEBUG queue root: `{queue_root_dir}`")
     st.caption(
         "DEBUG view of queue directories. Active can include stale files if a worker stopped before cleaning up."
     )
@@ -2684,7 +2849,8 @@ def main() -> None:
         if isinstance(specific, Path):
             base = specific
         else:
-            base = Path(runs_root) / label
+            # Fallback (legacy layout)
+            base = Path(runs_base_dir) / label
         try:
             if not base.exists() or not base.is_dir():
                 items: List[str] = []
@@ -2698,7 +2864,7 @@ def main() -> None:
 
                 # For pending/active, focus on job files for clarity
                 if label in ("pending", "active"):
-                    items = [x for x in items if x.endswith("_job.json")]
+                    items = [x for x in items if x.endswith("_job.json") or x.endswith(".json")]
 
                 # Avoid overly long debug output
                 if len(items) > 60:
@@ -2769,7 +2935,7 @@ def main() -> None:
         else:
             run_ids = [_get_job_id(j) for j in finished_jobs]
 
-            id_to_job = { _get_job_id(j): j for j in finished_jobs }
+            id_to_job = {_get_job_id(j): j for j in finished_jobs}
 
             def _format_run(jid: str) -> str:
                 j = id_to_job.get(jid)
@@ -2797,12 +2963,9 @@ def main() -> None:
     with col_runs_right:
         st.markdown("#### Active runs")
 
-        # Show the canonical pending directory used by run_jobs
-        if isinstance(RUNS_PENDING_DIR, Path):
-            pending_dir = str(RUNS_PENDING_DIR)
-        else:
-            runs_root = get_runs_root()
-            pending_dir = os.path.join(runs_root, "pending")
+        # Canonical pending directory used by run_jobs
+        pending_dir_path = RUNS_PENDING_DIR if isinstance(RUNS_PENDING_DIR, Path) else (Path(queue_root_dir) / "pending")
+        pending_dir = str(pending_dir_path)
 
         if not active_jobs:
             st.info("No active runs detected by run_jobs.")
@@ -2822,18 +2985,71 @@ def main() -> None:
         st.markdown("#### Queued runs")
         st.caption(f"Queue directory: `{pending_dir}`")
 
-        # Clear queue button (file based jobs under ARA_RUNS_DIR/pending)
+        # Clear queue button (canonical + legacy job copies)
         if st.button("🧹 Clear job queue", key="clear_queue_btn"):
-            pattern = os.path.join(pending_dir, "*_job.json")
             removed = 0
-            for fp in glob.glob(pattern):
+
+            def _is_uuid_stem(stem: str) -> bool:
                 try:
-                    os.remove(fp)
-                    removed += 1
+                    uuid.UUID(stem)
+                    return True
                 except Exception:
-                    # Ignore deletion errors and continue
-                    pass
-            st.success(f"Cleared {removed} queued job file(s) from {pending_dir}.")
+                    return False
+
+            # Canonical pending dir, legacy pending dir, and queue-root shadow copies
+            dirs_to_scan: List[Tuple[Path, bool]] = []
+
+            # canonical pending folder
+            try:
+                dirs_to_scan.append((Path(pending_dir), False))
+            except Exception:
+                pass
+
+            # legacy pending folder: <runs_root>/pending
+            try:
+                legacy_pending = Path(get_runs_root()) / "pending"
+                dirs_to_scan.append((legacy_pending, False))
+            except Exception:
+                pass
+
+            # queue root shadow copies (root-level *_job.json and legacy <uuid>.json)
+            try:
+                queue_root_path = Path(get_queue_root())
+                dirs_to_scan.append((queue_root_path, True))
+            except Exception:
+                queue_root_path = None  # type: ignore[assignment]
+
+            for dpath, root_level in dirs_to_scan:
+                if not isinstance(dpath, Path) or not dpath.exists() or not dpath.is_dir():
+                    continue
+
+                for fp in dpath.glob("*.json"):
+                    # Only clear job metadata (avoid deleting results / progress / unrelated json)
+                    name = fp.name
+
+                    # Never delete progress/result artifacts here
+                    if name.endswith("_progress.json") or name.endswith("_results.json") or name.endswith("_result.json"):
+                        continue
+
+                    # Canonical job naming
+                    if name.endswith("_job.json"):
+                        try:
+                            fp.unlink()
+                            removed += 1
+                        except Exception:
+                            pass
+                        continue
+
+                    # Legacy job naming: <uuid>.json at root or in legacy pending dir
+                    if _is_uuid_stem(fp.stem):
+                        try:
+                            fp.unlink()
+                            removed += 1
+                        except Exception:
+                            pass
+                        continue
+
+            st.success(f"Cleared {removed} queued job file(s) (canonical + legacy).")
             st.rerun()
 
         if not pending_jobs:
