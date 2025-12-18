@@ -1,6 +1,6 @@
 services:
   # ---------------------------------------------------------
-  # STREAMLIT WEB UI SERVICE
+  # SINGLE SERVICE: STREAMLIT UI + ENGINE WORKER (started via start.sh)
   # ---------------------------------------------------------
   - type: web
     name: reparodynamics-autonomous-agent
@@ -14,6 +14,7 @@ services:
       pip install -r requirements.txt
       chmod +x start.sh
 
+    # start.sh must start engine_worker.py (background) + streamlit (foreground)
     startCommand: ./start.sh
 
     autoDeploy: true
@@ -27,11 +28,19 @@ services:
 
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11
+        value: "3.11"
 
-      # Shared correct queue path for Streamlit
+      # Shared runs dir (single source of truth)
       - key: ARA_RUNS_DIR
         value: /opt/render/project/src/runs
+
+      # Make queue root explicit (avoids any ambiguity)
+      - key: ARA_QUEUE_ROOT
+        value: /opt/render/project/src/runs/queue
+
+      # Run worker in queue mode
+      - key: WORKER_QUEUE_MODE
+        value: "1"
 
       # Browser / Tavily controls
       - key: ENABLE_TAVILY
@@ -40,68 +49,13 @@ services:
         value: "0"
       - key: DISABLE_WEB_SEARCH
         value: "0"
-      # Optional: tune request rate and cache TTL for swarm runs
       - key: TAVILY_RPS
         value: "1.0"
       - key: BROWSER_CACHE_TTL_SECONDS
         value: "600"
 
+      # Secrets
       - key: OPENAI_API_KEY
         sync: false
-
-      - key: TAVILY_API_KEY
-        sync: false
-
-
-  # ---------------------------------------------------------
-  # ENGINE WORKER SERVICE (reads from queue, runs jobs)
-  # ---------------------------------------------------------
-  - type: worker
-    name: reparodynamics-autonomous-agent-worker
-    env: python
-    plan: starter
-
-    rootDir: .
-
-    buildCommand: |
-      pip install --upgrade pip
-      pip install -r requirements.txt
-
-    startCommand: python engine_worker.py
-
-    autoDeploy: true
-
-    # Shared disk for EXACT SAME run folders
-    disk:
-      name: ara-runs
-      mountPath: /opt/render/project/src/runs
-      sizeGB: 1
-
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11
-
-      # Worker must see the same queue path
-      - key: ARA_RUNS_DIR
-        value: /opt/render/project/src/runs
-
-      - key: WORKER_QUEUE_MODE
-        value: "1"
-
-      # Browser / Tavily controls (same as web service)
-      - key: ENABLE_TAVILY
-        value: "1"
-      - key: TAVILY_STUB_MODE
-        value: "0"
-      - key: DISABLE_WEB_SEARCH
-        value: "0"
-      - key: TAVILY_RPS
-        value: "1.0"
-      - key: BROWSER_CACHE_TTL_SECONDS
-        value: "600"
-
-      - key: OPENAI_API_KEY
-        sync: false
-
       - key: TAVILY_API_KEY
         sync: false
