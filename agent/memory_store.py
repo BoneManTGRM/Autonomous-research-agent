@@ -36,12 +36,12 @@ Reparodynamics interpretation:
     The run_state, worker_state, watchdog, goal_index, events, discoveries,
     run_manifests, tool_events, milestones, hypothesis_evolution,
     option_c_diagnostics, swarm_contracts, learning_burst, benchmarks,
-    source_index, replay_buffer, and msil_snapshots sections act as a meta layer:
-    they record how the system itself is running so that the agent can restart and continue
-    repair with minimal extra energy and give swarm level analytics
-    (per role and per goal), plus a running log of key cure and treatment
-    candidates, tool behavior, benchmark performance, learning curve
-    shaping, and optional replay/curriculum artifacts.
+    source_index, replay_buffer, and msil_snapshots sections act as a meta
+    layer: they record how the system itself is running so that the agent can
+    restart and continue repair with minimal extra energy and give swarm level
+    analytics (per role and per goal), plus a running log of key cure and
+    treatment candidates, tool behavior, benchmark performance, learning curve
+    shaping, and high value replay/skill intelligence artifacts.
 """
 
 from __future__ import annotations
@@ -86,14 +86,14 @@ MAX_RUN_MANIFESTS = 10_000
 MAX_MILESTONES = 20_000
 MAX_BENCHMARKS = 100_000
 
+# Replay + MSIL caps (kept separate so you can tune without touching core logs)
+MAX_REPLAY_BUFFER = 50_000
+MAX_MSIL_SNAPSHOTS = 50_000
+
 # Explicit caps for evolution and frontier diagnostics
 MAX_HYPOTHESIS_EVOLUTION = 20_000
 MAX_OPTION_C_DIAGNOSTICS = 20_000
 MAX_SWARM_CONTRACTS = 20_000
-
-# Replay + MSIL caps (kept separate so you can tune without touching core logs)
-MAX_REPLAY_BUFFER = 50_000
-MAX_MSIL_SNAPSHOTS = 50_000
 
 # Snapshot settings for Streamlit timeline and long runs
 DEFAULT_SNAPSHOT_SECTIONS = [
@@ -152,7 +152,7 @@ class MemoryStore:
         - "benchmarks":          benchmark and task results such as ARC, math suites
         - "source_index":        optional index for mapping entities to citations
         - "replay_buffer":       high value items for replay/curriculum
-        - "msil_snapshots":      MSIL snapshots (optional meta analytics)
+        - "msil_snapshots":      meta skill intelligence snapshots (optional)
 
     In memory (non persistent) vector memory may also be attached to
     support semantic search and time decayed retrieval if the optional
@@ -176,8 +176,8 @@ class MemoryStore:
         - hypothesis_evolution tracks how ideas refine or merge
         - option_c_diagnostics and swarm_contracts support frontier AGI runs
         - benchmarks give a persistent trace of test performance (ARC, math, etc.)
-        - replay_buffer provides durable high-value replay items
-        - msil_snapshots provides optional MSIL state traces for dashboards
+        - replay_buffer provides high value items for curriculum replay
+        - msil_snapshots provide compact skill intelligence snapshots for analytics
     """
 
     def __init__(
@@ -255,15 +255,15 @@ class MemoryStore:
             "hypotheses": [],
             "citations": [],
             "biomarkers": [],
-            "run_state": {},      # crash proof run metadata
-            "worker_state": {},   # live worker mode and status
-            "watchdog": {},       # heartbeat and last seen info
-            "goal_index": {},     # compact goal wise stats
-            "events": [],         # streaming event log
-            "discoveries": [],    # cure, treatment, mechanism candidates
+            "run_state": {},  # crash proof run metadata
+            "worker_state": {},  # live worker mode and status
+            "watchdog": {},  # heartbeat and last seen info
+            "goal_index": {},  # compact goal wise stats
+            "events": [],  # streaming event log
+            "discoveries": [],  # cure, treatment, mechanism candidates
             "run_manifests": {},  # run_id -> manifest dict
-            "tool_events": [],    # per tool usage events
-            "milestones": [],     # milestones over long runs
+            "tool_events": [],  # per tool usage events
+            "milestones": [],  # milestones over long runs
             "learning_burst": {
                 "active": False,
                 "cycles_remaining": None,
@@ -1387,6 +1387,9 @@ class MemoryStore:
         if isinstance(cycle_data, dict):
             if "cycle_index" not in cycle_data and "cycle" in cycle_data:
                 cycle_data["cycle_index"] = cycle_data.get("cycle")
+            elif "cycle" not in cycle_data and "cycle_index" in cycle_data:
+                # Maintain legacy key for any downstream consumers still reading "cycle"
+                cycle_data["cycle"] = cycle_data.get("cycle_index")
 
         self._data.setdefault("cycles", []).append(cycle_data)
 
@@ -2339,7 +2342,9 @@ class MemoryStore:
                 "finished_at": finished_at,
             },
             "best_cycle": {
-                "cycle_index": best_cycle.get("cycle_index", best_cycle.get("cycle")) if isinstance(best_cycle, dict) else None,
+                "cycle_index": (
+                    best_cycle.get("cycle_index", best_cycle.get("cycle")) if isinstance(best_cycle, dict) else None
+                ),
                 "RYE": best_rye_val,
                 "timestamp": best_cycle.get("timestamp") if isinstance(best_cycle, dict) else None,
             }
@@ -2788,7 +2793,9 @@ class MemoryStore:
 
             def _cycle_key(c: Dict[str, Any]) -> int:
                 try:
-                    return int(c.get("cycle_index", c.get("cycle", 0)) or 0)
+                    if c.get("cycle_index") is not None:
+                        return int(c.get("cycle_index"))
+                    return int(c.get("cycle", 0))
                 except Exception:
                     return 0
 
@@ -2858,7 +2865,9 @@ class MemoryStore:
                 "delta": (late_avg - early_avg) if (early_avg is not None and late_avg is not None) else None,
             },
             "best_cycle": {
-                "cycle_index": best_cycle.get("cycle_index", best_cycle.get("cycle")) if isinstance(best_cycle, dict) else None,
+                "cycle_index": (
+                    best_cycle.get("cycle_index", best_cycle.get("cycle")) if isinstance(best_cycle, dict) else None
+                ),
                 "RYE": best_rye_val,
                 "timestamp": best_cycle.get("timestamp") if isinstance(best_cycle, dict) else None,
                 "equilibrium": best_cycle.get("equilibrium") if isinstance(best_cycle, dict) else None,
@@ -3759,6 +3768,7 @@ class MemoryStore:
         buf = self._data.get("replay_buffer", [])
         if prefer_buffer and isinstance(buf, list) and buf:
             out: List[Dict[str, Any]] = []
+            lim = max(1, int(limit)) if isinstance(limit, int) else 200
             for e in reversed(buf):  # newest first (append order)
                 if not isinstance(e, dict):
                     continue
@@ -3773,17 +3783,17 @@ class MemoryStore:
                     if float(rs) < float(min_rye):
                         continue
                 out.append(dict(e))
-                if len(out) >= max(1, int(limit)):
+                if len(out) >= lim:
                     break
             return out
 
         # 2) Fallback: derive from recent cycles
         out2: List[Dict[str, Any]] = []
         try:
-            lim = max(1, int(limit))
+            lim2 = max(1, int(limit))
         except Exception:
-            lim = 200
-        window = max(lim, 200)
+            lim2 = 200
+        window = max(lim2, 200)
         cycles = self.get_cycle_history_for_goal(goal, limit=window)  # oldest->newest
         for c in reversed(cycles):  # newest first
             if not isinstance(c, dict):
@@ -3812,7 +3822,7 @@ class MemoryStore:
                     "importance": 1.0,
                 }
             )
-            if len(out2) >= lim:
+            if len(out2) >= lim2:
                 break
         return out2
 
