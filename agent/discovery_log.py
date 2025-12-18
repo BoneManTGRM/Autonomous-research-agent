@@ -1,54 +1,35 @@
 """
-discovery_log.py
+agent/discovery_log.py
 
-Centralized discovery logging for the Autonomous Research Agent.
+Centralized logging for "discovery" events produced by the agent.
 
-This module writes human readable Markdown entries to:
-    logs/discovery_log.md
+What it does
+------------
+- Appends human-readable Markdown entries to:  logs/discovery_log.md
+- Optionally mirrors structured JSONL records to: logs/discovery_log.jsonl
 
-It can also mirror structured JSONL entries to:
-    logs/discovery_log.jsonl
+It is intended for long-running research workflows where you want a durable,
+append-only ledger of hypotheses, notable insights, contradictions repaired,
+high-RYE events, and milestone markers.
 
-It is designed for:
-    - Hypotheses (pending, validated, rejected)
-    - High RYE events and delta R spikes
-    - Contradictions resolved or repaired
-    - Notable insights and structural discoveries
-    - Mechanisms, treatments, biomarkers, and cure candidates
-    - Run milestones and swarm or tool events
-    - Long run stability and phase shifts
-
-Typical usage from TGRM or CoreAgent:
-
-    from agent.discovery_log import DiscoveryLogger
-
-    logger = DiscoveryLogger.default(run_id="abc123")
-
-    logger.log_hypothesis(
-        title="New candidate mechanism for pathway X",
-        description="Summarize the reasoning here...",
-        cycle_index=128,
-        agent_role="Researcher",
-        rye_before=0.42,
-        rye_after=0.55,
-        delta_r=0.13,
-        energy=2.4,
-        tags=["longevity", "pathway_x", "hypothesis"],
-    )
-
-All entries are appended so you can review discoveries after a long run
-and export them into papers or structured summaries.
+Design goals
+------------
+- stdlib-only (no external deps)
+- safe by default: logging must not crash the worker unless raise_on_error=True
+- reasonably concurrent-friendly (best-effort file locking on platforms that support it)
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import uuid
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Union
+
 
 LOG_DIR_DEFAULT = Path("logs")
 LOG_FILE_NAME_DEFAULT = "discovery_log.md"
@@ -82,9 +63,18 @@ def _clamp_text(s: Any, max_len: int = 4000) -> str:
 
 
 def _normalize_tags(tags: Optional[Iterable[Any]]) -> Optional[List[str]]:
-    """Normalize tags into a stable, de-duped list preserving first-seen order."""
+    """
+    Normalize tags into a stable, de-duped list preserving first-seen order.
+
+    Footgun guard:
+      - If someone passes a single string (e.g. tags="longevity"), treat it as one tag,
+        not an iterable of characters.
+    """
     if not tags:
         return None
+
+    if isinstance(tags, (str, bytes)):
+        tags = [tags]
 
     out: List[str] = []
     for t in tags:
@@ -115,9 +105,20 @@ def _dataclass_shallow(obj: Any) -> Dict[str, Any]:
 
 
 def _json_safe(obj: Any, *, max_depth: int = 8, _depth: int = 0) -> Any:
-    """Make an object JSON-serializable (best-effort)."""
+    """
+    Make an object JSON-serializable (best-effort).
+
+    Notes:
+    - Avoid dataclasses.asdict() (deepcopy) because extra payloads may contain
+      objects that cannot be deep-copied.
+    - Convert NaN/Inf to None so JSONL stays strict-parser friendly.
+    """
     if _depth > max_depth:
         return repr(obj)
+
+    if isinstance(obj, float):
+        if not math.isfinite(obj):
+            return None
 
     if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
@@ -128,8 +129,6 @@ def _json_safe(obj: Any, *, max_depth: int = 8, _depth: int = 0) -> Any:
     if isinstance(obj, BaseException):
         return {"type": obj.__class__.__name__, "message": str(obj)}
 
-    # IMPORTANT: avoid dataclasses.asdict() (deepcopy) because `extra` may contain
-    # objects that cannot be deep-copied (locks, sockets, etc.).
     if is_dataclass(obj):
         try:
             shallow = _dataclass_shallow(obj)
@@ -174,6 +173,7 @@ def _try_lock(f) -> None:
 
 
 def _try_unlock(f) -> None:
+    """Best-effort file unlock (no-op on platforms without fcntl)."""
     try:
         import fcntl  # type: ignore
 
@@ -183,6 +183,7 @@ def _try_unlock(f) -> None:
 
 
 def _try_fsync(f) -> None:
+    """Best-effort fsync for durability (can be slow on network disks)."""
     try:
         f.flush()
         os.fsync(f.fileno())
@@ -213,7 +214,7 @@ def _ts_unix_from_iso(ts: str) -> Optional[float]:
 # -----------------------------
 @dataclass
 class DiscoveryEvent:
-    """Structured representation of a discovery related event."""
+    """Structured representation of a discovery-related event."""
 
     kind: str
     title: str
@@ -364,15 +365,9 @@ class DiscoveryEvent:
 # -----------------------------
 class DiscoveryLogger:
     """
-    Discovery logger for Reparodynamics experiments.
+    Append-only discovery logger.
 
-    Responsibilities:
-        - Ensure log directory and files exist.
-        - Write well structured Markdown entries for discovery events.
-        - Optionally mirror structured JSONL entries for machine analysis.
-        - Provide convenience methods for common event types.
-
-    You can use one shared logger per process or per run_id.
+    It writes Markdown for humans and optionally JSONL for analysis pipelines.
     """
 
     def __init__(
@@ -408,14 +403,13 @@ class DiscoveryLogger:
         if auto_header and not self.file_path.exists():
             self._write_header()
 
+    def set_run_id(self, run_id: Optional[str]) -> None:
+        """Update the logger's run_id (useful for long-lived singletons)."""
+        self.run_id = run_id
+
     @classmethod
     def default(cls, run_id: Optional[str] = None) -> "DiscoveryLogger":
-        """
-        Return a default logger that writes to logs/discovery_log.md
-        and logs/discovery_log.jsonl.
-
-        You can call this from anywhere without worrying about paths.
-        """
+        """Create a logger that writes into the local ./logs directory."""
         return cls(
             log_dir=LOG_DIR_DEFAULT,
             file_name=LOG_FILE_NAME_DEFAULT,
@@ -431,12 +425,7 @@ class DiscoveryLogger:
         run_id: Optional[str] = None,
         for_worker: bool = False,
     ) -> "DiscoveryLogger":
-        """
-        Helper for engine_worker or CoreAgent to create a logger that
-        lives alongside other run specific logs.
-
-        If for_worker is True, uses a slightly different file name.
-        """
+        """Create a logger next to a run directory or worker config base."""
         base = Path(base_dir)
         logs_dir = base / "logs"
         if for_worker:
@@ -469,13 +458,11 @@ class DiscoveryLogger:
         header_lines = [
             "# Discovery Log",
             "",
-            "This file records hypotheses, high value repairs, RYE spikes,",
-            "contradictions resolved, and other potential discoveries produced",
-            "by the Autonomous Research Agent running under Reparodynamics.",
+            "This file records hypotheses, high-value repairs, RYE spikes,",
+            "contradictions resolved, and other noteworthy discoveries.",
             "",
             "Each entry is appended with a timestamp so you can reconstruct",
-            "what the agent discovered during long runs, including 24 hour",
-            "or 90 day stability and swarm experiments.",
+            "what the agent found across long runs (including multi-day stability).",
             "",
             f"Log schema version: `{DISCOVERY_LOG_VERSION}`",
             "",
@@ -510,7 +497,7 @@ class DiscoveryLogger:
         self._safe_call(_append)
 
     def _append_json(self, event: DiscoveryEvent) -> None:
-        """Append a JSON line representation of the event if json mirroring is enabled."""
+        """Append a JSONL line representation of the event if mirroring is enabled."""
         if not self.json_mirror:
             return
 
@@ -558,20 +545,7 @@ class DiscoveryLogger:
         swarm_config: Optional[Dict[str, Any]] = None,
         event_id: Optional[str] = None,
     ) -> DiscoveryEvent:
-        """
-        Log a generic discovery event.
-
-        This is the core lower level method. Other helpers call this with
-        pre filled kind values for hypotheses, RYE spikes, mechanisms, etc.
-
-        Optional fields:
-            info_gain, search_energy, semantic_diversity:
-                Used to mirror web search and TGRM stack quality metrics.
-            swarm_size, swarm_config:
-                Used to tag swarm scale and configuration for the event.
-            event_id:
-                Optional override if caller wants to set a fixed id.
-        """
+        """Log a generic discovery event (Markdown + optional JSONL)."""
         event = DiscoveryEvent(
             kind=str(kind),
             title=str(title),
@@ -754,7 +728,7 @@ class DiscoveryLogger:
         semantic_diversity: Optional[float] = None,
         swarm_size: Optional[int] = None,
     ) -> DiscoveryEvent:
-        """Log a high RYE event, likely associated with a significant repair or insight."""
+        """Log a high-RYE event, often associated with a significant repair or insight."""
         combined_tags = (tags or []) + ["rye_spike", "high_value"]
         return self.log_event(
             kind="rye_spike",
@@ -858,7 +832,7 @@ class DiscoveryLogger:
         domain: Optional[str] = None,
         confidence: Optional[float] = None,
     ) -> DiscoveryEvent:
-        """Log a treatment or stack candidate for cure extraction pipelines."""
+        """Log a treatment or intervention candidate."""
         extra_payload: Dict[str, Any] = {"citations": citations or []}
         combined_tags = (tags or []) + ["treatment", "candidate", "intervention"]
         return self.log_event(
@@ -887,7 +861,7 @@ class DiscoveryLogger:
         domain: Optional[str] = None,
         confidence: Optional[float] = None,
     ) -> DiscoveryEvent:
-        """Log a very strong cure candidate with high RYE and verification needs."""
+        """Log a high-stakes cure candidate."""
         extra_payload: Dict[str, Any] = {"citations": citations or []}
         combined_tags = (tags or []) + ["cure_candidate", "high_stakes"]
         return self.log_event(
@@ -944,7 +918,7 @@ class DiscoveryLogger:
         domain: Optional[str] = None,
         confidence: Optional[float] = None,
     ) -> DiscoveryEvent:
-        """Log a structural discovery such as a mathematical framework or pattern."""
+        """Log a structural discovery such as a framework or recurring pattern."""
         combined_tags = (tags or []) + ["mathematical_structure", "pattern"]
         return self.log_event(
             kind="structure_discovery",
@@ -976,7 +950,7 @@ class DiscoveryLogger:
         severity: str = "info",
         swarm_size: Optional[int] = None,
     ) -> DiscoveryEvent:
-        """Log a run milestone such as best RYE so far or phase shift detection."""
+        """Log a run milestone (best RYE so far, phase shift, etc.)."""
         if run_id is not None:
             self.run_id = run_id
         combined_tags = (tags or []) + ["milestone"]
@@ -1007,7 +981,7 @@ class DiscoveryLogger:
         swarm_size: Optional[int] = None,
         swarm_config: Optional[Dict[str, Any]] = None,
     ) -> DiscoveryEvent:
-        """Log a swarm related event, such as rebalancing or consensus switch."""
+        """Log a swarm-related event (rebalance, consensus change, etc.)."""
         combined_tags = (tags or []) + ["swarm_event"]
         return self.log_event(
             kind="swarm_event",
@@ -1040,10 +1014,7 @@ class DiscoveryLogger:
         info_gain: Optional[float] = None,
         search_energy: Optional[float] = None,
     ) -> DiscoveryEvent:
-        """
-        Log a tool event that is particularly important for discovery,
-        for example a long browser crawl or a large data pipeline run.
-        """
+        """Log an important tool invocation (crawl, retrieval job, pipeline run, etc.)."""
         tool_tags = (tags or []) + ["tool_event", tool_name, status]
         payload: Dict[str, Any] = extra.copy() if isinstance(extra, dict) else {}
         payload.update(
@@ -1073,25 +1044,10 @@ class DiscoveryLogger:
         )
 
     # ------------------------------------------------------------------
-    # Integration helpers for MemoryStore style discovery entries
+    # Integration helpers for MemoryStore-style discovery entries
     # ------------------------------------------------------------------
     def log_from_memory_discovery(self, entry: Dict[str, Any]) -> DiscoveryEvent:
-        """
-        Bridge helper to log a discovery entry coming from MemoryStore.
-
-        Expected MemoryStore shape (best effort, all optional):
-            {
-                "timestamp": str,
-                "goal": str,
-                "kind": str,
-                "label": str,
-                "evidence_summary": str,
-                "score": float | None,
-                "tags": list,
-                "citations": list,
-                "domain": str | None,
-            }
-        """
+        """Bridge helper to log a discovery entry coming from a MemoryStore-like record."""
         kind = str(entry.get("kind", "discovery") or "discovery")
         label = str(entry.get("label", "(no label)") or "(no label)")
         evidence = str(entry.get("evidence_summary", "") or "")
@@ -1137,16 +1093,12 @@ class DiscoveryLogger:
         )
 
 
-# Optional singleton style logger for very simple integrations
+# Optional singleton-style logger for lightweight integrations
 _GLOBAL_LOGGER: Optional[DiscoveryLogger] = None
 
 
 def get_global_logger(run_id: Optional[str] = None) -> DiscoveryLogger:
-    """
-    Return a process global DiscoveryLogger.
-
-    Useful when you do not want to pass a logger instance through many layers.
-    """
+    """Return a process-global DiscoveryLogger (creates it on first use)."""
     global _GLOBAL_LOGGER
     if _GLOBAL_LOGGER is None:
         _GLOBAL_LOGGER = DiscoveryLogger.default(run_id=run_id)
