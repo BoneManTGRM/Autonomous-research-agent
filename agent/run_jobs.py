@@ -54,8 +54,9 @@ What is verified here:
         ACTIVE_DIR    = QUEUE_ROOT / "active"
         FINISHED_DIR  = QUEUE_ROOT / "finished"
         ERROR_DIR     = QUEUE_ROOT / "error"
-        QUEUE_DIR     = PENDING_DIR        (canonical queue folder)
-        LEGACY_QUEUE_DIR = QUEUE_ROOT      (root alias for older watchers)
+        BAD_JOBS_DIR  = QUEUE_ROOT / "bad_jobs"     (quarantine for malformed jobs)
+        QUEUE_DIR     = PENDING_DIR                 (canonical queue folder)
+        LEGACY_QUEUE_DIR = QUEUE_ROOT               (root alias for older watchers)
 
     Legacy layout support:
 
@@ -105,9 +106,19 @@ What is verified here:
         finished/<run_id>.json          (result payload)
         finished/<run_id>_job.json      (finished metadata for job lists)
 
-    load_next_pending_job and list_jobs only treat *_job.json as runnable
-    metadata files. Older jobs that used bare "<run_id>.json" are still
-    supported through compatibility helpers.
+    Compatibility with newer workers:
+        Some workers (e.g. a hardened internal queue) may archive job state as:
+
+            finished/<run_id>__job.json
+            error/<run_id>__job.json
+
+        This module now treats both *_job.json and *__job.json as valid
+        metadata files wherever metadata is expected.
+
+    load_next_pending_job and list_jobs only treat metadata files as runnable
+    when they are in pending/active. Older jobs that used bare "<run_id>.json"
+    are still supported through compatibility helpers (but finished/<run_id>.json
+    is reserved for the result payload).
 
 4. What actually drives the cycles table in the UI
 
@@ -135,21 +146,21 @@ Bottom line:
     in app_streamlit.py, not on this queue layer.
 
 Update notes:
-    - Canonical job metadata filenames now end in "_job.json" in pending,
+    - Canonical job metadata filenames end in "_job.json" in pending,
       active, finished, and error folders. Finished results stay at
       finished/<run_id>.json, with an optional finished/<run_id>_results.json
       alias on read.
+    - Newer workers may archive job metadata as "<run_id>__job.json"; this
+      module reads both variants.
     - load_next_pending_job, claim_next_job and list_jobs prefer "*_job.json"
       and ignore non metadata JSON like "*_progress.json".
     - Backward compatibility is preserved for older "<run_id>.json" jobs.
     - create_job and RunJob.from_dict inject the run_id into the config
       (and common sub-config sections) so the engine and MemoryStore use the
       exact same run_id that the UI uses when generating reports.
-    - list_jobs now derives the effective job.status from the folder it was
-      loaded from (queued/active/finished/error), and in conflicts a higher
-      priority status (finished, error) will override a lower one (active,
-      queued). Finished jobs can not incorrectly appear as active in the UI
-      even if stale copies exist.
+    - list_jobs derives the effective job.status from the folder it was
+      loaded from. Higher priority folder status (finished, error) will
+      override a lower one (active, queued).
 """
 
 # Public exports (useful for type checkers and explicit imports)
@@ -160,8 +171,10 @@ __all__ = [
     "ACTIVE_DIR",
     "FINISHED_DIR",
     "ERROR_DIR",
+    "BAD_JOBS_DIR",
     "QUEUE_DIR",
     "LEGACY_QUEUE_DIR",
+    "LOCKS_DIR",
     "RunJob",
     "debug_print_layout",
     "_inject_run_id_into_config",
@@ -349,11 +362,13 @@ else:
 #   - QUEUE_ROOT/pending/   : file based queue of pending jobs (canonical queue)
 #   - QUEUE_ROOT/active/    : in progress metadata and optional progress JSON
 #   - QUEUE_ROOT/finished/  : final result JSON and finished job metadata
-#   - QUEUE_ROOT/error/     : failed job metadata and optional traceback
+#   - QUEUE_ROOT/error/     : failed job metadata and optional traceback/payload
+#   - QUEUE_ROOT/bad_jobs/  : quarantine for malformed or unreadable job files
 PENDING_DIR = QUEUE_ROOT / "pending"
 ACTIVE_DIR = QUEUE_ROOT / "active"
 FINISHED_DIR = QUEUE_ROOT / "finished"
 ERROR_DIR = QUEUE_ROOT / "error"
+BAD_JOBS_DIR = QUEUE_ROOT / "bad_jobs"
 
 # Canonical queue folder for UIs
 QUEUE_DIR = PENDING_DIR
@@ -365,8 +380,10 @@ LEGACY_ACTIVE_DIR = BASE_DIR / "active"
 LEGACY_FINISHED_DIR = BASE_DIR / "finished"
 LEGACY_ERROR_DIR = BASE_DIR / "error"
 
-# Internal lock directory used to claim jobs safely across multiple workers
+# Internal lock directory used to claim jobs safely across multiple workers.
+# Kept stable for backward compatibility.
 _LOCKS_DIR = QUEUE_ROOT / ".locks"
+LOCKS_DIR = _LOCKS_DIR  # public alias
 
 # Make sure directories exist at import time
 for folder in [
@@ -376,6 +393,7 @@ for folder in [
     ACTIVE_DIR,
     FINISHED_DIR,
     ERROR_DIR,
+    BAD_JOBS_DIR,
     LEGACY_QUEUE_DIR,
     LEGACY_PENDING_DIR,
     LEGACY_ACTIVE_DIR,
@@ -426,6 +444,7 @@ def debug_print_layout() -> None:
     print("[run_jobs] ACTIVE_DIR:", ACTIVE_DIR)
     print("[run_jobs] FINISHED_DIR:", FINISHED_DIR)
     print("[run_jobs] ERROR_DIR:", ERROR_DIR)
+    print("[run_jobs] BAD_JOBS_DIR:", BAD_JOBS_DIR)
     print("[run_jobs] LEGACY_QUEUE_DIR:", LEGACY_QUEUE_DIR)
     print("[run_jobs] LEGACY_PENDING_DIR:", LEGACY_PENDING_DIR)
     print("[run_jobs] LEGACY_ACTIVE_DIR:", LEGACY_ACTIVE_DIR)
@@ -553,13 +572,28 @@ def _safe_unlink(path: Optional[Path]) -> None:
 
 
 def _normalize_status(status: Any) -> str:
-    s = str(status or "queued").lower()
-    if s in ("pending", "queued"):
+    """
+    Normalize status strings across queue implementations.
+
+    Canonical statuses:
+        queued, active, finished, error
+
+    Accepted aliases:
+        pending -> queued
+        retrying -> queued
+        running -> active
+        done/completed/success -> finished
+        failed/failure -> error
+    """
+    s = str(status or "queued").strip().lower()
+    if s in ("pending", "queued", "retrying", "requeued"):
         return "queued"
-    if s in ("running", "active"):
+    if s in ("running", "active", "in_progress", "in-progress"):
         return "active"
-    if s in ("finished", "error"):
-        return s
+    if s in ("finished", "done", "completed", "complete", "success", "succeeded", "ok"):
+        return "finished"
+    if s in ("error", "failed", "failure", "crashed"):
+        return "error"
     return "queued"
 
 
@@ -694,15 +728,41 @@ def _find_meta_in_folder(run_id: str, folder: Path) -> Optional[Path]:
     """
     Find a job metadata file for this run_id in a folder.
 
-    Supports both the canonical "{run_id}_job.json" and the legacy
-    "{run_id}.json" naming so that older runs and newer runs can coexist.
+    Supports:
+        - canonical "{run_id}_job.json"
+        - alternate "{run_id}__job.json" (some workers archive as this)
+        - legacy "{run_id}.json" (older queue versions)
+
+    NOTE:
+        In FINISHED_DIR, "{run_id}.json" is typically the result payload, not metadata.
+        Callers that need finished metadata should use _find_finished_meta_in_folder().
     """
     primary = folder / f"{run_id}_job.json"
     if primary.exists():
         return primary
+    alt2 = folder / f"{run_id}__job.json"
+    if alt2.exists():
+        return alt2
     alt = folder / f"{run_id}.json"
     if alt.exists():
         return alt
+    return None
+
+
+def _find_finished_meta_in_folder(run_id: str, folder: Path) -> Optional[Path]:
+    """
+    Finished/error metadata finder that NEVER returns the result payload file.
+
+    Accepts:
+        - "{run_id}_job.json"
+        - "{run_id}__job.json"
+    """
+    p1 = folder / f"{run_id}_job.json"
+    if p1.exists():
+        return p1
+    p2 = folder / f"{run_id}__job.json"
+    if p2.exists():
+        return p2
     return None
 
 
@@ -730,6 +790,8 @@ class RunJob:
         - "queued" is the canonical queue status used by engines.
         - "pending" is treated as an alias for "queued".
         - "running" is treated as an alias for "active".
+        - "done"/"completed" are treated as an alias for "finished".
+        - "failed" is treated as an alias for "error".
 
     This file is written by the UI and read by your engine worker.
     """
@@ -832,7 +894,7 @@ def _job_path_for_status(run_id: str, status: str) -> Path:
 
     Important:
         For finished jobs we store metadata separately from the result JSON.
-        Metadata: finished/{run_id}_job.json
+        Metadata: finished/{run_id}_job.json  (canonical)
         Result:   finished/{run_id}.json (or {run_id}_results.json alias)
     """
     norm = status.lower()
@@ -863,7 +925,9 @@ def _run_id_exists(run_id: str) -> bool:
         PENDING_DIR / f"{run_id}_job.json",
         ACTIVE_DIR / f"{run_id}_job.json",
         FINISHED_DIR / f"{run_id}_job.json",
+        FINISHED_DIR / f"{run_id}__job.json",
         ERROR_DIR / f"{run_id}_job.json",
+        ERROR_DIR / f"{run_id}__job.json",
         # Canonical result
         FINISHED_DIR / f"{run_id}.json",
         FINISHED_DIR / f"{run_id}_results.json",
@@ -875,8 +939,10 @@ def _run_id_exists(run_id: str) -> bool:
         LEGACY_ACTIVE_DIR / f"{run_id}_job.json",
         LEGACY_ACTIVE_DIR / f"{run_id}.json",
         LEGACY_FINISHED_DIR / f"{run_id}_job.json",
+        LEGACY_FINISHED_DIR / f"{run_id}__job.json",
         LEGACY_FINISHED_DIR / f"{run_id}.json",
         LEGACY_ERROR_DIR / f"{run_id}_job.json",
+        LEGACY_ERROR_DIR / f"{run_id}__job.json",
         LEGACY_ERROR_DIR / f"{run_id}.json",
     ]
     return any(p.exists() for p in candidates)
@@ -1117,23 +1183,20 @@ def load_job_by_id(run_id: str) -> Optional[RunJob]:
     if not _is_safe_run_id(run_id):
         return None
 
-    # Finished metadata uses "_job.json" and is separate from results
-    finished_meta = FINISHED_DIR / f"{run_id}_job.json"
-    if finished_meta.exists():
-        try:
-            return load_job(finished_meta)
-        except Exception:
-            return None
+    # Finished metadata uses "_job.json" (and sometimes "__job.json") and is separate from results.
+    for candidate in (
+        FINISHED_DIR / f"{run_id}_job.json",
+        FINISHED_DIR / f"{run_id}__job.json",
+        LEGACY_FINISHED_DIR / f"{run_id}_job.json",
+        LEGACY_FINISHED_DIR / f"{run_id}__job.json",
+    ):
+        if candidate.exists():
+            try:
+                return load_job(candidate)
+            except Exception:
+                return None
 
-    # Check legacy finished dir as well
-    legacy_finished_meta = LEGACY_FINISHED_DIR / f"{run_id}_job.json"
-    if legacy_finished_meta.exists():
-        try:
-            return load_job(legacy_finished_meta)
-        except Exception:
-            return None
-
-    # Other statuses: support both "{run_id}_job.json" and "{run_id}.json"
+    # Other statuses: support "{run_id}_job.json", "{run_id}__job.json", and legacy "{run_id}.json"
     search_folders = [
         PENDING_DIR,
         LEGACY_QUEUE_DIR,
@@ -1144,7 +1207,14 @@ def load_job_by_id(run_id: str) -> Optional[RunJob]:
         LEGACY_ERROR_DIR,
     ]
     for folder in search_folders:
-        path = _find_meta_in_folder(run_id, folder)
+        # In ERROR_DIR, prefer *_job.json/__job.json over a payload {run_id}.json if present.
+        if folder in (ERROR_DIR, LEGACY_ERROR_DIR):
+            path = _find_finished_meta_in_folder(run_id, folder)
+            if path is None:
+                path = _find_meta_in_folder(run_id, folder)
+        else:
+            path = _find_meta_in_folder(run_id, folder)
+
         if path is not None and path.exists():
             try:
                 return load_job(path)
@@ -1160,6 +1230,7 @@ def _cleanup_queued_copies(run_id: str) -> None:
     """
     for folder in (PENDING_DIR, LEGACY_QUEUE_DIR, LEGACY_PENDING_DIR):
         _safe_unlink(folder / f"{run_id}_job.json")
+        _safe_unlink(folder / f"{run_id}__job.json")
         _safe_unlink(folder / f"{run_id}.json")
 
 
@@ -1197,9 +1268,13 @@ def move_job(run_id: str, from_status: str, to_status: str) -> Tuple[Optional[Ru
 
         for folder in candidate_folders:
             if norm_from == "finished":
-                maybe = folder / f"{run_id}_job.json"
+                maybe = _find_finished_meta_in_folder(run_id, folder)
+            elif norm_from == "error":
+                # Prefer metadata variants over any payload {run_id}.json
+                maybe = _find_finished_meta_in_folder(run_id, folder) or _find_meta_in_folder(run_id, folder)
             else:
                 maybe = _find_meta_in_folder(run_id, folder)
+
             if maybe is not None and maybe.exists():
                 src = maybe
                 break
@@ -1276,7 +1351,6 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
     norm_new = _normalize_status(new_status)
 
     # Find existing job metadata in any folder.
-    # Finished metadata uses a dedicated "{run_id}_job.json".
     search: List[Tuple[Path, bool]] = [
         (FINISHED_DIR, True),
         (LEGACY_FINISHED_DIR, True),
@@ -1292,12 +1366,17 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
     src: Optional[Path] = None
     for folder, is_finished in search:
         if is_finished:
-            candidate = folder / f"{run_id}_job.json"
-            if candidate.exists():
+            candidate = _find_finished_meta_in_folder(run_id, folder)
+            if candidate is not None and candidate.exists():
                 src = candidate
                 break
         else:
-            candidate = _find_meta_in_folder(run_id, folder)
+            # For error folders, prefer meta variants over payload JSON if present.
+            if folder in (ERROR_DIR, LEGACY_ERROR_DIR):
+                candidate = _find_finished_meta_in_folder(run_id, folder) or _find_meta_in_folder(run_id, folder)
+            else:
+                candidate = _find_meta_in_folder(run_id, folder)
+
             if candidate is not None and candidate.exists():
                 src = candidate
                 break
@@ -1371,8 +1450,11 @@ def list_jobs(status: Optional[str] = None, limit: int = 100) -> List[RunJob]:
         This avoids cases where a job that has been moved to finished/ still
         carries an old "active" status in the JSON and appears wrong in the UI.
 
-        For pending and active it only considers "*_job.json" metadata files.
-        Legacy "<run_id>.json" jobs are still supported if no job files exist.
+        For pending and active it prefers "*_job.json" metadata files; if none exist
+        it falls back to "*.json" for older jobs, while still skipping progress files.
+
+        For finished it only considers "*_job.json" metadata files (including "__job.json"),
+        never the result payload "{run_id}.json".
 
     Resolution rule:
         If multiple metadata files for the same run_id exist across folders
@@ -1514,8 +1596,10 @@ def _active_meta_exists(run_id: str) -> bool:
         p.exists()
         for p in (
             ACTIVE_DIR / f"{run_id}_job.json",
+            ACTIVE_DIR / f"{run_id}__job.json",
             ACTIVE_DIR / f"{run_id}.json",
             LEGACY_ACTIVE_DIR / f"{run_id}_job.json",
+            LEGACY_ACTIVE_DIR / f"{run_id}__job.json",
             LEGACY_ACTIVE_DIR / f"{run_id}.json",
         )
     )
@@ -1526,9 +1610,13 @@ def _final_meta_exists(run_id: str) -> bool:
         p.exists()
         for p in (
             FINISHED_DIR / f"{run_id}_job.json",
+            FINISHED_DIR / f"{run_id}__job.json",
             ERROR_DIR / f"{run_id}_job.json",
+            ERROR_DIR / f"{run_id}__job.json",
             LEGACY_FINISHED_DIR / f"{run_id}_job.json",
+            LEGACY_FINISHED_DIR / f"{run_id}__job.json",
             LEGACY_ERROR_DIR / f"{run_id}_job.json",
+            LEGACY_ERROR_DIR / f"{run_id}__job.json",
         )
     )
 
@@ -1732,6 +1820,9 @@ def result_path(run_id: str) -> Path:
     Finished jobs now have two files:
         - finished/{run_id}_job.json   (job metadata, used by list_jobs)
         - finished/{run_id}.json       (final result payload, used by UI)
+
+    Some workers also archive job state as finished/{run_id}__job.json; this
+    module reads both variants for metadata.
     """
     safe_id = _sanitize_run_id_for_filename(run_id)
     return FINISHED_DIR / f"{safe_id}.json"
@@ -1740,6 +1831,10 @@ def result_path(run_id: str) -> Path:
 def error_log_path(run_id: str) -> Path:
     """
     Path where the worker can write an error message or traceback.
+
+    Note:
+        Some workers may write a structured error payload as error/{run_id}.json.
+        This function remains a stable path for text logs: error/{run_id}_error.txt.
     """
     safe_id = _sanitize_run_id_for_filename(run_id)
     return ERROR_DIR / f"{safe_id}_error.txt"
@@ -1771,9 +1866,11 @@ def _cleanup_active_artifacts(run_id: str) -> None:
     """
     for p in (
         ACTIVE_DIR / f"{run_id}_job.json",
+        ACTIVE_DIR / f"{run_id}__job.json",
         ACTIVE_DIR / f"{run_id}.json",
         ACTIVE_DIR / f"{run_id}_progress.json",
         LEGACY_ACTIVE_DIR / f"{run_id}_job.json",
+        LEGACY_ACTIVE_DIR / f"{run_id}__job.json",
         LEGACY_ACTIVE_DIR / f"{run_id}.json",
         LEGACY_ACTIVE_DIR / f"{run_id}_progress.json",
     ):
@@ -1788,7 +1885,8 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
     """
     Write final result JSON for a job and mark it finished.
 
-    Used by engine_worker queue mode.
+    Used by engine_worker queue mode (legacy path). Newer workers may manage
+    retries/finalization themselves; this helper remains stable and compatible.
     """
     run_id = str(job.run_id).strip()
     if not _is_safe_run_id(run_id):
@@ -1807,8 +1905,10 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
     finished_job = job
     active_meta_candidates = [
         ACTIVE_DIR / f"{run_id}_job.json",
-        ACTIVE_DIR / f"{run_id}.json",  # legacy
+        ACTIVE_DIR / f"{run_id}__job.json",
+        ACTIVE_DIR / f"{run_id}.json",  # legacy / alt
         LEGACY_ACTIVE_DIR / f"{run_id}_job.json",
+        LEGACY_ACTIVE_DIR / f"{run_id}__job.json",
         LEGACY_ACTIVE_DIR / f"{run_id}.json",
     ]
     for active_meta in active_meta_candidates:
@@ -1825,7 +1925,7 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
     finished_job.status = "finished"
     finished_job.updated_at = time.time()
 
-    # Write finished metadata, then clean up active/queued artifacts.
+    # Write finished metadata (canonical), then clean up active/queued artifacts.
     finished_job.save_to(FINISHED_DIR, filename=f"{run_id}_job.json")
     _cleanup_active_artifacts(run_id)
     _cleanup_queued_copies(run_id)
@@ -1866,8 +1966,10 @@ def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
     error_job = job
     active_meta_candidates = [
         ACTIVE_DIR / f"{run_id}_job.json",
-        ACTIVE_DIR / f"{run_id}.json",  # legacy
+        ACTIVE_DIR / f"{run_id}__job.json",
+        ACTIVE_DIR / f"{run_id}.json",  # legacy / alt
         LEGACY_ACTIVE_DIR / f"{run_id}_job.json",
+        LEGACY_ACTIVE_DIR / f"{run_id}__job.json",
         LEGACY_ACTIVE_DIR / f"{run_id}.json",
     ]
     for active_meta in active_meta_candidates:
