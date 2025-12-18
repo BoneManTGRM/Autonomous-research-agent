@@ -2,30 +2,16 @@
 """
 agent/state_schema.py
 
-Shared, stable JSON schemas for the ARA worker <-> Streamlit UI "reparodynamic"
+Shared JSON schemas + coercion helpers for the ARA worker <-> Streamlit UI
 telemetry layer.
 
-Goals:
-- Be dependency-light (stdlib only).
-- Be backward/forward compatible (accept multiple key aliases).
-- Provide simple dataclasses + helpers to emit and parse:
-    - watchdog heartbeat
-    - worker state
-    - run state
-    - progress state
-    - narrative event log entries
+Design goals
+- Stdlib only.
+- Backward/forward compatible: accept multiple key aliases on read.
+- Easy to emit: dataclasses with .to_dict().
 
-This module does NOT write files by itself. File I/O lives in agent/state_emitter.py
-and agent/event_log.py.
-
-Recommended canonical filenames (written under <runs_root>/logs/):
-- watchdog_heartbeat.json
-- worker_state.json
-- run_state.json
-- event_log.json
-- <run_id>_progress.json
-
-The Streamlit UI you posted already checks many of these names.
+This module does NOT write files. Disk I/O lives in agent/state_emitter.py
+(and optionally agent/event_log.py).
 """
 
 from __future__ import annotations
@@ -41,7 +27,7 @@ JSONDict = Dict[str, Any]
 
 SCHEMA_VERSION: str = "v1"
 
-# Canonical filenames (state_emitter/event_log will use these)
+# Canonical filenames (state_emitter/event_log should use these)
 WATCHDOG_HEARTBEAT_FILENAME: str = "watchdog_heartbeat.json"
 WORKER_STATE_FILENAME: str = "worker_state.json"
 RUN_STATE_FILENAME: str = "run_state.json"
@@ -78,6 +64,7 @@ def utc_now_iso(timespec: str = "seconds") -> str:
 
 
 def iso_from_ts(ts: Union[int, float], timespec: str = "seconds") -> str:
+    """ISO 8601 in UTC from a unix timestamp (best-effort)."""
     try:
         return (
             datetime.fromtimestamp(float(ts), tz=timezone.utc)
@@ -101,6 +88,47 @@ def parse_iso(ts: Any) -> Optional[datetime]:
         return datetime.fromisoformat(s)
     except Exception:
         return None
+
+
+def iso_from_any(v: Any, timespec: str = "seconds") -> str:
+    """
+    Best-effort conversion into a UTC ISO string with trailing Z.
+    Accepts ISO strings, unix timestamps (int/float), numeric strings, or datetimes.
+    """
+    if v is None:
+        return utc_now_iso(timespec=timespec)
+
+    if isinstance(v, datetime):
+        try:
+            dt = v.astimezone(timezone.utc)
+            return dt.isoformat(timespec=timespec).replace("+00:00", "Z")
+        except Exception:
+            return utc_now_iso(timespec=timespec)
+
+    if isinstance(v, (int, float)):
+        return iso_from_ts(v, timespec=timespec)
+
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return utc_now_iso(timespec=timespec)
+
+        dt = parse_iso(s)
+        if dt is not None:
+            try:
+                dt2 = dt.astimezone(timezone.utc)
+                return dt2.isoformat(timespec=timespec).replace("+00:00", "Z")
+            except Exception:
+                pass
+
+        # numeric string?
+        try:
+            f = float(s)
+            return iso_from_ts(f, timespec=timespec)
+        except Exception:
+            return utc_now_iso(timespec=timespec)
+
+    return utc_now_iso(timespec=timespec)
 
 
 # -----------------------------
@@ -157,17 +185,27 @@ def safe_str(v: Any, default: str = "") -> str:
     if v is None:
         return default
     try:
-        s = str(v)
-        return s
+        return str(v)
     except Exception:
         return default
 
 
-def clamp_text(s: str, max_len: int = 4000) -> str:
-    s = safe_str(s, "")
-    if len(s) <= max_len:
-        return s
-    return s[: max_len - 3] + "..."
+def safe_opt_str(v: Any) -> Optional[str]:
+    """Return a trimmed string or None."""
+    if v is None:
+        return None
+    try:
+        s = str(v).strip()
+        return s if s else None
+    except Exception:
+        return None
+
+
+def clamp_text(s: Any, max_len: int = 4000) -> str:
+    txt = safe_str(s, "")
+    if len(txt) <= max_len:
+        return txt
+    return txt[: max_len - 3] + "..."
 
 
 # -----------------------------
@@ -176,15 +214,16 @@ def clamp_text(s: str, max_len: int = 4000) -> str:
 @dataclass
 class WatchdogHeartbeat:
     """
-    A small always-updated heartbeat state.
+    A small always-updated heartbeat snapshot.
 
-    Streamlit's _normalize_watchdog_info() checks keys:
+    Fields Streamlit commonly checks:
       - last_beat | timestamp | ts
       - count | heartbeat_count | beats
-      - seconds_since_last | age_seconds
 
-    We'll emit:
-      last_beat (ISO), ts (float), count (int), interval_seconds (optional)
+    We use:
+      - last_beat (ISO string)
+      - ts (unix float)
+      - count (int)
     """
 
     ts: float = field(default_factory=utc_now_ts)
@@ -197,60 +236,74 @@ class WatchdogHeartbeat:
     status: Optional[str] = None
 
     def to_dict(self) -> JSONDict:
-        d = asdict(self)
+        d: JSONDict = asdict(self)
         d["schema_version"] = SCHEMA_VERSION
+        # Compatibility aliases
+        d.setdefault("timestamp", self.last_beat)
+        d.setdefault("heartbeat_ts", self.ts)
+        d.setdefault("beats", self.count)
         return d
 
     @classmethod
     def from_dict(cls, raw: Any) -> "WatchdogHeartbeat":
         d = raw if isinstance(raw, dict) else {}
 
-        # Support multiple input spellings
-        ts_val = _pick(d, ("ts", "heartbeat_ts", "time", "unix_ts"), default=None)
-        iso_val = _pick(d, ("last_beat", "lastBeat", "timestamp", "time_iso"), default=None)
+        ts_val = _pick(d, ("ts", "heartbeat_ts", "time", "unix_ts", "timestamp_unix"), default=None)
+        iso_val = _pick(d, ("last_beat", "lastBeat", "timestamp", "time_iso", "lastBeatTime"), default=None)
         count_val = _pick(d, ("count", "heartbeat_count", "beats"), default=0)
 
         ts_f = safe_float(ts_val, None)
-        if ts_f is None and isinstance(iso_val, str):
-            dt = parse_iso(iso_val)
-            if dt is not None:
-                ts_f = dt.timestamp()
+
+        # If ts isn't present, attempt to derive it from iso_val
+        if ts_f is None:
+            if isinstance(iso_val, (int, float)):
+                ts_f = float(iso_val)
+            elif isinstance(iso_val, str):
+                dt = parse_iso(iso_val)
+                if dt is not None:
+                    ts_f = dt.timestamp()
+                else:
+                    ts_f = safe_float(iso_val, None)
+
         if ts_f is None:
             ts_f = utc_now_ts()
 
-        iso_s = safe_str(iso_val, "")
-        if not iso_s:
-            iso_s = iso_from_ts(ts_f)
+        # Normalize last_beat to a real ISO string
+        last_beat_iso = None
+        if isinstance(iso_val, str):
+            dt = parse_iso(iso_val)
+            if dt is not None:
+                last_beat_iso = iso_from_any(dt)
+        if last_beat_iso is None:
+            last_beat_iso = iso_from_ts(ts_f)
 
         return cls(
             ts=ts_f,
-            last_beat=iso_s,
+            last_beat=last_beat_iso,
             count=safe_int(count_val, 0) or 0,
             interval_seconds=safe_float(_pick(d, ("interval_seconds", "interval", "period_s"), None), None),
-            run_id=safe_str(_pick(d, ("run_id", "job_id", "id"), None), None) if _pick(d, ("run_id", "job_id", "id"), None) is not None else None,
-            status=safe_str(_pick(d, ("status",), None), None) if _pick(d, ("status",), None) is not None else None,
+            run_id=safe_opt_str(_pick(d, ("run_id", "job_id", "id"), None)),
+            status=safe_opt_str(_pick(d, ("status",), None)),
         )
 
 
 @dataclass
 class ProgressState:
     """
-    Optional progress-only file. This is how you get 1/3 -> 2/3 -> 3/3.
+    Optional progress-only snapshot.
 
-    Streamlit compute_progress_view() looks for:
-      phase_index, phase_total, phase_name
-      current/total (cycles)
-      effective_current/effective_total (optional)
-      status
+    Phase indexing:
+      Your current Streamlit progress normalizer treats `phase_index` as 0-based
+      while running (0..phase_total-1) and displays it as 1..phase_total.
 
-    We'll include all relevant fields.
+      Emit 0,1,2 for a 3-phase pipeline to see 1/3,2/3,3/3 in the UI.
     """
 
     run_id: Optional[str] = None
     status: str = STATUS_UNKNOWN
 
-    # Phase progress (recommended for "3-phase" pipelines)
-    phase_index: Optional[int] = None  # 1-based recommended
+    # Phase progress
+    phase_index: Optional[int] = None  # 0-based recommended
     phase_total: Optional[int] = None
     phase_name: Optional[str] = None
 
@@ -258,7 +311,7 @@ class ProgressState:
     current: Optional[int] = None
     total: Optional[int] = None
 
-    # If you want the UI to prefer these values
+    # Preferred by Streamlit if present
     effective_current: Optional[int] = None
     effective_total: Optional[int] = None
 
@@ -267,13 +320,20 @@ class ProgressState:
     updated_at: str = field(default_factory=utc_now_iso)
 
     def to_dict(self) -> JSONDict:
-        d = asdict(self)
+        d: JSONDict = asdict(self)
         d["schema_version"] = SCHEMA_VERSION
-        # Add common aliases for compatibility
+
+        # Compatibility aliases
+        d.setdefault("timestamp", self.updated_at)
+        d.setdefault("timestamp_unix", self.ts)
+
         if self.phase_index is not None:
             d.setdefault("phase_current", self.phase_index)
+            d.setdefault("phase", self.phase_index)
         if self.phase_total is not None:
             d.setdefault("phase_count", self.phase_total)
+            d.setdefault("total_phases", self.phase_total)
+
         if self.current is not None:
             d.setdefault("cycle", self.current)
             d.setdefault("cycle_index", self.current)
@@ -281,38 +341,35 @@ class ProgressState:
         if self.total is not None:
             d.setdefault("total_cycles", self.total)
             d.setdefault("max_cycles", self.total)
+
         return d
 
     @classmethod
     def from_dict(cls, raw: Any) -> "ProgressState":
         d = raw if isinstance(raw, dict) else {}
+        updated_at_raw = _pick(d, ("updated_at", "timestamp", "time_iso"), None)
+
         return cls(
-            run_id=safe_str(_pick(d, ("run_id", "job_id", "id"), None), None) if _pick(d, ("run_id", "job_id", "id"), None) is not None else None,
+            run_id=safe_opt_str(_pick(d, ("run_id", "job_id", "id"), None)),
             status=safe_str(_pick(d, ("status",), STATUS_UNKNOWN), STATUS_UNKNOWN),
             phase_index=safe_int(_pick(d, ("phase_index", "phase_current", "phase"), None), None),
             phase_total=safe_int(_pick(d, ("phase_total", "phase_count", "total_phases"), None), None),
-            phase_name=safe_str(_pick(d, ("phase_name",), None), None) if _pick(d, ("phase_name",), None) is not None else None,
+            phase_name=safe_opt_str(_pick(d, ("phase_name",), None)),
             current=safe_int(_pick(d, ("current", "current_cycle", "cycle", "cycle_index"), None), None),
             total=safe_int(_pick(d, ("total", "total_cycles", "max_cycles"), None), None),
             effective_current=safe_int(_pick(d, ("effective_current",), None), None),
             effective_total=safe_int(_pick(d, ("effective_total",), None), None),
-            ts=safe_float(_pick(d, ("ts", "timestamp_unix", "time"), None), utc_now_ts()) or utc_now_ts(),
-            updated_at=safe_str(_pick(d, ("updated_at", "timestamp", "time_iso"), None), utc_now_iso()),
+            ts=safe_float(_pick(d, ("ts", "timestamp_unix", "time", "unix_ts"), None), utc_now_ts()) or utc_now_ts(),
+            updated_at=iso_from_any(updated_at_raw),
         )
 
 
 @dataclass
 class WorkerState:
     """
-    The primary "live state" snapshot for the engine worker.
+    Primary "live worker snapshot".
 
-    The Streamlit UI reads this to render:
-    - sticky heartbeat/topbar state
-    - progress
-    - mode/domain/goal
-    - active agent role (optional)
-
-    Keep it small and update frequently.
+    Keep it small; update frequently.
     """
 
     run_id: Optional[str] = None
@@ -329,12 +386,18 @@ class WorkerState:
     agents: Optional[List[str]] = None  # configured roles/agents (swarm/pair)
 
     # Phase + cycle progress
-    phase_index: Optional[int] = None  # 1-based recommended
+    phase_index: Optional[int] = None  # 0-based recommended for your Streamlit UI
     phase_total: Optional[int] = None
     phase_name: Optional[str] = None
 
     current: Optional[int] = None
     total: Optional[int] = None
+
+    effective_current: Optional[int] = None
+    effective_total: Optional[int] = None
+
+    # Optional short status line
+    message: Optional[str] = None
 
     # timestamps
     ts: float = field(default_factory=utc_now_ts)
@@ -345,13 +408,16 @@ class WorkerState:
     meta: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> JSONDict:
-        d = asdict(self)
+        d: JSONDict = asdict(self)
         d["schema_version"] = SCHEMA_VERSION
 
-        # Provide compatibility aliases the UI already checks for
+        # Compatibility aliases
         if self.run_id is not None:
             d.setdefault("job_id", self.run_id)
             d.setdefault("id", self.run_id)
+
+        d.setdefault("timestamp", self.updated_at)
+        d.setdefault("timestamp_unix", self.ts)
 
         if self.phase_total is not None:
             d.setdefault("total_phases", self.phase_total)
@@ -363,7 +429,7 @@ class WorkerState:
             d.setdefault("cycle_index", self.current)
             d.setdefault("current_cycle", self.current)
 
-        # If someone expects these keys:
+        # Some code expects `role` always set.
         if self.active_role and not self.role:
             d["role"] = self.active_role
 
@@ -373,38 +439,39 @@ class WorkerState:
     def from_dict(cls, raw: Any) -> "WorkerState":
         d = raw if isinstance(raw, dict) else {}
 
-        run_id = _pick(d, ("run_id", "job_id", "id"), None)
-        phase_total = _pick(d, ("phase_total", "total_phases"), None)
-        phase_index = _pick(d, ("phase_index", "phase"), None)
-
-        total = _pick(d, ("total", "total_cycles"), None)
-        current = _pick(d, ("current", "current_cycle", "cycle", "cycle_index"), None)
-
         agents_val = _pick(d, ("agents", "roles", "swarm_roles"), None)
         agents: Optional[List[str]] = None
         if isinstance(agents_val, list):
-            agents = [safe_str(x, "").strip() for x in agents_val if safe_str(x, "").strip()]
+            cleaned = [safe_str(x, "").strip() for x in agents_val]
+            agents = [x for x in cleaned if x]
 
         meta_val = _pick(d, ("meta",), None)
         meta = meta_val if isinstance(meta_val, dict) else {}
 
+        updated_at_raw = _pick(d, ("updated_at", "timestamp", "time_iso"), None)
+
         return cls(
-            run_id=safe_str(run_id, None) if run_id is not None else None,
+            run_id=safe_opt_str(_pick(d, ("run_id", "job_id", "id"), None)),
             status=safe_str(_pick(d, ("status",), STATUS_UNKNOWN), STATUS_UNKNOWN),
-            mode=safe_str(_pick(d, ("mode", "run_mode"), None), None) if _pick(d, ("mode", "run_mode"), None) is not None else None,
-            domain=safe_str(_pick(d, ("domain",), None), None) if _pick(d, ("domain",), None) is not None else None,
-            goal=safe_str(_pick(d, ("goal",), None), None) if _pick(d, ("goal",), None) is not None else None,
-            role=safe_str(_pick(d, ("role",), None), None) if _pick(d, ("role",), None) is not None else None,
-            active_role=safe_str(_pick(d, ("active_role", "current_role"), None), None) if _pick(d, ("active_role", "current_role"), None) is not None else None,
+            mode=safe_opt_str(_pick(d, ("mode", "run_mode"), None)),
+            domain=safe_opt_str(_pick(d, ("domain",), None)),
+            goal=safe_opt_str(_pick(d, ("goal",), None)),
+            role=safe_opt_str(_pick(d, ("role",), None)),
+            active_role=safe_opt_str(_pick(d, ("active_role", "current_role"), None)),
             agents=agents,
-            phase_index=safe_int(phase_index, None),
-            phase_total=safe_int(phase_total, None),
-            phase_name=safe_str(_pick(d, ("phase_name",), None), None) if _pick(d, ("phase_name",), None) is not None else None,
-            current=safe_int(current, None),
-            total=safe_int(total, None),
-            ts=safe_float(_pick(d, ("ts", "timestamp_unix"), None), utc_now_ts()) or utc_now_ts(),
-            updated_at=safe_str(_pick(d, ("updated_at", "timestamp"), None), utc_now_iso()),
-            last_error=clamp_text(safe_str(_pick(d, ("last_error", "error", "error_message"), None), "")) or None,
+            phase_index=safe_int(_pick(d, ("phase_index", "phase", "phase_current"), None), None),
+            phase_total=safe_int(_pick(d, ("phase_total", "total_phases", "phase_count"), None), None),
+            phase_name=safe_opt_str(_pick(d, ("phase_name",), None)),
+            current=safe_int(_pick(d, ("current", "current_cycle", "cycle", "cycle_index"), None), None),
+            total=safe_int(_pick(d, ("total", "total_cycles", "max_cycles"), None), None),
+            effective_current=safe_int(_pick(d, ("effective_current",), None), None),
+            effective_total=safe_int(_pick(d, ("effective_total",), None), None),
+            message=safe_opt_str(_pick(d, ("message", "status_text", "detail"), None)),
+            ts=safe_float(_pick(d, ("ts", "timestamp_unix", "unix_ts"), None), utc_now_ts()) or utc_now_ts(),
+            updated_at=iso_from_any(updated_at_raw),
+            last_error=(
+                clamp_text(_pick(d, ("last_error", "error", "error_message"), None), 12000).strip() or None
+            ),
             meta=meta,
         )
 
@@ -412,13 +479,11 @@ class WorkerState:
 @dataclass
 class RunState:
     """
-    "Last saved run state" snapshot. Typically written:
+    Last saved run snapshot. Often written:
     - at start (queued/starting)
     - before/after each phase
     - on finish
     - on error
-
-    The Streamlit diagnostics tab reads run_state.json when MemoryStore is absent.
     """
 
     run_id: Optional[str] = None
@@ -432,7 +497,7 @@ class RunState:
     finished_at: Optional[str] = None
 
     # Latest known phase/cycle
-    phase_index: Optional[int] = None
+    phase_index: Optional[int] = None  # 0-based recommended for your Streamlit UI
     phase_total: Optional[int] = None
     phase_name: Optional[str] = None
     cycle: Optional[int] = None
@@ -449,13 +514,16 @@ class RunState:
     updated_at: str = field(default_factory=utc_now_iso)
 
     def to_dict(self) -> JSONDict:
-        d = asdict(self)
+        d: JSONDict = asdict(self)
         d["schema_version"] = SCHEMA_VERSION
 
         # Compatibility aliases
         if self.run_id is not None:
             d.setdefault("job_id", self.run_id)
             d.setdefault("id", self.run_id)
+
+        d.setdefault("timestamp", self.updated_at)
+        d.setdefault("timestamp_unix", self.ts)
 
         if self.cycle is not None:
             d.setdefault("current_cycle", self.cycle)
@@ -464,31 +532,37 @@ class RunState:
         if self.total_cycles is not None:
             d.setdefault("total", self.total_cycles)
 
+        if self.phase_total is not None:
+            d.setdefault("total_phases", self.phase_total)
+
         return d
 
     @classmethod
     def from_dict(cls, raw: Any) -> "RunState":
         d = raw if isinstance(raw, dict) else {}
-        run_id = _pick(d, ("run_id", "job_id", "id"), None)
+        updated_at_raw = _pick(d, ("updated_at", "timestamp", "time_iso"), None)
+
+        diagnostics_val = _pick(d, ("diagnostics", "debug"), None)
+        diagnostics = diagnostics_val if isinstance(diagnostics_val, dict) else None
 
         return cls(
-            run_id=safe_str(run_id, None) if run_id is not None else None,
+            run_id=safe_opt_str(_pick(d, ("run_id", "job_id", "id"), None)),
             status=safe_str(_pick(d, ("status",), STATUS_UNKNOWN), STATUS_UNKNOWN),
-            domain=safe_str(_pick(d, ("domain",), None), None) if _pick(d, ("domain",), None) is not None else None,
-            mode=safe_str(_pick(d, ("mode", "run_mode"), None), None) if _pick(d, ("mode", "run_mode"), None) is not None else None,
-            goal=safe_str(_pick(d, ("goal",), None), None) if _pick(d, ("goal",), None) is not None else None,
-            started_at=safe_str(_pick(d, ("started_at", "start_time", "start_ts"), None), None) if _pick(d, ("started_at", "start_time", "start_ts"), None) is not None else None,
-            finished_at=safe_str(_pick(d, ("finished_at", "end_time", "end_ts"), None), None) if _pick(d, ("finished_at", "end_time", "end_ts"), None) is not None else None,
-            phase_index=safe_int(_pick(d, ("phase_index", "phase"), None), None),
-            phase_total=safe_int(_pick(d, ("phase_total", "total_phases"), None), None),
-            phase_name=safe_str(_pick(d, ("phase_name",), None), None) if _pick(d, ("phase_name",), None) is not None else None,
+            domain=safe_opt_str(_pick(d, ("domain",), None)),
+            mode=safe_opt_str(_pick(d, ("mode", "run_mode"), None)),
+            goal=safe_opt_str(_pick(d, ("goal",), None)),
+            started_at=safe_opt_str(_pick(d, ("started_at", "start_time", "start_ts"), None)),
+            finished_at=safe_opt_str(_pick(d, ("finished_at", "end_time", "end_ts"), None)),
+            phase_index=safe_int(_pick(d, ("phase_index", "phase", "phase_current"), None), None),
+            phase_total=safe_int(_pick(d, ("phase_total", "total_phases", "phase_count"), None), None),
+            phase_name=safe_opt_str(_pick(d, ("phase_name",), None)),
             cycle=safe_int(_pick(d, ("cycle", "current_cycle", "cycle_index"), None), None),
             total_cycles=safe_int(_pick(d, ("total_cycles", "total"), None), None),
-            summary=clamp_text(safe_str(_pick(d, ("summary", "run_summary", "human_summary"), None), ""), 10000) or None,
-            diagnostics=_pick(d, ("diagnostics", "debug"), None) if isinstance(_pick(d, ("diagnostics", "debug"), None), dict) else None,
-            error=clamp_text(safe_str(_pick(d, ("error", "last_error", "error_message"), None), ""), 12000) or None,
-            ts=safe_float(_pick(d, ("ts", "timestamp_unix"), None), utc_now_ts()) or utc_now_ts(),
-            updated_at=safe_str(_pick(d, ("updated_at", "timestamp"), None), utc_now_iso()),
+            summary=(clamp_text(_pick(d, ("summary", "run_summary", "human_summary"), None), 10000).strip() or None),
+            diagnostics=diagnostics,
+            error=(clamp_text(_pick(d, ("error", "last_error", "error_message"), None), 12000).strip() or None),
+            ts=safe_float(_pick(d, ("ts", "timestamp_unix", "unix_ts"), None), utc_now_ts()) or utc_now_ts(),
+            updated_at=iso_from_any(updated_at_raw),
         )
 
 
@@ -497,13 +571,10 @@ class EventEntry:
     """
     Narrative timeline event entry.
 
-    Streamlit render_narrative_feed() accepts events with keys like:
+    Streamlit viewers typically accept:
       - ts or timestamp
       - kind or type
       - message or text or summary
-
-    We'll emit:
-      ts (ISO), kind, message, plus optional structured data.
     """
 
     ts: str = field(default_factory=utc_now_iso)
@@ -514,22 +585,27 @@ class EventEntry:
     run_id: Optional[str] = None
     domain: Optional[str] = None
     role: Optional[str] = None
+    phase_name: Optional[str] = None
+    cycle: Optional[int] = None
 
     # Optional structured payload
     data: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> JSONDict:
+        msg = clamp_text(self.message, 6000)
         return {
             "schema_version": SCHEMA_VERSION,
             "ts": self.ts,
-            "timestamp": self.ts,  # alias for viewers
+            "timestamp": self.ts,  # alias
             "kind": self.kind,
             "type": self.kind,  # alias
-            "message": clamp_text(self.message, 6000),
-            "text": clamp_text(self.message, 6000),  # alias
+            "message": msg,
+            "text": msg,  # alias
             "run_id": self.run_id,
             "domain": self.domain,
             "role": self.role,
+            "phase_name": self.phase_name,
+            "cycle": self.cycle,
             "data": self.data or {},
         }
 
@@ -537,11 +613,7 @@ class EventEntry:
     def from_dict(cls, raw: Any) -> "EventEntry":
         d = raw if isinstance(raw, dict) else {}
         ts_val = _pick(d, ("ts", "timestamp", "time"), None)
-        ts_iso = safe_str(ts_val, "")
-        if not ts_iso:
-            # Try unix ts
-            ts_num = safe_float(_pick(d, ("unix_ts", "ts_unix"), None), None)
-            ts_iso = iso_from_ts(ts_num) if ts_num is not None else utc_now_iso()
+        ts_iso = iso_from_any(ts_val)
 
         kind = safe_str(_pick(d, ("kind", "type"), "event"), "event")
         msg = safe_str(_pick(d, ("message", "text", "summary"), ""), "")
@@ -549,15 +621,15 @@ class EventEntry:
         data_val = _pick(d, ("data", "payload"), None)
         data = data_val if isinstance(data_val, dict) else {}
 
-        rid = _pick(d, ("run_id", "job_id", "id"), None)
-
         return cls(
             ts=ts_iso,
             kind=kind or "event",
             message=msg,
-            run_id=safe_str(rid, None) if rid is not None else None,
-            domain=safe_str(_pick(d, ("domain",), None), None) if _pick(d, ("domain",), None) is not None else None,
-            role=safe_str(_pick(d, ("role",), None), None) if _pick(d, ("role",), None) is not None else None,
+            run_id=safe_opt_str(_pick(d, ("run_id", "job_id", "id"), None)),
+            domain=safe_opt_str(_pick(d, ("domain",), None)),
+            role=safe_opt_str(_pick(d, ("role",), None)),
+            phase_name=safe_opt_str(_pick(d, ("phase_name",), None)),
+            cycle=safe_int(_pick(d, ("cycle", "cycle_index", "current_cycle"), None), None),
             data=data,
         )
 
