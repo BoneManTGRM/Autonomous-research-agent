@@ -33,9 +33,9 @@ Live console upgrades (this update):
 - Discovery confidence cards (top discovery candidates)
 
 Run diagnostics upgrades (this update):
-- Unified loaders: read from MemoryStore when available, with file-based fallbacks
-- Progress normalization (supports both cycle progress and phase progress, if emitted by worker)
-- Optional auto-refresh so the UI can actually show 1/3 Ã¢ÂÂ 2/3 Ã¢ÂÂ 3/3 while the worker runs
+    - Unified loaders: read from MemoryStore when available, with file-based fallbacks
+    - Progress normalization (supports both cycle progress and phase progress, if emitted by worker)
+    - Optional auto-refresh so the UI can actually show 1/3 -> 2/3 -> 3/3 while the worker runs
 
 Reparodynamics:
     The UI is a front panel on a reparodynamic system:
@@ -81,7 +81,14 @@ except Exception:  # pragma: no cover
 
 # IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="Ã°ÂÂ§Âª", layout="wide")
+# Configure the Streamlit page.  Avoid using complex emoji for the page icon to
+# prevent character encoding issues on some platforms.  A simple microscope
+# emoji conveys the scientific nature of the app and renders reliably.  If
+# emojis are not desired the icon can be set to None.
+# Set the page icon to a microscope emoji in plain UTFâ8.  Using a proper
+# Unicode character here prevents mojibake issues on some systems.  If
+# desired, you can set page_icon to None instead of an emoji.
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ð¬", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -475,7 +482,9 @@ def _abbrev_id(value: Any, head: int = 8, tail: int = 4) -> str:
     s = str(value)
     if len(s) <= head + tail + 1:
         return s
-    return f"{s[:head]}Ã¢ÂÂ¦{s[-tail:]}"
+    # When abbreviating identifiers include a plain ASCII ellipsis.  Using "..."
+    # avoids problems with Unicode ellipsis rendering on some systems.
+    return f"{s[:head]}...{s[-tail:]}"
 def _format_metric_value(v: Any, decimals: int = 3) -> str:
     """Format a metric value safely for st.metric."""
     num = _maybe_float(v)
@@ -747,11 +756,13 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
                     text = h.get("text", "")
                     conf = h.get("confidence")
                     if conf is not None:
-                        st.write(f"Ã¢ÂÂ¢ {text} (confidence ~ {conf})")
+                        # Use a simple hyphen to list generated hypotheses and include the confidence.
+                        st.write(f"- {text} (confidence ~ {conf})")
                     else:
-                        st.write(f"Ã¢ÂÂ¢ {text}")
+                        st.write(f"- {text}")
                 else:
-                    st.write(f"Ã¢ÂÂ¢ {h}")
+                    # For non-dictionary hypotheses just show the value prefaced with a hyphen.
+                    st.write(f"- {h}")
 
     # Citations
     if cycle_summary.get("citations") or cycle_summary.get("sources") or cycle_summary.get("source_list"):
@@ -948,7 +959,8 @@ def render_job_summary(job: Any) -> None:
     cols[2].markdown(f"Status: `{status}`")
     cols[3].markdown(f"Domain: `{str(domain).title()}`")
 
-    st.caption(f"Mode: {mode} Ã¢ÂÂ¢ Created at: {created_at}")
+    # Separate the mode and creation time with a vertical bar to avoid Unicode bullet rendering issues.
+    st.caption(f"Mode: {mode} | Created at: {created_at}")
 
 
 # -------------------------------------------------------------------
@@ -1025,7 +1037,7 @@ def _safe_create_job(config: Dict[str, Any], meta: Optional[Dict[str, Any]] = No
 
 
 # -------------------------------------------------------------------
-# Run-result Ã¢ÂÂ cycle-history helpers (used for citation table fallback)
+# Run-result -> cycle-history helpers (used for citation table fallback)
 # -------------------------------------------------------------------
 def _extract_cycles_from_run_result(
     run_result: Dict[str, Any],
@@ -2085,7 +2097,7 @@ def load_run_state_unified(
 
 
 def load_progress_unified(run_id: Optional[str]) -> Tuple[Optional[Dict[str, Any]], str]:
-    """Load progress JSON if the worker emits one (recommended for smooth 1/3Ã¢ÂÂ2/3Ã¢ÂÂ3/3 updates)."""
+    """Load progress JSON if the worker emits one (recommended for smooth 1/3->2/3->3/3 updates)."""
     if not run_id:
         return None, "no run_id"
 
@@ -2387,34 +2399,11 @@ def inject_base_styles() -> None:
   align-items:center;
   justify-content:space-between;
   gap: 1rem;
-  flex-wrap: nowrap;
 }
 .ara-topbar-left, .ara-topbar-mid, .ara-topbar-right{
-  display:flex;
-  align-items:center;
-  gap: 0.75rem;
-  min-width: 0;
-  overflow: hidden;
+  display:flex; align-items:center; gap: 0.75rem; min-width: 0;
 }
-.ara-topbar-left{ flex: 1 1 auto; }
-.ara-topbar-mid{ flex: 1 1 auto; justify-content: center; opacity: 0.9; }
-.ara-topbar-right{ flex: 0 0 auto; justify-content: flex-end; }
-
-/* Mobile / narrow-screen behavior: avoid text collisions by stacking rows and
-   hiding non-essential middle text. */
-@media (max-width: 740px){
-  .ara-topbar-wrap{ padding: 0.55rem 0.9rem 0.55rem 0.9rem; }
-  .ara-topbar{ flex-wrap: wrap; justify-content: flex-start; gap: 0.55rem; }
-  .ara-topbar-left{ flex: 1 1 100%; flex-wrap: wrap; }
-  .ara-topbar-right{ flex: 1 1 100%; justify-content: flex-start; flex-wrap: wrap; }
-  .ara-topbar-mid{ display: none; }
-  .ara-mini-progress{ width: 180px; }
-}
-
-@media (max-width: 420px){
-  .ara-mini-progress{ width: 140px; }
-  .ara-topbar-title{ max-width: 42vw; }
-}
+.ara-topbar-mid { opacity: 0.9; }
 .ara-topbar-title{
   font-weight: 650;
   letter-spacing: 0.2px;
@@ -2443,9 +2432,6 @@ def inject_base_styles() -> None:
   font-size: 0.85rem;
   opacity: 0.86;
   white-space: nowrap;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .ara-kv code{
   font-size: 0.8rem;
@@ -2535,29 +2521,6 @@ def inject_base_styles() -> None:
 
 /* Reduce clutter of Streamlit default anchors in markdown headers */
 h1 a, h2 a, h3 a, h4 a { display:none !important; }
-
-/* Responsive topbar: prevent text collisions on narrow/mobile screens */
-@media (max-width: 740px){
-  .ara-topbar{
-    flex-wrap: wrap;
-    justify-content: flex-start;
-    row-gap: 0.45rem;
-  }
-  .ara-topbar-left, .ara-topbar-right{
-    flex: 1 1 100%;
-    flex-wrap: wrap;
-  }
-  .ara-topbar-right{ justify-content: flex-start; }
-  /* The mid section is helpful on desktop, but causes crowding on mobile. */
-  .ara-topbar-mid{ display:none; }
-  .ara-mini-progress{ width: 180px; }
-  .ara-topbar-wrap{ padding: 0.55rem 0.95rem 0.55rem 0.95rem; }
-}
-
-@media (max-width: 420px){
-  .ara-mini-progress{ width: 140px; }
-  .ara-topbar-title{ max-width: 44vw; }
-}
 </style>
             """
         ).strip("\n"),
@@ -2594,14 +2557,14 @@ def render_topbar(
         mid_parts.append(f'Run <code title="{rid_title}">{rid_html}</code>')
         if mode:
             mid_parts.append(f"Mode <code>{html.escape(str(mode))}</code>")
-    # Only show the middle section when we actually have run metadata.
-    # This avoids long "No active run detected" text colliding with other
-    # topbar elements on smaller screens.
-    mid_txt = " | ".join(mid_parts) if mid_parts else ""
+    # Join the mid-text parts with a simple vertical bar.  The middle dot (Â·) is
+    # replaced to improve legibility and avoid encoding artifacts in some
+    # environments.
+    mid_txt = " | ".join(mid_parts) if mid_parts else "No active run detected"
 
     # Progress (show as X/Y + label). If nothing is running, keep the indicator subtle.
     kind = str(progress_view.get("kind") or "none")
-    # Default progress label when nothing is running
+    # Use a regular hyphen as the default value for the right-hand progress label.
     right_txt = "-"
     width_pct = 0.0
 
@@ -2624,18 +2587,6 @@ def render_topbar(
 
     status_html = html.escape(status or "unknown")
 
-    # Conditionally render the middle section only when we have run metadata.
-    # (On mobile/narrow screens this section is hidden via CSS anyway.)
-    mid_block = ""
-    if mid_txt:
-        mid_block = (
-            f"""
-<div class=\"ara-topbar-mid\">
-  <div class=\"ara-kv\">{mid_txt}</div>
-</div>
-            """
-        )
-
     st.markdown(
         textwrap.dedent(
             f"""
@@ -2645,14 +2596,16 @@ def render_topbar(
 <div class="ara-dot {health_class}"></div>
 <div class="ara-topbar-title">{html.escape(health_label)}</div>
 <div class="ara-kv">Beat {html.escape(beat_txt)} ago</div>
-<div class="ara-kv">Status {status_html}</div>
+<div class="ara-kv">Status <code>{status_html}</code></div>
 </div>
 
-{mid_block}
+<div class="ara-topbar-mid">
+<div class="ara-kv">{mid_txt}</div>
+</div>
 
 <div class="ara-topbar-right">
 <div class="ara-kv">{autonomy_html}</div>
-<div class="ara-kv">{html.escape(right_txt)}</div>
+<div class="ara-kv"><code>{html.escape(right_txt)}</code></div>
 <div class="ara-mini-progress" title="progress">
 <div style="width:{width_pct}%"></div>
 </div>
@@ -2790,7 +2743,11 @@ def render_agent_presence(
         a_clean = str(a)
         is_active = active_agent and (a_clean == active_agent or a_clean.split("_", 1)[0] == str(active_agent))
         cls = "ara-chip active" if is_active else "ara-chip"
-        chips.append(f'<span class="{cls}">Ã¢ÂÂ {html.escape(a_clean)}</span>')
+        # Render the agent name directly without a leading Unicode bullet.  The
+        # original implementation used a large dot (â) which sometimes shows up
+        # incorrectly on devices without full Unicode font support.  A clean
+        # presentation without the bullet improves compatibility.
+        chips.append(f'<span class="{cls}">{html.escape(a_clean)}</span>')
     st.markdown("".join(chips), unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -2896,7 +2853,10 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
         if isinstance(rye, (int, float)):
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
-            parts.append(f"ÃÂR {float(d_r):.3f}")
+            # Use the Greek capital delta character (Î) to denote the change in R.  This
+            # avoids the mojibake that previously manifested (encoded gibberish) and should
+            # render correctly in UTF-8 environments.
+            parts.append(f"ÎR {float(d_r):.3f}")
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
@@ -2904,7 +2864,8 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
         if hyps_n:
             parts.append(f"{hyps_n} hypotheses")
 
-        msg = " Ã¢ÂÂ¢ ".join(parts)
+        # Join parts of the cycle message with a vertical bar rather than a Unicode bullet.
+        msg = " | ".join(parts)
         events.append(
             {
                 "ts": e.get("timestamp") or "",
@@ -2942,7 +2903,9 @@ def render_narrative_feed(events: List[Dict[str, Any]], source_label: str = "") 
         msg = str(ev.get("message") or ev.get("text") or ev.get("summary") or "")
         if not msg:
             continue
-        meta = " Ã¢ÂÂ¢ ".join([x for x in [ts, kind] if x])
+        # Join timestamp and kind metadata with a vertical bar.  This avoids issues
+        # with bullet characters rendering incorrectly on some devices.
+        meta = " | ".join([x for x in [ts, kind] if x])
         rows.append(
             f"""
 <div class="ara-event">
@@ -3017,8 +2980,8 @@ def render_discovery_cards(discoveries: List[Dict[str, Any]]) -> None:
                 f"""
 <div class="ara-card">
   <div class="ara-card-title">{html.escape(title)}</div>
-  <div class="ara-card-sub">{html.escape(domain)} Ã¢ÂÂ¢ confidence {html.escape(conf_txt)} Ã¢ÂÂ¢ RYE gain {html.escape(gain_txt)} Ã¢ÂÂ¢ evidence {ev_n}</div>
-  <div class="ara-card-mono">{html.escape(desc) if desc else "Ã¢ÂÂ"}</div>
+  <div class="ara-card-sub">{html.escape(domain)} | confidence {html.escape(conf_txt)} | RYE gain {html.escape(gain_txt)} | evidence {ev_n}</div>
+  <div class="ara-card-mono">{html.escape(desc) if desc else "-"}</div>
 </div>
                 """,
                 unsafe_allow_html=True,
@@ -3818,7 +3781,7 @@ def main() -> None:
     )
 
     st.caption(
-        f"Finite mode only Ã¢ÂÂ¢ Queue based runs Ã¢ÂÂ¢ Engine worker processes jobs from `{queue_pending_dir}` for `*_job.json` files.\n"
+        f"Finite mode only | Queue based runs | Engine worker processes jobs from `{queue_pending_dir}` for `*_job.json` files.\n"
         "This UI never runs TGRM loops directly. It only queues jobs and visualizes artifacts."
     )
 
@@ -3831,13 +3794,14 @@ def main() -> None:
         pass
 
     # ------------------------------------------------------------------
-    # Sidebar: Live updates (this fixes the Ã¢ÂÂ0/3 then 3/3Ã¢ÂÂ perception issue)
+    # Sidebar: Live updates (this fixes the "0/3 then 3/3" perception issue)
     # ------------------------------------------------------------------
     st.sidebar.subheader("Live updates")
     auto_refresh = st.sidebar.checkbox(
         "Auto-refresh while worker is running",
         value=True,
-        help="Enables live dashboard updates so progress can show 1/3 Ã¢ÂÂ 2/3 Ã¢ÂÂ 3/3 during runs.",
+        # Use ASCII arrows in the help text to avoid Unicode rendering issues.
+        help="Enables live dashboard updates so progress can show 1/3 -> 2/3 -> 3/3 during runs.",
     )
     refresh_seconds = 5
     if auto_refresh:
@@ -3873,7 +3837,7 @@ def main() -> None:
             f"""
 <div class="ara-card">
   <div class="ara-card-title">Autonomy level</div>
-  <div class="ara-card-sub">{html.escape(str(autonomy_view0.get("label","Unknown")))} Ã¢ÂÂ¢ {int(autonomy_view0.get("score",0))}/4</div>
+  <div class="ara-card-sub">{html.escape(str(autonomy_view0.get("label","Unknown")))} | {int(autonomy_view0.get("score",0))}/4</div>
   <div class="ara-card-mono">{html.escape(str(autonomy_view0.get("explain","")))}</div>
 </div>
             """,
@@ -4398,7 +4362,9 @@ def main() -> None:
         st.markdown("#### Queued runs")
         st.caption(f"Queue directory: `{pending_dir}`")
 
-        if st.button("Ã°ÂÂ§Â¹ Clear job queue", key="clear_queue_btn"):
+        # Use a plain label for the clear queue button.  Avoid emojis for
+        # compatibility across devices.
+        if st.button("Clear job queue", key="clear_queue_btn"):
             removed = 0
 
             def _is_uuid_stem(stem: str) -> bool:
@@ -5228,7 +5194,8 @@ def main() -> None:
     st.subheader("Run diagnostics")
 
     # Refresh button (manual)
-    if st.button("Ã¢ÂÂ» Refresh diagnostics now", key="refresh_diag_btn"):
+    # Provide a plain text refresh button.  Unicode arrows can render poorly on some systems.
+    if st.button("Refresh diagnostics now", key="refresh_diag_btn"):
         st.rerun()
 
     # Reload unified states (fresh for this render)
@@ -5335,7 +5302,8 @@ def main() -> None:
                         if note:
                             st.caption(note)
                 else:
-                    st.info("No progress JSON found. If you want smooth 1/3 Ã¢ÂÂ 2/3 updates, have the worker write `<run_id>_progress.json` each phase/cycle.")
+                    # Use ASCII arrows in this informational message.
+                    st.info("No progress JSON found. If you want smooth 1/3 -> 2/3 updates, have the worker write `<run_id>_progress.json` each phase/cycle.")
 
     with st.expander("Diagnostics discovery (files checked)"):
         st.write("These are the standard locations the UI checks for diagnostics artifacts.")
@@ -5345,7 +5313,11 @@ def main() -> None:
             lst = paths.get(k, [])
             shown = []
             for p in lst[:12]:
-                exists = "Ã¢ÂÂ" if p.exists() else "Ã¢ÂÂ"
+                # Indicate existence of a diagnostic file with a simple check mark; use '-' when absent.
+                # Use a simple check mark to indicate the presence of a diagnostic file.  The
+                # previous encoding resulted in mojibake (encoded gibberish); this uses the proper
+                # Unicode check mark instead.
+                exists = "â" if p.exists() else "-"
                 shown.append(f"{exists} `{p}`")
             st.write("\n".join(shown))
 
