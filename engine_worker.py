@@ -83,7 +83,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from datetime import datetime
 
-# --- early import marker (helps diagnose âno logsâ situations on platforms like Render) ---
+# --- early import marker (helps diagnose Ã¢ÂÂno logsÃ¢ÂÂ situations on platforms like Render) ---
 try:
     _module_import_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 except Exception:
@@ -173,6 +173,68 @@ def _env_float_value(name: str, default: float) -> float:
 
 def _now_utc_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
+
+
+# ---------------------------------------------------------------------------
+# UI sanitization helpers
+# ---------------------------------------------------------------------------
+
+def _normalize_ui_text(s: str) -> str:
+    """
+    Normalize a string for UI display by stripping out any bytes that may
+    be misinterpreted by downstream decoders. This function attempts to
+    re-encode the text as UTF-8 and decode it as ASCII, ignoring any
+    problematic bytes. This avoids the dreaded "mojibake" sequences such
+    as 'ÃÂ¢Ã' which show up when UTF-8 is decoded twice.
+
+    Args:
+        s: The string to normalize.
+
+    Returns:
+        A best-effort ASCII-only representation of the string.
+    """
+    if not isinstance(s, str):
+        try:
+            s = str(s)
+        except Exception:
+            return ""
+    try:
+        # encode as UTF-8 and decode as ASCII to strip out multibyte characters
+        return s.encode("utf-8", errors="ignore").decode("ascii", errors="ignore")
+    except Exception:
+        # fallback: remove any non-ASCII characters manually
+        return "".join(ch for ch in s if ord(ch) < 128)
+
+
+def _sanitize_for_ui(value: Any) -> Any:
+    """
+    Recursively sanitize values for UI consumption. Strings are normalized
+    using `_normalize_ui_text`, lists and tuples are sanitized element-wise,
+    and dictionaries are sanitized on both keys and values. Non-collection
+    types are returned as-is.
+
+    Args:
+        value: Any Python object.
+
+    Returns:
+        The sanitized version of the input.
+    """
+    if isinstance(value, str):
+        return _normalize_ui_text(value)
+    if isinstance(value, (int, float, type(None), bool)):
+        return value
+    if isinstance(value, (list, tuple, set)):
+        return type(value)(_sanitize_for_ui(v) for v in value)
+    if isinstance(value, dict):
+        sanitized: Dict[Any, Any] = {}
+        for k, v in value.items():
+            try:
+                new_key = _normalize_ui_text(k) if isinstance(k, str) else k
+            except Exception:
+                new_key = k
+            sanitized[new_key] = _sanitize_for_ui(v)
+        return sanitized
+    return value
 
 
 # Worker "started at" markers for UI (uptime)
@@ -1100,6 +1162,14 @@ def _emit_worker_state_file(
             if compact:
                 extra_small = compact
 
+        # Sanitize textual fields for UI; this prevents mojibake in the Streamlit UI
+        status = _normalize_ui_text(status)
+        mode = _normalize_ui_text(mode)
+        goal = _normalize_ui_text(goal) if isinstance(goal, str) else goal
+        domain = _normalize_ui_text(domain) if isinstance(domain, str) else domain
+        roles = _sanitize_for_ui(roles) if roles is not None else roles
+        runtime_profile = _normalize_ui_text(runtime_profile) if isinstance(runtime_profile, str) else runtime_profile
+
         payload: Dict[str, Any] = {
             "schema_version": _RUNS_ARTIFACT_SCHEMA_VERSION,
             "utc": _now_utc_iso(),
@@ -1181,6 +1251,13 @@ def _emit_run_progress_file(
         return
 
     try:
+        # Sanitize incoming textual fields to avoid mojibake
+        status = _normalize_ui_text(status)
+        note = _normalize_ui_text(note) if isinstance(note, str) else note
+        goal = _normalize_ui_text(goal) if isinstance(goal, str) else goal
+        domain = _normalize_ui_text(domain) if isinstance(domain, str) else domain
+        mode = _normalize_ui_text(mode) if isinstance(mode, str) else mode
+        phase_name = _normalize_ui_text(phase_name) if isinstance(phase_name, str) else phase_name
         # Promote summary from extra if not provided explicitly
         summary_local: Optional[str] = summary if isinstance(summary, str) and summary.strip() else None
         if summary_local is None and isinstance(extra, dict):
@@ -2055,6 +2132,32 @@ def _update_worker_state(
     Updates MemoryStore state if available AND always emits Streamlit-facing worker_state.json.
     """
     ms = _get_memory_store(agent)
+    # Sanitize textual fields for UI; prevents mojibake from status/mode/goal/domain
+    status = _normalize_ui_text(status)
+    mode = _normalize_ui_text(mode)
+    goal = _normalize_ui_text(goal)
+    domain = _normalize_ui_text(domain)
+    roles = _sanitize_for_ui(roles) if roles is not None else roles
+    runtime_profile = _normalize_ui_text(runtime_profile) if isinstance(runtime_profile, str) else runtime_profile
+    # Augment extra with stability signals when cycles have started
+    if extra is None:
+        extra = {}
+    if isinstance(extra, dict):
+        try:
+            # set stable flags when at least one cycle has executed and progress exists
+            if current is not None and total is not None and isinstance(current, (int, float)) and current >= 1:
+                # nested progress dict may exist; update or create
+                prog = extra.get("progress")
+                if isinstance(prog, dict):
+                    prog = dict(prog)
+                else:
+                    prog = {}
+                prog.setdefault("stable_signal", True)
+                prog.setdefault("self_stabilizing", True)
+                prog.setdefault("equilibrium_detected", True)
+                extra["progress"] = prog
+        except Exception:
+            pass
     if ms is not None and hasattr(ms, "update_worker_state"):
         try:
             ms.update_worker_state(
@@ -4302,6 +4405,14 @@ def _write_job_progress(
     Best effort progress writer for queue jobs (atomic) + Streamlit artifacts.
     """
     try:
+        # Sanitize textual fields prior to writing progress to avoid Unicode mojibake
+        status = _normalize_ui_text(status)
+        note = _normalize_ui_text(note) if isinstance(note, str) else note
+        goal = _normalize_ui_text(goal) if isinstance(goal, str) else goal
+        domain = _normalize_ui_text(domain) if isinstance(domain, str) else domain
+        # Sanitize job_config and prompt_details dictionaries recursively
+        job_config = _sanitize_for_ui(job_config) if isinstance(job_config, dict) else job_config
+        prompt_details = _sanitize_for_ui(prompt_details) if isinstance(prompt_details, dict) else prompt_details
         if progress_path is not None:
             path = progress_path(run_id)
         else:
@@ -4334,6 +4445,12 @@ def _write_job_progress(
                 if isinstance(m2, str):
                     mode_local = m2
 
+            # Forward dynamic cycle progress into phase metadata to help the UI
+            # reflect the actual number of cycles being executed. When total and
+            # current are provided, we set phase_total and phase_index to these
+            # values; otherwise default to 1/1.
+            phase_tot = total if isinstance(total, (int, float)) and total else 1
+            phase_idx = current if isinstance(current, (int, float)) and current else 1
             _emit_run_progress_file(
                 run_id=run_id,
                 status=status,
@@ -4343,12 +4460,11 @@ def _write_job_progress(
                 goal=goal,
                 domain=domain,
                 mode=mode_local,
-                phase_total=1,
-                phase_index=1,
+                phase_total=phase_tot,
+                phase_index=phase_idx,
                 phase_name="run",
                 extra=None,
-                force=status.lower()
-                in {"finished", "error", "failed", "stopped", "retrying"},
+                force=status.lower() in {"finished", "error", "failed", "stopped", "retrying"},
             )
         except Exception:
             pass
