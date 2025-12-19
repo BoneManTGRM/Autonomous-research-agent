@@ -65,7 +65,7 @@ import sys
 import textwrap
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -334,7 +334,12 @@ DISCOVERY_CARDS_LIMIT: int = 6
 # Helpers
 # -------------------------------------------------------------------
 def _parse_timestamp_str(ts: str) -> Optional[datetime]:
-    """Parse ISO style timestamps, including those with a trailing Z."""
+    """Parse ISO style timestamps, including those with a trailing Z.
+
+    Returns a naive UTC datetime when possible:
+    - "2025-01-01T00:00:00Z" -> naive UTC
+    - "2025-01-01T00:00:00+00:00" -> converted to UTC then tzinfo stripped
+    """
     if not isinstance(ts, str):
         return None
     ts = ts.strip()
@@ -343,7 +348,16 @@ def _parse_timestamp_str(ts: str) -> Optional[datetime]:
     try:
         if ts.endswith("Z"):
             ts = ts[:-1]
-        return datetime.fromisoformat(ts)
+            dt = datetime.fromisoformat(ts)
+            # Z indicates UTC; keep naive UTC representation
+            if dt.tzinfo is not None:
+                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+            return dt
+
+        dt = datetime.fromisoformat(ts)
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
     except Exception:
         return None
 
@@ -1569,6 +1583,8 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
         logs / "watchdog_heartbeat.json",
         logs / "heartbeat.json",
         logs / "worker_heartbeat.json",
+        logs / "watchdog.json",
+        logs / "watchdog_state.json",
         queue_root / "watchdog_heartbeat.json",
         q_active / "watchdog_heartbeat.json",
     ]
@@ -1600,6 +1616,8 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
             [
                 logs / f"{run_id}_heartbeat.json",
                 runs_root / run_id / "heartbeat.json",
+                runs_root / run_id / "watchdog_heartbeat.json",
+                runs_root / run_id / "watchdog.json",
             ]
         )
         events.extend(
@@ -1659,30 +1677,199 @@ def _normalize_watchdog_info(raw: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-def load_watchdog_info_unified(memory: MemoryStore, run_id: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
-    """Load heartbeat/watchdog info, preferring MemoryStore but with file fallbacks.
+def _is_meaningful_watchdog(info: Optional[Dict[str, Any]]) -> bool:
+    """Return True only if the watchdog payload contains real signals.
 
-    Returns (info_or_none, source_string).
+    This prevents an "empty shell" dict (count=0, last_beat=None) coming from MemoryStore
+    from blocking file-based fallbacks.
     """
-    # MemoryStore
+    if not isinstance(info, dict):
+        return False
+
+    last = info.get("last_beat")
+    if isinstance(last, str) and last.strip():
+        return True
+    if isinstance(last, (int, float)):
+        try:
+            return float(last) > 0.0
+        except Exception:
+            pass
+
+    count = _safe_int(info.get("count"), 0) or 0
+    if count > 0:
+        return True
+
+    seconds = _maybe_float(info.get("seconds_since_last"))
+    if seconds is not None:
+        return True
+
+    return False
+
+
+def _watchdog_dt(info: Optional[Dict[str, Any]], fallback_path: Optional[Path] = None) -> Optional[datetime]:
+    """Best-effort datetime for 'freshness' comparisons."""
+    if isinstance(info, dict):
+        lb = info.get("last_beat")
+        if isinstance(lb, (int, float)):
+            try:
+                return datetime.utcfromtimestamp(float(lb))
+            except Exception:
+                pass
+        if isinstance(lb, str):
+            dt = _parse_timestamp_str(lb)
+            if dt is not None:
+                return dt
+
+    if isinstance(fallback_path, Path):
+        try:
+            return datetime.utcfromtimestamp(float(fallback_path.stat().st_mtime))
+        except Exception:
+            return None
+
+    return None
+
+
+def load_watchdog_info_unified(memory: MemoryStore, run_id: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Load heartbeat/watchdog info.
+
+    Fix:
+    - Do NOT treat an empty MemoryStore watchdog dict as authoritative.
+      If MemoryStore returns {count:0,last_beat:None}, we fall back to file-based heartbeat,
+      and if that also doesn't exist, we return None so the UI can synthesize "last activity".
+    - If both MemoryStore and a file exist, pick the fresher one by timestamp/mtime.
+    """
+    mem_info: Optional[Dict[str, Any]] = None
+    mem_src = "MemoryStore.get_watchdog_info"
+
     func = getattr(memory, "get_watchdog_info", None)
     if callable(func):
         try:
             raw = func()
-            info = _normalize_watchdog_info(raw)
-            if info:
-                return info, "MemoryStore.get_watchdog_info"
+            cand = _normalize_watchdog_info(raw)
+            if _is_meaningful_watchdog(cand):
+                mem_info = cand
         except Exception:
-            pass
+            mem_info = None
 
-    # File fallback
+    file_info: Optional[Dict[str, Any]] = None
+    file_src: str = "not found"
+    file_path: Optional[Path] = None
+
     paths = _candidate_state_paths(run_id=run_id)["heartbeat"]
     raw, p = _first_existing_json(paths)
-    info = _normalize_watchdog_info(raw)
-    if info and p is not None:
-        return info, str(p)
+    cand = _normalize_watchdog_info(raw)
+    if _is_meaningful_watchdog(cand) and p is not None:
+        file_info = cand
+        file_path = p
+        file_src = str(p)
+
+    # Choose freshest when both exist
+    if mem_info and file_info:
+        dt_mem = _watchdog_dt(mem_info)
+        dt_file = _watchdog_dt(file_info, fallback_path=file_path)
+        if dt_file is not None and (dt_mem is None or dt_file >= dt_mem):
+            return file_info, file_src
+        return mem_info, mem_src
+
+    if file_info:
+        return file_info, file_src
+    if mem_info:
+        return mem_info, mem_src
 
     return None, "not found"
+
+
+def _as_datetime_utc(v: Any) -> Optional[datetime]:
+    """Convert common timestamp formats into a naive UTC datetime."""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        try:
+            return datetime.utcfromtimestamp(float(v))
+        except Exception:
+            return None
+    if isinstance(v, str):
+        return _parse_timestamp_str(v)
+    return None
+
+
+def _latest_timestamp_in_dict(d: Optional[Dict[str, Any]], keys: List[str]) -> Optional[datetime]:
+    if not isinstance(d, dict):
+        return None
+    best: Optional[datetime] = None
+    for k in keys:
+        dt = _as_datetime_utc(d.get(k))
+        if dt is None:
+            continue
+        if best is None or dt > best:
+            best = dt
+    return best
+
+
+def synthesize_watchdog_from_activity(
+    worker_state: Optional[Dict[str, Any]],
+    run_state: Optional[Dict[str, Any]],
+    history: Optional[List[Dict[str, Any]]] = None,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Synthesize a 'watchdog-like' heartbeat when real heartbeat isn't emitted.
+
+    Used only when:
+    - MemoryStore watchdog is empty, AND
+    - no heartbeat JSON is found on disk.
+
+    It derives 'last_beat' from the freshest timestamp it can find in:
+    - worker_state (updated_at/timestamp/etc)
+    - run_state (updated_at/timestamp/etc)
+    - cycle history (last cycle timestamp)
+
+    Returns (watchdog_dict_or_none, source_label).
+    """
+    candidates: List[Tuple[datetime, str]] = []
+
+    ws_dt = _latest_timestamp_in_dict(
+        worker_state,
+        keys=["updated_at", "updatedAt", "timestamp", "ts", "last_update", "lastUpdate", "last_seen", "lastSeen"],
+    )
+    if ws_dt is not None:
+        candidates.append((ws_dt, "derived:worker_state"))
+
+    rs_dt = _latest_timestamp_in_dict(
+        run_state,
+        keys=["updated_at", "updatedAt", "timestamp", "ts", "last_update", "lastUpdate", "saved_at", "savedAt"],
+    )
+    if rs_dt is not None:
+        candidates.append((rs_dt, "derived:run_state"))
+
+    hist_dt: Optional[datetime] = None
+    if isinstance(history, list) and history:
+        ts = history[-1].get("timestamp")
+        if isinstance(ts, str):
+            hist_dt = _parse_timestamp_str(ts)
+    if hist_dt is not None:
+        candidates.append((hist_dt, "derived:history_last_cycle"))
+
+    if not candidates:
+        return None, "not found"
+
+    best_dt, src = max(candidates, key=lambda x: x[0])
+
+    try:
+        seconds_since = (datetime.utcnow() - best_dt).total_seconds()
+    except Exception:
+        seconds_since = None
+
+    # Heuristic count: use cycle count if we have it (best effort)
+    count_guess = 0
+    if isinstance(history, list) and history:
+        count_guess = len(history)
+    else:
+        count_guess = _safe_int((worker_state or {}).get("cycle") or (worker_state or {}).get("current"), 0) or 0
+
+    last_beat_str = best_dt.isoformat(timespec="seconds") + "Z"
+    return (
+        {"last_beat": last_beat_str, "count": count_guess, "seconds_since_last": seconds_since},
+        src,
+    )
 
 
 def _normalize_worker_state(raw: Any) -> Optional[Dict[str, Any]]:
@@ -2020,6 +2207,8 @@ def derive_health_class(
         return "idle", "Queued"
     if status in {"finished", "done", "completed"}:
         return "idle", "Completed"
+    if status in {"idle", "stopped", "standby", "waiting"}:
+        return "idle", "Idle"
     if status in {"error", "failed"}:
         return "offline", "Error"
 
@@ -3258,11 +3447,6 @@ def main() -> None:
         active_run_hint = str(active_run_hint)
     active_run_id = (ws0 or {}).get("run_id") or active_run_hint or _derive_active_run_id_from_queue()
 
-    # Diagnostics sources (for top bar + live console)
-    watchdog0, watchdog_src0 = load_watchdog_info_unified(memory, run_id=active_run_id)
-    progress0_raw, progress_src0 = load_progress_unified(active_run_id)
-    progress_view0 = compute_progress_view(ws0, progress0_raw, watchdog0, run_id=active_run_id)
-
     # Light history preview for narrative synthesis and stability/autonomy (last ~25 only)
     history_preview: List[Dict[str, Any]] = []
     get_cycle_history_preview = getattr(memory, "get_cycle_history", None)
@@ -3276,6 +3460,20 @@ def main() -> None:
     if not history_preview:
         # fallback to finished runs (small)
         history_preview = load_history_from_finished_runs(limit_runs=5)[-25:]
+
+    # Diagnostics sources (for top bar + live console)
+    run_state0, run_state_src0 = load_run_state_unified(memory, run_id_hint=active_run_id)
+    watchdog0, watchdog_src0 = load_watchdog_info_unified(memory, run_id=active_run_id)
+
+    # If no real watchdog heartbeat is available, synthesize one from last activity
+    if not _is_meaningful_watchdog(watchdog0):
+        synth_wd, synth_src = synthesize_watchdog_from_activity(ws0, run_state0, history_preview)
+        if synth_wd:
+            watchdog0 = synth_wd
+            watchdog_src0 = synth_src
+
+    progress0_raw, progress_src0 = load_progress_unified(active_run_id)
+    progress_view0 = compute_progress_view(ws0, progress0_raw, watchdog0, run_id=active_run_id)
 
     diagnostics_preview: Optional[Dict[str, Any]] = None
     if history_preview:
@@ -4725,6 +4923,14 @@ def main() -> None:
     watchdog, watchdog_src = load_watchdog_info_unified(memory, run_id=run_id)
     run_state, run_state_src = load_run_state_unified(memory, run_id_hint=run_id)
     progress_raw, progress_src = load_progress_unified(run_id)
+
+    # If watchdog is missing/empty, synthesize from last activity so the UI doesn't show "None recorded"
+    if not _is_meaningful_watchdog(watchdog):
+        synth_wd2, synth_src2 = synthesize_watchdog_from_activity(ws, run_state, history_preview)
+        if synth_wd2:
+            watchdog = synth_wd2
+            watchdog_src = synth_src2
+
     progress_view = compute_progress_view(ws, progress_raw, watchdog, run_id=run_id)
 
     col_state, col_watchdog = st.columns(2)
