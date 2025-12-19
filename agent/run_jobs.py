@@ -1145,10 +1145,10 @@ def update_worker_state(update: Dict[str, Any], *, replace: bool = False) -> Pat
     state.setdefault("hostname", socket.gethostname())
     state.setdefault("worker_id", _default_worker_id())
 
-    # Inject dynamic phase metadata and stability flags if cycle progress present
+    # Inject dynamic phase metadata and stability flags based on cycle progress
     try:
-        cur_cycle = None
-        tot_cycles = None
+        cur_cycle: Optional[int] = None
+        tot_cycles: Optional[int] = None
         if isinstance(state.get("current_cycle"), (int, float)):
             cur_cycle = int(state.get("current_cycle"))
         elif isinstance(state.get("current"), (int, float)):
@@ -1157,11 +1157,16 @@ def update_worker_state(update: Dict[str, Any], *, replace: bool = False) -> Pat
             tot_cycles = int(state.get("total_cycles"))
         elif isinstance(state.get("total"), (int, float)):
             tot_cycles = int(state.get("total"))
-        if cur_cycle is not None and tot_cycles is not None:
-            state.setdefault("phase_total", tot_cycles)
-            state.setdefault("phase_index", cur_cycle)
+        # Always emit phase metadata when we know a total or current.  When total
+        # is missing, default to 1; when current is missing, default to 0.
+        if tot_cycles is not None or cur_cycle is not None:
+            phase_total = tot_cycles if tot_cycles is not None else 1
+            phase_index = cur_cycle if cur_cycle is not None else 0
+            state.setdefault("phase_total", phase_total)
+            state.setdefault("phase_index", phase_index)
             state.setdefault("phase_name", state.get("phase_name") or "run")
-            if cur_cycle >= 1:
+            # Stability flags only when at least one cycle has executed
+            if cur_cycle is not None and cur_cycle >= 1:
                 state.setdefault("stable_signal", True)
                 state.setdefault("self_stabilizing", True)
                 state.setdefault("equilibrium_detected", True)
@@ -2315,8 +2320,8 @@ def write_progress(run_id: str, progress: Dict[str, Any]) -> Path:
     payload: Dict[str, Any] = _sanitize_for_ui(dict(progress or {}))
     # Inject stable flags and phase metadata if cycle progress is present
     try:
-        cur_cycle = None
-        tot_cycles = None
+        cur_cycle: Optional[int] = None
+        tot_cycles: Optional[int] = None
         # Many engines use either current_cycle/total_cycles or current/total
         if isinstance(payload.get("current_cycle"), (int, float)):
             cur_cycle = int(payload.get("current_cycle"))
@@ -2326,13 +2331,16 @@ def write_progress(run_id: str, progress: Dict[str, Any]) -> Path:
             tot_cycles = int(payload.get("total_cycles"))
         elif isinstance(payload.get("total"), (int, float)):
             tot_cycles = int(payload.get("total"))
-        if cur_cycle is not None and tot_cycles is not None:
-            # Set dynamic phase fields for UI progress bars
-            payload.setdefault("phase_total", tot_cycles)
-            payload.setdefault("phase_index", cur_cycle)
+        # Always inject phase metadata when tot_cycles is present.  If cur_cycle
+        # is missing, default to 0.  When tot_cycles is missing, default to 1.
+        if tot_cycles is not None or cur_cycle is not None:
+            phase_total = tot_cycles if tot_cycles is not None else 1
+            phase_index = cur_cycle if cur_cycle is not None else 0
+            payload.setdefault("phase_total", phase_total)
+            payload.setdefault("phase_index", phase_index)
             payload.setdefault("phase_name", payload.get("phase_name") or "run")
-            # Set stability flags when at least one cycle has executed
-            if cur_cycle >= 1:
+            # Set stability flags only when at least one cycle has executed
+            if cur_cycle is not None and cur_cycle >= 1:
                 payload.setdefault("stable_signal", True)
                 payload.setdefault("self_stabilizing", True)
                 payload.setdefault("equilibrium_detected", True)
