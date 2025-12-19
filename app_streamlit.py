@@ -82,7 +82,7 @@ except Exception:  # pragma: no cover
 
 # IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ð¬", layout="wide")
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="Ã°ÂÂÂ¬", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -2757,8 +2757,8 @@ def render_agent_presence(
         a_clean = str(a)
         is_active = active_agent and (a_clean == active_agent or a_clean.split("_", 1)[0] == str(active_agent))
         cls = "ara-chip active" if is_active else "ara-chip"
-        # Use a proper Unicode bullet instead of a misencoded character
-        chips.append(f'<span class="{cls}">â {html.escape(a_clean)}</span>')
+        # Use a plain ASCII marker instead of a misencoded Unicode bullet
+        chips.append(f'<span class="{cls}">* {html.escape(a_clean)}</span>')
     st.markdown("".join(chips), unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -2865,7 +2865,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
             # Use a readable delta symbol instead of a misencoded character
-            parts.append(f"ÎR {float(d_r):.3f}")
+            parts.append(f"ÃÂR {float(d_r):.3f}")
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
@@ -4382,7 +4382,7 @@ def main() -> None:
         st.markdown("#### Queued runs")
         st.caption(f"Queue directory: `{pending_dir}`")
 
-        if st.button("Ã°ÂÂ§Â¹ Clear job queue", key="clear_queue_btn"):
+        if st.button("Clear job queue", key="clear_queue_btn"):
             removed = 0
 
             def _is_uuid_stem(stem: str) -> bool:
@@ -5212,8 +5212,8 @@ def main() -> None:
     st.subheader("Run diagnostics")
 
     # Refresh button (manual)
-    # Use a simple refresh icon rather than a misencoded arrow
-    if st.button("â³ Refresh diagnostics now", key="refresh_diag_btn"):
+    # Use a plain label without misencoded symbols
+    if st.button("Refresh diagnostics now", key="refresh_diag_btn"):
         st.rerun()
 
     # Reload unified states (fresh for this render)
@@ -5330,9 +5330,9 @@ def main() -> None:
             lst = paths.get(k, [])
             shown = []
             for p in lst[:12]:
-                # Use simple ASCII markers instead of misencoded check marks/dashes
-                exists = "â" if p.exists() else "-"
-                shown.append(f"{exists} `{p}`")
+                # Use plain ASCII markers to indicate existence instead of misencoded symbols
+                exists_marker = "[x]" if p.exists() else "[ ]"
+                shown.append(f"{exists_marker} `{p}`")
             st.write("\n".join(shown))
 
     # ------------------------------
