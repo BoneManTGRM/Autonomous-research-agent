@@ -3,22 +3,22 @@ RYE Metrics (Level 3, Swarm Aware, 90 Day Safe, Learning Aware 10x Ready)
 
 This upgraded module introduces:
 --------------------------------
-• ΔR with deeper signal components
-• E with RYE aware cost fields for swarms and multi agent parallelization
-• Noise resistant RYE
-• Rolling RYE (windowed)
-• Robust trend detection
-• Regression slope
-• Outlier robust median RYE
-• Domain weighted RYE (math, longevity, general)
-• Multi agent energy normalization
-• Stability Index (NEW)
-• Recovery Momentum (NEW)
-• Repair Efficiency Signature (NEW)
-• Per cycle RYE summaries (NEW)
-• Run level diagnostics bundle (NEW)
-• Tool RYE diagnostics for tool_events (NEW)
-• Learning adjusted RYE fields for 10x style cognitive speed factors (NEW)
+ - Delta R with deeper signal components
+ - E with RYE aware cost fields for swarms and multi agent parallelization
+ - Noise resistant RYE
+ - Rolling RYE (windowed)
+ - Robust trend detection
+ - Regression slope
+ - Outlier robust median RYE
+ - Domain weighted RYE (math, longevity, general)
+ - Multi agent energy normalization
+ - Stability Index (NEW)
+ - Recovery Momentum (NEW)
+ - Repair Efficiency Signature (NEW)
+ - Per cycle RYE summaries (NEW)
+ - Run level diagnostics bundle (NEW)
+ - Tool RYE diagnostics for tool_events (NEW)
+ - Learning adjusted RYE fields for 10x style cognitive speed factors (NEW)
 
 Backwards compatibility:
     Existing callers that only pass the original arguments still work:
@@ -186,7 +186,7 @@ def _extract_rye_series(values_or_history: List[Any]) -> List[float]:
 
 
 # ---------------------------------------------------------------------------
-# ΔR (Improvement) - Level 3
+# Delta R (Improvement) - Level 3
 # ---------------------------------------------------------------------------
 
 def compute_delta_r(
@@ -200,7 +200,7 @@ def compute_delta_r(
     coherence_gain: float = 0.0,
 ) -> float:
     """
-    Compute ΔR using Level 3 multi signal improvement analysis.
+    Compute Delta R using Level 3 multi-signal improvement analysis.
 
     New improvements:
     - novelty_score      -> reward discovering something new
@@ -218,7 +218,7 @@ def compute_delta_r(
 
     delta = float(base + contradiction_gain + hypothesis_gain + source_gain + bonus)
 
-    # Maintenance credit (avoid ΔR = 0 with real work)
+    # Maintenance credit (avoid delta R = 0 with real work)
     if issues_before == 0 and delta == 0 and repairs_applied > 0:
         delta = repairs_applied * 0.1
 
@@ -284,7 +284,7 @@ def compute_energy(
 # ---------------------------------------------------------------------------
 
 def compute_rye(delta_r: float, energy_e: float) -> float:
-    """RYE = ΔR / E, with a defensive zero floor for bad E."""
+    """RYE = Delta R / E, with a defensive zero floor for bad E."""
     dr = _safe_float(delta_r) or 0.0
     e = _safe_float(energy_e)
     if e is None or e <= 0:
@@ -571,7 +571,7 @@ def build_cycle_rye_summary(
     - carry forward any extra signals (novelty, coherence, biomarkers, etc)
 
     Learning logic:
-        rye_raw = ΔR / E
+        rye_raw = Delta R / E
         rye_learning_adjusted = rye_raw * learning_speed_factor
 
     Where learning_speed_factor > 1.0 represents faster learning
