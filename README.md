@@ -9,7 +9,7 @@ Add your Tavily API key in the sidebar. Without it, search runs in offline stub 
 
 ---
 
-# 🔬 Scientific Attribution and Field Protection
+## 🔬 Scientific Attribution and Field Protection
 
 **Reparodynamics**, **TGRM (Targeted Gradient Repair Mechanism)**, and  
 **RYE (Repair Yield per Energy)** were created and defined by **Cody Ryan Jenkins**.
@@ -24,37 +24,37 @@ Reparodynamics is a claimed scientific trademark of Cody Ryan Jenkins.
 
 ---
 
-# 🚀 Overview
+## 🚀 Overview
 
-The **Autonomous Research Agent** is a long-run scientific intelligence engine based on Reparodynamics — the universal science of self-repairing systems.
+The **Autonomous Research Agent (ARA)** is a long-run scientific intelligence engine based on Reparodynamics, the universal science of self-repairing systems.
+
+The architecture is **engineered for multi-hour to multi-month autonomous operation**, but the current public build runs in **finite-cycle mode only** with explicitly defined cycle budgets.
+
+Long-run continuity logic, stability kernels, and recovery dynamics are already implemented and validated internally.
 
 Powered by:
 
-- **Reparodynamics** - self-repair physics for AI  
-- **TGRM v3** - high-precision gradient-repair cycles  
-- **RYE v3** - efficiency-driven learning laws  
-- **MSIL v2** - Meta Stability Intelligence Layer  
-- **Stability Kernel v2** - equilibrium and oscillation analysis  
-- **Ultra Swarm Engine** - 5 to 32 autonomous agents  
-- **Discovery Engine v3** - breakthrough-tier detection  
-- **MemoryStore v3** - persistent long-run learning  
-
-This system is engineered for **multi-hour to multi-month** autonomous scientific reasoning:
-
-**1 hour → 8 hours → 24 hours → 1 week → 1 month → 90 days → 1 year**
+- **Reparodynamics** – self-repair physics for AI  
+- **TGRM v3** – high-precision gradient repair cycles  
+- **RYE v3** – efficiency-driven learning laws  
+- **MSIL v2** – Meta Stability Intelligence Layer  
+- **Stability Kernel v2** – equilibrium and oscillation analysis  
+- **Ultra Swarm Engine** – 5 to 32 autonomous agents  
+- **Discovery Engine v3** – breakthrough-tier detection  
+- **MemoryStore v3** – persistent learning substrate  
 
 ---
 
-# 🔁 TGRM Loop — The Repair Core
+## 🔁 TGRM Loop — The Repair Core
 
-Each cycle performs:
+Each cycle executes a closed self-repair loop:
 
-1. **TEST** — scan memory, detect weak logic  
-2. **DETECT** — locate contradictions, noise, instabilities  
-3. **REPAIR** — search, read PDFs, analyze biomarkers, refine hypotheses  
-4. **VERIFY** — compute ΔR, energy cost, and RYE  
+1. **TEST** – scan memory and reasoning traces  
+2. **DETECT** – identify contradictions, noise, instability  
+3. **REPAIR** – search, ingest PDFs, analyze data, refine hypotheses  
+4. **VERIFY** – compute ΔR, energy cost, and RYE  
 
-Every cycle logs:
+Each cycle logs:
 
 - ΔR (repair gain)  
 - E (energy cost)  
@@ -66,28 +66,28 @@ Every cycle logs:
 - Recovery Momentum  
 - Oscillation Signature  
 
-This creates a **self-repairing research intelligence loop**.
+This forms a **self-repairing scientific intelligence loop** rather than a prompt-response model.
 
 ---
 
-# ⚙ Key Components
+## ⚙ Key Components
 
-## ⭐ CoreAgent v3
+### ⭐ CoreAgent v3
 - Full TGRM integration  
-- Advanced ΔR verification engine  
-- RYE v3 (noise-resistant, swarm-normalized)  
-- Hypothesis engine + verification scoring  
+- Advanced ΔR verification  
+- Noise-resistant RYE v3  
+- Hypothesis generation and scoring  
 - PDF and PubMed ingestion  
-- Biomarker processing  
+- Biomarker processing support  
 - Equilibrium-aware learning  
-- Automatic continuity across long runs  
+- Automatic continuity across finite runs  
 - Ultra Fast Learning Mode (10× throughput)  
 
 ---
 
 ## ⭐ Swarm Intelligence (5 to 32 Agents)
 
-Role-based swarm system:
+Role-based swarm architecture:
 
 - Researcher  
 - Critic  
@@ -95,90 +95,87 @@ Role-based swarm system:
 - Integrator  
 - Planner  
 - Synthesis Agent  
-- agent_01 … agent_32  
+- agent_01 through agent_32  
 
-Each swarm round produces:
+Each swarm cycle produces:
 
 - Consensus RYE  
 - Cross-agent contradiction detection  
 - Multi-role hypotheses  
 - Repair-signature comparison  
 - Alignment score  
-- Stability-aware weighting  
+- Stability-weighted aggregation  
 
-Swarm mode is the highest-performance mode of the entire system.
+Swarm mode is the highest-performance operational mode of ARA.
 
 ---
 
-# ⭐ MSIL — Meta Stability Intelligence Layer
+## ⭐ MSIL — Meta Stability Intelligence Layer
 
-MSIL provides real-time metacognitive analysis:
+MSIL provides continuous metacognitive analysis:
 
-- Rolling RYE  
-- Median RYE  
-- RYE slope  
-- Curvature  
-- Noise signature  
+- Rolling and median RYE  
+- RYE slope and curvature  
+- Noise signature detection  
 - Recovery Momentum  
 - TGRM Harmonic Index  
 - Stability Index  
-- Expansion vs saturation detection  
+- Expansion versus saturation detection  
 - Equilibrium classification  
 - Tier-style discovery likelihood  
-- Multi-agent alignment  
+- Multi-agent alignment metrics  
 - Safety envelope estimation  
 
-MSIL is the system’s **self-awareness layer**, enabling proto-AGI behavior during long multi-agent runs.
+MSIL functions as the system’s **self-awareness layer**, enabling proto-AGI behavior during extended finite runs.
 
 ---
 
-# ⭐ Stability Kernel v2
+## ⭐ Stability Kernel v2
 
-Advanced stability analytics for long-run research:
+Advanced stability analytics:
 
 - Equilibrium detection  
 - Oscillation detection  
-- Fragility vs robustness classification  
-- Noise-suppressed stability curve  
+- Fragility versus robustness classification  
+- Noise-suppressed stability curves  
 - Recovery tracking  
-- Run-phase segmentation (warmup → expansion → saturation)  
+- Run-phase segmentation  
 - UI-ready stability summaries  
 
 ---
 
-# ⭐ Discovery Engine v3
+## ⭐ Discovery Engine v3
 
-A multi-stage scientific discovery pipeline:
+Multi-stage scientific discovery pipeline:
 
-- Hypothesis grid  
+- Hypothesis grid construction  
 - ΔR-weighted novelty scoring  
-- Multi-agent critique  
-- Verification engine tie-in  
+- Multi-agent critique loops  
+- Verification engine integration  
 - Breakthrough-tier classification  
 - Discovery IDs and structured logs  
 - Cross-run longitudinal density analysis  
 
-The Discovery Engine is MSIL-integrated and swarm-aware.
+Fully integrated with MSIL and swarm intelligence.
 
 ---
 
-# ⭐ MemoryStore v3
+## ⭐ MemoryStore v3
 
-Persistent adaptive memory architecture:
+Persistent adaptive memory system:
 
-- Cross-run memory  
+- Cross-run memory continuity  
 - RYE-aware pruning  
 - Stability-weighted retention  
-- Scratch vs gold notebook separation  
+- Scratch versus gold notebook separation  
 - Half-life forgetting models  
 - Replay buffer integration  
-- Multi-run learning continuity  
 
-ARA can run **day after day**, growing a stable intelligence curve.
+ARA can accumulate intelligence **across many finite runs**, approximating long-run behavior safely.
 
 ---
 
-# ⭐ Protocol Synthesizer v2
+## ⭐ Protocol Synthesizer v2
 
 Automatically generates actionable scientific protocols:
 
@@ -190,42 +187,38 @@ Automatically generates actionable scientific protocols:
 
 ---
 
-# ⭐ Reporting System
+## ⭐ Reporting System
 
 ### Markdown Reporter
-Creates `.md` reports with:
+Generates `.md` reports containing:
 
 - Cycle logs  
 - RYE graphs  
 - Stability signatures  
-- Breakthroughs  
-- Summaries and tables  
+- Discovery summaries  
 
 ### PDF Reporter
 Publication-ready research reports:
 
 - Full MSIL diagnostics  
-- Stability visuals  
+- Stability visualizations  
 - Hypothesis matrices  
 - Cross-agent alignment tables  
-- Breakthrough tier classification  
+- Breakthrough-tier classification  
 
 ---
 
-# 🧩 Long-Run Runners & Presets
+## 🧩 Run Control and Presets
 
-### `run_agent.py`  
-Supports real-time:
+### `run_agent.py`
 
-- 1 hour  
-- 8 hours  
-- 24 hours  
-- 1 week  
-- 1 month  
-- 90 days  
-- Forever  
+Supports **finite-cycle execution only**:
 
-Actual real-world minutes are used — no artificial shortcuts.
+- Explicit cycle budgets  
+- Deterministic stopping conditions  
+- Stability-safe termination  
+
+The system architecture is designed for future reactivation of true wall-clock long-run execution.
 
 ### Presets include:
 - General  
@@ -234,11 +227,11 @@ Actual real-world minutes are used — no artificial shortcuts.
 - Deep Biomarkers  
 - High Stability  
 - Breakthrough Mode  
-- Ultra Fast Learning (10×)  
+- Ultra Fast Learning  
 
 ---
 
-# 🧱 Repository Structure
+## 🧱 Repository Structure
 
 Autonomous-research-agent/  
 │  
@@ -308,35 +301,32 @@ Autonomous-research-agent/
 
 ---
 
-# 🛡 Licensing (Option C - Strong Legal Tone)
+## 🛡 Licensing (Option C – Strong Legal Tone)
 
 **This software is PROPRIETARY. All rights reserved.**
 
-Two licenses govern this project:
-
-### 1. ARA-FCCL (Full-Control License)
-- No redistribution or sublicensing  
-- No publication of code  
+### ARA-FCCL (Full Control License)
+- No redistribution  
+- No sublicensing  
 - No derivative systems  
 - No hosting without permission  
-- No competing commercial uses  
-- All derivatives are the property of **Cody Ryan Jenkins**  
-- License may be revoked upon breach  
+- No competing commercial use  
+- All derivatives belong to **Cody Ryan Jenkins**  
+- License revocable upon breach  
 
-### 2. ARA-Commercial License
-For organizations and paid commercial users.
+### ARA-Commercial License
+For approved commercial entities:
 
-Includes:
-- Single-seat commercial rights  
+- Single-seat rights  
 - Non-transferable  
 - Non-sublicensable  
 - Royalty structures may apply  
 - Subject to audit  
-- Revocable on violation  
+- Revocable upon violation  
 
 **Use of this software constitutes full acceptance of these licenses.**  
 See `LICENSE` and `COMMERCIAL_LICENSE.md` for full terms.
 
 ---
 
-# ✔ End of README
+## ✔ End of README
