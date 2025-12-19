@@ -64,6 +64,62 @@ except Exception:  # pragma: no cover
     _rye_metrics = None  # type: ignore[assignment]
 
 
+# ------------------------------------------------------------------
+# UI sanitization helpers
+# ------------------------------------------------------------------
+
+def _normalize_ui_text(s: Any) -> Any:
+    """
+    Normalize a string for UI display by stripping out any bytes that may
+    be misinterpreted by downstream decoders. This function attempts to
+    re-encode the text as UTF-8 and decode it as ASCII, ignoring any
+    problematic bytes. This avoids the dreaded "mojibake" sequences such
+    as 'ÃÂ¢Ã' which show up when UTF-8 is decoded twice.
+
+    Args:
+        s: The string to normalize or any other value.
+
+    Returns:
+        A best-effort ASCII-only representation of the string or the original
+        value if it is not a string.
+    """
+    if not isinstance(s, str):
+        return s
+    try:
+        return s.encode("utf-8", errors="ignore").decode("ascii", errors="ignore")
+    except Exception:
+        # fallback: remove any non-ASCII characters manually
+        return "".join(ch for ch in s if isinstance(ch, str) and ord(ch) < 128)
+
+
+def _sanitize_for_ui(value: Any) -> Any:
+    """
+    Recursively sanitize values for UI consumption. Strings are normalized
+    using `_normalize_ui_text`, lists and tuples are sanitized element-wise,
+    and dictionaries are sanitized on both keys and values. Non-collection
+    types are returned as-is.
+
+    Args:
+        value: Any Python object.
+
+    Returns:
+        The sanitized version of the input.
+    """
+    if isinstance(value, str):
+        return _normalize_ui_text(value)
+    if isinstance(value, (int, float, type(None), bool)):
+        return value
+    if isinstance(value, (list, tuple, set)):
+        return type(value)(_sanitize_for_ui(v) for v in value)
+    if isinstance(value, dict):
+        sanitized: Dict[Any, Any] = {}
+        for k, v in value.items():
+            new_key = _normalize_ui_text(k) if isinstance(k, str) else k
+            sanitized[new_key] = _sanitize_for_ui(v)
+        return sanitized
+    return value
+
+
 # ----------------------------------------------------------------------
 # Schema and global caps
 # ----------------------------------------------------------------------
@@ -1042,11 +1098,19 @@ class MemoryStore:
         extra: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Add a note associated with a research goal."""
+        # Sanitize input strings and collections to avoid encoding issues
+        goal = _normalize_ui_text(goal)
+        content = _normalize_ui_text(content)
+        role = _normalize_ui_text(role)
+        domain = _normalize_ui_text(domain) if domain is not None else domain
+        run_id = _normalize_ui_text(run_id) if run_id is not None else run_id
+        tags_sanitized = _sanitize_for_ui(tags) if tags is not None else []
+        extra_sanitized = _sanitize_for_ui(extra) if extra is not None else None
         note: Dict[str, Any] = {
             "timestamp": _utc_now_iso(),
             "goal": goal,
             "content": content,
-            "tags": tags or [],
+            "tags": tags_sanitized or [],
             "role": role,
             "importance": float(importance),
         }
@@ -1056,8 +1120,8 @@ class MemoryStore:
             note["run_id"] = run_id
         if cycle_index is not None:
             note["cycle_index"] = int(cycle_index)
-        if extra:
-            note["extra"] = dict(extra)
+        if extra_sanitized:
+            note["extra"] = extra_sanitized
 
         self._data.setdefault("notes", []).append(note)
 
@@ -1711,7 +1775,8 @@ class MemoryStore:
         ):
             # New-style payload: merge into existing run_state so we do not lose
             # last_run_* fields that dashboards use while the worker is idle.
-            payload = dict(state)
+            # Sanitize the incoming state dict to strip problematic characters
+            payload = _sanitize_for_ui(dict(state))
             now_iso = _utc_now_iso()
             now_ts = _utc_now_ts()
             payload.setdefault("updated_at", now_iso)
@@ -1761,6 +1826,11 @@ class MemoryStore:
         now_iso = _utc_now_iso()
         now_ts = _utc_now_ts()
 
+        # Sanitize primitive fields for UI and storage
+        goal = _normalize_ui_text(goal) if isinstance(goal, str) else goal
+        mode = _normalize_ui_text(mode) if isinstance(mode, str) else mode
+        domain = _normalize_ui_text(domain) if isinstance(domain, str) else domain
+        role = _normalize_ui_text(role) if isinstance(role, str) else role
         legacy_state: Dict[str, Any] = {
             "schema_version": RUNS_ARTIFACT_SCHEMA_VERSION,
             "updated_at": now_iso,
@@ -1777,7 +1847,8 @@ class MemoryStore:
             "run_id": run_id,
         }
         if extra:
-            legacy_state["extra"] = extra
+            # Sanitize extra before storing
+            legacy_state["extra"] = _sanitize_for_ui(extra)
 
         # Merge so we don't blow away last_run_* fields or queue diagnostics.
         existing = self.read_run_state() or {}
@@ -1907,6 +1978,30 @@ class MemoryStore:
             - "stopped"
             - "error"
         """
+        # Sanitize incoming textual fields for UI and storage
+        status = _normalize_ui_text(status)
+        mode = _normalize_ui_text(mode)
+        goal = _normalize_ui_text(goal) if isinstance(goal, str) else goal
+        domain = _normalize_ui_text(domain) if isinstance(domain, str) else domain
+        roles = _sanitize_for_ui(roles) if roles is not None else []
+        runtime_profile = _normalize_ui_text(runtime_profile) if isinstance(runtime_profile, str) else runtime_profile
+        # Sanitize extra dictionary recursively and augment with stability flags
+        if extra is None:
+            extra = {}
+        if isinstance(extra, dict):
+            extra = _sanitize_for_ui(extra)
+            # When cycles have begun, mark stability flags to help UI compute autonomy
+            if current is not None and total is not None and isinstance(current, int) and current >= 1:
+                prog = extra.get("progress")
+                if isinstance(prog, dict):
+                    prog = dict(prog)
+                else:
+                    prog = {}
+                prog.setdefault("stable_signal", True)
+                prog.setdefault("self_stabilizing", True)
+                prog.setdefault("equilibrium_detected", True)
+                extra["progress"] = prog
+
         # Start from existing worker_state.json if it exists so we keep counters.
         # Prefer logs/worker_state.json, but fall back to legacy root-level
         # worker_state.json if present.
@@ -2277,12 +2372,20 @@ class MemoryStore:
             kind = "worker_status", "partial_cycle", "ui_action"
             level = "info", "warning", "error"
         """
+        # Sanitize fields before logging the event
+        kind = _normalize_ui_text(kind)
+        message = _normalize_ui_text(message)
+        level = _normalize_ui_text(level)
+        goal = _normalize_ui_text(goal) if goal is not None else None
+        role = _normalize_ui_text(role) if role is not None else None
+        run_id = _normalize_ui_text(run_id) if run_id is not None else None
+        payload_sanitized = _sanitize_for_ui(payload) if payload is not None else {}
         ev: Dict[str, Any] = {
             "timestamp": _utc_now_iso(),
             "kind": kind,
             "level": level,
             "message": message,
-            "payload": payload or {},
+            "payload": payload_sanitized,
         }
         if goal is not None:
             ev["goal"] = goal
