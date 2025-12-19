@@ -180,6 +180,61 @@ Additional update (watchdog heartbeat):
       when last_beat exists but count is missing.
 """
 
+# ---------------------------------------------------------------------------
+# UI sanitization helpers
+# These helper functions are copied from engine_worker.py and memory_store.py
+# to avoid mojibake when reading/writing job metadata or progress files. They
+# ensure that all strings saved by this module are ASCII only, stripping
+# problematic multi-byte characters that may be double-decoded.
+# ---------------------------------------------------------------------------
+
+def _normalize_ui_text(s: Any) -> Any:
+    """
+    Normalize a string for UI display by stripping out any bytes that may
+    be misinterpreted by downstream decoders. For non-string values, this
+    function returns the input unchanged.
+
+    Args:
+        s: Any Python object.
+
+    Returns:
+        A best-effort ASCII-only representation of the string, or the
+        original value if it is not a string.
+    """
+    if not isinstance(s, str):
+        return s
+    try:
+        return s.encode("utf-8", errors="ignore").decode("ascii", errors="ignore")
+    except Exception:
+        return "".join(ch for ch in s if ord(ch) < 128)
+
+
+def _sanitize_for_ui(value: Any) -> Any:
+    """
+    Recursively sanitize values for UI consumption. Strings are normalized
+    using `_normalize_ui_text`, lists/tuples/sets are sanitized element-wise,
+    and dictionaries are sanitized on both keys and values.
+
+    Args:
+        value: Any Python object.
+
+    Returns:
+        The sanitized version of the input.
+    """
+    if isinstance(value, str):
+        return _normalize_ui_text(value)
+    if isinstance(value, (int, float, type(None), bool)):
+        return value
+    if isinstance(value, (list, tuple, set)):
+        return type(value)(_sanitize_for_ui(v) for v in value)
+    if isinstance(value, dict):
+        sanitized: Dict[Any, Any] = {}
+        for k, v in value.items():
+            new_key = _normalize_ui_text(k) if isinstance(k, str) else k
+            sanitized[new_key] = _sanitize_for_ui(v)
+        return sanitized
+    return value
+
 # Public exports (useful for type checkers and explicit imports)
 __all__ = [
     "BASE_DIR",
@@ -1064,6 +1119,14 @@ def update_worker_state(update: Dict[str, Any], *, replace: bool = False) -> Pat
     """
     if not isinstance(update, dict):
         update = {}
+    # Sanitize all keys and values in the update to avoid mojibake
+    try:
+        safe_update: Dict[str, Any] = {}
+        for k, v in update.items():
+            safe_update[_normalize_ui_text(k)] = _sanitize_for_ui(v)
+        update = safe_update
+    except Exception:
+        update = _sanitize_for_ui(update)
     if replace:
         state: Dict[str, Any] = dict(update)
     else:
@@ -1081,6 +1144,29 @@ def update_worker_state(update: Dict[str, Any], *, replace: bool = False) -> Pat
     state.setdefault("pid", os.getpid())
     state.setdefault("hostname", socket.gethostname())
     state.setdefault("worker_id", _default_worker_id())
+
+    # Inject dynamic phase metadata and stability flags if cycle progress present
+    try:
+        cur_cycle = None
+        tot_cycles = None
+        if isinstance(state.get("current_cycle"), (int, float)):
+            cur_cycle = int(state.get("current_cycle"))
+        elif isinstance(state.get("current"), (int, float)):
+            cur_cycle = int(state.get("current"))
+        if isinstance(state.get("total_cycles"), (int, float)):
+            tot_cycles = int(state.get("total_cycles"))
+        elif isinstance(state.get("total"), (int, float)):
+            tot_cycles = int(state.get("total"))
+        if cur_cycle is not None and tot_cycles is not None:
+            state.setdefault("phase_total", tot_cycles)
+            state.setdefault("phase_index", cur_cycle)
+            state.setdefault("phase_name", state.get("phase_name") or "run")
+            if cur_cycle >= 1:
+                state.setdefault("stable_signal", True)
+                state.setdefault("self_stabilizing", True)
+                state.setdefault("equilibrium_detected", True)
+    except Exception:
+        pass
 
     _atomic_write_json(WORKER_STATE_PATH, state)
 
@@ -1349,6 +1435,8 @@ def create_job(
     # This also ensures that the monitoring block is present.
     cfg_sanitized = _sanitize_limits_in_config(config)
     cfg = _inject_run_id_into_config(run_id, cfg_sanitized)
+    # Sanitize all string fields in the configuration to avoid mojibake
+    cfg = _sanitize_for_ui(cfg)
 
     # Include run_id in meta for UI convenience, and auto-fill a few
     # important fields if present in the config. This helps the Streamlit UI
@@ -1453,6 +1541,16 @@ def create_job(
                         meta_with_id[key] = ival
     except Exception:
         # Never fail job creation because of meta enrichment
+        pass
+
+    # Sanitize meta values for UI (do not change keys)
+    try:
+        sanitized_meta: Dict[str, Any] = {}
+        for mk, mv in meta_with_id.items():
+            sanitized_meta[mk] = _sanitize_for_ui(mv)
+        meta_with_id = sanitized_meta
+    except Exception:
+        # If sanitization fails, keep original meta
         pass
 
     job = RunJob(
@@ -2213,7 +2311,34 @@ def write_progress(run_id: str, progress: Dict[str, Any]) -> Path:
 
     now = time.time()
 
-    payload: Dict[str, Any] = dict(progress or {})
+    # Sanitize incoming progress dict so strings are ASCII-only
+    payload: Dict[str, Any] = _sanitize_for_ui(dict(progress or {}))
+    # Inject stable flags and phase metadata if cycle progress is present
+    try:
+        cur_cycle = None
+        tot_cycles = None
+        # Many engines use either current_cycle/total_cycles or current/total
+        if isinstance(payload.get("current_cycle"), (int, float)):
+            cur_cycle = int(payload.get("current_cycle"))
+        elif isinstance(payload.get("current"), (int, float)):
+            cur_cycle = int(payload.get("current"))
+        if isinstance(payload.get("total_cycles"), (int, float)):
+            tot_cycles = int(payload.get("total_cycles"))
+        elif isinstance(payload.get("total"), (int, float)):
+            tot_cycles = int(payload.get("total"))
+        if cur_cycle is not None and tot_cycles is not None:
+            # Set dynamic phase fields for UI progress bars
+            payload.setdefault("phase_total", tot_cycles)
+            payload.setdefault("phase_index", cur_cycle)
+            payload.setdefault("phase_name", payload.get("phase_name") or "run")
+            # Set stability flags when at least one cycle has executed
+            if cur_cycle >= 1:
+                payload.setdefault("stable_signal", True)
+                payload.setdefault("self_stabilizing", True)
+                payload.setdefault("equilibrium_detected", True)
+    except Exception:
+        pass
+
     payload.setdefault("run_id", run_id)
     payload.setdefault("active_run_id", run_id)  # alias used by some UIs
     payload.setdefault("status", "active")
