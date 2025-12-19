@@ -83,6 +83,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from datetime import datetime
 
+# --- early import marker (helps diagnose “no logs” situations on platforms like Render) ---
+try:
+    _module_import_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+except Exception:
+    _module_import_utc = "unknown"
+try:
+    sys.stderr.write(
+        f"[engine_worker] module_import_begin utc={_module_import_utc} pid={os.getpid()}\n"
+    )
+    sys.stderr.flush()
+except Exception:
+    pass
+
 # Optional YAML (treat as unreliable / optional)
 try:
     import yaml  # type: ignore
@@ -125,7 +138,7 @@ CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
 _ENGINE_WORKER_VERSION: str = os.getenv(
     "ENGINE_WORKER_VERSION",
-    os.getenv("WORKER_VERSION", "engine_worker.py/always_on/2025-12-17"),
+    os.getenv("WORKER_VERSION", "engine_worker.py/always_on/2025-12-19"),
 )
 
 
@@ -312,12 +325,21 @@ def _emit_log_line(line: str) -> None:
         if len(line) > _LOG_LINE_MAX_CHARS:
             line = _truncate_text(line, _LOG_LINE_MAX_CHARS)
         print(line)
-        sys.stdout.flush()
-    except Exception:
-        # never crash on log
         try:
-            sys.stderr.write((line[:1000] if isinstance(line, str) else "<log_error>") + "\n")
-            sys.stderr.flush()
+            sys.stdout.flush()
+        except Exception:
+            pass
+    except Exception:
+        # never crash on log (also handle encoding errors)
+        try:
+            msg = (line[:1000] if isinstance(line, str) else "<log_error>") + "\n"
+            err = sys.stderr
+            if hasattr(err, "buffer"):
+                err.buffer.write(msg.encode("utf-8", errors="backslashreplace"))
+                err.flush()
+            else:
+                err.write(msg)
+                err.flush()
         except Exception:
             pass
 
@@ -3830,7 +3852,10 @@ def _cleanup_active_job_files(run_id: str) -> None:
     or errors so the UI and queue do not think the job is still active.
     """
     try:
-        active_dir = BASE_DIR / "active"
+        try:
+            active_dir = _resolve_queue_dirs(BASE_DIR).active
+        except Exception:
+            active_dir = BASE_DIR / "active"
         if not active_dir.exists():
             return
 
@@ -3851,7 +3876,10 @@ def _cleanup_active_job_files(run_id: str) -> None:
 
 
 def _fallback_progress_path(run_id: str) -> Path:
-    return BASE_DIR / "active" / f"{run_id}_progress.json"
+    try:
+        return _resolve_queue_dirs(BASE_DIR).active / f"{run_id}_progress.json"
+    except Exception:
+        return BASE_DIR / "active" / f"{run_id}_progress.json"
 
 
 def _write_job_progress(
