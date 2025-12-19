@@ -62,6 +62,7 @@ import json
 import os
 import re
 import sys
+import textwrap
 import time
 import uuid
 from datetime import datetime
@@ -2041,7 +2042,8 @@ def derive_health_class(
 def inject_base_styles() -> None:
     """Global UI polish + styles for heartbeat bar, cards, chips, and event feed."""
     st.markdown(
-        """
+        textwrap.dedent(
+            """
 <style>
 /* Layout rhythm */
 .block-container { padding-top: 0.75rem; padding-bottom: 2.5rem; max-width: 1180px; }
@@ -2185,7 +2187,8 @@ def inject_base_styles() -> None:
 /* Reduce clutter of Streamlit default anchors in markdown headers */
 h1 a, h2 a, h3 a, h4 a { display:none !important; }
 </style>
-        """,
+            """
+        ),
         unsafe_allow_html=True,
     )
 
@@ -2243,7 +2246,8 @@ def render_topbar(
         right_txt += f" {html.escape(str(kind_label))}"
 
     st.markdown(
-        f"""
+        textwrap.dedent(
+            f"""
 <div class="ara-topbar-wrap">
   <div class="ara-topbar">
     <div class="ara-topbar-left">
@@ -2266,7 +2270,8 @@ def render_topbar(
     </div>
   </div>
 </div>
-        """,
+            """
+        ),
         unsafe_allow_html=True,
     )
 
@@ -3288,51 +3293,53 @@ def main() -> None:
     event_log0, event_src0 = load_event_log_unified(active_run_id)
     narrative_events = event_log0 if event_log0 else build_narrative_events_from_history(history_preview, limit=LIVE_EVENTS_LIMIT)
 
-    # Sticky topbar removed (was rendering as raw HTML on some clients)
-    # render_topbar(ws0, watchdog0, progress_view0, autonomy_view0)
+    # Sticky topbar (heartbeat/status/progress)
+    render_topbar(ws0, watchdog0, progress_view0, autonomy_view0)
 
     # Header: ARA with gradient and powered by pill
     st.markdown(
-        """
-        <style>
-        .ara-header {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            margin-bottom: 1.25rem;
-        }
-        .ara-logo-text {
-            font-size: 2.6rem;
-            font-weight: 900;
-            letter-spacing: 0.12em;
-            text-transform: uppercase;
-            background: linear-gradient(90deg, #FFD93B, #FF9A1F, #FF3B3B);
-            -webkit-background-clip: text;
-            background-clip: text;
-            color: transparent;
-        }
-        .ara-powered-pill {
-            padding: 0.35rem 0.9rem;
-            border-radius: 999px;
-            border: 1px solid rgba(255,255,255,0.25);
-            background: rgba(10, 10, 20, 0.6);
-            font-size: 0.85rem;
-            font-weight: 500;
-            display: inline-flex;
-            align-items: center;
-            gap: 0.25rem;
-        }
-        .ara-powered-pill span.label { opacity: 0.8; }
-        .ara-powered-pill span.brand { font-weight: 600; opacity: 1.0; }
-        </style>
-        <div class="ara-header">
-            <div class="ara-logo-text">ARA</div>
-            <div class="ara-powered-pill">
-                <span class="label">powered by</span>
-                <span class="brand">Reparodynamics</span>
-            </div>
-        </div>
-        """,
+        textwrap.dedent(
+            """
+<style>
+.ara-header {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1.25rem;
+}
+.ara-logo-text {
+    font-size: 2.6rem;
+    font-weight: 900;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    background: linear-gradient(90deg, #FFD93B, #FF9A1F, #FF3B3B);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+}
+.ara-powered-pill {
+    padding: 0.35rem 0.9rem;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.25);
+    background: rgba(10, 10, 20, 0.6);
+    font-size: 0.85rem;
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+}
+.ara-powered-pill span.label { opacity: 0.8; }
+.ara-powered-pill span.brand { font-weight: 600; opacity: 1.0; }
+</style>
+<div class="ara-header">
+    <div class="ara-logo-text">ARA</div>
+    <div class="ara-powered-pill">
+        <span class="label">powered by</span>
+        <span class="brand">Reparodynamics</span>
+    </div>
+</div>
+            """
+        ),
         unsafe_allow_html=True,
     )
 
@@ -3432,9 +3439,9 @@ def main() -> None:
         discoveries_live = load_discoveries_from_finished_runs()
     render_discovery_cards(discoveries_live)
 
-    # ------------------------------------------------------------------
+    # -------------------------------------------------------------------
     # Sidebar: Run configuration (original)
-    # ------------------------------------------------------------------
+    # -------------------------------------------------------------------
     st.sidebar.title("Run configuration")
 
     # Optional Tavily key input (per user, not stored on disk)
