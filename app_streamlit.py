@@ -81,6 +81,7 @@ except Exception:  # pragma: no cover
 
 # IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
+# Use a proper Unicode emoji for the page icon instead of a misâencoded sequence
 st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ð§ª", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
@@ -475,6 +476,7 @@ def _abbrev_id(value: Any, head: int = 8, tail: int = 4) -> str:
     s = str(value)
     if len(s) <= head + tail + 1:
         return s
+    # Use an ellipsis instead of a misâencoded sequence when abbreviating long identifiers
     return f"{s[:head]}â¦{s[-tail:]}"
 def _format_metric_value(v: Any, decimals: int = 3) -> str:
     """Format a metric value safely for st.metric."""
@@ -747,6 +749,7 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
                     text = h.get("text", "")
                     conf = h.get("confidence")
                     if conf is not None:
+                        # Use a proper bullet character instead of a misâencoded sequence
                         st.write(f"â¢ {text} (confidence ~ {conf})")
                     else:
                         st.write(f"â¢ {text}")
@@ -948,6 +951,7 @@ def render_job_summary(job: Any) -> None:
     cols[2].markdown(f"Status: `{status}`")
     cols[3].markdown(f"Domain: `{str(domain).title()}`")
 
+    # Separate mode and creation time with a proper bullet character
     st.caption(f"Mode: {mode} â¢ Created at: {created_at}")
 
 
@@ -2545,10 +2549,12 @@ def render_topbar(
         mid_parts.append(f'Run <code title="{rid_title}">{rid_html}</code>')
         if mode:
             mid_parts.append(f"Mode <code>{html.escape(str(mode))}</code>")
+    # Separate run ID and mode with a middle dot
     mid_txt = " Â· ".join(mid_parts) if mid_parts else "No active run detected"
 
     # Progress (show as X/Y + label). If nothing is running, keep the indicator subtle.
     kind = str(progress_view.get("kind") or "none")
+    # Display an em dash when no progress information is available
     right_txt = "â"
     width_pct = 0.0
 
@@ -2727,6 +2733,7 @@ def render_agent_presence(
         a_clean = str(a)
         is_active = active_agent and (a_clean == active_agent or a_clean.split("_", 1)[0] == str(active_agent))
         cls = "ara-chip active" if is_active else "ara-chip"
+        # Render a bullet using a proper Unicode symbol for each agent
         chips.append(f'<span class="{cls}">â {html.escape(a_clean)}</span>')
     st.markdown("".join(chips), unsafe_allow_html=True)
 
@@ -2833,6 +2840,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
         if isinstance(rye, (int, float)):
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
+            # Use the Greek capital delta (Î) instead of a misâencoded sequence
             parts.append(f"ÎR {float(d_r):.3f}")
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
@@ -2841,6 +2849,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
         if hyps_n:
             parts.append(f"{hyps_n} hypotheses")
 
+        # Join different cycle summary parts with a proper bullet rather than a misâencoded sequence
         msg = " â¢ ".join(parts)
         events.append(
             {
@@ -2879,6 +2888,7 @@ def render_narrative_feed(events: List[Dict[str, Any]], source_label: str = "") 
         msg = str(ev.get("message") or ev.get("text") or ev.get("summary") or "")
         if not msg:
             continue
+        # Join timestamp and kind with a proper bullet
         meta = " â¢ ".join([x for x in [ts, kind] if x])
         rows.append(
             f"""
@@ -3754,6 +3764,7 @@ def main() -> None:
         unsafe_allow_html=True,
     )
 
+    # Describe the finite mode queue and worker using proper bullet separators
     st.caption(
         f"Finite mode only â¢ Queue based runs â¢ Engine worker processes jobs from `{queue_pending_dir}` for `*_job.json` files.\n"
         "This UI never runs TGRM loops directly. It only queues jobs and visualizes artifacts."
@@ -4335,6 +4346,7 @@ def main() -> None:
         st.markdown("#### Queued runs")
         st.caption(f"Queue directory: `{pending_dir}`")
 
+        # Use a broom emoji for the clear queue button instead of a misâencoded sequence
         if st.button("ð§¹ Clear job queue", key="clear_queue_btn"):
             removed = 0
 
@@ -5165,6 +5177,7 @@ def main() -> None:
     st.subheader("Run diagnostics")
 
     # Refresh button (manual)
+    # Use a circular arrow symbol instead of a misâencoded sequence on the refresh button
     if st.button("â» Refresh diagnostics now", key="refresh_diag_btn"):
         st.rerun()
 
@@ -5282,6 +5295,7 @@ def main() -> None:
             lst = paths.get(k, [])
             shown = []
             for p in lst[:12]:
+                # Display a check mark if the diagnostics file exists, otherwise an em dash
                 exists = "â" if p.exists() else "â"
                 shown.append(f"{exists} `{p}`")
             st.write("\n".join(shown))
