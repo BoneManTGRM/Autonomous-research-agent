@@ -35,7 +35,7 @@ Live console upgrades (this update):
 Run diagnostics upgrades (this update):
 - Unified loaders: read from MemoryStore when available, with file-based fallbacks
 - Progress normalization (supports both cycle progress and phase progress, if emitted by worker)
-- Optional auto-refresh so the UI can actually show 1/3 → 2/3 → 3/3 while the worker runs
+- Optional auto-refresh so the UI can actually show 1/3 â 2/3 â 3/3 while the worker runs
 
 Reparodynamics:
     The UI is a front panel on a reparodynamic system:
@@ -81,7 +81,7 @@ except Exception:  # pragma: no cover
 
 # IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="🧪", layout="wide")
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ð§ª", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -467,6 +467,15 @@ def _humanize_seconds(seconds: Optional[float]) -> str:
     return f"{d:.1f}d"
 
 
+
+def _abbrev_id(value: Any, head: int = 8, tail: int = 4) -> str:
+    """Abbreviate a long identifier for compact UIs (especially mobile)."""
+    if value is None:
+        return ""
+    s = str(value)
+    if len(s) <= head + tail + 1:
+        return s
+    return f"{s[:head]}â¦{s[-tail:]}"
 def _format_metric_value(v: Any, decimals: int = 3) -> str:
     """Format a metric value safely for st.metric."""
     num = _maybe_float(v)
@@ -738,11 +747,11 @@ def render_cycle_summary(cycle_summary: Dict[str, Any]) -> None:
                     text = h.get("text", "")
                     conf = h.get("confidence")
                     if conf is not None:
-                        st.write(f"• {text} (confidence ~ {conf})")
+                        st.write(f"â¢ {text} (confidence ~ {conf})")
                     else:
-                        st.write(f"• {text}")
+                        st.write(f"â¢ {text}")
                 else:
-                    st.write(f"• {h}")
+                    st.write(f"â¢ {h}")
 
     # Citations
     if cycle_summary.get("citations") or cycle_summary.get("sources") or cycle_summary.get("source_list"):
@@ -939,7 +948,7 @@ def render_job_summary(job: Any) -> None:
     cols[2].markdown(f"Status: `{status}`")
     cols[3].markdown(f"Domain: `{str(domain).title()}`")
 
-    st.caption(f"Mode: {mode} • Created at: {created_at}")
+    st.caption(f"Mode: {mode} â¢ Created at: {created_at}")
 
 
 # -------------------------------------------------------------------
@@ -1016,7 +1025,7 @@ def _safe_create_job(config: Dict[str, Any], meta: Optional[Dict[str, Any]] = No
 
 
 # -------------------------------------------------------------------
-# Run-result → cycle-history helpers (used for citation table fallback)
+# Run-result â cycle-history helpers (used for citation table fallback)
 # -------------------------------------------------------------------
 def _extract_cycles_from_run_result(
     run_result: Dict[str, Any],
@@ -1241,7 +1250,17 @@ def render_result_details(result: Dict[str, Any]) -> None:
     if summary:
         st.write(summary)
     else:
-        st.info("No summary was provided by the engine.")
+        # Fallback: synthesize a lightweight summary from cycles/metrics when the engine didn't provide one.
+        synthesized = ""
+        try:
+            if cycles:
+                synthesized = build_outcome_summary(cycles)
+        except Exception:
+            synthesized = ""
+        if synthesized:
+            st.markdown(synthesized)
+        else:
+            st.info("No summary was provided by the engine.")
 
     key_findings = base.get("key_findings") or base.get("discoveries") or base.get("discovery_candidates")
     if isinstance(key_findings, list) and key_findings:
@@ -1312,6 +1331,9 @@ def render_result_details(result: Dict[str, Any]) -> None:
 
         if len(chart_data) > 1:
             df = pd.DataFrame(chart_data).set_index("cycle")
+            # Ensure numeric columns (Streamlit charts can render blank when dtype becomes 'object').
+            for _col in df.columns:
+                df[_col] = pd.to_numeric(df[_col], errors="coerce")
             st.line_chart(df)
             st.caption("Timeline of delta_R, energy, and RYE per cycle.")
 
@@ -1694,31 +1716,48 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
     }
 
 
-def _normalize_watchdog_info(raw: Any) -> Optional[Dict[str, Any]]:
-    if not isinstance(raw, dict):
-        return None
-    last_beat = raw.get("last_beat") or raw.get("lastBeat") or raw.get("timestamp") or raw.get("ts")
-    count = raw.get("count")
-    if count is None:
-        count = raw.get("heartbeat_count") or raw.get("beats") or 0
-    seconds_since = raw.get("seconds_since_last") or raw.get("seconds_since") or raw.get("age_seconds")
 
-    # Try compute seconds since if we have an ISO timestamp
-    if seconds_since is None and isinstance(last_beat, str):
-        dt = _parse_timestamp_str(last_beat)
+def _normalize_watchdog_info(raw: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Normalize watchdog heartbeat payloads from various backends.
+
+    Fixes:
+    - If last_beat is a numeric epoch (float/int), compute seconds_since_last automatically.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    last_beat = (
+        raw.get("last_beat")
+        or raw.get("lastBeat")
+        or raw.get("ts")
+        or raw.get("timestamp")
+        or raw.get("utc")
+        or raw.get("time")
+    )
+    seconds_since = raw.get("seconds_since_last") or raw.get("secondsSinceLast") or raw.get("age_seconds") or raw.get("age")
+    count = raw.get("count") or raw.get("heartbeat_count") or raw.get("beats")
+
+    # If seconds_since wasn't provided, compute it from last_beat when possible.
+    if seconds_since is None and last_beat is not None:
+        dt = _as_datetime_utc(last_beat)
         if dt is not None:
             try:
                 seconds_since = (datetime.utcnow() - dt).total_seconds()
             except Exception:
                 seconds_since = None
 
+    try:
+        if seconds_since is not None:
+            seconds_since = float(seconds_since)
+            if seconds_since < 0:
+                seconds_since = 0.0
+    except Exception:
+        seconds_since = None
+
     return {
         "last_beat": last_beat,
-        "count": _safe_int(count, 0) or 0,
         "seconds_since_last": seconds_since,
+        "count": _safe_int(count, 0),
     }
-
-
 def _is_meaningful_watchdog(info: Optional[Dict[str, Any]]) -> bool:
     """Return True only if the watchdog payload contains real signals.
 
@@ -1855,6 +1894,18 @@ def _as_datetime_utc(v: Any) -> Optional[datetime]:
     return None
 
 
+
+def _format_watchdog_last_beat(last_beat: Any) -> str:
+    """Human-friendly formatting for watchdog timestamps."""
+    if last_beat in (None, ""):
+        return "None recorded"
+    dt = _as_datetime_utc(last_beat)
+    if dt is not None:
+        try:
+            return dt.replace(microsecond=0).isoformat() + "Z"
+        except Exception:
+            return str(last_beat)
+    return str(last_beat)
 def _latest_timestamp_in_dict(d: Optional[Dict[str, Any]], keys: List[str]) -> Optional[datetime]:
     if not isinstance(d, dict):
         return None
@@ -2034,7 +2085,7 @@ def load_run_state_unified(
 
 
 def load_progress_unified(run_id: Optional[str]) -> Tuple[Optional[Dict[str, Any]], str]:
-    """Load progress JSON if the worker emits one (recommended for smooth 1/3→2/3→3/3 updates)."""
+    """Load progress JSON if the worker emits one (recommended for smooth 1/3â2/3â3/3 updates)."""
     if not run_id:
         return None, "no run_id"
 
@@ -2465,63 +2516,66 @@ h1 a, h2 a, h3 a, h4 a { display:none !important; }
     )
 
 
+
 def render_topbar(
     worker_state: Optional[Dict[str, Any]],
     watchdog: Optional[Dict[str, Any]],
     progress_view: Dict[str, Any],
     autonomy_view: Dict[str, Any],
-) -> None:
+):
+    """Render the fixed top header bar."""
+    status = str((worker_state or {}).get("status") or "").lower()
+    seconds_since = _maybe_float((watchdog or {}).get("seconds_since_last"))
+
     health_class, health_label = derive_health_class(worker_state, watchdog)
 
-    run_id = (worker_state or {}).get("run_id") or ""
-    mode = (worker_state or {}).get("mode") or (worker_state or {}).get("run_mode") or ""
-    status = (worker_state or {}).get("status") or "unknown"
+    beat_txt = _humanize_seconds(seconds_since) if seconds_since is not None else "n/a"
 
-    seconds_since = _maybe_float((watchdog or {}).get("seconds_since_last"))
-    beat_txt = _humanize_seconds(seconds_since)
+    # Compact run id for mobile while keeping full id on hover (desktop).
+    run_id = (worker_state or {}).get("run_id")
+    run_id_full = str(run_id) if run_id else ""
+    run_id_short = _abbrev_id(run_id_full, head=8, tail=4) if run_id_full else ""
 
-    cur = progress_view.get("current")
-    tot = progress_view.get("total")
-    frac = progress_view.get("fraction")
-    kind_label = progress_view.get("label") or ""
-    if isinstance(cur, int) and isinstance(tot, int) and tot > 0:
-        progress_text = f"{cur}/{tot}"
-    else:
-        progress_text = "—"
+    mode = (worker_state or {}).get("mode") or (worker_state or {}).get("run_mode")
 
-    autonomy_label = autonomy_view.get("label") or "Autonomy"
-    autonomy_score = autonomy_view.get("score")
-    if isinstance(autonomy_score, int):
-        autonomy_text = f"{autonomy_label} ({autonomy_score}/4)"
-    else:
-        autonomy_text = autonomy_label
+    mid_parts: List[str] = []
+    if run_id_short:
+        rid_html = html.escape(run_id_short)
+        rid_title = html.escape(run_id_full)
+        mid_parts.append(f'Run <code title="{rid_title}">{rid_html}</code>')
+        if mode:
+            mid_parts.append(f"Mode <code>{html.escape(str(mode))}</code>")
+    mid_txt = " Â· ".join(mid_parts) if mid_parts else "No active run detected"
 
-    width_pct = 0
-    if isinstance(frac, (int, float)):
-        width_pct = int(max(0.0, min(1.0, float(frac))) * 100)
+    # Progress (show as X/Y + label). If nothing is running, keep the indicator subtle.
+    kind = str(progress_view.get("kind") or "none")
+    right_txt = "â"
+    width_pct = 0.0
 
-    # Escape user-controlled strings
-    run_id_html = html.escape(str(run_id)) if run_id else ""
-    mode_html = html.escape(str(mode)) if mode else ""
-    status_html = html.escape(str(status))
-    autonomy_html = html.escape(str(autonomy_text))
+    if kind != "none":
+        cur = _safe_int(progress_view.get("current"), 0)
+        tot = _safe_int(progress_view.get("total"), 0)
+        frac = _maybe_float(progress_view.get("fraction")) or 0.0
+        frac = max(0.0, min(1.0, frac))
+        width_pct = frac * 100.0
 
-    mid_parts = []
-    if run_id_html:
-        mid_parts.append(f'Run <code>{run_id_html}</code>')
-    if mode_html:
-        mid_parts.append(f'Mode <code>{mode_html}</code>')
-    mid_txt = " • ".join(mid_parts) if mid_parts else "No active run detected"
+        kind_label = str(progress_view.get("label") or "").strip()
+        if tot > 0:
+            right_txt = f"{cur}/{tot}" + (f" {kind_label}" if kind_label else "")
+        else:
+            right_txt = str(cur) + (f" {kind_label}" if kind_label else "")
 
-    right_txt = f"{progress_text}"
-    if kind_label:
-        right_txt += f" {html.escape(str(kind_label))}"
+    autonomy_label = str(autonomy_view.get("label") or "Assisted")
+    autonomy_score = _safe_int(autonomy_view.get("score"), 0)
+    autonomy_html = html.escape(f"{autonomy_label} ({autonomy_score}/4)")
+
+    status_html = html.escape(status or "unknown")
 
     st.markdown(
         textwrap.dedent(
             f"""
 <div class="ara-topbar-wrap">
-<div class="ara-topbar">
+<div class="ara-topbar {health_class}">
 <div class="ara-topbar-left">
 <div class="ara-dot {health_class}"></div>
 <div class="ara-topbar-title">{html.escape(health_label)}</div>
@@ -2547,83 +2601,86 @@ def render_topbar(
         unsafe_allow_html=True,
     )
 
-
 def compute_autonomy_view(
     job_payload: Optional[Dict[str, Any]],
     worker_state: Optional[Dict[str, Any]],
-    diagnostics: Optional[Dict[str, Any]] = None,
+    diagnostics_preview: Optional[Dict[str, Any]],
 ) -> Dict[str, Any]:
-    """Compute autonomy level based on configured features + observed stability."""
-    cfg = {}
+    """Compute a simple autonomy score (0..4) and label.
+
+    Important UX goal:
+    - If we *don't* have an active job/config context, avoid showing high autonomy levels based on
+      stale diagnostics or defaults.
+    """
+    # Extract config (if present)
+    cfg: Dict[str, Any] = {}
     if isinstance(job_payload, dict):
-        cfg = job_payload.get("config") if isinstance(job_payload.get("config"), dict) else {}
-        if not isinstance(cfg, dict):
-            cfg = {}
+        cfg_raw = job_payload.get("config")
+        if isinstance(cfg_raw, dict):
+            cfg = cfg_raw
 
-    source_controls = cfg.get("source_controls") if isinstance(cfg.get("source_controls"), dict) else {}
-    monitoring = cfg.get("monitoring") if isinstance(cfg.get("monitoring"), dict) else {}
-    swarm_cfg = cfg.get("swarm_config") or cfg.get("swarm") or {}
-    if not isinstance(swarm_cfg, dict):
-        swarm_cfg = {}
+    has_cfg = bool(cfg)
 
-    # Feature flags
-    has_tools = bool(source_controls.get("web") or source_controls.get("sandbox") or source_controls.get("tavily_enabled"))
-    is_multi = bool(cfg.get("multi_agent_pair") or (_safe_int(swarm_cfg.get("swarm_size"), 1) or 1) > 1)
-    is_monitored = bool(
-        monitoring.get("heartbeat_enabled", True)
-        or monitoring.get("run_state_enabled", True)
-        or monitoring.get("snapshots_enabled", False)
-    )
+    source_controls = cfg.get("source_controls") if has_cfg and isinstance(cfg.get("source_controls"), dict) else {}
+    monitoring = cfg.get("monitoring") if has_cfg and isinstance(cfg.get("monitoring"), dict) else {}
+    swarm_cfg = cfg.get("swarm") if has_cfg and isinstance(cfg.get("swarm"), dict) else {}
 
-    # Observed stability (optional)
+    status = str((worker_state or {}).get("status") or "").lower()
+    running_like = status in {"running", "active", "in_progress", "working"}
+
+    # Only treat "signals" as meaningful if we have an active job/config context or we're running.
+    has_active_context = bool(job_payload) or running_like
+
     stable_signal = False
-    if isinstance(diagnostics, dict):
-        stab = diagnostics.get("stability_index")
-        eq = diagnostics.get("equilibrium_fraction") or diagnostics.get("equilibrium")
-        try:
-            if isinstance(stab, (int, float)) and float(stab) >= 0.70:
-                stable_signal = True
-        except Exception:
-            pass
-        try:
-            if isinstance(eq, (int, float)) and float(eq) >= 0.60:
-                stable_signal = True
-        except Exception:
-            pass
+    if has_active_context and isinstance(diagnostics_preview, dict):
+        stable_signal = bool(
+            diagnostics_preview.get("stable_signal")
+            or diagnostics_preview.get("equilibrium_detected")
+            or diagnostics_preview.get("self_stabilizing")
+        )
 
-    # Score ladder
+    # Features are only credited when config is present.
+    has_tools = False
+    is_monitored = False
+    is_multi = False
+
+    if has_cfg:
+        has_tools = bool(
+            source_controls.get("allow_remote_sources")
+            or source_controls.get("allow_local_sources")
+            or source_controls.get("enable_web")
+            or source_controls.get("enable_web_search")
+            or source_controls.get("enable_retrieval")
+        )
+
+        hb_enabled = monitoring.get("heartbeat_enabled")
+        log_watchdog = monitoring.get("log_watchdog")
+        is_monitored = bool(hb_enabled) or bool(log_watchdog)
+
+        worker_count = _safe_int(swarm_cfg.get("worker_count"), 1)
+        roles = cfg.get("roles") if isinstance(cfg.get("roles"), list) else []
+        is_multi = bool(worker_count and worker_count > 1) or len(roles) > 1
+
     score = 0
     label = "Assisted"
-    explain = "Manual finite runs, UI queues jobs. No tool autonomy detected."
-
-    if has_tools:
-        score = 1
-        label = "Tool-assisted"
-        explain = "Uses external tools (web/sandbox) when enabled."
 
     if is_multi:
-        score = 2
-        label = "Multi-agent"
-        explain = "Multiple roles/agents contribute (two-stage or swarm)."
+        score = max(score, 1)
+        label = "Collaborative"
+
+    if has_tools:
+        score = max(score, 2)
+        label = "Tool-enabled"
 
     if is_monitored:
         score = max(score, 3)
         label = "Self-monitoring"
-        explain = "Emits heartbeat/state/snapshots for operational stability."
 
     if stable_signal:
         score = max(score, 4)
         label = "Self-stabilizing"
-        explain = "Signals suggest stability/equilibrium emerging (heuristic)."
 
-    # Add current state context
-    status = (worker_state or {}).get("status")
-    if status:
-        explain = f"{explain} Worker status: {status}."
-
-    return {"score": score, "label": label, "explain": explain}
-
-
+    return {"score": score, "label": label}
 def _infer_agents_from_job_config(job_payload: Optional[Dict[str, Any]]) -> List[str]:
     if not isinstance(job_payload, dict):
         return ["agent"]
@@ -2670,7 +2727,7 @@ def render_agent_presence(
         a_clean = str(a)
         is_active = active_agent and (a_clean == active_agent or a_clean.split("_", 1)[0] == str(active_agent))
         cls = "ara-chip active" if is_active else "ara-chip"
-        chips.append(f'<span class="{cls}">● {html.escape(a_clean)}</span>')
+        chips.append(f'<span class="{cls}">â {html.escape(a_clean)}</span>')
     st.markdown("".join(chips), unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -2776,7 +2833,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
         if isinstance(rye, (int, float)):
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
-            parts.append(f"ΔR {float(d_r):.3f}")
+            parts.append(f"ÎR {float(d_r):.3f}")
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
@@ -2784,7 +2841,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
         if hyps_n:
             parts.append(f"{hyps_n} hypotheses")
 
-        msg = " • ".join(parts)
+        msg = " â¢ ".join(parts)
         events.append(
             {
                 "ts": e.get("timestamp") or "",
@@ -2822,7 +2879,7 @@ def render_narrative_feed(events: List[Dict[str, Any]], source_label: str = "") 
         msg = str(ev.get("message") or ev.get("text") or ev.get("summary") or "")
         if not msg:
             continue
-        meta = " • ".join([x for x in [ts, kind] if x])
+        meta = " â¢ ".join([x for x in [ts, kind] if x])
         rows.append(
             f"""
 <div class="ara-event">
@@ -2897,8 +2954,8 @@ def render_discovery_cards(discoveries: List[Dict[str, Any]]) -> None:
                 f"""
 <div class="ara-card">
   <div class="ara-card-title">{html.escape(title)}</div>
-  <div class="ara-card-sub">{html.escape(domain)} • confidence {html.escape(conf_txt)} • RYE gain {html.escape(gain_txt)} • evidence {ev_n}</div>
-  <div class="ara-card-mono">{html.escape(desc) if desc else "—"}</div>
+  <div class="ara-card-sub">{html.escape(domain)} â¢ confidence {html.escape(conf_txt)} â¢ RYE gain {html.escape(gain_txt)} â¢ evidence {ev_n}</div>
+  <div class="ara-card-mono">{html.escape(desc) if desc else "â"}</div>
 </div>
                 """,
                 unsafe_allow_html=True,
@@ -3545,12 +3602,34 @@ def main() -> None:
     # Shared MemoryStore instance (read-only UI)
     memory = init_memory_store()
 
-    # Determine active run id as early as possible (worker_state run_id > last queued hint > queue scan)
+    # Load worker state and global run_state early (used for active run detection)
     ws0, ws_src0 = load_worker_state_unified(memory)
+    run_state_global, run_state_global_src = load_run_state_unified(memory, run_id_hint=None)
+
+    # Determine active run id as early as possible.
+    # Prefer run_state.active_run_id (authoritative), then a running worker's run_id, then UI hint, then queue scan.
     active_run_hint = st.session_state.get("active_run_id_hint")
     if active_run_hint is not None:
         active_run_hint = str(active_run_hint)
-    active_run_id = (ws0 or {}).get("run_id") or active_run_hint or _derive_active_run_id_from_queue()
+
+    status0 = str((ws0 or {}).get("status") or "").lower()
+    running_like = status0 in {"running", "active", "in_progress", "working"}
+
+    active_run_from_run_state: Optional[str] = None
+    if isinstance(run_state_global, dict):
+        ar0 = run_state_global.get("active_run_id")
+        if ar0 not in (None, "", "null", "NULL"):
+            active_run_from_run_state = str(ar0)
+
+    ws_run_id = (ws0 or {}).get("run_id")
+    ws_run_id = str(ws_run_id) if ws_run_id is not None else None
+
+    active_run_id = (
+        active_run_from_run_state
+        or (ws_run_id if running_like else None)
+        or active_run_hint
+        or _derive_active_run_id_from_queue()
+    )
 
     # Light history preview for narrative synthesis and stability/autonomy (last ~25 only)
     history_preview: List[Dict[str, Any]] = []
@@ -3567,7 +3646,10 @@ def main() -> None:
         history_preview = load_history_from_finished_runs(limit_runs=5)[-25:]
 
     # Diagnostics sources (for top bar + live console)
-    run_state0, run_state_src0 = load_run_state_unified(memory, run_id_hint=active_run_id)
+    if active_run_id:
+        run_state0, run_state_src0 = load_run_state_unified(memory, run_id_hint=active_run_id)
+    else:
+        run_state0, run_state_src0 = run_state_global, run_state_global_src
     watchdog0, watchdog_src0 = load_watchdog_info_unified(memory, run_id=active_run_id)
 
     # If no real watchdog heartbeat is available, synthesize one from last activity
@@ -3578,7 +3660,12 @@ def main() -> None:
             watchdog_src0 = synth_src
 
     progress0_raw, progress_src0 = load_progress_unified(active_run_id)
-    progress_view0 = compute_progress_view(ws0, progress0_raw, watchdog0, run_id=active_run_id)
+    progress_view0 = compute_progress_view(
+        ws0 if active_run_id else None,
+        progress0_raw if active_run_id else None,
+        watchdog0,
+        run_id=active_run_id,
+    )
 
     diagnostics_preview: Optional[Dict[str, Any]] = None
     if history_preview:
@@ -3601,7 +3688,24 @@ def main() -> None:
     )
 
     # Sticky topbar (heartbeat/status/progress)
-    render_topbar(ws0, watchdog0, progress_view0, autonomy_view0)
+    ws0_for_topbar: Optional[Dict[str, Any]] = ws0
+    if not active_run_id:
+        # Avoid displaying stale run/progress information when the worker is idle.
+        ws0_for_topbar = dict(ws0 or {})
+        for _k in (
+            "run_id",
+            "job_id",
+            "mode",
+            "run_mode",
+            "current",
+            "total",
+            "phase_index",
+            "phase_total",
+            "phase_name",
+        ):
+            ws0_for_topbar.pop(_k, None)
+
+    render_topbar(ws0_for_topbar, watchdog0, progress_view0, autonomy_view0)
 
     # Header: ARA with gradient and powered by pill
     st.markdown(
@@ -3651,7 +3755,7 @@ def main() -> None:
     )
 
     st.caption(
-        f"Finite mode only • Queue based runs • Engine worker processes jobs from `{queue_pending_dir}` for `*_job.json` files.\n"
+        f"Finite mode only â¢ Queue based runs â¢ Engine worker processes jobs from `{queue_pending_dir}` for `*_job.json` files.\n"
         "This UI never runs TGRM loops directly. It only queues jobs and visualizes artifacts."
     )
 
@@ -3664,13 +3768,13 @@ def main() -> None:
         pass
 
     # ------------------------------------------------------------------
-    # Sidebar: Live updates (this fixes the “0/3 then 3/3” perception issue)
+    # Sidebar: Live updates (this fixes the â0/3 then 3/3â perception issue)
     # ------------------------------------------------------------------
     st.sidebar.subheader("Live updates")
     auto_refresh = st.sidebar.checkbox(
         "Auto-refresh while worker is running",
         value=True,
-        help="Enables live dashboard updates so progress can show 1/3 → 2/3 → 3/3 during runs.",
+        help="Enables live dashboard updates so progress can show 1/3 â 2/3 â 3/3 during runs.",
     )
     refresh_seconds = 5
     if auto_refresh:
@@ -3706,7 +3810,7 @@ def main() -> None:
             f"""
 <div class="ara-card">
   <div class="ara-card-title">Autonomy level</div>
-  <div class="ara-card-sub">{html.escape(str(autonomy_view0.get("label","Unknown")))} • {int(autonomy_view0.get("score",0))}/4</div>
+  <div class="ara-card-sub">{html.escape(str(autonomy_view0.get("label","Unknown")))} â¢ {int(autonomy_view0.get("score",0))}/4</div>
   <div class="ara-card-mono">{html.escape(str(autonomy_view0.get("explain","")))}</div>
 </div>
             """,
@@ -4231,7 +4335,7 @@ def main() -> None:
         st.markdown("#### Queued runs")
         st.caption(f"Queue directory: `{pending_dir}`")
 
-        if st.button("🧹 Clear job queue", key="clear_queue_btn"):
+        if st.button("ð§¹ Clear job queue", key="clear_queue_btn"):
             removed = 0
 
             def _is_uuid_stem(stem: str) -> bool:
@@ -5061,7 +5165,7 @@ def main() -> None:
     st.subheader("Run diagnostics")
 
     # Refresh button (manual)
-    if st.button("↻ Refresh diagnostics now", key="refresh_diag_btn"):
+    if st.button("â» Refresh diagnostics now", key="refresh_diag_btn"):
         st.rerun()
 
     # Reload unified states (fresh for this render)
@@ -5109,9 +5213,15 @@ def main() -> None:
             last_beat = watchdog.get("last_beat")
             count = watchdog.get("count", 0)
             seconds_since = watchdog.get("seconds_since_last")
-            st.write(f"Last beat: {last_beat if last_beat else 'None recorded'}")
+            st.write(f"Last beat: {_format_watchdog_last_beat(last_beat)}")
             st.write(f"Heartbeat count: {count}")
-            st.write(f"Seconds since last beat: {_humanize_seconds(_maybe_float(seconds_since))}")
+            seconds_since_f = _maybe_float(seconds_since)
+            if seconds_since_f is not None:
+                st.write(
+                    f"Seconds since last beat: {seconds_since_f:.1f} ({_humanize_seconds(seconds_since_f)} ago)"
+                )
+            else:
+                st.write("Seconds since last beat: n/a")
 
         st.markdown("---")
         st.markdown("**Worker state (engine queue)**")
@@ -5162,7 +5272,7 @@ def main() -> None:
                         if note:
                             st.caption(note)
                 else:
-                    st.info("No progress JSON found. If you want smooth 1/3 → 2/3 updates, have the worker write `<run_id>_progress.json` each phase/cycle.")
+                    st.info("No progress JSON found. If you want smooth 1/3 â 2/3 updates, have the worker write `<run_id>_progress.json` each phase/cycle.")
 
     with st.expander("Diagnostics discovery (files checked)"):
         st.write("These are the standard locations the UI checks for diagnostics artifacts.")
@@ -5172,7 +5282,7 @@ def main() -> None:
             lst = paths.get(k, [])
             shown = []
             for p in lst[:12]:
-                exists = "✅" if p.exists() else "—"
+                exists = "â" if p.exists() else "â"
                 shown.append(f"{exists} `{p}`")
             st.write("\n".join(shown))
 
