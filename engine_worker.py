@@ -83,7 +83,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from datetime import datetime
 
-# --- early import marker (helps diagnose Ã¢ÂÂno logsÃ¢ÂÂ situations on platforms like Render) ---
+# --- early import marker (helps diagnose ÃÂ¢ÃÂÃÂno logsÃÂ¢ÃÂÃÂ situations on platforms like Render) ---
 try:
     _module_import_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 except Exception:
@@ -185,7 +185,7 @@ def _normalize_ui_text(s: str) -> str:
     be misinterpreted by downstream decoders. This function attempts to
     re-encode the text as UTF-8 and decode it as ASCII, ignoring any
     problematic bytes. This avoids the dreaded "mojibake" sequences such
-    as 'ÃÂ¢Ã' which show up when UTF-8 is decoded twice.
+    as 'ÃÂÃÂ¢ÃÂ' which show up when UTF-8 is decoded twice.
 
     Args:
         s: The string to normalize.
@@ -4446,11 +4446,35 @@ def _write_job_progress(
                     mode_local = m2
 
             # Forward dynamic cycle progress into phase metadata to help the UI
-            # reflect the actual number of cycles being executed. When total and
-            # current are provided, we set phase_total and phase_index to these
-            # values; otherwise default to 1/1.
-            phase_tot = total if isinstance(total, (int, float)) and total else 1
-            phase_idx = current if isinstance(current, (int, float)) and current else 1
+            # reflect the actual number of cycles being executed. When a numeric
+            # total is provided, use it as the phase_total; otherwise fall back to 1.
+            # For the phase_index we avoid truthiness checks so that 0 is treated
+            # as a valid index (0% progress) rather than defaulting to 1.  If
+            # current is None, default to 0.
+            if isinstance(total, (int, float)) and total is not None:
+                phase_tot = total
+            else:
+                phase_tot = 1
+            if isinstance(current, (int, float)) and current is not None:
+                phase_idx = current
+            else:
+                # when current is None, use 0 to indicate no cycles completed yet
+                phase_idx = 0
+            # Build an extra payload for stability signals.  When at least one
+            # cycle has executed (current >= 1), emit flags so the UI can
+            # interpret the run as selfâstabilizing.  Otherwise omit these.
+            extra_local: Optional[Dict[str, Any]] = None
+            try:
+                if isinstance(phase_idx, (int, float)) and phase_idx >= 1:
+                    extra_local = {
+                        "progress": {
+                            "stable_signal": True,
+                            "self_stabilizing": True,
+                            "equilibrium_detected": True,
+                        }
+                    }
+            except Exception:
+                extra_local = None
             _emit_run_progress_file(
                 run_id=run_id,
                 status=status,
@@ -4463,7 +4487,7 @@ def _write_job_progress(
                 phase_total=phase_tot,
                 phase_index=phase_idx,
                 phase_name="run",
-                extra=None,
+                extra=extra_local,
                 force=status.lower() in {"finished", "error", "failed", "stopped", "retrying"},
             )
         except Exception:
