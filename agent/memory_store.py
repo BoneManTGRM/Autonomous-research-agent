@@ -111,10 +111,19 @@ DEFAULT_SNAPSHOT_SECTIONS = [
 # Hard cap per run so snapshot folders cannot explode
 MAX_SNAPSHOTS_PER_RUN = 200
 
+# Logs / watchdog filenames (UI often reads these directly)
+DEFAULT_LOGS_DIRNAME = "logs"
+WATCHDOG_HEARTBEAT_FILENAME = "watchdog_heartbeat.json"
+
 
 def _utc_now_iso() -> str:
     """Return current UTC time in ISO 8601 with Z suffix."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _utc_now_ts() -> float:
+    """Return current UTC time as a unix timestamp (seconds since epoch)."""
+    return float(datetime.now(timezone.utc).timestamp())
 
 
 def _to_int(value: Any) -> Optional[int]:
@@ -178,6 +187,12 @@ class MemoryStore:
         - benchmarks give a persistent trace of test performance (ARC, math, etc.)
         - replay_buffer provides high value items for curriculum replay
         - msil_snapshots provide compact skill intelligence snapshots for analytics
+
+    Watchdog notes:
+        - This class maintains two watchdog outputs:
+            1) watchdog.json (label->dict) for internal multi-label diagnostics
+            2) logs/watchdog_heartbeat.json (flat dict) for UIs that read a single
+               "heartbeat" file directly and expect unix timestamps + heartbeat_count
     """
 
     def __init__(
@@ -230,11 +245,21 @@ class MemoryStore:
 
         self.memory_file = os.path.abspath(memory_path)
 
+        # Logs directory (UI panels often read files from here)
+        self.logs_dir = os.path.join(self.base_dir, DEFAULT_LOGS_DIRNAME)
+        try:
+            os.makedirs(self.logs_dir, exist_ok=True)
+        except Exception:
+            pass
+
         # These external JSON files are used by diagnostics panels and
         # background workers for very fast, low risk status checks.
         self.run_state_path = os.path.join(self.base_dir, "run_state.json")
         self.watchdog_path = os.path.join(self.base_dir, "watchdog.json")
         self.worker_state_path = os.path.join(self.base_dir, "worker_state.json")
+
+        # Flat heartbeat file for UIs that read a single watchdog file directly
+        self.watchdog_heartbeat_path = os.path.join(self.logs_dir, WATCHDOG_HEARTBEAT_FILENAME)
 
         # Snapshots directory for run specific snapshots
         self.snapshot_root = os.path.join(self.base_dir, "snapshots")
@@ -308,6 +333,10 @@ class MemoryStore:
     def has_advanced_rye_metrics(self) -> bool:
         """Return True if optional advanced RYE metrics module is available."""
         return _rye_metrics is not None
+
+    def get_logs_dir(self) -> str:
+        """Return the resolved logs directory used for lightweight status files."""
+        return self.logs_dir
 
     # ------------------------------------------------------------------
     # Internal JSON persistence
@@ -664,6 +693,8 @@ class MemoryStore:
             "file_path": os.path.abspath(self.memory_file),
             "file_size_bytes": None,
             "base_dir": self.base_dir,
+            "logs_dir": self.logs_dir,
+            "watchdog_heartbeat_path": self.watchdog_heartbeat_path,
             "env_ARA_RUNS_DIR": os.environ.get("ARA_RUNS_DIR"),
         }
         try:
@@ -686,10 +717,12 @@ class MemoryStore:
             "schema_version": int(self._data.get("schema_version", MEMORY_SCHEMA_VERSION)),
             "file_path": os.path.abspath(self.memory_file),
             "base_dir": self.base_dir,
+            "logs_dir": self.logs_dir,
             "snapshot_root": self.snapshot_root,
             "run_state_path": self.run_state_path,
             "worker_state_path": self.worker_state_path,
             "watchdog_path": self.watchdog_path,
+            "watchdog_heartbeat_path": self.watchdog_heartbeat_path,
             "counts": {
                 "notes": len(self._data.get("notes", [])),
                 "cycles": len(self._data.get("cycles", [])),
@@ -785,6 +818,10 @@ class MemoryStore:
             pass
         try:
             self._write_json_file(self.watchdog_path, {})
+        except Exception:
+            pass
+        try:
+            self._write_json_file(self.watchdog_heartbeat_path, {})
         except Exception:
             pass
 
@@ -1775,12 +1812,18 @@ class MemoryStore:
 
         # Compute heartbeat info
         now_iso = _utc_now_iso()
+        now_ts = _utc_now_ts()
         last_beat = state.get("last_beat") or state.get("last_heartbeat_utc")
         seconds_since_last: Optional[float] = None
         if isinstance(last_beat, str):
             try:
                 dt = datetime.fromisoformat(last_beat.replace("Z", "+00:00"))
                 seconds_since_last = (datetime.now(timezone.utc) - dt).total_seconds()
+            except Exception:
+                seconds_since_last = None
+        elif isinstance(last_beat, (int, float)):
+            try:
+                seconds_since_last = float(now_ts) - float(last_beat)
             except Exception:
                 seconds_since_last = None
 
@@ -1852,6 +1895,63 @@ class MemoryStore:
     # ------------------------------------------------------------------
     # Watchdog heartbeats for long runs
     # ------------------------------------------------------------------
+    def _write_flat_watchdog_heartbeat(
+        self,
+        *,
+        label: str,
+        run_id: Optional[str],
+        now_iso: str,
+        now_ts: float,
+    ) -> None:
+        """Write a flat watchdog heartbeat file for UIs that read it directly.
+
+        The UI panel shown in the screenshots expects a single JSON document
+        (not per-label) and commonly reads:
+            - last_beat (unix timestamp float)
+            - heartbeat_count (int)
+            - seconds_since_last_beat (optional; may be displayed as 'n/a' if missing)
+
+        This method:
+            - loads existing heartbeat_count if present (persisting across restarts)
+            - increments it
+            - writes a compact payload to logs/watchdog_heartbeat.json
+        """
+        prev = self._read_json_file(self.watchdog_heartbeat_path) or {}
+        prev_count = prev.get("heartbeat_count")
+        if not isinstance(prev_count, int):
+            try:
+                prev_count = int(float(prev.get("count") if prev.get("count") is not None else prev_count or 0))
+            except Exception:
+                prev_count = 0
+
+        prev_last = prev.get("last_beat")
+        seconds_since_prev: Optional[float] = None
+        if isinstance(prev_last, (int, float, str)):
+            try:
+                seconds_since_prev = float(now_ts) - float(prev_last)
+                if seconds_since_prev < 0:
+                    seconds_since_prev = None
+            except Exception:
+                seconds_since_prev = None
+
+        count = int(prev_count) + 1
+
+        payload: Dict[str, Any] = {
+            "last_update_utc": now_iso, "last_heartbeat_utc": now_iso,
+            "ts": float(now_ts),
+            "last_beat": float(now_ts),
+            "heartbeat_count": int(count),
+            "count": int(count),  # compatibility alias
+            "seconds_since_last_beat": seconds_since_prev,
+            "label": label,
+            "run_id": run_id,
+        }
+
+        try:
+            self._write_json_file(self.watchdog_heartbeat_path, payload)
+        except Exception:
+            pass
+
     def heartbeat(self, label: str = "continuous_run", run_id: Optional[str] = None) -> None:
         """Record a watchdog heartbeat.
 
@@ -1861,29 +1961,41 @@ class MemoryStore:
 
         To avoid heavy disk writes, this updates watchdog in memory and
         writes only to the small watchdog.json file, not the main memory.json.
+
+        Additionally, a flat logs/watchdog_heartbeat.json file is updated for
+        UIs that read a single heartbeat file directly.
         """
         wd = self._data.setdefault("watchdog", {})
         now = _utc_now_iso()
-        existing = wd.get(label)
+        now_ts = _utc_now_ts()
+        existing = (self._read_json_file(self.watchdog_path) or {}).get(label) or wd.get(label)
         if isinstance(existing, dict):
-            count = int(existing.get("count", 0)) + 1
+            count = int(_to_int(existing.get("count") or existing.get("heartbeat_count")) or 0) + 1
             prev_run_id = existing.get("run_id")
         else:
             count = 1
             prev_run_id = None
         wd[label] = {
-            "last_beat": now,
+            "last_beat": now, "last_beat_ts": float(now_ts),
             "last_heartbeat_utc": now,  # extra field for diagnostics readers
-            "count": count,
+            "count": count, "heartbeat_count": count,
             "run_id": run_id or prev_run_id,
         }
 
         # Mirror watchdog dict to a dedicated JSON file without rewriting memory.json
         try:
-            payload = dict(self._data.get("watchdog") or {})
-            self._write_json_file(self.watchdog_path, payload)
+            payload = self._read_json_file(self.watchdog_path) or {}
+            payload = payload if isinstance(payload, dict) else {}; payload[label] = dict(wd.get(label) or {}); self._write_json_file(self.watchdog_path, payload)
         except Exception:
             pass
+
+        # Also write the flat heartbeat file commonly used by Streamlit dashboards
+        self._write_flat_watchdog_heartbeat(
+            label=label,
+            run_id=run_id or prev_run_id,
+            now_iso=now,
+            now_ts=now_ts,
+        )
 
     def record_heartbeat(
         self,
@@ -1899,6 +2011,10 @@ class MemoryStore:
 
         Prefers watchdog.json so separate processes see live heartbeats,
         but falls back to in memory data if the file is missing.
+
+        If the requested label is not found and the label is the common
+        'continuous_run', fall back to reading logs/watchdog_heartbeat.json
+        (flat heartbeat) and map its fields into the same return shape.
         """
         entry: Dict[str, Any]
 
@@ -1911,22 +2027,55 @@ class MemoryStore:
                 wd = {}
             entry = wd.get(label) or {}
 
+        # Fallback: if label missing and user asked for the common heartbeat label,
+        # attempt to read the flat heartbeat file used by dashboards.
+        if (not entry) and label in ("continuous_run", "watchdog", "heartbeat"):
+            flat = self._read_json_file(self.watchdog_heartbeat_path) or {}
+            if isinstance(flat, dict) and flat:
+                entry = {
+                    "last_beat": flat.get("last_update_utc") or flat.get("last_heartbeat_utc"),
+                    "count": flat.get("heartbeat_count") if flat.get("heartbeat_count") is not None else flat.get("count"),
+                    "run_id": flat.get("run_id"),
+                    "_flat_last_beat_ts": flat.get("last_beat") or flat.get("ts"),
+                    "_flat_seconds_since_last_beat": flat.get("seconds_since_last_beat"),
+                }
+
         last_beat = entry.get("last_beat") or entry.get("last_heartbeat_utc")
-        count = entry.get("count", 0)
+        count = _to_int(entry.get("count") or entry.get("heartbeat_count")) or 0
         run_id = entry.get("run_id")
 
         seconds_since_last: Optional[float] = None
-        if isinstance(last_beat, str):
+
+        # If we have the flat heartbeat timestamp in seconds, prefer it
+        flat_ts = entry.get("_flat_last_beat_ts")
+        if isinstance(flat_ts, (int, float)):
             try:
-                dt = datetime.fromisoformat(last_beat.replace("Z", "+00:00"))
-                seconds_since_last = (datetime.now(timezone.utc) - dt).total_seconds()
+                seconds_since_last = float(_utc_now_ts()) - float(flat_ts)
             except Exception:
                 seconds_since_last = None
+        else:
+            # Otherwise parse ISO timestamps if possible
+            if isinstance(last_beat, str):
+                try:
+                    dt = datetime.fromisoformat(last_beat.replace("Z", "+00:00"))
+                    seconds_since_last = (datetime.now(timezone.utc) - dt).total_seconds()
+                except Exception:
+                    seconds_since_last = None
+            elif isinstance(last_beat, (int, float)):
+                try:
+                    seconds_since_last = float(_utc_now_ts()) - float(last_beat)
+                except Exception:
+                    seconds_since_last = None
+
+        # If the flat file explicitly provides seconds_since_last_beat, keep it
+        flat_seconds = entry.get("_flat_seconds_since_last_beat")
+        if isinstance(flat_seconds, (int, float)):
+            seconds_since_last = float(flat_seconds)
 
         return {
             "last_beat": last_beat,
-            "count": count,
-            "seconds_since_last": seconds_since_last,
+            "count": count, "heartbeat_count": count,
+            "seconds_since_last": seconds_since_last, "seconds_since_last_beat": seconds_since_last,
             "run_id": run_id,
         }
 
