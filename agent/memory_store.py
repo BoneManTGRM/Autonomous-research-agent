@@ -115,6 +115,10 @@ MAX_SNAPSHOTS_PER_RUN = 200
 DEFAULT_LOGS_DIRNAME = "logs"
 WATCHDOG_HEARTBEAT_FILENAME = "watchdog_heartbeat.json"
 
+# Small artifact files used by the Streamlit UI and engine_worker.
+# Keep this separate from MEMORY_SCHEMA_VERSION (memory.json schema).
+RUNS_ARTIFACT_SCHEMA_VERSION = 1
+
 
 def _utc_now_iso() -> str:
     """Return current UTC time in ISO 8601 with Z suffix."""
@@ -254,9 +258,19 @@ class MemoryStore:
 
         # These external JSON files are used by diagnostics panels and
         # background workers for very fast, low risk status checks.
-        self.run_state_path = os.path.join(self.base_dir, "run_state.json")
+        #
+        # IMPORTANT: The Streamlit UI and engine_worker expect these lightweight
+        # artifacts under "<runs_root>/logs/". Older deployments sometimes wrote
+        # them to "<runs_root>/". We support both:
+        #   - Prefer logs/ paths for reads and writes
+        #   - Mirror writes to legacy root paths when possible
+        self.run_state_path = os.path.join(self.logs_dir, "run_state.json")
+        self.worker_state_path = os.path.join(self.logs_dir, "worker_state.json")
         self.watchdog_path = os.path.join(self.base_dir, "watchdog.json")
-        self.worker_state_path = os.path.join(self.base_dir, "worker_state.json")
+
+        # Legacy root-level paths for backward compatibility
+        self.legacy_run_state_path = os.path.join(self.base_dir, "run_state.json")
+        self.legacy_worker_state_path = os.path.join(self.base_dir, "worker_state.json")
 
         # Flat heartbeat file for UIs that read a single watchdog file directly
         self.watchdog_heartbeat_path = os.path.join(self.logs_dir, WATCHDOG_HEARTBEAT_FILENAME)
@@ -721,6 +735,8 @@ class MemoryStore:
             "snapshot_root": self.snapshot_root,
             "run_state_path": self.run_state_path,
             "worker_state_path": self.worker_state_path,
+            "legacy_run_state_path": getattr(self, "legacy_run_state_path", None),
+            "legacy_worker_state_path": getattr(self, "legacy_worker_state_path", None),
             "watchdog_path": self.watchdog_path,
             "watchdog_heartbeat_path": self.watchdog_heartbeat_path,
             "counts": {
@@ -812,8 +828,22 @@ class MemoryStore:
             self._write_json_file(self.run_state_path, {})
         except Exception:
             pass
+        # Also clear legacy root-level path if configured
+        try:
+            legacy_path = getattr(self, "legacy_run_state_path", None)
+            if isinstance(legacy_path, str) and legacy_path and legacy_path != self.run_state_path:
+                self._write_json_file(legacy_path, {})
+        except Exception:
+            pass
         try:
             self._write_json_file(self.worker_state_path, {})
+        except Exception:
+            pass
+        # Also clear legacy root-level path if configured
+        try:
+            legacy_path = getattr(self, "legacy_worker_state_path", None)
+            if isinstance(legacy_path, str) and legacy_path and legacy_path != self.worker_state_path:
+                self._write_json_file(legacy_path, {})
         except Exception:
             pass
         try:
@@ -1679,17 +1709,43 @@ class MemoryStore:
             v is not None
             for v in (goal, mode, minutes_remaining, last_cycle_index, domain, extra, run_id)
         ):
+            # New-style payload: merge into existing run_state so we do not lose
+            # last_run_* fields that dashboards use while the worker is idle.
             payload = dict(state)
-            payload.setdefault("updated_at", _utc_now_iso())
+            now_iso = _utc_now_iso()
+            now_ts = _utc_now_ts()
+            payload.setdefault("updated_at", now_iso)
+            payload.setdefault("utc", payload.get("updated_at") or now_iso)
+            payload.setdefault("ts", float(now_ts))
+            payload.setdefault("schema_version", RUNS_ARTIFACT_SCHEMA_VERSION)
+
+            # Merge with any existing on-disk run_state (logs/ preferred)
+            existing = self.read_run_state() or {}
+            if not isinstance(existing, dict):
+                existing = {}
+            merged = dict(existing)
+            merged.update(payload)
+
             self._data.setdefault("run_state", {})
-            self._data["run_state"] = payload
+            self._data["run_state"] = merged
             self._save()
-            # Mirror to dedicated JSON file for diagnostics
+
+            # Mirror to dedicated JSON files for diagnostics / dashboards
+            file_payload = dict(merged)
+            file_payload.setdefault("schema_version", RUNS_ARTIFACT_SCHEMA_VERSION)
             try:
-                file_payload = dict(self._data.get("run_state") or {})
-                if file_payload:
-                    file_payload.setdefault("schema_version", MEMORY_SCHEMA_VERSION)
-                    self._write_json_file(self.run_state_path, file_payload)
+                self._write_json_file(self.run_state_path, file_payload)
+            except Exception:
+                pass
+            # Also mirror to legacy root-level path if configured
+            try:
+                legacy_path = getattr(self, "legacy_run_state_path", None)
+                if (
+                    isinstance(legacy_path, str)
+                    and legacy_path
+                    and legacy_path != self.run_state_path
+                ):
+                    self._write_json_file(legacy_path, file_payload)
             except Exception:
                 pass
             return
@@ -1702,8 +1758,16 @@ class MemoryStore:
         if run_id is None and isinstance(state, dict):
             run_id = state.get("run_id")
 
+        now_iso = _utc_now_iso()
+        now_ts = _utc_now_ts()
+
         legacy_state: Dict[str, Any] = {
-            "updated_at": _utc_now_iso(),
+            "schema_version": RUNS_ARTIFACT_SCHEMA_VERSION,
+            "updated_at": now_iso,
+            "utc": now_iso,
+            "ts": float(now_ts),
+            "status": "running" if run_id else "idle",
+            "active_run_id": run_id,
             "goal": goal,
             "mode": mode,
             "domain": domain,
@@ -1715,16 +1779,33 @@ class MemoryStore:
         if extra:
             legacy_state["extra"] = extra
 
+        # Merge so we don't blow away last_run_* fields or queue diagnostics.
+        existing = self.read_run_state() or {}
+        if not isinstance(existing, dict):
+            existing = {}
+        merged = dict(existing)
+        merged.update(legacy_state)
+
         self._data.setdefault("run_state", {})
-        self._data["run_state"] = legacy_state
+        self._data["run_state"] = merged
         self._save()
 
-        # Mirror to dedicated JSON file for diagnostics
+        # Mirror to dedicated JSON files for diagnostics / dashboards
+        file_payload = dict(merged)
+        file_payload.setdefault("schema_version", RUNS_ARTIFACT_SCHEMA_VERSION)
         try:
-            file_payload = dict(self._data.get("run_state") or {})
-            if file_payload:
-                file_payload.setdefault("schema_version", MEMORY_SCHEMA_VERSION)
-                self._write_json_file(self.run_state_path, file_payload)
+            self._write_json_file(self.run_state_path, file_payload)
+        except Exception:
+            pass
+        # Also mirror to legacy root-level path if configured
+        try:
+            legacy_path = getattr(self, "legacy_run_state_path", None)
+            if (
+                isinstance(legacy_path, str)
+                and legacy_path
+                and legacy_path != self.run_state_path
+            ):
+                self._write_json_file(legacy_path, file_payload)
         except Exception:
             pass
 
@@ -1755,10 +1836,24 @@ class MemoryStore:
         self.write_run_state(payload)
 
     def read_run_state(self) -> Optional[Dict[str, Any]]:
-        """Read run_state from run_state.json, falling back to memory.json."""
+        """Read run_state from run_state.json files, falling back to memory.json.
+
+        Prefers logs/run_state.json, but falls back to a legacy root-level
+        run_state.json if present.
+        """
         data = self._read_json_file(self.run_state_path)
+        if not isinstance(data, dict) or not data:
+            legacy_path = getattr(self, "legacy_run_state_path", None)
+            if (
+                isinstance(legacy_path, str)
+                and legacy_path
+                and legacy_path != self.run_state_path
+            ):
+                data = self._read_json_file(legacy_path)
+
         if isinstance(data, dict) and data:
             return data
+
         return self.load_run_state()
 
     def clear_run_state(self) -> None:
@@ -1767,6 +1862,17 @@ class MemoryStore:
         self._save()
         try:
             self._write_json_file(self.run_state_path, {})
+        except Exception:
+            pass
+        # Also clear legacy root-level path if configured
+        try:
+            legacy_path = getattr(self, "legacy_run_state_path", None)
+            if (
+                isinstance(legacy_path, str)
+                and legacy_path
+                and legacy_path != self.run_state_path
+            ):
+                self._write_json_file(legacy_path, {})
         except Exception:
             pass
 
@@ -1801,10 +1907,21 @@ class MemoryStore:
             - "stopped"
             - "error"
         """
-        # Start from existing worker_state.json if it exists so we keep counters
+        # Start from existing worker_state.json if it exists so we keep counters.
+        # Prefer logs/worker_state.json, but fall back to legacy root-level
+        # worker_state.json if present.
         state: Dict[str, Any]
         file_state = self._read_json_file(self.worker_state_path)
-        if isinstance(file_state, dict):
+        if not isinstance(file_state, dict) or not file_state:
+            legacy_path = getattr(self, "legacy_worker_state_path", None)
+            if (
+                isinstance(legacy_path, str)
+                and legacy_path
+                and legacy_path != self.worker_state_path
+            ):
+                file_state = self._read_json_file(legacy_path)
+
+        if isinstance(file_state, dict) and file_state:
             state = dict(file_state)
         else:
             ws = self._data.get("worker_state") or {}
@@ -1832,6 +1949,9 @@ class MemoryStore:
         # Update core fields
         state.update(
             {
+                "schema_version": RUNS_ARTIFACT_SCHEMA_VERSION,
+                "utc": now_iso,
+                "ts": float(now_ts),
                 "updated_at": now_iso,
                 "last_beat": now_iso,
                 "last_heartbeat_utc": now_iso,
@@ -1848,6 +1968,7 @@ class MemoryStore:
                 "max_cycles": _to_int(max_cycles),
                 "max_rounds": _to_int(max_rounds),
                 "run_id": run_id,
+                "active_run_id": run_id,
                 "experiment_mode": experiment_mode,
                 "current": _to_int(current),
                 "total": _to_int(total),
@@ -1868,12 +1989,37 @@ class MemoryStore:
             self._write_json_file(self.worker_state_path, dict(state))
         except Exception:
             pass
+        # Mirror to legacy root-level worker_state.json for older readers
+        try:
+            legacy_path = getattr(self, "legacy_worker_state_path", None)
+            if (
+                isinstance(legacy_path, str)
+                and legacy_path
+                and legacy_path != self.worker_state_path
+            ):
+                self._write_json_file(legacy_path, dict(state))
+        except Exception:
+            pass
 
     def get_worker_state(self) -> Optional[Dict[str, Any]]:
-        """Return current worker_state snapshot, preferring worker_state.json."""
+        """Return current worker_state snapshot.
+
+        Prefers logs/worker_state.json, but falls back to a legacy root-level
+        worker_state.json if present, then to in-memory data from memory.json.
+        """
         data = self._read_json_file(self.worker_state_path)
+        if not isinstance(data, dict) or not data:
+            legacy_path = getattr(self, "legacy_worker_state_path", None)
+            if (
+                isinstance(legacy_path, str)
+                and legacy_path
+                and legacy_path != self.worker_state_path
+            ):
+                data = self._read_json_file(legacy_path)
+
         if isinstance(data, dict) and data:
             return data
+
         ws = self._data.get("worker_state") or {}
         if not isinstance(ws, dict) or not ws:
             return None
@@ -1884,11 +2030,22 @@ class MemoryStore:
         return self.get_worker_state()
 
     def clear_worker_state(self) -> None:
-        """Clear worker state in both memory.json and worker_state.json."""
+        """Clear worker state in memory.json and worker_state.json files."""
         self._data["worker_state"] = {}
         self._save()
         try:
             self._write_json_file(self.worker_state_path, {})
+        except Exception:
+            pass
+        # Also clear legacy root-level path if configured
+        try:
+            legacy_path = getattr(self, "legacy_worker_state_path", None)
+            if (
+                isinstance(legacy_path, str)
+                and legacy_path
+                and legacy_path != self.worker_state_path
+            ):
+                self._write_json_file(legacy_path, {})
         except Exception:
             pass
 
@@ -1937,14 +2094,22 @@ class MemoryStore:
         count = int(prev_count) + 1
 
         payload: Dict[str, Any] = {
-            "last_update_utc": now_iso, "last_heartbeat_utc": now_iso,
+            "schema_version": RUNS_ARTIFACT_SCHEMA_VERSION,
+            "utc": now_iso,
+            # Legacy naming (kept for dashboards that show these fields)
+            "last_update_utc": now_iso,
+            "last_heartbeat_utc": now_iso,
             "ts": float(now_ts),
             "last_beat": float(now_ts),
+            # Counter fields (UI may look for either key)
             "heartbeat_count": int(count),
             "count": int(count),  # compatibility alias
             "seconds_since_last_beat": seconds_since_prev,
-            "label": label,
+            # Simple status hints for UIs
+            "status": "running" if run_id else "idle",
             "run_id": run_id,
+            "active_run_id": run_id,
+            "label": label,
         }
 
         try:
@@ -3706,6 +3871,7 @@ class MemoryStore:
 
             row = {
                 "run_id": run_id,
+                "active_run_id": run_id,
                 "label": m.get("label") or m.get("name") or run_id,
                 "goals": goals,
                 "goals_str": goals_str,
@@ -3755,6 +3921,7 @@ class MemoryStore:
 
                 row = {
                     "run_id": run_id,
+                "active_run_id": run_id,
                     "label": run_id,
                     "goals": goals,
                     "goals_str": goals_str,
