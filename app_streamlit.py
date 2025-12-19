@@ -79,6 +79,10 @@ try:  # pragma: no cover
 except Exception:  # pragma: no cover
     st_autorefresh = None  # type: ignore[assignment]
 
+# IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
+# (cached decorators count as Streamlit commands). Keep this at module top level.
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="🧪", layout="wide")
+
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
 _THIS_FILE_DIR = Path(__file__).resolve().parent
@@ -301,6 +305,29 @@ except ModuleNotFoundError as e:
         RUNS_FINISHED_DIR = None
         RUNS_ERROR_DIR = None
         _queue_load_job_result = None  # type: ignore[assignment]
+
+
+def _coerce_path(p: Any) -> Optional[Path]:
+    """Coerce run_jobs exported paths (Path/str/PathLike) into Path, or None."""
+    if p is None:
+        return None
+    if isinstance(p, Path):
+        return p
+    if isinstance(p, str):
+        return Path(p)
+    try:
+        return Path(os.fspath(p))
+    except Exception:
+        return None
+
+
+# Normalize run_jobs path constants (they may be Path OR str depending on deployment)
+RUNS_BASE_DIR = _coerce_path(RUNS_BASE_DIR)
+RUNS_QUEUE_ROOT = _coerce_path(RUNS_QUEUE_ROOT)
+RUNS_PENDING_DIR = _coerce_path(RUNS_PENDING_DIR)
+RUNS_ACTIVE_DIR = _coerce_path(RUNS_ACTIVE_DIR)
+RUNS_FINISHED_DIR = _coerce_path(RUNS_FINISHED_DIR)
+RUNS_ERROR_DIR = _coerce_path(RUNS_ERROR_DIR)
 
 # Use absolute path for default config relative to repo root
 CONFIG_PATH_DEFAULT = str(REPO_ROOT / "config" / "settings.yaml")
@@ -1744,7 +1771,10 @@ def _watchdog_dt(info: Optional[Dict[str, Any]], fallback_path: Optional[Path] =
     return None
 
 
-def load_watchdog_info_unified(memory: MemoryStore, run_id: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+def load_watchdog_info_unified(
+    memory: MemoryStore,
+    run_id: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], str]:
     """Load heartbeat/watchdog info.
 
     Fix:
@@ -1758,23 +1788,34 @@ def load_watchdog_info_unified(memory: MemoryStore, run_id: Optional[str] = None
 
     func = getattr(memory, "get_watchdog_info", None)
     if callable(func):
+        raw = None
         try:
-            raw = func()
-            cand = _normalize_watchdog_info(raw)
-            if _is_meaningful_watchdog(cand):
-                mem_info = cand
+            if run_id is not None:
+                try:
+                    raw = func(run_id=run_id)  # type: ignore[misc]
+                except TypeError:
+                    try:
+                        raw = func(run_id)  # type: ignore[misc]
+                    except TypeError:
+                        raw = func()  # type: ignore[misc]
+            else:
+                raw = func()  # type: ignore[misc]
         except Exception:
-            mem_info = None
+            raw = None
+
+        cand = _normalize_watchdog_info(raw)
+        if _is_meaningful_watchdog(cand):
+            mem_info = cand
 
     file_info: Optional[Dict[str, Any]] = None
     file_src: str = "not found"
     file_path: Optional[Path] = None
 
     paths = _candidate_state_paths(run_id=run_id)["heartbeat"]
-    raw, p = _first_existing_json(paths)
-    cand = _normalize_watchdog_info(raw)
-    if _is_meaningful_watchdog(cand) and p is not None:
-        file_info = cand
+    raw2, p = _first_existing_json(paths)
+    cand2 = _normalize_watchdog_info(raw2)
+    if _is_meaningful_watchdog(cand2) and p is not None:
+        file_info = cand2
         file_path = p
         file_src = str(p)
 
@@ -1782,9 +1823,15 @@ def load_watchdog_info_unified(memory: MemoryStore, run_id: Optional[str] = None
     if mem_info and file_info:
         dt_mem = _watchdog_dt(mem_info)
         dt_file = _watchdog_dt(file_info, fallback_path=file_path)
-        if dt_file is not None and (dt_mem is None or dt_file >= dt_mem):
-            return file_info, file_src
-        return mem_info, mem_src
+
+        use_file = dt_file is not None and (dt_mem is None or dt_file >= dt_mem)
+        primary, primary_src, secondary = (file_info, file_src, mem_info) if use_file else (mem_info, mem_src, file_info)
+
+        merged = dict(primary)
+        merged["count"] = max(_safe_int(mem_info.get("count"), 0) or 0, _safe_int(file_info.get("count"), 0) or 0)
+        merged["last_beat"] = merged.get("last_beat") or secondary.get("last_beat")
+        merged["seconds_since_last"] = _coalesce(merged.get("seconds_since_last"), secondary.get("seconds_since_last"))
+        return merged, primary_src
 
     if file_info:
         return file_info, file_src
@@ -1915,44 +1962,73 @@ def _normalize_worker_state(raw: Any) -> Optional[Dict[str, Any]]:
     return ws
 
 
-def load_worker_state_unified(memory: MemoryStore, run_id_hint: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+def load_worker_state_unified(
+    memory: MemoryStore,
+    run_id_hint: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], str]:
     """Load worker state, preferring MemoryStore but with file fallbacks."""
     # MemoryStore methods (try multiple names)
     for name in ("get_worker_state", "read_worker_state", "load_worker_state"):
         func = getattr(memory, name, None)
         if callable(func):
+            raw = None
             try:
-                raw = func()
-                ws = _normalize_worker_state(raw)
-                if ws:
-                    return ws, f"MemoryStore.{name}"
+                if run_id_hint:
+                    # try keyword then positional then no-arg fallback
+                    try:
+                        raw = func(run_id=run_id_hint)  # type: ignore[misc]
+                    except TypeError:
+                        try:
+                            raw = func(run_id_hint)  # type: ignore[misc]
+                        except TypeError:
+                            raw = func()  # type: ignore[misc]
+                else:
+                    raw = func()  # type: ignore[misc]
             except Exception:
-                pass
+                raw = None
+
+            ws = _normalize_worker_state(raw)
+            if ws:
+                return ws, f"MemoryStore.{name}"
 
     paths = _candidate_state_paths(run_id=run_id_hint)["worker_state"]
-    raw, p = _first_existing_json(paths)
-    ws = _normalize_worker_state(raw)
-    if ws and p is not None:
-        return ws, str(p)
+    raw2, p = _first_existing_json(paths)
+    ws2 = _normalize_worker_state(raw2)
+    if ws2 and p is not None:
+        return ws2, str(p)
 
     return None, "not found"
 
 
-def load_run_state_unified(memory: MemoryStore, run_id_hint: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], str]:
+def load_run_state_unified(
+    memory: MemoryStore,
+    run_id_hint: Optional[str] = None,
+) -> Tuple[Optional[Dict[str, Any]], str]:
     """Load last saved run state, preferring MemoryStore but with file fallbacks."""
     func = getattr(memory, "load_run_state", None)
     if callable(func):
+        raw = None
         try:
-            raw = func()
-            if isinstance(raw, dict) and raw:
-                return raw, "MemoryStore.load_run_state"
+            if run_id_hint:
+                try:
+                    raw = func(run_id=run_id_hint)  # type: ignore[misc]
+                except TypeError:
+                    try:
+                        raw = func(run_id_hint)  # type: ignore[misc]
+                    except TypeError:
+                        raw = func()  # type: ignore[misc]
+            else:
+                raw = func()  # type: ignore[misc]
         except Exception:
-            pass
+            raw = None
+
+        if isinstance(raw, dict) and raw:
+            return raw, "MemoryStore.load_run_state"
 
     paths = _candidate_state_paths(run_id=run_id_hint)["run_state"]
-    raw, p = _first_existing_json(paths)
-    if isinstance(raw, dict) and raw and p is not None:
-        return raw, str(p)
+    raw2, p = _first_existing_json(paths)
+    if isinstance(raw2, dict) and raw2 and p is not None:
+        return raw2, str(p)
 
     return None, "not found"
 
@@ -2094,6 +2170,14 @@ def compute_progress_view(
 
     finished_like = status_s in {"finished", "done", "completed", "complete", "success"}
 
+    # Signals that the worker has started doing real work (status running OR fresh-ish heartbeat)
+    hb_count = _safe_int((watchdog or {}).get("count"), 0) or 0
+    hb_last = (watchdog or {}).get("last_beat")
+    hb_age = _maybe_float((watchdog or {}).get("seconds_since_last"))
+    heartbeat_fresh = hb_age is None or hb_age <= 600.0
+    running_like = status_s in {"running", "active", "in_progress", "working"}
+    started_like = bool(running_like or hb_count > 0 or (hb_last and heartbeat_fresh))
+
     # Preferred: phase progress (3-phase pipeline etc.) (preserve 0 values)
     phase_cur = _coalesce(ws.get("phase_index"), ps.get("phase_index"), ps.get("phase_current"))
     phase_tot = _coalesce(ws.get("phase_total"), ps.get("phase_total"), ps.get("phase_count"))
@@ -2121,7 +2205,8 @@ def compute_progress_view(
     # Select which progress track to display
     use_phase = _safe_int(phase_tot, None)
     if use_phase is not None and use_phase > 0:
-        c = _safe_int(phase_cur, 0) or 0
+        phase_cur_raw = phase_cur
+        c = _safe_int(phase_cur_raw, 0) or 0
         t = use_phase
 
         # If finished, clamp to full
@@ -2132,13 +2217,8 @@ def compute_progress_view(
             key = f"ara_phase_zero_indexed::{run_id or 'global'}"
             zero_indexed = bool(st.session_state.get(key, False))
 
-            hb_count = _safe_int((watchdog or {}).get("count"), 0) or 0
-            hb_last = (watchdog or {}).get("last_beat")
-            started = bool(hb_count > 0 or hb_last)
-
-            # If we observe phase_cur==0 while actively running, treat as 0-based and mark it
-            running_like = status_s in {"running", "active", "in_progress", "working"}
-            if running_like and c == 0 and started:
+            # If we observe phase_cur==0 (and phase_cur actually exists), treat as 0-based and mark it
+            if phase_cur_raw is not None and c == 0 and started_like:
                 st.session_state[key] = True
                 zero_indexed = True
 
@@ -2155,8 +2235,8 @@ def compute_progress_view(
                 # 1-based or already-display-ready
                 c_disp = min(max(c, 0), t)
 
-            # Small UX: if running, started, and c_disp==0, show 1 as "in progress"
-            if running_like and started and c_disp == 0 and t > 0:
+            # UX: if started and still at 0, show 1 as "in progress"
+            if started_like and c_disp == 0 and t > 0:
                 c_disp = 1
 
         frac = float(c_disp) / float(t) if t > 0 else None
@@ -2180,12 +2260,9 @@ def compute_progress_view(
     else:
         c_disp2 = min(max(c2, 0), t2)
 
-        # Small improvement: if run is active and current == 0 but we have heartbeat activity, show "1" as "in progress"
-        hb_count = _safe_int((watchdog or {}).get("count"), 0) or 0
-        hb_last = (watchdog or {}).get("last_beat")
-        if status_s in {"running", "active", "in_progress", "working"} and c_disp2 == 0 and t2 > 0:
-            if hb_count > 0 or hb_last:
-                c_disp2 = 1
+        # UX: if worker has started and current still reads 0, show 1 as "in progress"
+        if started_like and c_disp2 == 0 and t2 > 0:
+            c_disp2 = 1
 
     frac2 = float(c_disp2) / float(t2) if t2 > 0 else None
     return {
@@ -2248,7 +2325,7 @@ def inject_base_styles() -> None:
   position: sticky;
   top: 0;
   z-index: 9999;
-  margin: -0.75rem -1rem 1rem -1rem;
+  margin: -0.75rem -1rem 0.85rem -1rem;
   padding: 0.65rem 1rem 0.6rem 1rem;
   background: rgba(8, 10, 18, 0.78);
   border-bottom: 1px solid rgba(255,255,255,0.08);
@@ -2383,7 +2460,7 @@ def inject_base_styles() -> None:
 h1 a, h2 a, h3 a, h4 a { display:none !important; }
 </style>
             """
-        ),
+        ).strip("\n"),
         unsafe_allow_html=True,
     )
 
@@ -2444,29 +2521,29 @@ def render_topbar(
         textwrap.dedent(
             f"""
 <div class="ara-topbar-wrap">
-  <div class="ara-topbar">
-    <div class="ara-topbar-left">
-      <div class="ara-dot {health_class}"></div>
-      <div class="ara-topbar-title">{html.escape(health_label)}</div>
-      <div class="ara-kv">Beat {html.escape(beat_txt)} ago</div>
-      <div class="ara-kv">Status <code>{status_html}</code></div>
-    </div>
+<div class="ara-topbar">
+<div class="ara-topbar-left">
+<div class="ara-dot {health_class}"></div>
+<div class="ara-topbar-title">{html.escape(health_label)}</div>
+<div class="ara-kv">Beat {html.escape(beat_txt)} ago</div>
+<div class="ara-kv">Status <code>{status_html}</code></div>
+</div>
 
-    <div class="ara-topbar-mid">
-      <div class="ara-kv">{mid_txt}</div>
-    </div>
+<div class="ara-topbar-mid">
+<div class="ara-kv">{mid_txt}</div>
+</div>
 
-    <div class="ara-topbar-right">
-      <div class="ara-kv">{autonomy_html}</div>
-      <div class="ara-kv"><code>{html.escape(right_txt)}</code></div>
-      <div class="ara-mini-progress" title="progress">
-        <div style="width:{width_pct}%"></div>
-      </div>
-    </div>
-  </div>
+<div class="ara-topbar-right">
+<div class="ara-kv">{autonomy_html}</div>
+<div class="ara-kv"><code>{html.escape(right_txt)}</code></div>
+<div class="ara-mini-progress" title="progress">
+<div style="width:{width_pct}%"></div>
+</div>
+</div>
+</div>
 </div>
             """
-        ),
+        ).strip("\n"),
         unsafe_allow_html=True,
     )
 
@@ -3300,7 +3377,11 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
     for job in jobs_slice:
         run_id = _get_job_id(job)
 
-        created_at_raw = getattr(job, "created_at", None) if hasattr(job, "created_at") else (job.get("created_at") if isinstance(job, dict) else None)
+        created_at_raw = (
+            getattr(job, "created_at", None)
+            if hasattr(job, "created_at")
+            else (job.get("created_at") if isinstance(job, dict) else None)
+        )
         default_ts = None
         if isinstance(created_at_raw, (int, float)):
             try:
@@ -3387,7 +3468,11 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
     for job in jobs_slice:
         run_id = _get_job_id(job)
 
-        created_at_raw = getattr(job, "created_at", None) if hasattr(job, "created_at") else (job.get("created_at") if isinstance(job, dict) else None)
+        created_at_raw = (
+            getattr(job, "created_at", None)
+            if hasattr(job, "created_at")
+            else (job.get("created_at") if isinstance(job, dict) else None)
+        )
         default_ts = None
         if isinstance(created_at_raw, (int, float)):
             try:
@@ -3450,8 +3535,6 @@ def _looks_like_job_payload_json(obj: Any) -> bool:
 # Main Streamlit app
 # -------------------------------------------------------------------
 def main() -> None:
-    st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="🧪", layout="wide")
-
     inject_base_styles()
 
     # Resolve base + queue paths once for UI display
@@ -3505,13 +3588,17 @@ def main() -> None:
             diagnostics_preview = None
 
     # Autonomy + agents (from job payload if available)
-    job_payload0, job_payload_src0 = load_job_payload_from_disk(active_run_id) if active_run_id else (None, "no run_id")
+    job_payload0, job_payload_src0 = (
+        load_job_payload_from_disk(active_run_id) if active_run_id else (None, "no run_id")
+    )
     autonomy_view0 = compute_autonomy_view(job_payload0, ws0, diagnostics_preview)
     agents0 = _infer_agents_from_job_config(job_payload0)
 
     # Event log (or synthesized)
     event_log0, event_src0 = load_event_log_unified(active_run_id)
-    narrative_events = event_log0 if event_log0 else build_narrative_events_from_history(history_preview, limit=LIVE_EVENTS_LIMIT)
+    narrative_events = (
+        event_log0 if event_log0 else build_narrative_events_from_history(history_preview, limit=LIVE_EVENTS_LIMIT)
+    )
 
     # Sticky topbar (heartbeat/status/progress)
     render_topbar(ws0, watchdog0, progress_view0, autonomy_view0)
@@ -3525,7 +3612,7 @@ def main() -> None:
     display: flex;
     align-items: center;
     gap: 0.75rem;
-    margin-bottom: 1.25rem;
+    margin: 0.20rem 0 1.05rem 0;
 }
 .ara-logo-text {
     font-size: 2.6rem;
@@ -3559,7 +3646,7 @@ def main() -> None:
     </div>
 </div>
             """
-        ),
+        ).strip("\n"),
         unsafe_allow_html=True,
     )
 
@@ -5219,8 +5306,8 @@ def main() -> None:
     if auto_refresh:
         health_class, _ = derive_health_class(ws, watchdog)
         status_now = str((ws or {}).get("status") or "").lower()
-        running_like = status_now in {"running", "active", "in_progress", "working"} or health_class in {"healthy", "stale"}
-        if running_like:
+        running_like2 = status_now in {"running", "active", "in_progress", "working"} or health_class in {"healthy", "stale"}
+        if running_like2:
             if callable(st_autorefresh):
                 try:
                     st_autorefresh(interval=int(refresh_seconds * 1000), key="ara_autorefresh")
