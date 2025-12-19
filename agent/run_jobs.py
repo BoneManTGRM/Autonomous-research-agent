@@ -7,10 +7,12 @@ import json
 import logging
 import os
 import socket
+import threading
 import time
 import traceback
 import uuid
 from dataclasses import asdict, dataclass, field, fields
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -168,6 +170,14 @@ Additional update (2025-12):
       files in the same folder.
     - Optional shared worker_state.json helpers were added to support a live
       top-of-page status strip and phase counters in Streamlit.
+
+Additional update (watchdog heartbeat):
+    - Adds runs/logs/watchdog_heartbeat.json helpers that:
+        * always persist a numeric heartbeat_count
+        * persist last_beat + ts timestamps
+        * can be bumped from write_progress() and update_worker_state()
+      This fixes the UI symptom: "Heartbeat count: 0" and "Seconds since last beat: n/a"
+      when last_beat exists but count is missing.
 """
 
 # Public exports (useful for type checkers and explicit imports)
@@ -183,6 +193,12 @@ __all__ = [
     "LEGACY_QUEUE_DIR",
     "LOCKS_DIR",
     "WORKER_STATE_PATH",
+    # Logs/diagnostics
+    "LOGS_DIR",
+    "WATCHDOG_HEARTBEAT_PATH",
+    "read_watchdog_heartbeat",
+    "bump_watchdog_heartbeat",
+    # Core API
     "RunJob",
     "debug_print_layout",
     "_inject_run_id_into_config",
@@ -379,6 +395,12 @@ if _env_worker_state:
 else:
     WORKER_STATE_PATH = (BASE_DIR / "worker_state.json").resolve()
 
+# Logs/diagnostics folder and watchdog heartbeat path (used by Streamlit diagnostics).
+# The UI expects:
+#   /opt/render/project/src/runs/logs/watchdog_heartbeat.json
+LOGS_DIR = (BASE_DIR / "logs").resolve()
+WATCHDOG_HEARTBEAT_PATH = (LOGS_DIR / "watchdog_heartbeat.json").resolve()
+
 # Primary job layout used by the engine worker:
 #   - QUEUE_ROOT/pending/   : file based queue of pending jobs (canonical queue)
 #   - QUEUE_ROOT/active/    : in progress metadata and optional progress JSON
@@ -409,6 +431,7 @@ LOCKS_DIR = _LOCKS_DIR  # public alias
 # Make sure directories exist at import time
 for folder in [
     BASE_DIR,
+    LOGS_DIR,
     QUEUE_ROOT,
     PENDING_DIR,
     ACTIVE_DIR,
@@ -432,6 +455,7 @@ _log("Initialized BASE_DIR:", BASE_DIR)
 _log("QUEUE_ROOT:", QUEUE_ROOT)
 _log("PENDING_DIR:", PENDING_DIR, "ACTIVE_DIR:", ACTIVE_DIR, "FINISHED_DIR:", FINISHED_DIR)
 _log("WORKER_STATE_PATH:", WORKER_STATE_PATH)
+_log("LOGS_DIR:", LOGS_DIR, "WATCHDOG_HEARTBEAT_PATH:", WATCHDOG_HEARTBEAT_PATH)
 
 # Status priority for conflict resolution in list_jobs
 # Higher number wins when the same run_id appears in multiple folders.
@@ -464,6 +488,8 @@ def debug_print_layout() -> None:
     print("[run_jobs] ARA_QUEUE_ROOT env (raw):", repr(env_queue_val))
     print("[run_jobs] QUEUE_ROOT:", QUEUE_ROOT)
     print("[run_jobs] BASE_DIR:", base_resolved)
+    print("[run_jobs] LOGS_DIR:", LOGS_DIR)
+    print("[run_jobs] WATCHDOG_HEARTBEAT_PATH:", WATCHDOG_HEARTBEAT_PATH)
     print("[run_jobs] PENDING_DIR:", PENDING_DIR)
     print("[run_jobs] ACTIVE_DIR:", ACTIVE_DIR)
     print("[run_jobs] FINISHED_DIR:", FINISHED_DIR)
@@ -800,6 +826,194 @@ def _safe_float(value: Any, default: float) -> float:
 
 
 # ---------------------------------------------------------------------------
+# Watchdog heartbeat (runs/logs/watchdog_heartbeat.json)
+# ---------------------------------------------------------------------------
+
+_WATCHDOG_HEARTBEAT_LOCK = threading.Lock()
+_WATCHDOG_LAST_WRITE_TS: float = 0.0
+
+
+def _utc_iso(ts: Optional[float] = None) -> str:
+    """
+    UTC timestamp formatted like: 2025-12-19T02:39:39.966247Z
+    """
+    t = float(ts if ts is not None else time.time())
+    try:
+        dt = datetime.fromtimestamp(t, tz=timezone.utc)
+        return dt.isoformat(timespec="microseconds").replace("+00:00", "Z")
+    except Exception:
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def _default_worker_id() -> str:
+    """
+    Best-effort stable worker identifier for diagnostics.
+    """
+    for key in ("ARA_WORKER_ID", "RENDER_INSTANCE_ID", "RENDER_SERVICE_ID", "HOSTNAME"):
+        v = os.getenv(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    try:
+        return socket.gethostname()
+    except Exception:
+        return "unknown"
+
+
+def _watchdog_heartbeat_enabled() -> bool:
+    """
+    Allow disabling watchdog heartbeat writes via env var.
+
+    Defaults to enabled.
+    """
+    raw = os.getenv("ARA_WATCHDOG_HEARTBEAT_ENABLED", "").strip().lower()
+    if raw in ("0", "false", "no", "off", "disabled"):
+        return False
+    return True
+
+
+def _watchdog_heartbeat_interval_seconds(explicit: Optional[int] = None) -> int:
+    """
+    Interval throttle for writing watchdog_heartbeat.json.
+
+    Priority:
+      1) explicit arg
+      2) ARA_WATCHDOG_HEARTBEAT_INTERVAL_SECONDS
+      3) ARA_HEARTBEAT_INTERVAL_SECONDS (backwards compatible)
+      4) MONITORING_DEFAULTS["heartbeat_interval_seconds"] (default 60)
+    """
+    if explicit is not None:
+        try:
+            v = int(explicit)
+            return v if v > 0 else 1
+        except Exception:
+            pass
+
+    for env_key in ("ARA_WATCHDOG_HEARTBEAT_INTERVAL_SECONDS", "ARA_HEARTBEAT_INTERVAL_SECONDS"):
+        raw = os.getenv(env_key, "").strip()
+        if raw:
+            try:
+                v = int(raw)
+                return v if v > 0 else 1
+            except Exception:
+                continue
+
+    try:
+        v2 = int(MONITORING_DEFAULTS.get("heartbeat_interval_seconds") or 60)
+        return v2 if v2 > 0 else 60
+    except Exception:
+        return 60
+
+
+def read_watchdog_heartbeat(default: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """
+    Read runs/logs/watchdog_heartbeat.json.
+
+    Returns:
+        dict (default merged in), tolerant of file missing/corrupt.
+    """
+    base: Dict[str, Any] = dict(default or {})
+    path = WATCHDOG_HEARTBEAT_PATH
+    if not path.exists():
+        return base
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            base.update(data)
+        return base
+    except Exception:
+        return base
+
+
+def bump_watchdog_heartbeat(
+    *,
+    run_id: Optional[str] = None,
+    status: Optional[str] = None,
+    worker_id: Optional[str] = None,
+    extra: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+    interval_seconds: Optional[int] = None,
+) -> Path:
+    """
+    Update runs/logs/watchdog_heartbeat.json with an incrementing heartbeat_count.
+
+    This is intentionally safe to call frequently; writes are throttled to
+    at most once per interval_seconds (default 60s) unless force=True.
+
+    Schema written (superset, so UIs can evolve safely):
+        {
+          "last_beat": <float unix seconds>,
+          "ts": <float unix seconds>,                  # alias
+          "last_update_utc": "....Z",
+          "heartbeat_count": <int>,
+          "count": <int>,                              # alias for older UIs
+          "pid": <int>,
+          "hostname": <str>,
+          "worker_id": <str>,
+          "active_run_id": <str or null>,
+          "status": <str or null>,
+          "extra": <dict or null>
+        }
+    """
+    if not _watchdog_heartbeat_enabled():
+        return WATCHDOG_HEARTBEAT_PATH
+
+    interval = _watchdog_heartbeat_interval_seconds(interval_seconds)
+    now = time.time()
+
+    global _WATCHDOG_LAST_WRITE_TS  # noqa: PLW0603
+
+    with _WATCHDOG_HEARTBEAT_LOCK:
+        if not force:
+            try:
+                if (now - float(_WATCHDOG_LAST_WRITE_TS)) < float(interval):
+                    return WATCHDOG_HEARTBEAT_PATH
+            except Exception:
+                # If state is corrupt, just write.
+                pass
+
+        existing = read_watchdog_heartbeat()
+        count_raw = (
+            existing.get("heartbeat_count")
+            if isinstance(existing, dict)
+            else None
+        )
+        if count_raw is None and isinstance(existing, dict):
+            count_raw = existing.get("count")
+
+        try:
+            count = int(count_raw) if count_raw is not None else 0
+        except Exception:
+            count = 0
+        if count < 0:
+            count = 0
+        count += 1
+
+        wid = (worker_id or "").strip() or _default_worker_id()
+
+        payload: Dict[str, Any] = {
+            "last_beat": now,
+            "ts": now,
+            "last_update_utc": _utc_iso(now),
+            "heartbeat_count": count,
+            "count": count,  # alias
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "worker_id": wid,
+            "active_run_id": (str(run_id).strip() if run_id else (existing.get("active_run_id") if isinstance(existing, dict) else None)),
+            "status": (str(status).strip() if status else (existing.get("status") if isinstance(existing, dict) else None)),
+            "extra": dict(extra) if isinstance(extra, dict) else (existing.get("extra") if isinstance(existing, dict) else None),
+        }
+
+        try:
+            _atomic_write_json(WATCHDOG_HEARTBEAT_PATH, payload)
+        finally:
+            _WATCHDOG_LAST_WRITE_TS = now
+
+    return WATCHDOG_HEARTBEAT_PATH
+
+
+# ---------------------------------------------------------------------------
 # Shared worker state helpers (optional, but useful for Streamlit live UI)
 # ---------------------------------------------------------------------------
 
@@ -819,6 +1033,9 @@ def read_worker_state(default: Optional[Dict[str, Any]] = None) -> Dict[str, Any
         - phase_name (str)
         - cycle (int)
         - updated_at (float)
+        - ts (float)                 # alias for updated_at (UI convenience)
+        - last_update_utc (str)      # ISO UTC timestamp (UI convenience)
+        - worker_id / pid / hostname (diagnostics)
     """
     base: Dict[str, Any] = dict(default or {})
     path = WORKER_STATE_PATH
@@ -853,9 +1070,31 @@ def update_worker_state(update: Dict[str, Any], *, replace: bool = False) -> Pat
         state = read_worker_state()
         state.update(update)
 
-    # Common timestamp key for UI freshness checks
-    state.setdefault("updated_at", time.time())
+    now = time.time()
+
+    # Common timestamp keys for UI freshness checks
+    state["updated_at"] = now
+    state["ts"] = now
+    state["last_update_utc"] = _utc_iso(now)
+
+    # Diagnostics
+    state.setdefault("pid", os.getpid())
+    state.setdefault("hostname", socket.gethostname())
+    state.setdefault("worker_id", _default_worker_id())
+
     _atomic_write_json(WORKER_STATE_PATH, state)
+
+    # Best-effort: bump watchdog heartbeat from any worker-state update.
+    try:
+        bump_watchdog_heartbeat(
+            run_id=state.get("run_id"),
+            status=state.get("status"),
+            worker_id=state.get("worker_id"),
+            extra={"source": "worker_state"},
+        )
+    except Exception:
+        pass
+
     return WORKER_STATE_PATH
 
 
@@ -1150,19 +1389,28 @@ def create_job(
         runtime_cfg = cfg.get("runtime") if isinstance(cfg.get("runtime"), dict) else {}
 
         max_cycles = (
-            cfg.get("max_cycles") or limits.get("max_cycles") or engine_cfg.get("max_cycles") or runtime_cfg.get("max_cycles")
+            cfg.get("max_cycles")
+            or limits.get("max_cycles")
+            or engine_cfg.get("max_cycles")
+            or runtime_cfg.get("max_cycles")
         )
         if max_cycles is not None and "max_cycles" not in meta_with_id:
             meta_with_id["max_cycles"] = max_cycles
 
         max_rounds = (
-            cfg.get("max_rounds") or limits.get("max_rounds") or engine_cfg.get("max_rounds") or runtime_cfg.get("max_rounds")
+            cfg.get("max_rounds")
+            or limits.get("max_rounds")
+            or engine_cfg.get("max_rounds")
+            or runtime_cfg.get("max_rounds")
         )
         if max_rounds is not None and "max_rounds" not in meta_with_id:
             meta_with_id["max_rounds"] = max_rounds
 
         max_minutes = (
-            cfg.get("max_minutes") or limits.get("max_minutes") or engine_cfg.get("max_minutes") or runtime_cfg.get("max_minutes")
+            cfg.get("max_minutes")
+            or limits.get("max_minutes")
+            or engine_cfg.get("max_minutes")
+            or runtime_cfg.get("max_minutes")
         )
         if max_minutes is not None and "max_minutes" not in meta_with_id:
             meta_with_id["max_minutes"] = max_minutes
@@ -1485,7 +1733,11 @@ def update_job_status(run_id: str, new_status: str) -> Optional[RunJob]:
     try:
         job = load_job(src)
     except Exception as e:
-        _queue_log("update_job_status:", f"failed to load job run_id={run_id} from {src}: {repr(e)}", level=logging.WARNING)
+        _queue_log(
+            "update_job_status:",
+            f"failed to load job run_id={run_id} from {src}: {repr(e)}",
+            level=logging.WARNING,
+        )
         return None
 
     job.status = norm_new
@@ -1950,17 +2202,46 @@ def write_progress(run_id: str, progress: Dict[str, Any]) -> Path:
     Atomically write live progress JSON for a run.
 
     This is intentionally lightweight so engine_worker.py can call it before each phase/cycle.
+
+    Update:
+        This also bumps runs/logs/watchdog_heartbeat.json (throttled) so the UI
+        shows a live heartbeat while the engine is running.
     """
     run_id = str(run_id).strip()
     if not _is_safe_run_id(run_id):
         raise ValueError(f"write_progress called with unsafe run_id: {run_id!r}")
 
+    now = time.time()
+
     payload: Dict[str, Any] = dict(progress or {})
     payload.setdefault("run_id", run_id)
+    payload.setdefault("active_run_id", run_id)  # alias used by some UIs
     payload.setdefault("status", "active")
-    payload.setdefault("updated_at", time.time())
+
+    # Standard timestamps
+    payload["updated_at"] = now
+    payload["ts"] = now
+    payload["last_update_utc"] = _utc_iso(now)
+
+    # Diagnostics
+    payload.setdefault("pid", os.getpid())
+    payload.setdefault("hostname", socket.gethostname())
+    payload.setdefault("worker_id", _default_worker_id())
+
     path = progress_path(run_id)
     _atomic_write_json(path, payload)
+
+    # Best-effort: bump watchdog heartbeat using progress as the driver signal.
+    try:
+        bump_watchdog_heartbeat(
+            run_id=run_id,
+            status=payload.get("status") or "active",
+            worker_id=payload.get("worker_id"),
+            extra={"source": "progress"},
+        )
+    except Exception:
+        pass
+
     return path
 
 
