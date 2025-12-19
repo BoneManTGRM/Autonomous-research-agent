@@ -83,7 +83,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from datetime import datetime
 
-# --- early import marker (helps diagnose “no logs” situations on platforms like Render) ---
+# --- early import marker (helps diagnose âno logsâ situations on platforms like Render) ---
 try:
     _module_import_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 except Exception:
@@ -880,6 +880,105 @@ def _run_progress_file_path(run_id: str) -> Path:
     return _ensure_runs_logs_dir() / f"{run_id}_progress.json"
 
 
+
+
+# ---------------------------------------------------------------------------
+# Watchdog heartbeat counter (file-based)
+# ---------------------------------------------------------------------------
+
+_WATCHDOG_HEARTBEAT_LOCK = threading.Lock()
+_WATCHDOG_HEARTBEAT_COUNT: int = 0
+_WATCHDOG_HEARTBEAT_INIT_DONE: bool = False
+
+
+def _next_watchdog_heartbeat_count() -> int:
+    """
+    Monotonically increasing heartbeat counter for watchdog_heartbeat.json.
+
+    The Streamlit UI uses this counter to confirm the heartbeat file is being
+    updated (some panels treat a missing/zero counter as "not running").
+    We seed from the existing heartbeat file (if any) so restarts don't
+    always reset the visible counter back to 0.
+    """
+    global _WATCHDOG_HEARTBEAT_COUNT, _WATCHDOG_HEARTBEAT_INIT_DONE
+    with _WATCHDOG_HEARTBEAT_LOCK:
+        if not _WATCHDOG_HEARTBEAT_INIT_DONE:
+            _WATCHDOG_HEARTBEAT_INIT_DONE = True
+            try:
+                existing = safe_read_json(_watchdog_heartbeat_file_path())
+                if isinstance(existing, dict):
+                    v = existing.get("count")
+                    if not isinstance(v, int):
+                        v = existing.get("heartbeat_count")
+                    if isinstance(v, int) and v > 0:
+                        _WATCHDOG_HEARTBEAT_COUNT = v
+            except Exception:
+                pass
+        _WATCHDOG_HEARTBEAT_COUNT += 1
+        return _WATCHDOG_HEARTBEAT_COUNT
+
+
+# ---------------------------------------------------------------------------
+# Last-run snapshot (so Streamlit can show summary/diagnostics while idle)
+# ---------------------------------------------------------------------------
+
+_LAST_RUN_LOCK = threading.Lock()
+_LAST_RUN_SNAPSHOT: Dict[str, Any] = {}
+
+
+def _get_last_run_snapshot() -> Dict[str, Any]:
+    with _LAST_RUN_LOCK:
+        return dict(_LAST_RUN_SNAPSHOT) if _LAST_RUN_SNAPSHOT else {}
+
+
+def _set_last_run_snapshot(snapshot: Dict[str, Any]) -> None:
+    if not isinstance(snapshot, dict):
+        return
+    # Keep it small and JSON-safe
+    compact: Dict[str, Any] = {}
+    for k, v in list(snapshot.items())[:80]:
+        try:
+            compact[str(k)] = _to_jsonable(v)
+        except Exception:
+            compact[str(k)] = safe_repr(v, 200)
+    with _LAST_RUN_LOCK:
+        _LAST_RUN_SNAPSHOT.clear()
+        _LAST_RUN_SNAPSHOT.update(compact)
+
+
+def _maybe_load_last_run_snapshot_from_disk() -> None:
+    """
+    Seed _LAST_RUN_SNAPSHOT from an existing run_state.json (best effort).
+
+    This helps preserve the last run summary across worker restarts.
+    """
+    try:
+        existing = safe_read_json(_run_state_file_path())
+        if not isinstance(existing, dict):
+            return
+
+        snap: Dict[str, Any] = {}
+        for k in (
+            "last_run_id",
+            "last_run_summary",
+            "last_run_diagnostics",
+            "last_run_finished_utc",
+            "last_run_completed_at",
+            "last_run_status",
+            # Convenience aliases some UIs use
+            "summary",
+            "run_summary",
+            "diagnostics",
+            "rye_metrics",
+        ):
+            if k in existing:
+                snap[k] = existing.get(k)
+
+        if snap:
+            _set_last_run_snapshot(snap)
+    except Exception:
+        return
+
 def _emit_watchdog_heartbeat_file(
     *,
     label: str,
@@ -889,6 +988,10 @@ def _emit_watchdog_heartbeat_file(
 ) -> None:
     """
     Writes <runs_root>/logs/watchdog_heartbeat.json for Streamlit health checks.
+
+    This file is intentionally small and frequently updated. In addition to a
+    timestamp, we also persist an incrementing counter so the UI can detect
+    liveness even when "seconds since last beat" logic is brittle.
     """
     try:
         shutdown_requested = False
@@ -900,11 +1003,24 @@ def _emit_watchdog_heartbeat_file(
             shutdown_requested = False
             shutdown_signal = None
 
+        # Incrementing heartbeat counter (seeded from existing file if present)
+        hb_count = _next_watchdog_heartbeat_count()
+
+        # Simple status signal for UI widgets
+        if shutdown_requested:
+            status = "shutdown_requested"
+        else:
+            status = "running" if run_id else "idle"
+
         payload: Dict[str, Any] = {
             "schema_version": _RUNS_ARTIFACT_SCHEMA_VERSION,
             "utc": _now_utc_iso(),
             "ts": time.time(),
             "monotonic": time.monotonic(),
+            # counter fields (the UI may look for either key)
+            "count": hb_count,
+            "heartbeat_count": hb_count,
+            "status": status,
             "worker_started_utc": _WORKER_STARTED_AT_UTC,
             "uptime_s": int(max(0.0, time.monotonic() - _WORKER_STARTED_AT_MONO)),
             "worker_id": WORKER_ID,
@@ -912,6 +1028,8 @@ def _emit_watchdog_heartbeat_file(
             "hostname": _safe_hostname(),
             "label": label,
             "run_id": run_id,
+            # compatibility alias
+            "active_run_id": run_id,
             "rss_mb": _rss_mb(),
             "shutdown_requested": shutdown_requested,
             "shutdown_signal": shutdown_signal,
@@ -930,7 +1048,6 @@ def _emit_watchdog_heartbeat_file(
         )
     except Exception as e:
         log_exception("watchdog_heartbeat_file_failed", e)
-
 
 def _emit_worker_state_file(
     *,
@@ -1036,6 +1153,7 @@ def _emit_run_progress_file(
     run_id: str,
     status: str,
     note: str = "",
+    summary: Optional[str] = None,
     current: Optional[int] = None,
     total: Optional[int] = None,
     goal: Optional[str] = None,
@@ -1051,11 +1169,35 @@ def _emit_run_progress_file(
     Writes:
       - <runs_root>/logs/<run_id>_progress.json
       - <runs_root>/logs/run_state.json  (current run snapshot)
+
+    Notes:
+      - We include a top-level "summary" field because the Streamlit UI's
+        run page expects it; previously it was often missing which led to
+        "No summary was provided by the engine."
+      - We also promote diagnostics to top-level keys when present to make
+        UI parsing simpler and backward compatible.
     """
     if not run_id:
         return
 
     try:
+        # Promote summary from extra if not provided explicitly
+        summary_local: Optional[str] = summary if isinstance(summary, str) and summary.strip() else None
+        if summary_local is None and isinstance(extra, dict):
+            for k in ("summary", "run_summary", "final_summary"):
+                v = extra.get(k)
+                if isinstance(v, str) and v.strip():
+                    summary_local = v.strip()
+                    break
+
+        diagnostics_local: Optional[Dict[str, Any]] = None
+        if isinstance(extra, dict):
+            for dk in ("diagnostics", "final_diagnostics", "rye_metrics"):
+                dv = extra.get(dk)
+                if isinstance(dv, dict):
+                    diagnostics_local = dv
+                    break
+
         payload: Dict[str, Any] = {
             "schema_version": _RUNS_ARTIFACT_SCHEMA_VERSION,
             "run_id": run_id,
@@ -1077,6 +1219,13 @@ def _emit_run_progress_file(
             "hostname": _safe_hostname(),
             "last_update_utc": _now_utc_iso(),
             "ts": time.time(),
+            # top-level summary (UI expects this)
+            "summary": _truncate_text(summary_local, 4000) if isinstance(summary_local, str) else None,
+            "run_summary": _truncate_text(summary_local, 4000) if isinstance(summary_local, str) else None,
+            # promote diagnostics for UI convenience
+            "diagnostics": _to_jsonable(diagnostics_local) if isinstance(diagnostics_local, dict) else None,
+            "rye_metrics": _to_jsonable(diagnostics_local) if isinstance(diagnostics_local, dict) else None,
+            # keep extra for everything else
             "extra": _to_jsonable(extra) if isinstance(extra, dict) else None,
         }
 
@@ -1099,9 +1248,41 @@ def _emit_run_progress_file(
             force=force or terminalish,
         )
 
-        # Current run state snapshot
+        # Current run state snapshot:
+        # - While active: active_run_id == run_id
+        # - When terminal: active_run_id cleared, but last_run_* persisted
         run_state_payload = dict(payload)
-        run_state_payload["active_run_id"] = run_id
+        if terminalish:
+            run_state_payload["active_run_id"] = None
+            run_state_payload["last_run_id"] = run_id
+            if isinstance(summary_local, str) and summary_local.strip():
+                run_state_payload["last_run_summary"] = _truncate_text(summary_local.strip(), 8000)
+            if isinstance(diagnostics_local, dict) and diagnostics_local:
+                run_state_payload["last_run_diagnostics"] = _to_jsonable(diagnostics_local)
+            run_state_payload["last_run_status"] = status
+            run_state_payload["last_run_finished_utc"] = payload.get("last_update_utc")
+        else:
+            run_state_payload["active_run_id"] = run_id
+
+        # Update the in-memory last-run snapshot so the idle worker loop can preserve it.
+        if terminalish:
+            try:
+                snap: Dict[str, Any] = {
+                    "last_run_id": run_id,
+                    "last_run_summary": run_state_payload.get("last_run_summary") or run_state_payload.get("summary"),
+                    "last_run_diagnostics": run_state_payload.get("last_run_diagnostics") or run_state_payload.get("diagnostics"),
+                    "last_run_status": status,
+                    "last_run_finished_utc": run_state_payload.get("last_run_finished_utc"),
+                    # convenience aliases
+                    "summary": run_state_payload.get("summary"),
+                    "run_summary": run_state_payload.get("run_summary"),
+                    "diagnostics": run_state_payload.get("diagnostics"),
+                    "rye_metrics": run_state_payload.get("rye_metrics"),
+                }
+                _set_last_run_snapshot(snap)
+            except Exception:
+                pass
+
         _disk_write_json(
             _run_state_file_path(),
             run_state_payload,
@@ -1114,6 +1295,48 @@ def _emit_run_progress_file(
     except Exception as e:
         log_exception("run_progress_file_failed", e, run_id=run_id, status=status)
 
+
+def _emit_idle_run_state_file(
+    *,
+    status: str,
+    queue_counts: Optional[Dict[str, Any]] = None,
+    force: bool = False,
+) -> None:
+    """
+    When the worker is idle, we still write run_state.json so Streamlit can
+    show health + the most recent completed run summary/diagnostics.
+    """
+    try:
+        payload: Dict[str, Any] = {
+            "schema_version": _RUNS_ARTIFACT_SCHEMA_VERSION,
+            "status": status,
+            "active_run_id": None,
+            "worker_id": WORKER_ID,
+            "pid": _safe_os_getpid(),
+            "hostname": _safe_hostname(),
+            "utc": _now_utc_iso(),
+            "ts": time.time(),
+        }
+        if isinstance(queue_counts, dict):
+            payload["queue_counts"] = _to_jsonable(queue_counts)
+
+        last = _get_last_run_snapshot()
+        if last:
+            payload.update(_to_jsonable(last))
+            # Never allow a stale active_run_id to leak into idle state
+            payload["active_run_id"] = None
+
+        _disk_write_json(
+            _run_state_file_path(),
+            payload,
+            throttle_key="run_state_file",
+            throttle_min_interval_s=_env_float_value(
+                "WORKER_RUN_STATE_FILE_MIN_INTERVAL_SECONDS", 0.25
+            ),
+            force=force,
+        )
+    except Exception as e:
+        log_exception("idle_run_state_file_failed", e, status=status)
 
 # ---------------------------------------------------------------------------
 # Hard safety caps and forever mode (unchanged behavior)
@@ -1707,6 +1930,25 @@ def _log_run_manifest(
         log_exception("manifest_diag_failed", e, run_id=run_id)
         diag = {}
 
+    # Best-effort run summary for the UI
+    summary_text: Optional[str] = None
+    try:
+        summary_text = _extract_summary_from_cycles(summaries)
+    except Exception:
+        summary_text = None
+    if not summary_text:
+        try:
+            summary_text = _build_fallback_summary(
+                run_id=run_id,
+                mode=mode,
+                domain=domain,
+                goal=goal,
+                cycles=summaries,
+                diagnostics=diag if isinstance(diag, dict) else None,
+            )
+        except Exception:
+            summary_text = None
+
     manifest: Dict[str, Any] = {
         "run_id": run_id,
         "mode": mode,
@@ -1716,6 +1958,7 @@ def _log_run_manifest(
         "stop_rye": stop_rye,
         "max_minutes": max_minutes,
         "total_items": len(summaries),
+        "summary": summary_text,
         "rye_basic": {
             "avg": diag.get("rye_avg"),
             "median": diag.get("rye_median"),
@@ -1732,7 +1975,6 @@ def _log_run_manifest(
         log_kv("manifest_logged", run_id=run_id, mode=mode, items=len(summaries))
     except Exception as e:
         log_exception("manifest_log_failed", e, run_id=run_id)
-
 
 def _log_milestone(
     agent: CoreAgent,
@@ -1871,7 +2113,27 @@ def _write_cycles_and_run_state(
     if ms is None:
         return
 
-    diag_local = diagnostics or {}
+    diag_local: Dict[str, Any] = diagnostics or {}
+
+    # Best-effort summary extraction for UI
+    summary_text: Optional[str] = None
+    try:
+        summary_text = _extract_summary_from_cycles(cycles)
+    except Exception:
+        summary_text = None
+    if not summary_text:
+        try:
+            summary_text = _build_fallback_summary(
+                run_id=run_id,
+                mode=mode,
+                domain=domain,
+                goal=goal,
+                cycles=cycles,
+                diagnostics=diag_local,
+            )
+        except Exception:
+            summary_text = None
+
     try:
         if hasattr(ms, "write_cycle_history"):
             ms.write_cycle_history(run_id, cycles)  # type: ignore[arg-type]
@@ -1897,6 +2159,7 @@ def _write_cycles_and_run_state(
             "domain": domain,
             "total_cycles": len(cycles),
             "diagnostics": diag_local,
+            "summary": summary_text,
             "last_update_utc": _now_utc_iso(),
         }
 
@@ -1936,12 +2199,32 @@ def _write_cycles_and_run_state(
     except Exception as e:
         log_exception("run_state_write_failed", e, run_id=run_id)
 
+    # Update in-memory last-run snapshot for idle UI panes
+    try:
+        _set_last_run_snapshot(
+            {
+                "last_run_id": run_id,
+                "last_run_summary": summary_text,
+                "last_run_diagnostics": diag_local,
+                "last_run_status": "finished",
+                "last_run_finished_utc": _now_utc_iso(),
+                # convenience aliases some UIs use
+                "summary": summary_text,
+                "run_summary": summary_text,
+                "diagnostics": diag_local,
+                "rye_metrics": diag_local,
+            }
+        )
+    except Exception:
+        pass
+
     # Streamlit artifact: run_state.json snapshot + per-run progress terminal update
     try:
         _emit_run_progress_file(
             run_id=run_id,
             status="finished",
             note="Run state written",
+            summary=summary_text,
             current=len(cycles),
             total=len(cycles),
             goal=goal,
@@ -1950,12 +2233,11 @@ def _write_cycles_and_run_state(
             phase_total=1,
             phase_index=1,
             phase_name="run",
-            extra={"diagnostics": diag_local} if isinstance(diag_local, dict) else None,
+            extra={"diagnostics": diag_local, "summary": summary_text} if isinstance(diag_local, dict) else None,
             force=True,
         )
     except Exception:
         pass
-
 
 def _write_snapshot(
     agent: CoreAgent,
@@ -2115,6 +2397,96 @@ def _aggregate_from_cycles(cycles: List[Dict[str, Any]], key: str) -> List[Any]:
     return out
 
 
+def _extract_summary_from_cycles(cycles: List[Dict[str, Any]]) -> Optional[str]:
+    """
+    Best-effort extraction of a human-readable run summary from cycle entries.
+    Many UI surfaces expect a top-level summary string; historically some runs
+    never produced one, so we fall back elsewhere if needed.
+    """
+    if not isinstance(cycles, list) or not cycles:
+        return None
+
+    keys = ("summary", "run_summary", "final_summary", "brief", "title", "description")
+    # Prefer the most recent cycle that contains a summary-like field
+    for c in reversed(cycles):
+        if not isinstance(c, dict):
+            continue
+        for k in keys:
+            v = c.get(k)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+    return None
+
+
+def _build_fallback_summary(
+    *,
+    run_id: Optional[str],
+    mode: Optional[str],
+    domain: Optional[str],
+    goal: Optional[str],
+    cycles: Optional[List[Dict[str, Any]]] = None,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> str:
+    """
+    Construct a short, deterministic summary when the agent didn't provide one.
+    This prevents the UI from showing an empty summary box.
+    """
+    parts: List[str] = []
+
+    rid = run_id.strip() if isinstance(run_id, str) else ""
+    if rid:
+        parts.append(f"Run {rid} completed.")
+    else:
+        parts.append("Run completed.")
+
+    if isinstance(mode, str) and mode.strip():
+        parts.append(f"Mode: {mode.strip()}.")
+
+    if isinstance(domain, str) and domain.strip():
+        parts.append(f"Domain: {domain.strip()}.")
+
+    try:
+        n_cycles = len(cycles) if isinstance(cycles, list) else None
+    except Exception:
+        n_cycles = None
+    if isinstance(n_cycles, int):
+        parts.append(f"Cycles: {n_cycles}.")
+
+    if isinstance(diagnostics, dict) and diagnostics:
+        # Try a few common key names; keep it very small and stable
+        def _num(v: Any) -> Optional[float]:
+            try:
+                if isinstance(v, bool) or v is None:
+                    return None
+                if isinstance(v, (int, float)):
+                    return float(v)
+                return float(str(v))
+            except Exception:
+                return None
+
+        avg = _num(diagnostics.get("rye_avg"))
+        if avg is None:
+            avg = _num(diagnostics.get("avg_rye"))
+        slope = _num(diagnostics.get("rye_trend_slope"))
+        if slope is None:
+            slope = _num(diagnostics.get("rye_slope"))
+        stab = _num(diagnostics.get("stability_index"))
+
+        if avg is not None:
+            parts.append(f"Avg RYE: {avg:.4f}.")
+        if slope is not None:
+            parts.append(f"RYE trend slope: {slope:.4f}.")
+        if stab is not None:
+            parts.append(f"Stability index: {stab:.3f}.")
+
+    if isinstance(goal, str) and goal.strip():
+        parts.append(f"Goal: {_truncate_text(goal.strip(), 240)}")
+
+    out = " ".join(parts).strip()
+    if not out:
+        out = "Run completed."
+    return _truncate_text(out, 2000)
+
 def _attach_top_level_defaults(
     result_obj: Dict[str, Any],
     cycles: List[Dict[str, Any]],
@@ -2141,7 +2513,40 @@ def _attach_top_level_defaults(
         diagnostics = {}
     result_obj.setdefault("diagnostics", diagnostics)
     result_obj.setdefault("rye_metrics", diagnostics)
+
+    # Ensure a top-level summary is always present for the UI.
+    existing_summary = result_obj.get("summary")
+    if not (isinstance(existing_summary, str) and existing_summary.strip()):
+        extracted = _extract_summary_from_cycles(cycles)
+        if extracted:
+            summary_text = extracted
+        else:
+            summary_text = _build_fallback_summary(
+                run_id=str(
+                    result_obj.get("run_id")
+                    or result_obj.get("job_id")
+                    or result_obj.get("id")
+                    or ""
+                )
+                or None,
+                mode=str(result_obj.get("mode") or result_obj.get("engine_mode") or "") or None,
+                domain=str(result_obj.get("domain") or "") or None,
+                goal=str(result_obj.get("goal") or "") or None,
+                cycles=cycles,
+                diagnostics=diagnostics,
+            )
+        result_obj["summary"] = summary_text
+
+    # Compatibility alias (some UIs use run_summary)
+    if not (isinstance(result_obj.get("run_summary"), str) and str(result_obj.get("run_summary")).strip()):
+        try:
+            result_obj["run_summary"] = str(result_obj.get("summary") or "").strip() or None
+        except Exception:
+            result_obj["run_summary"] = None
+
     return result_obj
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -4927,20 +5332,15 @@ def run_job_queue_worker() -> None:
             extra={"queue": {"counts": queue.scan_counts()}},
             force=True,
         )
-        _disk_write_json(
-            _run_state_file_path(),
-            {
-                "schema_version": _RUNS_ARTIFACT_SCHEMA_VERSION,
-                "status": "idle",
-                "active_run_id": None,
-                "worker_id": WORKER_ID,
-                "pid": _safe_os_getpid(),
-                "hostname": _safe_hostname(),
-                "utc": _now_utc_iso(),
-                "ts": time.time(),
-            },
-            throttle_key="run_state_file",
-            throttle_min_interval_s=0.0,
+        # Seed last-run snapshot (best effort) so UI can show the most recent run while idle.
+        try:
+            _maybe_load_last_run_snapshot_from_disk()
+        except Exception:
+            pass
+
+        _emit_idle_run_state_file(
+            status="idle",
+            queue_counts=queue.scan_counts(),
             force=True,
         )
     except Exception:
@@ -5010,23 +5410,9 @@ def run_job_queue_worker() -> None:
                         force=False,
                     )
                     # Keep run_state.json showing no active run while idle
-                    _disk_write_json(
-                        _run_state_file_path(),
-                        {
-                            "schema_version": _RUNS_ARTIFACT_SCHEMA_VERSION,
-                            "status": "idle" if not _SHUTDOWN_REQUESTED.is_set() else "shutdown_requested",
-                            "active_run_id": None,
-                            "worker_id": WORKER_ID,
-                            "pid": _safe_os_getpid(),
-                            "hostname": _safe_hostname(),
-                            "utc": _now_utc_iso(),
-                            "ts": time.time(),
-                            "queue_counts": _to_jsonable(counts_now),
-                        },
-                        throttle_key="run_state_file",
-                        throttle_min_interval_s=_env_float_value(
-                            "WORKER_RUN_STATE_FILE_MIN_INTERVAL_SECONDS", 0.25
-                        ),
+                    _emit_idle_run_state_file(
+                        status="idle" if not _SHUTDOWN_REQUESTED.is_set() else "shutdown_requested",
+                        queue_counts=counts_now,
                         force=False,
                     )
                 except Exception:
