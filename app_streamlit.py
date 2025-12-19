@@ -362,6 +362,14 @@ def _parse_timestamp_str(ts: str) -> Optional[datetime]:
         return None
 
 
+def _coalesce(*values: Any) -> Any:
+    """Return the first value that is not None (preserves 0/False)."""
+    for v in values:
+        if v is not None:
+            return v
+    return None
+
+
 def _maybe_float(v: Any) -> Optional[float]:
     """Best-effort convert to float. Returns None if not convertible."""
     if v is None:
@@ -591,15 +599,21 @@ def tavily_status() -> Dict[str, Any]:
     """Check whether a Tavily API key is available (per user or env)."""
     # 1) Prefer per user key stored in session state (from sidebar input)
     key = st.session_state.get("tavily_key", None)
+    if isinstance(key, str):
+        key = key.strip()
 
     # 2) Fallback to environment variable (in case you set it on the server)
     if not key:
         key = os.getenv("TAVILY_API_KEY")
+        if isinstance(key, str):
+            key = key.strip()
 
     # 3) Optional final fallback to secrets (owner only use, can be empty)
     if not key:
         try:
             key = st.secrets.get("TAVILY_API_KEY", None)  # type: ignore[attr-defined]
+            if isinstance(key, str):
+                key = key.strip()
         except Exception:
             key = None
 
@@ -618,12 +632,13 @@ def detect_tools() -> Dict[str, bool]:
     if not isinstance(TOOL_REGISTRY, dict):
         return {"web": False, "sandbox": False}
 
-    # Flexible detection by common keys
+    # Flexible detection by common keys (case-insensitive)
+    keys_lower = {str(k).lower() for k in TOOL_REGISTRY.keys()}
     web_keys = {"web_search", "browser", "web", "internet"}
     sandbox_keys = {"sandbox", "code_sandbox", "python_sandbox", "exec_sandbox"}
 
-    has_web = any(k in TOOL_REGISTRY for k in web_keys)
-    has_sandbox = any(k in TOOL_REGISTRY for k in sandbox_keys)
+    has_web = any(k in keys_lower for k in web_keys)
+    has_sandbox = any(k in keys_lower for k in sandbox_keys)
 
     return {"web": has_web, "sandbox": has_sandbox}
 
@@ -1892,9 +1907,10 @@ def _normalize_worker_state(raw: Any) -> Optional[Dict[str, Any]]:
     # Cycle progress
     if "total" not in ws and "total_cycles" in ws:
         ws["total"] = ws.get("total_cycles")
-    if "current" not in ws:
-        # several worker styles
-        ws["current"] = ws.get("current_cycle") or ws.get("cycle") or ws.get("cycle_index")
+
+    # IMPORTANT: preserve 0 values
+    if "current" not in ws or ws.get("current") is None:
+        ws["current"] = _coalesce(ws.get("current_cycle"), ws.get("cycle"), ws.get("cycle_index"))
 
     return ws
 
@@ -2065,51 +2081,41 @@ def compute_progress_view(
     Update: fixes common off-by-one for phase progress by remembering whether a given run
     appears to be zero-indexed (per run_id) based on observing an initial 0 while running.
     """
-    status = (worker_state or {}).get("status") or (progress_state or {}).get("status") or "unknown"
+    ws = worker_state or {}
+    ps = progress_state or {}
+
+    status = _coalesce(ws.get("status"), ps.get("status"), "unknown")
     status_s = str(status).lower()
 
     if run_id is None:
-        run_id = (
-            (worker_state or {}).get("run_id")
-            or (progress_state or {}).get("run_id")
-            or (worker_state or {}).get("job_id")
-            or (progress_state or {}).get("job_id")
-        )
-        if run_id is not None:
-            run_id = str(run_id)
+        run_id_val = _coalesce(ws.get("run_id"), ps.get("run_id"), ws.get("job_id"), ps.get("job_id"))
+        if run_id_val is not None:
+            run_id = str(run_id_val)
 
     finished_like = status_s in {"finished", "done", "completed", "complete", "success"}
 
-    # Preferred: phase progress (3-phase pipeline etc.)
-    phase_cur = (
-        (worker_state or {}).get("phase_index")
-        or (progress_state or {}).get("phase_index")
-        or (progress_state or {}).get("phase_current")
-    )
-    phase_tot = (
-        (worker_state or {}).get("phase_total")
-        or (progress_state or {}).get("phase_total")
-        or (progress_state or {}).get("phase_count")
-    )
-    phase_name = (worker_state or {}).get("phase_name") or (progress_state or {}).get("phase_name") or ""
+    # Preferred: phase progress (3-phase pipeline etc.) (preserve 0 values)
+    phase_cur = _coalesce(ws.get("phase_index"), ps.get("phase_index"), ps.get("phase_current"))
+    phase_tot = _coalesce(ws.get("phase_total"), ps.get("phase_total"), ps.get("phase_count"))
+    phase_name = _coalesce(ws.get("phase_name"), ps.get("phase_name"), "") or ""
 
-    # Cycle progress
-    cur = (
-        (worker_state or {}).get("effective_current")
-        or (progress_state or {}).get("effective_current")
-        or (worker_state or {}).get("current")
-        or (progress_state or {}).get("current")
-        or (progress_state or {}).get("current_cycle")
-        or (progress_state or {}).get("cycle")
-        or (progress_state or {}).get("cycle_index")
+    # Cycle progress (preserve 0 values)
+    cur = _coalesce(
+        ws.get("effective_current"),
+        ps.get("effective_current"),
+        ws.get("current"),
+        ps.get("current"),
+        ps.get("current_cycle"),
+        ps.get("cycle"),
+        ps.get("cycle_index"),
     )
-    tot = (
-        (worker_state or {}).get("effective_total")
-        or (progress_state or {}).get("effective_total")
-        or (worker_state or {}).get("total")
-        or (progress_state or {}).get("total")
-        or (progress_state or {}).get("total_cycles")
-        or (progress_state or {}).get("max_cycles")
+    tot = _coalesce(
+        ws.get("effective_total"),
+        ps.get("effective_total"),
+        ws.get("total"),
+        ps.get("total"),
+        ps.get("total_cycles"),
+        ps.get("max_cycles"),
     )
 
     # Select which progress track to display
@@ -3424,6 +3430,22 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
     return discoveries
 
 
+def _looks_like_job_payload_json(obj: Any) -> bool:
+    """Heuristic: detect legacy job JSONs (avoid deleting results)."""
+    if not isinstance(obj, dict):
+        return False
+    # Results often include "result" or "results"
+    if "result" in obj or "results" in obj:
+        return False
+    cfg = obj.get("config")
+    if isinstance(cfg, dict) and cfg:
+        return True
+    # Flat/legacy
+    if "goal" in obj and any(k in obj for k in ("mode", "total_cycles", "max_cycles", "runtime_hints", "source_controls")):
+        return True
+    return False
+
+
 # -------------------------------------------------------------------
 # Main Streamlit app
 # -------------------------------------------------------------------
@@ -4027,7 +4049,11 @@ def main() -> None:
             if isinstance(specific, Path):
                 base = specific
             else:
-                base = Path(runs_base_dir) / label
+                # Prefer queue-root for queue dirs when run_jobs paths aren't available
+                if label in ("pending", "active", "finished", "error"):
+                    base = Path(queue_root_dir) / label
+                else:
+                    base = Path(runs_base_dir) / label
             try:
                 if not base.exists() or not base.is_dir():
                     items: List[str] = []
@@ -4128,29 +4154,46 @@ def main() -> None:
                 except Exception:
                     return False
 
-            dirs_to_scan: List[Tuple[Path, bool]] = []
+            # Safer: clear only pending directories (canonical + legacy), and only job-like JSONs
+            dirs_to_scan: List[Path] = []
             try:
-                dirs_to_scan.append((Path(pending_dir), False))
+                dirs_to_scan.append(Path(pending_dir))
             except Exception:
                 pass
             try:
-                legacy_pending = Path(get_runs_root()) / "pending"
-                dirs_to_scan.append((legacy_pending, False))
+                dirs_to_scan.append(Path(get_queue_root()) / "pending")
             except Exception:
                 pass
             try:
-                queue_root_path = Path(get_queue_root())
-                dirs_to_scan.append((queue_root_path, True))
+                dirs_to_scan.append(Path(get_runs_root()) / "pending")
             except Exception:
-                queue_root_path = None  # type: ignore[assignment]
+                pass
+            if isinstance(RUNS_PENDING_DIR, Path):
+                dirs_to_scan.append(RUNS_PENDING_DIR)
 
-            for dpath, root_level in dirs_to_scan:
+            # Deduplicate
+            seen_dirs: Set[str] = set()
+            unique_dirs: List[Path] = []
+            for d in dirs_to_scan:
+                try:
+                    key = str(d.resolve())
+                except Exception:
+                    key = str(d)
+                if key in seen_dirs:
+                    continue
+                seen_dirs.add(key)
+                unique_dirs.append(d)
+
+            for dpath in unique_dirs:
                 if not isinstance(dpath, Path) or not dpath.exists() or not dpath.is_dir():
                     continue
                 for fp in dpath.glob("*.json"):
                     name = fp.name
+                    # Never delete result/progress artifacts
                     if name.endswith("_progress.json") or name.endswith("_results.json") or name.endswith("_result.json"):
                         continue
+
+                    # Primary: canonical job files
                     if name.endswith("_job.json"):
                         try:
                             fp.unlink()
@@ -4158,15 +4201,32 @@ def main() -> None:
                         except Exception:
                             pass
                         continue
+
+                    # Legacy: job files named as UUID.json
                     if _is_uuid_stem(fp.stem):
                         try:
+                            # If it's small enough, sanity-check it's actually a job payload
+                            if fp.stat().st_size <= 5_000_000:
+                                data = _load_json_file(fp)
+                                if data is not None and not _looks_like_job_payload_json(data):
+                                    continue
                             fp.unlink()
                             removed += 1
                         except Exception:
                             pass
                         continue
 
-            st.success(f"Cleared {removed} queued job file(s) (canonical + legacy).")
+                    # Optional: non-uuid, but job-shaped JSON
+                    try:
+                        if fp.stat().st_size <= 2_000_000:
+                            data2 = _load_json_file(fp)
+                            if data2 is not None and _looks_like_job_payload_json(data2):
+                                fp.unlink()
+                                removed += 1
+                    except Exception:
+                        pass
+
+            st.success(f"Cleared {removed} queued job file(s) (pending only).")
             st.rerun()
 
         if not pending_jobs:
