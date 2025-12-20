@@ -2533,8 +2533,16 @@ def save_job_result(job: RunJob, result_obj: Dict[str, Any]) -> None:
     finished_job.status = "finished"
     finished_job.updated_at = time.time()
 
-    # Write finished metadata (canonical), then clean up active/queued artifacts.
+    # Write finished metadata (canonical) and an alternate variant with double underscore
+    # for compatibility with workers that expect "__job.json" (do not fail on errors).
     finished_job.save_to(FINISHED_DIR, filename=f"{run_id}_job.json")
+    try:
+        # Some internal workers treat "__job.json" as the finished metadata file; write it when possible.
+        finished_job.save_to(FINISHED_DIR, filename=f"{run_id}__job.json")
+    except Exception:
+        # Ignore failures here to avoid raising on best-effort writes.
+        pass
+    # Clean up active artifacts and queued copies now that we're finished.
     _cleanup_active_artifacts(run_id)
     _cleanup_queued_copies(run_id)
     _cleanup_claim_lock(run_id)
@@ -2641,7 +2649,14 @@ def mark_job_error(job: RunJob, error_info: Dict[str, Any]) -> None:
     error_job.status = "error"
     error_job.updated_at = time.time()
 
+    # Write error metadata (canonical) and an alternate variant with double underscore
+    # so workers reading "__job.json" also pick up the error state; ignore errors on alt write.
     error_job.save_to(ERROR_DIR, filename=f"{run_id}_job.json")
+    try:
+        error_job.save_to(ERROR_DIR, filename=f"{run_id}__job.json")
+    except Exception:
+        pass
+    # Clean up active and queued artifacts now that the job is in error state
     _cleanup_active_artifacts(run_id)
     _cleanup_queued_copies(run_id)
     _cleanup_claim_lock(run_id)
