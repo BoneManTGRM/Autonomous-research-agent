@@ -83,7 +83,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from datetime import datetime
 
-# --- early import marker (helps diagnose ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂno logsÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
+# --- early import marker (helps diagnose ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂno logsÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
 try:
     _module_import_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 except Exception:
@@ -185,7 +185,7 @@ def _normalize_ui_text(s: str) -> str:
     be misinterpreted by downstream decoders. This function attempts to
     re-encode the text as UTF-8 and decode it as ASCII, ignoring any
     problematic bytes. This avoids the dreaded "mojibake" sequences such
-    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
+    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
 
     Args:
         s: The string to normalize.
@@ -4479,7 +4479,7 @@ def _write_job_progress(
                 phase_idx = 0
             # Build an extra payload for stability signals.  When at least one
             # cycle has executed (current >= 1), emit flags so the UI can
-            # interpret the run as selfÃÂ¢ÃÂÃÂstabilizing.  Otherwise omit these.
+            # interpret the run as selfÃÂÃÂ¢ÃÂÃÂÃÂÃÂstabilizing.  Otherwise omit these.
             extra_local: Optional[Dict[str, Any]] = None
             try:
                 if isinstance(phase_idx, (int, float)) and phase_idx >= 1:
@@ -4852,101 +4852,108 @@ def _process_single_job(
                         except Exception:
                             return None
                 return None
-
+            # Progress callback used by run_goal/run_continuous/run_swarm_continuous. This updates
+            # last_progress_current/total and persists progress to disk and Streamlit UI artifacts.
             def _progress_cb(update: Dict[str, Any]) -> None:
-                status_local = str(update.get("status", "active"))
-
-                current_local = (
-                    update.get("current_cycle")
-                    or update.get("current")
-                    or update.get("cycle")
-                    or update.get("round")
-                    or update.get("step")
-                )
-                total_local = (
-                    update.get("total_cycles")
-                    or update.get("total")
-                    or update.get("max_cycles")
-                    or update.get("max_rounds")
-                    or update.get("target_cycles")
-                )
-
-                cur_int = _to_int(current_local)
-                tot_int = _to_int(total_local)
-
-                if tot_int is None:
-                    tot_int = macro_total
-
-                note_local = update.get("notes", "")
-
                 nonlocal last_progress_current, last_progress_total
-                if cur_int is not None:
-                    last_progress_current = cur_int
-                if tot_int is not None:
-                    last_progress_total = tot_int
-
-                # Shutdown-aware progress callback
-                if _SHUTDOWN_REQUESTED.is_set():
-                    raise RuntimeError("shutdown_requested")
-
-                # Snapshot hook
-                if snapshot_enabled and cur_int is not None:
+                try:
+                    # Extract current/total cycle values from the update. Fallback to macro_total.
+                    cur_val = (
+                        update.get("current_cycle")
+                        or update.get("cycle")
+                        or update.get("current")
+                        or update.get("progress_cycle")
+                    )
+                    tot_val = (
+                        update.get("total_cycles")
+                        or update.get("total")
+                        or update.get("max_cycles")
+                        or update.get("progress_total")
+                        or macro_total
+                    )
+                    cur_int = _to_int(cur_val)
+                    tot_int = _to_int(tot_val)
+                    # Update last progress values
+                    if cur_int is not None:
+                        last_progress_current = cur_int
+                    if tot_int is not None:
+                        last_progress_total = tot_int
+                    # Determine status/note
+                    status_local = update.get("status") or "running_job"
+                    note_local = update.get("note") or update.get("message") or ""
+                    # Periodically write snapshot if enabled
+                    if snapshot_enabled and cur_int is not None:
+                        try:
+                            interval = None
+                            if isinstance(snapshot_cfg, dict):
+                                interval = snapshot_cfg.get("interval")
+                            if not isinstance(interval, int) or interval is None:
+                                interval = 25
+                        except Exception:
+                            interval = 25
+                        try:
+                            if interval and interval > 0 and cur_int % interval == 0:
+                                _write_snapshot(
+                                    agent,
+                                    run_id=run_id,
+                                    mode=mode,
+                                    goal=goal,
+                                    domain=domain,
+                                    snapshot_cfg=snapshot_cfg,
+                                    current_cycle=cur_int,
+                                    diagnostics=None,
+                                )
+                        except Exception:
+                            pass
+                    # Write progress artifact
+                    _write_job_progress(
+                        run_id,
+                        status=status_local,
+                        note=str(note_local),
+                        current=cur_int,
+                        total=tot_int,
+                        goal=goal,
+                        domain=domain,
+                        job_config=cfg,
+                        prompt_details=prompt_details,
+                    )
+                    # Heartbeat update
+                    _heartbeat(agent, label="queue_job_progress", run_id=run_id)
+                    # Update worker state for UI
                     try:
-                        interval = int(snapshot_cfg.get("interval_cycles", snapshot_cfg.get("interval", 25)))
-                    except Exception:
-                        interval = 25
-                    if interval > 0 and cur_int % interval == 0:
-                        _write_snapshot(
+                        _update_worker_state(
                             agent,
-                            run_id=run_id,
+                            status="running_job",
                             mode=mode,
                             goal=goal,
                             domain=domain,
-                            snapshot_cfg=snapshot_cfg,
-                            current_cycle=cur_int,
-                            diagnostics=None,
+                            roles=roles_list if mode == "swarm" else [role],
+                            runtime_profile=runtime_profile,
+                            stop_rye=stop_rye,
+                            max_minutes=max_minutes,
+                            run_id=run_id,
+                            experiment_mode="queue_worker",
+                            current=cur_int,
+                            total=tot_int,
+                            extra={
+                                "experiment_fingerprint": experiment_fingerprint,
+                                "job_meta": job_meta,
+                                "job_config": cfg,
+                                "prompt_details": prompt_details,
+                                "progress": {
+                                    "current_cycle": cur_int,
+                                    "total_cycles": tot_int,
+                                    "note": _truncate_text(str(note_local), 300),
+                                },
+                            },
                         )
-
-                _write_job_progress(
-                    run_id,
-                    status=status_local,
-                    note=str(note_local),
-                    current=cur_int,
-                    total=tot_int,
-                    goal=goal,
-                    domain=domain,
-                    job_config=cfg,
-                    prompt_details=prompt_details,
-                )
-
-                _heartbeat(agent, label="queue_job_progress", run_id=run_id)
-
-                _update_worker_state(
-                    agent,
-                    status="running_job",
-                    mode=mode,
-                    goal=goal,
-                    domain=domain,
-                    roles=roles_list if mode == "swarm" else [role],
-                    runtime_profile=runtime_profile,
-                    stop_rye=stop_rye,
-                    max_minutes=max_minutes,
-                    run_id=run_id,
-                    experiment_mode="queue_worker",
-                    current=cur_int,
-                    total=tot_int,
-                    extra={
-                        "experiment_fingerprint": experiment_fingerprint,
-                        "job_meta": job_meta,
-                        "job_config": cfg,
-                        "prompt_details": prompt_details,
-                        "progress": {
-                            "current_cycle": cur_int,
-                            "total_cycles": tot_int,
-                            "note": _truncate_text(str(note_local), 300),
-                        },
-                    },
-                )
+                    except Exception:
+                        pass
+                except Exception as e:
+                    try:
+                        log_exception("queue_progress_cb_failed", e, run_id=run_id)
+                    except Exception:
+                        pass
 
             with _job_wall_time_guard(max_wall_seconds):
                 # Prefer run_goal with progress callback
@@ -4987,37 +4994,145 @@ def _process_single_job(
                             except Exception:
                                 roles_list = ["agent"]
 
-                        summaries = agent.run_swarm_continuous(
-                            goal=goal,
-                            max_rounds=max_rounds,
-                            stop_rye=stop_rye,
-                            roles=roles_list,
-                            source_controls=source_controls,
-                            pdf_bytes=None,
-                            biomarker_snapshot=None,
-                            domain=domain,
-                            max_minutes=max_minutes,
-                            forever=forever,
-                            resume_from_checkpoint=resume,
-                            watchdog_interval_minutes=watchdog_minutes,
-                            runtime_profile=runtime_profile,
-                        )
+                        try:
+                            summaries = agent.run_swarm_continuous(
+                                goal=goal,
+                                max_rounds=max_rounds,
+                                stop_rye=stop_rye,
+                                roles=roles_list,
+                                source_controls=source_controls,
+                                pdf_bytes=None,
+                                biomarker_snapshot=None,
+                                domain=domain,
+                                max_minutes=max_minutes,
+                                forever=forever,
+                                resume_from_checkpoint=resume,
+                                watchdog_interval_minutes=watchdog_minutes,
+                                runtime_profile=runtime_profile,
+                                progress_callback=_progress_cb,
+                            )
+                        except TypeError:
+                            try:
+                                summaries = agent.run_swarm_continuous(
+                                    goal=goal,
+                                    max_rounds=max_rounds,
+                                    stop_rye=stop_rye,
+                                    roles=roles_list,
+                                    source_controls=source_controls,
+                                    pdf_bytes=None,
+                                    biomarker_snapshot=None,
+                                    domain=domain,
+                                    max_minutes=max_minutes,
+                                    forever=forever,
+                                    resume_from_checkpoint=resume,
+                                    watchdog_interval_minutes=watchdog_minutes,
+                                    runtime_profile=runtime_profile,
+                                    progress_cb=_progress_cb,
+                                )
+                            except TypeError:
+                                try:
+                                    summaries = agent.run_swarm_continuous(
+                                        goal=goal,
+                                        max_rounds=max_rounds,
+                                        stop_rye=stop_rye,
+                                        roles=roles_list,
+                                        source_controls=source_controls,
+                                        pdf_bytes=None,
+                                        biomarker_snapshot=None,
+                                        domain=domain,
+                                        max_minutes=max_minutes,
+                                        forever=forever,
+                                        resume_from_checkpoint=resume,
+                                        watchdog_interval_minutes=watchdog_minutes,
+                                        runtime_profile=runtime_profile,
+                                        on_progress=_progress_cb,
+                                    )
+                                except TypeError:
+                                    summaries = agent.run_swarm_continuous(
+                                        goal=goal,
+                                        max_rounds=max_rounds,
+                                        stop_rye=stop_rye,
+                                        roles=roles_list,
+                                        source_controls=source_controls,
+                                        pdf_bytes=None,
+                                        biomarker_snapshot=None,
+                                        domain=domain,
+                                        max_minutes=max_minutes,
+                                        forever=forever,
+                                        resume_from_checkpoint=resume,
+                                        watchdog_interval_minutes=watchdog_minutes,
+                                        runtime_profile=runtime_profile,
+                                    )
                     else:
-                        summaries = agent.run_continuous(
-                            goal=goal,
-                            max_cycles=max_cycles,
-                            stop_rye=stop_rye,
-                            role=role,
-                            source_controls=source_controls,
-                            pdf_bytes=None,
-                            biomarker_snapshot=None,
-                            domain=domain,
-                            max_minutes=max_minutes,
-                            forever=forever,
-                            resume_from_checkpoint=resume,
-                            watchdog_interval_minutes=watchdog_minutes,
-                            runtime_profile=runtime_profile,
-                        )
+                        try:
+                            summaries = agent.run_continuous(
+                                goal=goal,
+                                max_cycles=max_cycles,
+                                stop_rye=stop_rye,
+                                role=role,
+                                source_controls=source_controls,
+                                pdf_bytes=None,
+                                biomarker_snapshot=None,
+                                domain=domain,
+                                max_minutes=max_minutes,
+                                forever=forever,
+                                resume_from_checkpoint=resume,
+                                watchdog_interval_minutes=watchdog_minutes,
+                                runtime_profile=runtime_profile,
+                                progress_callback=_progress_cb,
+                            )
+                        except TypeError:
+                            try:
+                                summaries = agent.run_continuous(
+                                    goal=goal,
+                                    max_cycles=max_cycles,
+                                    stop_rye=stop_rye,
+                                    role=role,
+                                    source_controls=source_controls,
+                                    pdf_bytes=None,
+                                    biomarker_snapshot=None,
+                                    domain=domain,
+                                    max_minutes=max_minutes,
+                                    forever=forever,
+                                    resume_from_checkpoint=resume,
+                                    watchdog_interval_minutes=watchdog_minutes,
+                                    runtime_profile=runtime_profile,
+                                    progress_cb=_progress_cb,
+                                )
+                            except TypeError:
+                                try:
+                                    summaries = agent.run_continuous(
+                                        goal=goal,
+                                        max_cycles=max_cycles,
+                                        stop_rye=stop_rye,
+                                        role=role,
+                                        source_controls=source_controls,
+                                        pdf_bytes=None,
+                                        biomarker_snapshot=None,
+                                        domain=domain,
+                                        max_minutes=max_minutes,
+                                        forever=forever,
+                                        resume_from_checkpoint=resume,
+                                        watchdog_interval_minutes=watchdog_minutes,
+                                        runtime_profile=runtime_profile,
+                                        on_progress=_progress_cb,
+                                    )
+                                except TypeError:
+                                    summaries = agent.run_continuous(
+                                        goal=goal,
+                                        max_cycles=max_cycles,
+                                        stop_rye=stop_rye,
+                                        role=role,
+                                        source_controls=source_controls,
+                                        pdf_bytes=None,
+                                        biomarker_snapshot=None,
+                                        domain=domain,
+                                        max_minutes=max_minutes,
+                                        forever=forever,
+                                        resume_from_checkpoint=resume,
+                                        watchdog_interval_minutes=watchdog_minutes,
+                                        runtime_profile=runtime_profile,
+                                    )
 
         finally:
             if hb_stop is not None:
