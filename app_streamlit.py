@@ -2421,7 +2421,12 @@ def inject_base_styles() -> None:
       flex: 1 1 auto;
     }
     .ara-topbar-right {
-      flex: 0 0 auto;
+      /* allow the right section to grow and stack items on small screens */
+      flex: 1 1 auto;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0.25rem;
     }
     .ara-topbar-left > div,
     .ara-topbar-mid > div,
@@ -2470,15 +2475,16 @@ def inject_base_styles() -> None:
 }
 
 /* Mini progress bar */
-.ara-mini-progress{
-  /* Stretch mini progress bar across the available width */
-  width: 100%;
-  height: 8px;
-  border-radius: 999px;
-  background: rgba(255,255,255,0.10);
-  overflow: hidden;
-  border: 1px solid rgba(255,255,255,0.08);
-}
+    .ara-mini-progress{
+      /* widen progress bar on small screens; let it fill available space */
+      width: 100%;
+      min-width: 160px;
+      height: 8px;
+      border-radius: 999px;
+      background: rgba(255,255,255,0.10);
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.08);
+    }
 .ara-mini-progress > div{
   height: 100%;
   width: 0%;
