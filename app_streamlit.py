@@ -3073,24 +3073,23 @@ def load_snapshots() -> List[Dict[str, Any]]:
     try:
         runs_root_path = Path(get_runs_root())
         if runs_root_path.exists() and runs_root_path.is_dir():
-            # Check each run directory for a "snapshots" subdirectory (original behavior)
             for run_dir in runs_root_path.iterdir():
                 if not run_dir.is_dir():
                     continue
                 snap_dir = run_dir / "snapshots"
                 if snap_dir.exists() and snap_dir.is_dir():
                     snapshot_dir_candidates.append(snap_dir)
-
-            # Additionally search within a top-level "snapshots" directory. When
-            # MemoryStore writes snapshots to <runs_root>/snapshots/<run_id>/,
-            # those files live one level deeper than what the UI originally
-            # scanned. To surface them, include each run-specific folder under
-            # <runs_root>/snapshots.
-            snapshots_root = runs_root_path / "snapshots"
-            if snapshots_root.exists() and snapshots_root.is_dir():
-                for run_dir in snapshots_root.iterdir():
-                    if run_dir.is_dir():
-                        snapshot_dir_candidates.append(run_dir)
+            # Additionally include snapshots created via MemoryStore.  These live
+            # under "runs_root/snapshots/<run_id>" and will be missed by the
+            # simple per-run scan above.  Append each run-specific folder here.
+            try:
+                snap_root = runs_root_path / "snapshots"
+                if snap_root.exists() and snap_root.is_dir():
+                    for sub_dir in snap_root.iterdir():
+                        if sub_dir.is_dir():
+                            snapshot_dir_candidates.append(sub_dir)
+            except Exception:
+                pass
     except Exception:
         pass
 
