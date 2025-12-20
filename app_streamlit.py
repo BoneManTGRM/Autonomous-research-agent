@@ -82,7 +82,7 @@ except Exception:  # pragma: no cover
 
 # IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂÃÂ°ÃÂÃÂÃÂÃÂÃÂÃÂ¬", layout="wide")
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂÃÂÃÂÃÂ°ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¬", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -2275,11 +2275,11 @@ def compute_progress_view(
     )
 
     # Select which progress track to display
-    # Only use phase progress when there is a multiâphase pipeline (phase_total > 1).
+    # Only use phase progress when there is a multiÃ¢ÂÂphase pipeline (phase_total > 1).
     phase_total_int = _safe_int(phase_tot, None)
     use_phase = phase_total_int
     # When phase_total is 1 or less, fall back to cycle progress instead of using phase progress.  This
-    # prevents singleâphase runs from displaying as "1 run" when multiple cycles are present.
+    # prevents singleÃ¢ÂÂphase runs from displaying as "1 run" when multiple cycles are present.
     if phase_total_int is not None and phase_total_int > 1:
         phase_cur_raw = phase_cur
         c = _safe_int(phase_cur_raw, 0) or 0
@@ -2895,7 +2895,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
             # Use a readable delta symbol instead of a misencoded character
-            parts.append(f"ÃÂÃÂÃÂÃÂR {float(d_r):.3f}")
+            parts.append(f"ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂR {float(d_r):.3f}")
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
@@ -3073,12 +3073,24 @@ def load_snapshots() -> List[Dict[str, Any]]:
     try:
         runs_root_path = Path(get_runs_root())
         if runs_root_path.exists() and runs_root_path.is_dir():
+            # Check each run directory for a "snapshots" subdirectory (original behavior)
             for run_dir in runs_root_path.iterdir():
                 if not run_dir.is_dir():
                     continue
                 snap_dir = run_dir / "snapshots"
                 if snap_dir.exists() and snap_dir.is_dir():
                     snapshot_dir_candidates.append(snap_dir)
+
+            # Additionally search within a top-level "snapshots" directory. When
+            # MemoryStore writes snapshots to <runs_root>/snapshots/<run_id>/,
+            # those files live one level deeper than what the UI originally
+            # scanned. To surface them, include each run-specific folder under
+            # <runs_root>/snapshots.
+            snapshots_root = runs_root_path / "snapshots"
+            if snapshots_root.exists() and snapshots_root.is_dir():
+                for run_dir in snapshots_root.iterdir():
+                    if run_dir.is_dir():
+                        snapshot_dir_candidates.append(run_dir)
     except Exception:
         pass
 
