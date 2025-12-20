@@ -2471,7 +2471,8 @@ def inject_base_styles() -> None:
 
 /* Mini progress bar */
 .ara-mini-progress{
-  width: 160px;
+  /* Stretch mini progress bar across the available width */
+  width: 100%;
   height: 8px;
   border-radius: 999px;
   background: rgba(255,255,255,0.10);
