@@ -74,7 +74,7 @@ def _normalize_ui_text(s: Any) -> Any:
     be misinterpreted by downstream decoders. This function attempts to
     re-encode the text as UTF-8 and decode it as ASCII, ignoring any
     problematic bytes. This avoids the dreaded "mojibake" sequences such
-    as 'ÃÂÃÂ¢ÃÂ' which show up when UTF-8 is decoded twice.
+    as 'ÃÂÃÂÃÂÃÂ¢ÃÂÃÂ' which show up when UTF-8 is decoded twice.
 
     Args:
         s: The string to normalize or any other value.
@@ -2079,7 +2079,7 @@ class MemoryStore:
             state["extra"] = existing_extra
 
             # Promote stability-related flags to top-level keys when present.
-            # This helps the UI quickly detect selfâstabilizing runs without
+            # This helps the UI quickly detect selfÃ¢ÂÂstabilizing runs without
             # having to inspect nested structures.  Only copy known flags and
             # leave others inside state["extra"].
             try:
