@@ -1454,13 +1454,10 @@ def _parse_float_env(name: str, default: float) -> float:
 
 HARD_MAX_CYCLES: int = _parse_int_env("WORKER_HARD_MAX_CYCLES", 10_000_000)
 HARD_MAX_ROUNDS: int = _parse_int_env("WORKER_HARD_MAX_ROUNDS", HARD_MAX_CYCLES)
-# The hard maximum minutes controls the upper bound on how long a run may
-# execute before the worker forcibly terminates. The original default was
-# 129,600 minutes (90 days), which would clamp long running jobs even when
-# no explicit limit was provided. To allow truly long running experiments
-# (e.g. 3 months or more) without artificial time limits, default this
-# parameter to zero. A zero value disables time-based clamping entirely
-# unless overridden by the WORKER_HARD_MAX_MINUTES environment variable.
+# Disable the hard minute clamp by default.  When WORKER_HARD_MAX_MINUTES
+# is unset, default to 0.0 which instructs _clamp_minutes() to treat
+# time budgets as unlimited (no cap).  This allows multiâmonth runs
+# without unexpectedly hitting the 90âday hard cap.
 HARD_MAX_MINUTES: float = _parse_float_env("WORKER_HARD_MAX_MINUTES", 0.0)
 
 
@@ -2360,9 +2357,6 @@ def _write_snapshot(
     current_cycle: Optional[int] = None,
     diagnostics: Optional[Dict[str, Any]] = None,
 ) -> None:
-    # If no explicit snapshot configuration is provided, snapshots should be
-    # enabled by default. Only skip writing snapshots when the caller
-    # explicitly disables them via snapshot_cfg["enabled"] = False.
     if not snapshot_cfg or not snapshot_cfg.get("enabled", True):
         return
 
@@ -2371,90 +2365,82 @@ def _write_snapshot(
         return
 
     try:
-        # Attempt to create a snapshot using the MemoryStore's higher level APIs.
-        # Prefer maybe_write_snapshot_from_config which respects the snapshot configuration
-        # fields such as include_sections, interval, and label. If that is unavailable,
-        # fall back to the simpler write_snapshot call.
-        wrote = False
-        maybe_fn = getattr(ms, "maybe_write_snapshot_from_config", None)
-        if callable(maybe_fn):
-            try:
-                maybe_fn(run_id=run_id, cycle_index=current_cycle, snapshot_config=snapshot_cfg)
-                wrote = True
-            except Exception:
-                wrote = False
-
-        if not wrote:
-            write_fn = getattr(ms, "write_snapshot", None)
-            if callable(write_fn):
-                try:
-                    write_fn(
-                        run_id=run_id,
-                        label=snapshot_cfg.get("label"),
-                        cycle_index=current_cycle,
-                        reason="engine",
-                        include_sections=snapshot_cfg.get("include_sections"),
-                        max_snapshots_per_run=(
-                            snapshot_cfg.get("max_snapshots_per_run")
-                            or snapshot_cfg.get("keep_last_n")
-                        ),
-                    )
-                    wrote = True
-                except Exception:
-                    wrote = False
-
-        if not wrote:
-            # As a last resort, append a compact snapshot object into the MemoryStore's
-            # in-memory data structure. This fallback uses the same structure the
-            # previous logic attempted, storing a lightweight dictionary per run.
-            try:
-                keep_last_n_raw = snapshot_cfg.get("keep_last_n", 25)
-                keep_last_n = 25
-                try:
-                    keep_last_n = int(keep_last_n_raw)
-                except Exception:
-                    pass
-                if keep_last_n <= 0:
-                    keep_last_n = 25
-
-                tag = snapshot_cfg.get("tag")
-                tag_str = str(tag) if isinstance(tag, (str, int, float)) else None
-
-                snap: Dict[str, Any] = {
-                    "run_id": run_id,
-                    "mode": mode,
-                    "goal": goal,
-                    "domain": domain,
-                    "utc": _now_utc_iso(),
-                    "ts": time.time(),
-                    "current_cycle": current_cycle,
-                    "diagnostics": diagnostics or {},
+        # Determine snapshot parameters: label/tag, included sections and snapshot cap.
+        tag = snapshot_cfg.get("tag")
+        tag_str = str(tag) if isinstance(tag, (str, int, float)) else None
+        include_sections = snapshot_cfg.get("include_sections")
+        # Keep last_n or max_snapshots_per_run controls how many snapshots to retain
+        max_snaps_raw = snapshot_cfg.get("keep_last_n") or snapshot_cfg.get("max_snapshots_per_run")
+        max_snaps: Optional[int] = None
+        try:
+            if isinstance(max_snaps_raw, (int, float)):
+                v = int(max_snaps_raw)
+                if v > 0:
+                    max_snaps = v
+        except Exception:
+            max_snaps = None
+        # Attempt to use MemoryStore.write_snapshot directly when available.
+        try:
+            if hasattr(ms, "write_snapshot"):
+                ms.write_snapshot(
+                    run_id=run_id,
+                    label=tag_str,
+                    cycle_index=current_cycle,
+                    reason="manual",
+                    include_sections=include_sections,
+                    max_snapshots_per_run=max_snaps,
+                )
+                return
+        except Exception:
+            pass
+        # Fallback: use maybe_write_snapshot_from_config if present
+        try:
+            if hasattr(ms, "maybe_write_snapshot_from_config"):
+                snap_cfg = {
+                    "enabled": True,
+                    "include_sections": include_sections,
+                    "max_snapshots_per_run": max_snaps,
+                    "label": tag_str,
                 }
-                if tag_str:
-                    snap["tag"] = tag_str
-
-                data_attr = getattr(ms, "data", getattr(ms, "_data", None))
-                if isinstance(data_attr, dict):
-                    all_snaps = data_attr.setdefault("snapshots", {})
-                    run_snaps = all_snaps.setdefault(run_id, [])
-                    if isinstance(run_snaps, list):
-                        run_snaps.append(snap)
-                        if len(run_snaps) > keep_last_n:
-                            del run_snaps[:-keep_last_n]
-                        wrote = True
-            except Exception:
-                wrote = False
-
-        # Persist snapshot changes to disk if we wrote one
-        if wrote:
-            try:
-                if hasattr(ms, "save"):
-                    ms.save()  # type: ignore[call-arg]
-                elif hasattr(ms, "_save"):
-                    ms._save()  # type: ignore[call-arg]
-            except Exception:
-                pass
-
+                ms.maybe_write_snapshot_from_config(
+                    run_id=run_id,
+                    cycle_index=current_cycle,
+                    snapshot_config=snap_cfg,
+                )
+                return
+        except Exception:
+            pass
+        # Last resort: inline snapshot into memory_store.data and persist
+        keep_last_n = max_snaps if max_snaps is not None else 25
+        if keep_last_n <= 0:
+            keep_last_n = 25
+        snap: Dict[str, Any] = {
+            "run_id": run_id,
+            "mode": mode,
+            "goal": goal,
+            "domain": domain,
+            "utc": _now_utc_iso(),
+            "ts": time.time(),
+            "current_cycle": current_cycle,
+            "diagnostics": diagnostics or {},
+        }
+        if tag_str:
+            snap["tag"] = tag_str
+        data_attr = getattr(ms, "data", getattr(ms, "_data", None))
+        if isinstance(data_attr, dict):
+            all_snaps = data_attr.setdefault("snapshots", {})
+            run_snaps = all_snaps.setdefault(run_id, [])
+            if isinstance(run_snaps, list):
+                run_snaps.append(snap)
+                if len(run_snaps) > keep_last_n:
+                    del run_snaps[:-keep_last_n]
+        try:
+            if hasattr(ms, "save"):
+                ms.save()  # type: ignore[call-arg]
+            elif hasattr(ms, "_save"):
+                ms._save()  # type: ignore[call-arg]
+        except Exception:
+            pass
     except Exception as e:
         log_exception("snapshot_write_failed", e, run_id=run_id)
 
@@ -2721,7 +2707,9 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     job_snapshot = cfg.get("snapshot")
     if isinstance(job_snapshot, dict):
         snapshot_cfg.update(job_snapshot)
-    # Snapshots default to enabled unless explicitly disabled via cfg or snapshot_cfg.
+    # Enable snapshots by default.  If snapshot_enabled is explicitly set
+    # in the job config, respect it; otherwise default to True so that
+    # snapshots are written unless explicitly disabled.
     snapshot_enabled = bool(cfg.get("snapshot_enabled", snapshot_cfg.get("enabled", True)))
     snapshot_cfg["enabled"] = snapshot_enabled
 
@@ -4676,7 +4664,9 @@ def _process_single_job(
         job_snapshot = cfg.get("snapshot")
         if isinstance(job_snapshot, dict):
             snapshot_cfg.update(job_snapshot)
-        # Enable snapshots by default unless explicitly disabled.
+        # Snapshots are enabled by default unless explicitly disabled in the
+        # job configuration.  Use True as the fallback when neither
+        # snapshot_enabled nor snapshot_cfg["enabled"] is provided.
         snapshot_enabled = bool(cfg.get("snapshot_enabled", snapshot_cfg.get("enabled", True)))
         snapshot_cfg["enabled"] = snapshot_enabled
 
@@ -6018,7 +6008,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             preset_snapshot = preset_cfg.get("snapshot")
             if isinstance(preset_snapshot, dict):
                 snapshot_cfg.update(preset_snapshot)
-            # Default to enabling snapshots for single-agent runs unless explicitly disabled.
+            # Snapshots are enabled by default for continuous single-agent runs.
             snapshot_enabled = bool(snapshot_cfg.get("enabled", True))
             snapshot_cfg["enabled"] = snapshot_enabled
 
@@ -6344,7 +6334,8 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             preset_snapshot = preset_cfg.get("snapshot")
             if isinstance(preset_snapshot, dict):
                 snapshot_cfg.update(preset_snapshot)
-            # Snapshots should be enabled for swarm runs unless explicitly disabled.
+            # Snapshots are enabled by default for swarm runs.  Respect explicit
+            # disabling of snapshots via configuration, otherwise default to True.
             snapshot_enabled = bool(snapshot_cfg.get("enabled", True))
             snapshot_cfg["enabled"] = snapshot_enabled
 
@@ -6891,7 +6882,8 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             preset_snapshot = preset_cfg.get("snapshot")
             if isinstance(preset_snapshot, dict):
                 snapshot_cfg.update(preset_snapshot)
-            # In meta mode snapshots are enabled by default to capture long-term state.
+            # Snapshots are enabled by default for meta controller runs.  Use
+            # explicit config to disable; otherwise, assume True.
             snapshot_enabled = bool(snapshot_cfg.get("enabled", True))
             snapshot_cfg["enabled"] = snapshot_enabled
 
