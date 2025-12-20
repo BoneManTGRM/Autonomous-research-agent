@@ -207,7 +207,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Callable
 
 from .memory_store import MemoryStore
 from .tgrm_loop import TGRMLoop
@@ -2715,6 +2715,7 @@ class CoreAgent:
         runtime_profile: Optional[str] = None,
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> List[Dict[str, Any]]:
         """Run multiple TGRM cycles in a row (continuous mode) for a single role.
 
@@ -2897,6 +2898,17 @@ class CoreAgent:
             merge=True,
         )
 
+        # Immediately emit initial progress if a callback is provided
+        if progress_callback is not None:
+            try:
+                progress_callback({
+                    "current_cycle": 0,
+                    "total_cycles": max_cycles,
+                    "status": "running",
+                })
+            except Exception:
+                pass
+
         while True:
             if i >= max_cycles:
                 stop_reason = "cycle_cap"
@@ -2979,7 +2991,7 @@ class CoreAgent:
                 if len(recent_rye) > 10:
                     recent_rye.pop(0)
 
-            # Update live state after each cycle (fixes “0 of N then jump” behavior in UI)
+            # Update live state after each cycle (fixes â0 of N then jumpâ behavior in UI)
             try:
                 self._emit_live_state(
                     {
@@ -3021,6 +3033,16 @@ class CoreAgent:
                     break
 
             i += 1
+            # Emit progress after each completed cycle
+            if progress_callback is not None:
+                try:
+                    progress_callback({
+                        "current_cycle": i,
+                        "total_cycles": max_cycles,
+                        "status": "running",
+                    })
+                except Exception:
+                    pass
 
         self._clear_checkpoint()
 
@@ -3135,6 +3157,7 @@ class CoreAgent:
         runtime_profile: Optional[str] = None,
         run_id: Optional[str] = None,
         experiment_mode: Optional[str] = None,
+        progress_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> List[Dict[str, Any]]:
         """Run continuous multi agent swarm rounds.
 
@@ -3320,6 +3343,17 @@ class CoreAgent:
             merge=True,
         )
 
+        # Immediately emit initial progress if a callback is provided
+        if progress_callback is not None:
+            try:
+                progress_callback({
+                    "current_cycle": 0,
+                    "total_cycles": max_rounds,
+                    "status": "running",
+                })
+            except Exception:
+                pass
+
         while True:
             if round_idx >= max_rounds:
                 stop_reason = "round_cap"
@@ -3468,6 +3502,16 @@ class CoreAgent:
                     break
 
             round_idx += 1
+            # Emit progress after each completed round
+            if progress_callback is not None:
+                try:
+                    progress_callback({
+                        "current_cycle": round_idx,
+                        "total_cycles": max_rounds,
+                        "status": "running",
+                    })
+                except Exception:
+                    pass
 
         self._clear_checkpoint()
 
