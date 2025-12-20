@@ -82,7 +82,8 @@ except Exception:  # pragma: no cover
 
 # IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ°ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¬", layout="wide")
+# Replace the misâencoded page icon with a valid emoji to prevent mojibake
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ð¬", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -239,8 +240,22 @@ except ModuleNotFoundError as e:
             raise
 
     # Flat layout fallback: all modules live next to this file
-    from memory_store import MemoryStore
-    from presets import PRESETS, RUNTIME_PROFILES, get_preset  # type: ignore[no-redef]
+    # Import memory_store components if available; otherwise define a stub.  Defining
+    # `MemoryStore` as `None` allows the UI to detect the absence of a working
+    # memory implementation and degrade gracefully.
+    try:
+        from memory_store import MemoryStore
+    except Exception:
+        MemoryStore = None  # type: ignore[assignment]
+
+    # Import preset helpers if available; otherwise fall back to empty defaults.
+    try:
+        from presets import PRESETS, RUNTIME_PROFILES, get_preset  # type: ignore[no-redef]
+    except Exception:
+        PRESETS = {}  # type: ignore[assignment]
+        RUNTIME_PROFILES = {}  # type: ignore[assignment]
+        def get_preset(name: str, default: Any = None) -> Any:  # type: ignore[no-redef]
+            return default
 
     # Report generator is optional; degrade gracefully if missing
     try:
@@ -256,17 +271,40 @@ except ModuleNotFoundError as e:
         generate_findings_report = None  # type: ignore[assignment]
         generate_findings_report_pdf = None  # type: ignore[assignment]
 
-    from rye_metrics import (  # type: ignore[no-redef]
-        autonomy_safety_envelope,
-        breakthrough_likelihood_90d,
-        build_run_diagnostics,
-        classify_run_tier,
-        detect_rye_equilibrium,
-        early_failure_warning_score,
-        estimate_breakthrough_probability,
-        rye_volatility_signature,
-        tgrm_harmonic_index,
-    )
+    # Import RYE metrics helpers if available; otherwise fall back to safe stubs.  These
+    # functions are used in try/except blocks throughout the UI. Returning an empty
+    # dictionary or None preserves behaviour when the metrics module is absent.
+    try:  # type: ignore[no-redef]
+        from rye_metrics import (  # type: ignore[no-redef]
+            autonomy_safety_envelope,
+            breakthrough_likelihood_90d,
+            build_run_diagnostics,
+            classify_run_tier,
+            detect_rye_equilibrium,
+            early_failure_warning_score,
+            estimate_breakthrough_probability,
+            rye_volatility_signature,
+            tgrm_harmonic_index,
+        )
+    except Exception:
+        def autonomy_safety_envelope(*args: Any, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[no-redef]
+            return {}
+        def breakthrough_likelihood_90d(*args: Any, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[no-redef]
+            return {}
+        def build_run_diagnostics(*args: Any, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[no-redef]
+            return {}
+        def classify_run_tier(*args: Any, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[no-redef]
+            return {}
+        def detect_rye_equilibrium(*args: Any, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[no-redef]
+            return {}
+        def early_failure_warning_score(*args: Any, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[no-redef]
+            return {}
+        def estimate_breakthrough_probability(*args: Any, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[no-redef]
+            return {}
+        def rye_volatility_signature(*args: Any, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[no-redef]
+            return {}
+        def tgrm_harmonic_index(*args: Any, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[no-redef]
+            return {}
 
     try:  # type: ignore[import]
         import discovery_log as _discovery_module  # pragma: no cover
@@ -587,6 +625,11 @@ def init_memory_store(config_path: str = CONFIG_PATH_DEFAULT) -> MemoryStore:
     Prefer a MemoryStore file under the runs root so the UI and the engine worker
     naturally share the same state/cycle history on disk.
     """
+    # If there is no MemoryStore implementation available, return None.  This allows
+    # the remainder of the UI to handle missing memory gracefully without crashing.
+    if MemoryStore is None:  # type: ignore[comparison-overlap]
+        return None  # type: ignore[return-value]
+
     ensure_directories()
     config = load_settings(config_path)
 
@@ -2275,11 +2318,11 @@ def compute_progress_view(
     )
 
     # Select which progress track to display
-    # Only use phase progress when there is a multiÃÂ¢ÃÂÃÂphase pipeline (phase_total > 1).
+    # Only use phase progress when there is a multiâphase pipeline (phase_total > 1).
     phase_total_int = _safe_int(phase_tot, None)
     use_phase = phase_total_int
     # When phase_total is 1 or less, fall back to cycle progress instead of using phase progress.  This
-    # prevents singleÃÂ¢ÃÂÃÂphase runs from displaying as "1 run" when multiple cycles are present.
+    # prevents singleâphase runs from displaying as "1 run" when multiple cycles are present.
     if phase_total_int is not None and phase_total_int > 1:
         phase_cur_raw = phase_cur
         c = _safe_int(phase_cur_raw, 0) or 0
@@ -2895,7 +2938,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
             # Use a readable delta symbol instead of a misencoded character
-            parts.append(f"ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂR {float(d_r):.3f}")
+            parts.append(f"ÎR {float(d_r):.3f}")
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
