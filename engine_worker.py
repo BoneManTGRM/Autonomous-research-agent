@@ -83,7 +83,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from datetime import datetime
 
-# --- early import marker (helps diagnose ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂno logsÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
+# --- early import marker (helps diagnose ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂno logsÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
 try:
     _module_import_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 except Exception:
@@ -185,7 +185,7 @@ def _normalize_ui_text(s: str) -> str:
     be misinterpreted by downstream decoders. This function attempts to
     re-encode the text as UTF-8 and decode it as ASCII, ignoring any
     problematic bytes. This avoids the dreaded "mojibake" sequences such
-    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
+    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
 
     Args:
         s: The string to normalize.
@@ -4479,7 +4479,7 @@ def _write_job_progress(
                 phase_idx = 0
             # Build an extra payload for stability signals.  When at least one
             # cycle has executed (current >= 1), emit flags so the UI can
-            # interpret the run as selfÃÂÃÂ¢ÃÂÃÂÃÂÃÂstabilizing.  Otherwise omit these.
+            # interpret the run as selfÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂstabilizing.  Otherwise omit these.
             extra_local: Optional[Dict[str, Any]] = None
             try:
                 if isinstance(phase_idx, (int, float)) and phase_idx >= 1:
@@ -4921,9 +4921,16 @@ def _process_single_job(
                     _heartbeat(agent, label="queue_job_progress", run_id=run_id)
                     # Update worker state for UI
                     try:
+                        # Use the reported status if provided; otherwise default to 'running_job'.
+                        ws_status = status_local if status_local else "running_job"
+                        # Normalize to supported refresh statuses used by the Streamlit UI.  The UI only
+                        # autoârefreshes for a handful of values (running, active, in_progress, working), so
+                        # map our internal 'running_job' status to 'running'.
+                        if ws_status == "running_job":
+                            ws_status = "running"
                         _update_worker_state(
                             agent,
-                            status="running_job",
+                            status=ws_status,
                             mode=mode,
                             goal=goal,
                             domain=domain,
