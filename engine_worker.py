@@ -83,7 +83,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from datetime import datetime
 
-# --- early import marker (helps diagnose ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂno logsÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
+# --- early import marker (helps diagnose ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂno logsÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
 try:
     _module_import_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 except Exception:
@@ -185,7 +185,7 @@ def _normalize_ui_text(s: str) -> str:
     be misinterpreted by downstream decoders. This function attempts to
     re-encode the text as UTF-8 and decode it as ASCII, ignoring any
     problematic bytes. This avoids the dreaded "mojibake" sequences such
-    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
+    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
 
     Args:
         s: The string to normalize.
@@ -1454,7 +1454,14 @@ def _parse_float_env(name: str, default: float) -> float:
 
 HARD_MAX_CYCLES: int = _parse_int_env("WORKER_HARD_MAX_CYCLES", 10_000_000)
 HARD_MAX_ROUNDS: int = _parse_int_env("WORKER_HARD_MAX_ROUNDS", HARD_MAX_CYCLES)
-HARD_MAX_MINUTES: float = _parse_float_env("WORKER_HARD_MAX_MINUTES", 129_600.0)
+# The hard maximum minutes controls the upper bound on how long a run may
+# execute before the worker forcibly terminates. The original default was
+# 129,600 minutes (90 days), which would clamp long running jobs even when
+# no explicit limit was provided. To allow truly long running experiments
+# (e.g. 3 months or more) without artificial time limits, default this
+# parameter to zero. A zero value disables time-based clamping entirely
+# unless overridden by the WORKER_HARD_MAX_MINUTES environment variable.
+HARD_MAX_MINUTES: float = _parse_float_env("WORKER_HARD_MAX_MINUTES", 0.0)
 
 
 def _clamp_int(value: int, hard_max: int, label: str) -> int:
@@ -2353,7 +2360,10 @@ def _write_snapshot(
     current_cycle: Optional[int] = None,
     diagnostics: Optional[Dict[str, Any]] = None,
 ) -> None:
-    if not snapshot_cfg or not snapshot_cfg.get("enabled", False):
+    # If no explicit snapshot configuration is provided, snapshots should be
+    # enabled by default. Only skip writing snapshots when the caller
+    # explicitly disables them via snapshot_cfg["enabled"] = False.
+    if not snapshot_cfg or not snapshot_cfg.get("enabled", True):
         return
 
     ms = _get_memory_store(agent)
@@ -2361,59 +2371,81 @@ def _write_snapshot(
         return
 
     try:
-        keep_last_n_raw = snapshot_cfg.get("keep_last_n", 25)
-        try:
-            keep_last_n = int(keep_last_n_raw)
-        except Exception:
-            keep_last_n = 25
-        if keep_last_n <= 0:
-            keep_last_n = 25
-
-        tag = snapshot_cfg.get("tag")
-        tag_str = str(tag) if isinstance(tag, (str, int, float)) else None
-
-        snap: Dict[str, Any] = {
-            "run_id": run_id,
-            "mode": mode,
-            "goal": goal,
-            "domain": domain,
-            "utc": _now_utc_iso(),
-            "ts": time.time(),
-            "current_cycle": current_cycle,
-            "diagnostics": diagnostics or {},
-        }
-        if tag_str:
-            snap["tag"] = tag_str
-
+        # Attempt to create a snapshot using the MemoryStore's higher level APIs.
+        # Prefer maybe_write_snapshot_from_config which respects the snapshot configuration
+        # fields such as include_sections, interval, and label. If that is unavailable,
+        # fall back to the simpler write_snapshot call.
         wrote = False
-        for api_name in ("write_snapshot", "log_snapshot", "append_snapshot", "save_snapshot"):
-            fn = getattr(ms, api_name, None)
-            if callable(fn):
-                try:
-                    fn(run_id, snap)  # type: ignore[misc]
-                    wrote = True
-                    break
-                except TypeError:
-                    try:
-                        fn(run_id=run_id, snapshot=snap)  # type: ignore[misc]
-                        wrote = True
-                        break
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
+        maybe_fn = getattr(ms, "maybe_write_snapshot_from_config", None)
+        if callable(maybe_fn):
+            try:
+                maybe_fn(run_id=run_id, cycle_index=current_cycle, snapshot_config=snapshot_cfg)
+                wrote = True
+            except Exception:
+                wrote = False
 
         if not wrote:
-            data_attr = getattr(ms, "data", getattr(ms, "_data", None))
-            if isinstance(data_attr, dict):
-                all_snaps = data_attr.setdefault("snapshots", {})
-                run_snaps = all_snaps.setdefault(run_id, [])
-                if isinstance(run_snaps, list):
-                    run_snaps.append(snap)
-                    if len(run_snaps) > keep_last_n:
-                        del run_snaps[:-keep_last_n]
+            write_fn = getattr(ms, "write_snapshot", None)
+            if callable(write_fn):
+                try:
+                    write_fn(
+                        run_id=run_id,
+                        label=snapshot_cfg.get("label"),
+                        cycle_index=current_cycle,
+                        reason="engine",
+                        include_sections=snapshot_cfg.get("include_sections"),
+                        max_snapshots_per_run=(
+                            snapshot_cfg.get("max_snapshots_per_run")
+                            or snapshot_cfg.get("keep_last_n")
+                        ),
+                    )
                     wrote = True
+                except Exception:
+                    wrote = False
 
+        if not wrote:
+            # As a last resort, append a compact snapshot object into the MemoryStore's
+            # in-memory data structure. This fallback uses the same structure the
+            # previous logic attempted, storing a lightweight dictionary per run.
+            try:
+                keep_last_n_raw = snapshot_cfg.get("keep_last_n", 25)
+                keep_last_n = 25
+                try:
+                    keep_last_n = int(keep_last_n_raw)
+                except Exception:
+                    pass
+                if keep_last_n <= 0:
+                    keep_last_n = 25
+
+                tag = snapshot_cfg.get("tag")
+                tag_str = str(tag) if isinstance(tag, (str, int, float)) else None
+
+                snap: Dict[str, Any] = {
+                    "run_id": run_id,
+                    "mode": mode,
+                    "goal": goal,
+                    "domain": domain,
+                    "utc": _now_utc_iso(),
+                    "ts": time.time(),
+                    "current_cycle": current_cycle,
+                    "diagnostics": diagnostics or {},
+                }
+                if tag_str:
+                    snap["tag"] = tag_str
+
+                data_attr = getattr(ms, "data", getattr(ms, "_data", None))
+                if isinstance(data_attr, dict):
+                    all_snaps = data_attr.setdefault("snapshots", {})
+                    run_snaps = all_snaps.setdefault(run_id, [])
+                    if isinstance(run_snaps, list):
+                        run_snaps.append(snap)
+                        if len(run_snaps) > keep_last_n:
+                            del run_snaps[:-keep_last_n]
+                        wrote = True
+            except Exception:
+                wrote = False
+
+        # Persist snapshot changes to disk if we wrote one
         if wrote:
             try:
                 if hasattr(ms, "save"):
@@ -2689,7 +2721,8 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     job_snapshot = cfg.get("snapshot")
     if isinstance(job_snapshot, dict):
         snapshot_cfg.update(job_snapshot)
-    snapshot_enabled = bool(cfg.get("snapshot_enabled", snapshot_cfg.get("enabled", False)))
+    # Snapshots default to enabled unless explicitly disabled via cfg or snapshot_cfg.
+    snapshot_enabled = bool(cfg.get("snapshot_enabled", snapshot_cfg.get("enabled", True)))
     snapshot_cfg["enabled"] = snapshot_enabled
 
     mode = str(cfg.get("mode", cfg.get("engine_mode", "single"))).lower()
@@ -4479,7 +4512,7 @@ def _write_job_progress(
                 phase_idx = 0
             # Build an extra payload for stability signals.  When at least one
             # cycle has executed (current >= 1), emit flags so the UI can
-            # interpret the run as selfÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂstabilizing.  Otherwise omit these.
+            # interpret the run as selfÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂstabilizing.  Otherwise omit these.
             extra_local: Optional[Dict[str, Any]] = None
             try:
                 if isinstance(phase_idx, (int, float)) and phase_idx >= 1:
@@ -4643,7 +4676,8 @@ def _process_single_job(
         job_snapshot = cfg.get("snapshot")
         if isinstance(job_snapshot, dict):
             snapshot_cfg.update(job_snapshot)
-        snapshot_enabled = bool(cfg.get("snapshot_enabled", snapshot_cfg.get("enabled", False)))
+        # Enable snapshots by default unless explicitly disabled.
+        snapshot_enabled = bool(cfg.get("snapshot_enabled", snapshot_cfg.get("enabled", True)))
         snapshot_cfg["enabled"] = snapshot_enabled
 
         mode = str(cfg.get("mode", cfg.get("engine_mode", "single"))).lower()
@@ -4924,7 +4958,7 @@ def _process_single_job(
                         # Use the reported status if provided; otherwise default to 'running_job'.
                         ws_status = status_local if status_local else "running_job"
                         # Normalize to supported refresh statuses used by the Streamlit UI.  The UI only
-                        # autoârefreshes for a handful of values (running, active, in_progress, working), so
+                        # autoÃ¢ÂÂrefreshes for a handful of values (running, active, in_progress, working), so
                         # map our internal 'running_job' status to 'running'.
                         if ws_status == "running_job":
                             ws_status = "running"
@@ -5984,7 +6018,8 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             preset_snapshot = preset_cfg.get("snapshot")
             if isinstance(preset_snapshot, dict):
                 snapshot_cfg.update(preset_snapshot)
-            snapshot_enabled = bool(snapshot_cfg.get("enabled", False))
+            # Default to enabling snapshots for single-agent runs unless explicitly disabled.
+            snapshot_enabled = bool(snapshot_cfg.get("enabled", True))
             snapshot_cfg["enabled"] = snapshot_enabled
 
             max_minutes_env = _env_float("WORKER_MAX_MINUTES")
@@ -6309,7 +6344,8 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             preset_snapshot = preset_cfg.get("snapshot")
             if isinstance(preset_snapshot, dict):
                 snapshot_cfg.update(preset_snapshot)
-            snapshot_enabled = bool(snapshot_cfg.get("enabled", False))
+            # Snapshots should be enabled for swarm runs unless explicitly disabled.
+            snapshot_enabled = bool(snapshot_cfg.get("enabled", True))
             snapshot_cfg["enabled"] = snapshot_enabled
 
             max_minutes_env = _env_float("WORKER_MAX_MINUTES")
@@ -6855,7 +6891,8 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             preset_snapshot = preset_cfg.get("snapshot")
             if isinstance(preset_snapshot, dict):
                 snapshot_cfg.update(preset_snapshot)
-            snapshot_enabled = bool(snapshot_cfg.get("enabled", False))
+            # In meta mode snapshots are enabled by default to capture long-term state.
+            snapshot_enabled = bool(snapshot_cfg.get("enabled", True))
             snapshot_cfg["enabled"] = snapshot_enabled
 
             total_budget_minutes_env = _env_float("WORKER_MAX_MINUTES")
