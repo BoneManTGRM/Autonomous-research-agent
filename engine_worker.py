@@ -83,7 +83,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from datetime import datetime
 
-# --- early import marker (helps diagnose ÃÂ¢ÃÂÃÂno logsÃÂ¢ÃÂÃÂ situations on platforms like Render) ---
+# --- early import marker (helps diagnose ÃÂÃÂ¢ÃÂÃÂÃÂÃÂno logsÃÂÃÂ¢ÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
 try:
     _module_import_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 except Exception:
@@ -185,7 +185,7 @@ def _normalize_ui_text(s: str) -> str:
     be misinterpreted by downstream decoders. This function attempts to
     re-encode the text as UTF-8 and decode it as ASCII, ignoring any
     problematic bytes. This avoids the dreaded "mojibake" sequences such
-    as 'ÃÂÃÂ¢ÃÂ' which show up when UTF-8 is decoded twice.
+    as 'ÃÂÃÂÃÂÃÂ¢ÃÂÃÂ' which show up when UTF-8 is decoded twice.
 
     Args:
         s: The string to normalize.
@@ -4462,7 +4462,7 @@ def _write_job_progress(
                 phase_idx = 0
             # Build an extra payload for stability signals.  When at least one
             # cycle has executed (current >= 1), emit flags so the UI can
-            # interpret the run as selfâstabilizing.  Otherwise omit these.
+            # interpret the run as selfÃ¢ÂÂstabilizing.  Otherwise omit these.
             extra_local: Optional[Dict[str, Any]] = None
             try:
                 if isinstance(phase_idx, (int, float)) and phase_idx >= 1:
@@ -5013,10 +5013,23 @@ def _process_single_job(
 
         _heartbeat(agent, label="queue_job_finished", run_id=run_id)
 
+        # Determine final progress. If we have recorded progress but it
+        # hasn't reached the total yet, we should still mark the job as
+        # complete by setting both current and total to the macro_total.
         if last_progress_current is not None and last_progress_total is not None:
-            final_current = last_progress_current
-            final_total = last_progress_total
+            if last_progress_current < last_progress_total:
+                # Some runs may not update progress on every cycle. To
+                # ensure the final state reflects completion, force the
+                # progress to the maximum when the last known progress
+                # current is less than the last known total.
+                final_current = macro_total
+                final_total = macro_total
+            else:
+                final_current = last_progress_current
+                final_total = last_progress_total
         else:
+            # If no progress was recorded, default to marking as
+            # complete at the macro_total for both current and total.
             final_current = macro_total
             final_total = macro_total
 
