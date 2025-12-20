@@ -82,7 +82,7 @@ except Exception:  # pragma: no cover
 
 # IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="Ã°ÂÂÂ¬", layout="wide")
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂ°ÃÂÃÂÃÂ¬", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -2412,6 +2412,25 @@ def inject_base_styles() -> None:
 .ara-topbar-left, .ara-topbar-mid, .ara-topbar-right{
   display:flex; align-items:center; gap: 0.75rem; min-width: 0;
 }
+
+    /* Fix sticky topbar layout: allow wrapping and truncate long text */
+    .ara-topbar {
+      flex-wrap: wrap;
+    }
+    .ara-topbar-left, .ara-topbar-mid {
+      flex: 1 1 auto;
+    }
+    .ara-topbar-right {
+      flex: 0 0 auto;
+    }
+    .ara-topbar-left > div,
+    .ara-topbar-mid > div,
+    .ara-topbar-right > div {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      min-width: 0;
+    }
 .ara-topbar-mid { opacity: 0.9; }
 .ara-topbar-title{
   font-weight: 650;
@@ -2865,7 +2884,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
             # Use a readable delta symbol instead of a misencoded character
-            parts.append(f"ÃÂR {float(d_r):.3f}")
+            parts.append(f"ÃÂÃÂR {float(d_r):.3f}")
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
