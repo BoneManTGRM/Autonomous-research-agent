@@ -83,7 +83,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from datetime import datetime
 
-# --- early import marker (helps diagnose ÃÂÃÂ¢ÃÂÃÂÃÂÃÂno logsÃÂÃÂ¢ÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
+# --- early import marker (helps diagnose ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂno logsÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
 try:
     _module_import_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 except Exception:
@@ -185,7 +185,7 @@ def _normalize_ui_text(s: str) -> str:
     be misinterpreted by downstream decoders. This function attempts to
     re-encode the text as UTF-8 and decode it as ASCII, ignoring any
     problematic bytes. This avoids the dreaded "mojibake" sequences such
-    as 'ÃÂÃÂÃÂÃÂ¢ÃÂÃÂ' which show up when UTF-8 is decoded twice.
+    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
 
     Args:
         s: The string to normalize.
@@ -3405,13 +3405,30 @@ class FileQueue:
             log_exception("lock_release_failed", e, run_id=run_id, lock_path=str(lp))
 
     def _is_job_file(self, p: Path) -> bool:
+        """
+        Determine whether a given JSON file should be treated as a pending job.
+
+        The queue layer uses simple filename heuristics to distinguish job
+        definitions from progress and other auxiliary files. Any file ending
+        in ``.json`` that is not a progress snapshot is considered a job. In
+        particular, files with suffixes like ``_job.json`` or ``__job.json``
+        represent the job payload and should be processed. Only progress
+        artifacts (``<run_id>_progress.json``) are explicitly excluded.
+
+        Args:
+            p: Path to the JSON file.
+
+        Returns:
+            True if the file should be treated as a job; False otherwise.
+        """
         name = p.name
+        # Only JSON files are considered
         if not name.endswith(".json"):
             return False
+        # Skip progress files (these are written by the worker itself)
         if name.endswith("_progress.json"):
             return False
-        if name.endswith("__job.json"):
-            return False
+        # Treat all other JSON files as jobs, including *_job.json and __job.json
         return True
 
     def _quarantine(self, path: Path, reason: str) -> None:
@@ -4462,7 +4479,7 @@ def _write_job_progress(
                 phase_idx = 0
             # Build an extra payload for stability signals.  When at least one
             # cycle has executed (current >= 1), emit flags so the UI can
-            # interpret the run as selfÃ¢ÂÂstabilizing.  Otherwise omit these.
+            # interpret the run as selfÃÂ¢ÃÂÃÂstabilizing.  Otherwise omit these.
             extra_local: Optional[Dict[str, Any]] = None
             try:
                 if isinstance(phase_idx, (int, float)) and phase_idx >= 1:
