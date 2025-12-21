@@ -4877,27 +4877,53 @@ def _process_single_job(
             def _progress_cb(update: Dict[str, Any]) -> None:
                 nonlocal last_progress_current, last_progress_total
                 try:
-                    # Extract current/total cycle values from the update. Fallback to macro_total.
-                    # Extract progress strictly from cycle-aware fields.  In earlier versions
-                    # of the engine the generic "current" and "total" keys were overloaded
-                    # to reflect internal phase or step counts.  This caused the UI to
-                    # display inflated values (e.g. 18 instead of 3 cycles) because the
-                    # total number of internal steps was interpreted as cycles.  To avoid
-                    # that confusion, prefer cycle-specific keys and avoid using
-                    # update["current"]/update["total"] when inferring cycle progress.
-                    cur_val = (
+                    # Extract cycle progress.
+                    # Many CoreAgent engines emit *internal step* counters using generic
+                    # keys like current/total. We only trust explicit cycle keys when
+                    # present. Otherwise we infer a steps-per-cycle ratio and map steps
+                    # back onto user-requested cycles (macro_total).
+
+                    raw_cur = (
                         update.get("current_cycle")
                         or update.get("cycle")
                         or update.get("progress_cycle")
+                        or update.get("current")
                     )
-                    tot_val = (
+                    raw_tot = (
                         update.get("total_cycles")
                         or update.get("max_cycles")
                         or update.get("progress_total")
-                        or macro_total
+                        or update.get("total")
                     )
-                    cur_int = _to_int(cur_val)
-                    tot_int = _to_int(tot_val)
+
+                    raw_cur_i = _to_int(raw_cur)
+                    raw_tot_i = _to_int(raw_tot)
+
+                    # Default to the user-requested total cycles
+                    tot_int: Optional[int] = macro_total
+                    cur_int: Optional[int] = raw_cur_i
+
+                    # If the engine is emitting step totals (e.g., 18 when user asked 3),
+                    # map step index -> cycle index.
+                    try:
+                        if (
+                            isinstance(raw_tot_i, int)
+                            and isinstance(macro_total, int)
+                            and raw_tot_i > macro_total
+                            and macro_total > 0
+                            and raw_tot_i % macro_total == 0
+                        ):
+                            steps_per_cycle = max(1, raw_tot_i // macro_total)
+                            if isinstance(raw_cur_i, int) and raw_cur_i is not None:
+                                # steps are usually 0-based or 1-based; ceil division is robust
+                                mapped = (raw_cur_i + (steps_per_cycle - 1)) // steps_per_cycle
+                                cur_int = max(0, min(int(mapped), macro_total))
+                    except Exception:
+                        pass
+
+                    # If we got an explicit total_cycles that is small and sane, honor it.
+                    if isinstance(raw_tot_i, int) and raw_tot_i > 0 and raw_tot_i <= macro_total:
+                        tot_int = raw_tot_i
                     # Update last progress values
                     if cur_int is not None:
                         last_progress_current = cur_int
