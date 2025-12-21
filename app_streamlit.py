@@ -82,8 +82,8 @@ except Exception:  # pragma: no cover
 
 # IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
-# Replace the misÃ¢ÂÂencoded page icon with a valid emoji to prevent mojibake
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="Ã°ÂÂÂ¬", layout="wide")
+# Replace the misÃÂ¢ÃÂÃÂencoded page icon with a valid emoji to prevent mojibake
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂ°ÃÂÃÂÃÂ¬", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -2224,6 +2224,56 @@ def load_progress_unified(run_id: Optional[str]) -> Tuple[Optional[Dict[str, Any
     return None, "not found"
 
 
+def _get_cycle_history_for_run(memory: Any, run_id: Optional[str]) -> List[Dict[str, Any]]:
+    """Best-effort: fetch cycle history scoped to a run_id.
+
+    Older MemoryStore implementations expose get_cycle_history() with no args
+    and return a global list. Newer ones accept a run_id.
+    """
+    if not run_id:
+        run_id = None
+
+    hist: Any = []
+    fn = getattr(memory, "get_cycle_history", None)
+    if callable(fn):
+        # Prefer run_id aware signature
+        if run_id is not None:
+            try:
+                hist = fn(run_id=run_id)  # type: ignore[misc]
+            except TypeError:
+                try:
+                    hist = fn(run_id)  # type: ignore[misc]
+                except TypeError:
+                    hist = fn()  # type: ignore[misc]
+        else:
+            try:
+                hist = fn()  # type: ignore[misc]
+            except Exception:
+                hist = []
+
+    if not isinstance(hist, list):
+        hist = []
+
+    # If the store returned global history, filter when entries contain run_id.
+    if run_id is not None:
+        filtered: List[Dict[str, Any]] = []
+        for item in hist:
+            if isinstance(item, dict):
+                rid = item.get("run_id") or item.get("job_id")
+                if rid is None or str(rid) == str(run_id):
+                    filtered.append(item)
+        # Only use filtered if it actually filtered something.
+        if filtered:
+            return filtered
+
+    # Normalize dict entries only
+    out: List[Dict[str, Any]] = []
+    for item in hist:
+        if isinstance(item, dict):
+            out.append(item)
+    return out
+
+
 def _derive_active_run_id_from_queue() -> Optional[str]:
     """Try to infer an active run id by looking at queue/active or runs/active."""
     # Prefer canonical queue/active
@@ -2367,11 +2417,11 @@ def compute_progress_view(
     )
 
     # Select which progress track to display
-    # Only use phase progress when there is a multiÃ¢ÂÂphase pipeline (phase_total > 1).
+    # Only use phase progress when there is a multiÃÂ¢ÃÂÃÂphase pipeline (phase_total > 1).
     phase_total_int = _safe_int(phase_tot, None)
     use_phase = phase_total_int
     # When phase_total is 1 or less, fall back to cycle progress instead of using phase progress.  This
-    # prevents singleÃ¢ÂÂphase runs from displaying as "1 run" when multiple cycles are present.
+    # prevents singleÃÂ¢ÃÂÃÂphase runs from displaying as "1 run" when multiple cycles are present.
     if phase_total_int is not None and phase_total_int > 1:
         phase_cur_raw = phase_cur
         c = _safe_int(phase_cur_raw, 0) or 0
@@ -2998,7 +3048,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
             # Use a readable delta symbol instead of a misencoded character
-            parts.append(f"ÃÂR {float(d_r):.3f}")
+            parts.append(f"ÃÂÃÂR {float(d_r):.3f}")
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
@@ -3811,15 +3861,7 @@ def main() -> None:
     )
 
     # Light history preview for narrative synthesis and stability/autonomy (last ~25 only)
-    history_preview: List[Dict[str, Any]] = []
-    get_cycle_history_preview = getattr(memory, "get_cycle_history", None)
-    if callable(get_cycle_history_preview):
-        try:
-            hist = get_cycle_history_preview() or []
-            if isinstance(hist, list):
-                history_preview = [e for e in hist if isinstance(e, dict)][-25:]
-        except Exception:
-            history_preview = []
+    history_preview: List[Dict[str, Any]] = _get_cycle_history_for_run(memory, active_run_id)[-25:]
     if not history_preview:
         # fallback to finished runs (small)
         history_preview = load_history_from_finished_runs(limit_runs=5)[-25:]
@@ -4361,6 +4403,9 @@ def main() -> None:
                 "goal": goal_clean,
                 "domain": domain_tag,
                 "mode": mode,
+                # For finite UI-triggered runs, never resume from a prior checkpoint by default.
+                # Resume can make a 3-cycle request look like it ran to cycle 200.
+                "resume": False,
                 "total_cycles": total_cycles_requested,
                 "max_cycles": int(cycles) if mode != "swarm" else None,
                 "max_rounds": int(cycles) if mode == "swarm" else None,
@@ -4626,13 +4671,10 @@ def main() -> None:
     st.markdown("---")
     st.subheader("History and advanced analysis")
 
-    get_cycle_history = getattr(memory, "get_cycle_history", None)
-    history: List[Dict[str, Any]] = []
-    if callable(get_cycle_history):
-        try:
-            history = get_cycle_history() or []
-        except Exception:
-            history = []
+    # Cycle history should be scoped to the active run. Older stores return a
+    # global history list, which can make it look like a 3-cycle run executed
+    # 200 cycles. Use a run_id-aware loader when possible.
+    history: List[Dict[str, Any]] = _get_cycle_history_for_run(memory, run_id)
 
     if not history:
         history = load_history_from_finished_runs()
