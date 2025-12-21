@@ -74,7 +74,7 @@ def _normalize_ui_text(s: Any) -> Any:
     be misinterpreted by downstream decoders. This function attempts to
     re-encode the text as UTF-8 and decode it as ASCII, ignoring any
     problematic bytes. This avoids the dreaded "mojibake" sequences such
-    as 'ÃÂÃÂÃÂÃÂ¢ÃÂÃÂ' which show up when UTF-8 is decoded twice.
+    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
 
     Args:
         s: The string to normalize or any other value.
@@ -953,6 +953,94 @@ class MemoryStore:
             self._data["run_manifests"] = rm
 
         self._save()
+
+    # ------------------------------------------------------------------
+    # History and note pruning
+    # ------------------------------------------------------------------
+    def prune_history(self, threshold: float = 0.0, max_keep: int = 0) -> int:
+        """
+        Prune cycle history entries with low RYE gain and optionally cap
+        the total number of retained entries.
+
+        This method filters the ``cycles`` list in-place by inspecting
+        each entry's RYE gain (or delta) and dropping any cycles whose
+        gain is below ``threshold``.  RYE gain is read from the first
+        available of ``rye_gain``, ``delta_rye``, or ``delta_RYE`` on
+        each cycle dictionary.  If no such key is present, the gain
+        defaults to 0.0.  After filtering, if ``max_keep`` is greater
+        than zero and more than ``max_keep`` entries remain, only the
+        most recent ``max_keep`` cycles are kept.
+
+        Args:
+            threshold: The minimum RYE gain required to keep a cycle.
+            max_keep: Maximum number of cycles to retain (0 means no cap).
+
+        Returns:
+            The number of cycles removed.
+        """
+        try:
+            cycles = self._data.get("cycles")
+            if not isinstance(cycles, list) or not cycles:
+                return 0
+
+            # Normalize threshold to a float
+            try:
+                thresh_f = float(threshold)
+            except Exception:
+                thresh_f = 0.0
+
+            # Helper to extract gain from a cycle entry
+            def _get_gain(c: Dict[str, Any]) -> float:
+                if not isinstance(c, dict):
+                    return 0.0
+                val = (
+                    c.get("rye_gain")
+                    or c.get("delta_rye")
+                    or c.get("delta_RYE")
+                    or 0.0
+                )
+                try:
+                    return float(val)
+                except Exception:
+                    return 0.0
+
+            # Filter cycles by threshold
+            pruned_cycles: List[Dict[str, Any]] = []
+            for cyc in cycles:
+                gain_val = _get_gain(cyc)
+                if gain_val >= thresh_f:
+                    pruned_cycles.append(cyc)
+
+            # Apply max_keep cap (keep the most recent entries)
+            if isinstance(max_keep, int) and max_keep > 0 and len(pruned_cycles) > max_keep:
+                pruned_cycles = pruned_cycles[-max_keep:]
+
+            removed_count = len(cycles) - len(pruned_cycles)
+            if removed_count > 0:
+                self._data["cycles"] = pruned_cycles
+                self._save()
+            return removed_count
+        except Exception:
+            # On error, do not remove any entries
+            return 0
+
+    def prune_low_value_notes(self, threshold: float = 0.0, max_keep: int = 0) -> int:
+        """
+        Alias for ``prune_history`` for backward compatibility.
+
+        Notes and cycles share similar RYE gain semantics in many
+        deployments.  This method delegates to ``prune_history`` so
+        that UIs calling ``prune_low_value_notes`` still reduce
+        history entries appropriately.
+
+        Args:
+            threshold: The minimum RYE gain required to keep a cycle.
+            max_keep: Maximum number of cycles to retain (0 means no cap).
+
+        Returns:
+            The number of cycles removed.
+        """
+        return self.prune_history(threshold=threshold, max_keep=max_keep)
 
     # ------------------------------------------------------------------
     # Internal helpers for goal index
@@ -2079,7 +2167,7 @@ class MemoryStore:
             state["extra"] = existing_extra
 
             # Promote stability-related flags to top-level keys when present.
-            # This helps the UI quickly detect selfÃ¢ÂÂstabilizing runs without
+            # This helps the UI quickly detect selfÃÂ¢ÃÂÃÂstabilizing runs without
             # having to inspect nested structures.  Only copy known flags and
             # leave others inside state["extra"].
             try:
