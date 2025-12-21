@@ -3041,14 +3041,17 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 diagnostics=diag,
             )
             # Persist a minimal snapshot JSON when snapshots are enabled
-            _persist_snapshot_json(
-                run_id=run_id,
-                mode=mode,
-                goal=goal,
-                domain=domain,
-                current_cycle=len(normalized_cycles),
-                diagnostics=diag,
-            )
+            try:
+                _persist_snapshot_json(
+                    run_id=run_id,
+                    mode=mode,
+                    goal=goal,
+                    domain=domain,
+                    current_cycle=len(normalized_cycles),
+                    diagnostics=diag,
+                )
+            except Exception:
+                pass
         else:
             # Always write a final snapshot when a run completes to allow
             # Streamlit to display snapshots even if disabled in config.  Compose
@@ -3074,14 +3077,17 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 diagnostics=diag,
             )
             # Persist a minimal snapshot JSON to the logs for the UI to discover
-            _persist_snapshot_json(
-                run_id=run_id,
-                mode=mode,
-                goal=goal,
-                domain=domain,
-                current_cycle=len(normalized_cycles),
-                diagnostics=diag,
-            )
+            try:
+                _persist_snapshot_json(
+                    run_id=run_id,
+                    mode=mode,
+                    goal=goal,
+                    domain=domain,
+                    current_cycle=len(normalized_cycles),
+                    diagnostics=diag,
+                )
+            except Exception:
+                pass
 
         intelligence_info = _run_post_run_intelligence(
             agent,
@@ -5395,14 +5401,17 @@ def _process_single_job(
                 diagnostics=diag,
             )
             # Persist a minimal snapshot JSON when snapshots are enabled
-            _persist_snapshot_json(
-                run_id=run_id,
-                mode=mode,
-                goal=goal,
-                domain=domain,
-                current_cycle=final_current,
-                diagnostics=diag,
-            )
+            try:
+                _persist_snapshot_json(
+                    run_id=run_id,
+                    mode=mode,
+                    goal=goal,
+                    domain=domain,
+                    current_cycle=final_current,
+                    diagnostics=diag,
+                )
+            except Exception:
+                pass
         else:
             # Always write a final snapshot when snapshotting is disabled so that
             # the snapshots tab is never empty.  Merge the existing
@@ -5426,14 +5435,17 @@ def _process_single_job(
                 diagnostics=diag,
             )
             # Persist a minimal snapshot JSON for the UI snapshot listing
-            _persist_snapshot_json(
-                run_id=run_id,
-                mode=mode,
-                goal=goal,
-                domain=domain,
-                current_cycle=final_current,
-                diagnostics=diag,
-            )
+            try:
+                _persist_snapshot_json(
+                    run_id=run_id,
+                    mode=mode,
+                    goal=goal,
+                    domain=domain,
+                    current_cycle=final_current,
+                    diagnostics=diag,
+                )
+            except Exception:
+                pass
 
         intelligence_info = _run_post_run_intelligence(
             agent,
@@ -6404,14 +6416,17 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         diagnostics=diag,
                     )
                     # Persist a minimal snapshot JSON for Streamlit when snapshots are enabled
-                    _persist_snapshot_json(
-                        run_id=run_id,
-                        mode="single",
-                        goal=goal,
-                        domain=domain,
-                        current_cycle=len(normalized_cycles),
-                        diagnostics=diag,
-                    )
+                    try:
+                        _persist_snapshot_json(
+                            run_id=run_id,
+                            mode="single",
+                            goal=goal,
+                            domain=domain,
+                            current_cycle=len(normalized_cycles),
+                            diagnostics=diag,
+                        )
+                    except Exception:
+                        pass
                 else:
                     # Always write a snapshot on run completion so that the snapshot
                     # UI has at least one entry even when snapshots are disabled.
@@ -6433,14 +6448,17 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         diagnostics=diag,
                     )
                     # Persist a minimal snapshot JSON for Streamlit snapshot discovery
-                    _persist_snapshot_json(
-                        run_id=run_id,
-                        mode="single",
-                        goal=goal,
-                        domain=domain,
-                        current_cycle=len(normalized_cycles),
-                        diagnostics=diag,
-                    )
+                    try:
+                        _persist_snapshot_json(
+                            run_id=run_id,
+                            mode="single",
+                            goal=goal,
+                            domain=domain,
+                            current_cycle=len(normalized_cycles),
+                            diagnostics=diag,
+                        )
+                    except Exception:
+                        pass
 
                 intelligence_info = _run_post_run_intelligence(
                     agent,
@@ -6839,14 +6857,17 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         diagnostics=diag,
                     )
                     # Persist a minimal snapshot JSON for the swarm run when snapshots are enabled
-                    _persist_snapshot_json(
-                        run_id=run_id,
-                        mode="swarm",
-                        goal=goal,
-                        domain=domain,
-                        current_cycle=len(normalized_cycles),
-                        diagnostics=diag,
-                    )
+                    try:
+                        _persist_snapshot_json(
+                            run_id=run_id,
+                            mode="swarm",
+                            goal=goal,
+                            domain=domain,
+                            current_cycle=len(normalized_cycles),
+                            diagnostics=diag,
+                        )
+                    except Exception:
+                        pass
                 else:
                     # Always write a snapshot when a swarm run completes so the
                     # snapshots tab is populated even if snapshots are disabled.
@@ -6868,14 +6889,17 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         diagnostics=diag,
                     )
                     # Persist a minimal snapshot JSON to the logs for UI listing
-                    _persist_snapshot_json(
-                        run_id=run_id,
-                        mode="swarm",
-                        goal=goal,
-                        domain=domain,
-                        current_cycle=len(normalized_cycles),
-                        diagnostics=diag,
-                    )
+                    try:
+                        _persist_snapshot_json(
+                            run_id=run_id,
+                            mode="swarm",
+                            goal=goal,
+                            domain=domain,
+                            current_cycle=len(normalized_cycles),
+                            diagnostics=diag,
+                        )
+                    except Exception:
+                        pass
 
                 intelligence_info = _run_post_run_intelligence(
                     agent,
@@ -7537,14 +7561,17 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         diagnostics=diag,
                     )
                     # Persist a minimal snapshot JSON for meta runs when snapshots are enabled
-                    _persist_snapshot_json(
-                        run_id=run_id,
-                        mode="meta",
-                        goal=goal,
-                        domain=domain,
-                        current_cycle=len(normalized_cycles),
-                        diagnostics=diag,
-                    )
+                    try:
+                        _persist_snapshot_json(
+                            run_id=run_id,
+                            mode="meta",
+                            goal=goal,
+                            domain=domain,
+                            current_cycle=len(normalized_cycles),
+                            diagnostics=diag,
+                        )
+                    except Exception:
+                        pass
                 else:
                     # Always write a snapshot when a meta run completes so the
                     # snapshots tab can display at least one snapshot even when
@@ -7567,14 +7594,17 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         diagnostics=diag,
                     )
                     # Persist a minimal snapshot JSON for Streamlit discovery
-                    _persist_snapshot_json(
-                        run_id=run_id,
-                        mode="meta",
-                        goal=goal,
-                        domain=domain,
-                        current_cycle=len(normalized_cycles),
-                        diagnostics=diag,
-                    )
+                    try:
+                        _persist_snapshot_json(
+                            run_id=run_id,
+                            mode="meta",
+                            goal=goal,
+                            domain=domain,
+                            current_cycle=len(normalized_cycles),
+                            diagnostics=diag,
+                        )
+                    except Exception:
+                        pass
 
                 intelligence_info = _run_post_run_intelligence(
                     agent,
