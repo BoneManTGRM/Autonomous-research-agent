@@ -1252,10 +1252,21 @@ def _persist_snapshot_json(
             "current_cycle": current_cycle,
             "diagnostics": diagnostics or {},
         }
-        # Promote RYE metrics to top-level if present
+        # Promote RYE metrics to top-level if present.
+        # Various versions of build_run_diagnostics may store RYE metrics under
+        # different keys (e.g. "metrics", "rye_metrics", "run_rye_metrics", or "rye").
+        # Capture any of these forms and attach to the payload if they are
+        # dictionaries.  Swallow any exceptions to avoid breaking snapshot
+        # persistence.
         try:
             if isinstance(diagnostics, dict):
-                metrics = diagnostics.get("rye_metrics") or diagnostics.get("metrics")
+                # Try multiple keys in order of preference
+                metrics = (
+                    diagnostics.get("metrics")
+                    or diagnostics.get("rye_metrics")
+                    or diagnostics.get("run_rye_metrics")
+                    or diagnostics.get("rye")
+                )
                 if isinstance(metrics, dict):
                     payload["metrics"] = metrics
         except Exception:
@@ -2272,6 +2283,19 @@ def _write_cycles_and_run_state(
 
     diag_local: Dict[str, Any] = diagnostics or {}
 
+    # Ensure each cycle entry includes the run_id to support per-run filtering in the UI.
+    # Some cycles may not contain a run identifier, which makes it impossible to
+    # filter histories by run.  Here we best-effort attach the current run_id
+    # to each dictionary entry.  Any errors are swallowed to avoid
+    # interfering with cycle history persistence.
+    try:
+        if isinstance(cycles, list):
+            for _ce in cycles:
+                if isinstance(_ce, dict):
+                    _ce.setdefault("run_id", run_id)
+    except Exception:
+        pass
+
     # Best-effort summary extraction for UI
     summary_text: Optional[str] = None
     try:
@@ -3071,6 +3095,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             log_exception("direct_job_diag_failed", e, run_id=run_id)
 
         normalized_cycles: List[Dict[str, Any]] = _normalize_cycles_for_ui(summaries)
+        # No per-entry run_id injection here; _write_cycles_and_run_state will attach run_id.
 
         _write_cycles_and_run_state(
             agent,
