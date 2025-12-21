@@ -3040,6 +3040,15 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 current_cycle=len(normalized_cycles),
                 diagnostics=diag,
             )
+            # Persist a minimal snapshot JSON when snapshots are enabled
+            _persist_snapshot_json(
+                run_id=run_id,
+                mode=mode,
+                goal=goal,
+                domain=domain,
+                current_cycle=len(normalized_cycles),
+                diagnostics=diag,
+            )
         else:
             # Always write a final snapshot when a run completes to allow
             # Streamlit to display snapshots even if disabled in config.  Compose
@@ -5385,6 +5394,15 @@ def _process_single_job(
                 current_cycle=final_current,
                 diagnostics=diag,
             )
+            # Persist a minimal snapshot JSON when snapshots are enabled
+            _persist_snapshot_json(
+                run_id=run_id,
+                mode=mode,
+                goal=goal,
+                domain=domain,
+                current_cycle=final_current,
+                diagnostics=diag,
+            )
         else:
             # Always write a final snapshot when snapshotting is disabled so that
             # the snapshots tab is never empty.  Merge the existing
@@ -6385,6 +6403,15 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         current_cycle=len(normalized_cycles),
                         diagnostics=diag,
                     )
+                    # Persist a minimal snapshot JSON for Streamlit when snapshots are enabled
+                    _persist_snapshot_json(
+                        run_id=run_id,
+                        mode="single",
+                        goal=goal,
+                        domain=domain,
+                        current_cycle=len(normalized_cycles),
+                        diagnostics=diag,
+                    )
                 else:
                     # Always write a snapshot on run completion so that the snapshot
                     # UI has at least one entry even when snapshots are disabled.
@@ -6808,6 +6835,15 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         goal=goal,
                         domain=domain,
                         snapshot_cfg=snapshot_cfg,
+                        current_cycle=len(normalized_cycles),
+                        diagnostics=diag,
+                    )
+                    # Persist a minimal snapshot JSON for the swarm run when snapshots are enabled
+                    _persist_snapshot_json(
+                        run_id=run_id,
+                        mode="swarm",
+                        goal=goal,
+                        domain=domain,
                         current_cycle=len(normalized_cycles),
                         diagnostics=diag,
                     )
@@ -7497,6 +7533,15 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         goal=goal,
                         domain=domain,
                         snapshot_cfg=snapshot_cfg,
+                        current_cycle=len(normalized_cycles),
+                        diagnostics=diag,
+                    )
+                    # Persist a minimal snapshot JSON for meta runs when snapshots are enabled
+                    _persist_snapshot_json(
+                        run_id=run_id,
+                        mode="meta",
+                        goal=goal,
+                        domain=domain,
                         current_cycle=len(normalized_cycles),
                         diagnostics=diag,
                     )
