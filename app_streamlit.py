@@ -2811,30 +2811,12 @@ def compute_autonomy_view(
     has_active_context = bool(job_payload) or running_like
 
     stable_signal = False
-    # Derive a stability signal from run diagnostics when available.  These metrics
-    # are computed from recent cycle history and indicate whether the agent has
-    # reached equilibrium (self-stabilizing).  When there are few cycles, the
-    # diagnostics may not contain these keys yet.
     if has_active_context and isinstance(diagnostics_preview, dict):
         stable_signal = bool(
             diagnostics_preview.get("stable_signal")
             or diagnostics_preview.get("equilibrium_detected")
             or diagnostics_preview.get("self_stabilizing")
         )
-    # Fallback: if run diagnostics did not mark the run as stable, consult the
-    # progress extras in the worker state.  When the engine emits progress
-    # updates with stability flags (stable_signal/self_stabilizing), surface
-    # these signals here.  This enables the autonomy indicator to reach
-    # Self-stabilizing (4/4) even when the history window is short.
-    if not stable_signal and has_active_context and isinstance(worker_state, dict):
-        try:
-            extra_obj = worker_state.get("extra") if isinstance(worker_state.get("extra"), dict) else None
-            prog = extra_obj.get("progress") if isinstance(extra_obj, dict) else None
-            if isinstance(prog, dict):
-                if prog.get("stable_signal") or prog.get("equilibrium_detected") or prog.get("self_stabilizing"):
-                    stable_signal = True
-        except Exception:
-            pass
 
     # Features are only credited when config is present.
     has_tools = False
