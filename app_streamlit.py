@@ -2067,12 +2067,74 @@ def _normalize_worker_state(raw: Any) -> Optional[Dict[str, Any]]:
         ws["phase_index"] = ws.get("phase")
 
     # Cycle progress
-    if "total" not in ws and "total_cycles" in ws:
-        ws["total"] = ws.get("total_cycles")
+    # Prefer total_cycles over a generic total when both are present.  A previous
+    # engine bug wrote the internal step count into "total" while the true
+    # user-requested cycle count lived in "total_cycles".  If both exist and
+    # total_cycles is smaller than total, assume total is an overcount and
+    # surface total_cycles instead.  Do not override if total is missing.
+    if "total_cycles" in ws:
+        try:
+            tot_cycles = _safe_int(ws.get("total_cycles"), None)
+            tot = _safe_int(ws.get("total"), None)
+            if tot_cycles is not None:
+                if tot is None or (isinstance(tot, int) and isinstance(tot_cycles, int) and tot_cycles <= tot):
+                    ws["total"] = tot_cycles
+        except Exception:
+            pass
 
-    # IMPORTANT: preserve 0 values
+    # Normalize current cycle progress
     if "current" not in ws or ws.get("current") is None:
         ws["current"] = _coalesce(ws.get("current_cycle"), ws.get("cycle"), ws.get("cycle_index"))
+
+    # Compute effective cycle progress when internal step counts inflate current/total.
+    # When the engine reports a larger "total" than the requested cycles, and the
+    # larger total (from the raw state) is an exact multiple of the smaller
+    # total_cycles, we infer a constant number of internal steps per cycle.  We
+    # then map the raw current step to the corresponding cycle index.  This
+    # produces a more intuitive cycle counter (1..N) for display without
+    # requiring engine modifications.  Results are stored in
+    # effective_current/effective_total.
+    try:
+        tot_cycles_int = _safe_int(ws.get("total_cycles"), None)
+        # Grab the raw counts before we may have overridden ws['total'] or ws['current']
+        raw_total_int = None
+        raw_current_int = None
+        try:
+            if isinstance(raw, dict):
+                raw_total_int = _safe_int(raw.get("total"), None)
+                raw_current_int = _safe_int(raw.get("current"), None)
+        except Exception:
+            pass
+        # Fallback to normalized totals if raw is unavailable
+        total_int = _safe_int(ws.get("total"), None)
+        cur_int = _safe_int(ws.get("current"), None)
+        # Decide which totals/currents to use for ratio computation
+        use_total_int = raw_total_int if raw_total_int is not None else total_int
+        use_cur_int = raw_current_int if raw_current_int is not None else cur_int
+        if tot_cycles_int and use_total_int and use_cur_int is not None:
+            # Compute ratio only when raw total exceeds cycle count and divides evenly
+            if use_total_int > tot_cycles_int and use_total_int % tot_cycles_int == 0:
+                ratio = use_total_int // tot_cycles_int
+                import math  # local import to avoid polluting module scope
+                # Map raw current (internal step) to cycle index.  A raw current of 0
+                # implies cycle 1 is starting.
+                cyc = max(0, use_cur_int)
+                cycle_index = int(math.ceil(cyc / float(ratio))) if ratio > 0 else 0
+                if cycle_index < 1:
+                    cycle_index = 1
+                if cycle_index > tot_cycles_int:
+                    cycle_index = tot_cycles_int
+                ws["effective_current"] = cycle_index
+                ws["effective_total"] = tot_cycles_int
+            else:
+                # When totals match or ratio cannot be computed, fall back to current and total
+                if use_cur_int is not None:
+                    ws["effective_current"] = use_cur_int
+                if use_total_int is not None:
+                    ws["effective_total"] = use_total_int
+        # If any of the above conditions fail, leave effective_* unset
+    except Exception:
+        pass
 
     return ws
 
