@@ -82,8 +82,8 @@ except Exception:  # pragma: no cover
 
 # IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
-# Replace the misÃÂ¢ÃÂÃÂencoded page icon with a valid emoji to prevent mojibake
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂ°ÃÂÃÂÃÂ¬", layout="wide")
+# Replace the misÃ¢ÂÂencoded page icon with a valid emoji to prevent mojibake
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="Ã°ÂÂÂ¬", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -120,6 +120,39 @@ def _to_ascii(text: Any) -> str:
         return ascii_bytes.decode("ascii")
     except Exception:
         return str(text) if text is not None else ""
+
+# -----------------------------------------------------------------------------
+# History helpers
+# -----------------------------------------------------------------------------
+
+def _get_cycle_history_for_run(history: List[Dict[str, Any]], run_id: Optional[str]) -> List[Dict[str, Any]]:
+    """
+    Filter a cycle history list to only include entries belonging to a specific
+    run_id.  Cycle entries are expected to be dictionaries that may include
+    identifiers such as "run_id" or "id".  When run_id is None or when no
+    entries match, the original history is returned.  This allows the UI to
+    display per-run histories instead of mixing cycles from multiple runs.
+
+    Args:
+        history: A list of cycle entry dictionaries.
+        run_id: The run identifier to filter by.
+
+    Returns:
+        A filtered list containing only entries whose run_id/id matches the
+        specified run_id, or the original history when no match is found.
+    """
+    if not run_id or not history:
+        return history
+    filtered: List[Dict[str, Any]] = []
+    for entry in history:
+        if not isinstance(entry, dict):
+            continue
+        # Common keys that might contain the run identifier
+        entry_run_id = entry.get("run_id") or entry.get("id") or entry.get("job_id")
+        if entry_run_id is not None and str(entry_run_id) == str(run_id):
+            filtered.append(entry)
+    # If matches were found, return them; otherwise return the original history
+    return filtered if filtered else history
 
 # Optional: run_jobs result loader (covers legacy filenames too)
 _queue_load_job_result = None  # type: ignore[assignment]
@@ -2077,50 +2110,6 @@ def _normalize_worker_state(raw: Any) -> Optional[Dict[str, Any]]:
     return ws
 
 
-def _normalize_progress_state(raw: Any, worker_state: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
-    """Normalize progress.json payloads and derive effective cycle progress.
-
-    The worker can emit internal step counts (e.g. 18) even when the user requested
-    a smaller cycle budget (e.g. 3). When we can infer a constant step-per-cycle
-    ratio, we compute effective_current/effective_total for the UI.
-    """
-    if not isinstance(raw, dict):
-        return None
-    ps = dict(raw)
-
-    # best-effort run id
-    rid = ps.get("run_id") or ps.get("job_id") or ps.get("id")
-    if rid is not None:
-        ps["run_id"] = str(rid)
-
-    # raw fields
-    raw_total = _safe_int(_coalesce(ps.get("total_cycles"), ps.get("total")), None)
-    raw_current = _safe_int(_coalesce(ps.get("current_cycle"), ps.get("current"), ps.get("cycle")), None)
-
-    # requested cycles from worker_state if available
-    ws = worker_state or {}
-    requested_total = _safe_int(_coalesce(ws.get("total_cycles"), ws.get("total")), None)
-
-    # If progress has explicit total_cycles that looks sane, prefer it
-    if isinstance(ps.get("total_cycles"), (int, float)):
-        requested_total = _safe_int(ps.get("total_cycles"), requested_total)
-
-    if raw_total is not None and requested_total is not None and requested_total > 0:
-        # Map step totals back to cycles when possible
-        if raw_total > requested_total and raw_total % requested_total == 0:
-            steps_per = max(1, raw_total // requested_total)
-            if raw_current is not None:
-                mapped = (raw_current + (steps_per - 1)) // steps_per
-                ps["effective_current"] = max(0, min(int(mapped), requested_total))
-                ps["effective_total"] = requested_total
-        else:
-            # Normal case
-            ps["effective_current"] = raw_current
-            ps["effective_total"] = requested_total
-
-    return ps
-
-
 def load_worker_state_unified(
     memory: MemoryStore,
     run_id_hint: Optional[str] = None,
@@ -2200,11 +2189,7 @@ def load_progress_unified(run_id: Optional[str]) -> Tuple[Optional[Dict[str, Any
     paths = _candidate_state_paths(run_id=run_id)["progress"]
     raw, p = _first_existing_json(paths)
     if isinstance(raw, dict) and raw and p is not None:
-        # Normalize to derive effective_current/effective_total when step totals are inflated.
-        # We cannot reliably load worker_state here without circular calls, so we normalize using
-        # fields present in the progress payload itself.
-        norm = _normalize_progress_state(raw)
-        return (norm or raw), str(p)
+        return raw, str(p)
 
     # Loose glob fallback (in case the worker uses custom naming)
     try:
@@ -2216,62 +2201,11 @@ def load_progress_unified(run_id: Optional[str]) -> Tuple[Optional[Dict[str, Any
         for gp in glob_candidates[:10]:
             data = _load_json_file(gp)
             if isinstance(data, dict) and data:
-                norm2 = _normalize_progress_state(data)
-                return (norm2 or data), str(gp)
+                return data, str(gp)
     except Exception:
         pass
 
     return None, "not found"
-
-
-def _get_cycle_history_for_run(memory: Any, run_id: Optional[str]) -> List[Dict[str, Any]]:
-    """Best-effort: fetch cycle history scoped to a run_id.
-
-    Older MemoryStore implementations expose get_cycle_history() with no args
-    and return a global list. Newer ones accept a run_id.
-    """
-    if not run_id:
-        run_id = None
-
-    hist: Any = []
-    fn = getattr(memory, "get_cycle_history", None)
-    if callable(fn):
-        # Prefer run_id aware signature
-        if run_id is not None:
-            try:
-                hist = fn(run_id=run_id)  # type: ignore[misc]
-            except TypeError:
-                try:
-                    hist = fn(run_id)  # type: ignore[misc]
-                except TypeError:
-                    hist = fn()  # type: ignore[misc]
-        else:
-            try:
-                hist = fn()  # type: ignore[misc]
-            except Exception:
-                hist = []
-
-    if not isinstance(hist, list):
-        hist = []
-
-    # If the store returned global history, filter when entries contain run_id.
-    if run_id is not None:
-        filtered: List[Dict[str, Any]] = []
-        for item in hist:
-            if isinstance(item, dict):
-                rid = item.get("run_id") or item.get("job_id")
-                if rid is None or str(rid) == str(run_id):
-                    filtered.append(item)
-        # Only use filtered if it actually filtered something.
-        if filtered:
-            return filtered
-
-    # Normalize dict entries only
-    out: List[Dict[str, Any]] = []
-    for item in hist:
-        if isinstance(item, dict):
-            out.append(item)
-    return out
 
 
 def _derive_active_run_id_from_queue() -> Optional[str]:
@@ -2417,11 +2351,11 @@ def compute_progress_view(
     )
 
     # Select which progress track to display
-    # Only use phase progress when there is a multiÃÂ¢ÃÂÃÂphase pipeline (phase_total > 1).
+    # Only use phase progress when there is a multiÃ¢ÂÂphase pipeline (phase_total > 1).
     phase_total_int = _safe_int(phase_tot, None)
     use_phase = phase_total_int
     # When phase_total is 1 or less, fall back to cycle progress instead of using phase progress.  This
-    # prevents singleÃÂ¢ÃÂÃÂphase runs from displaying as "1 run" when multiple cycles are present.
+    # prevents singleÃ¢ÂÂphase runs from displaying as "1 run" when multiple cycles are present.
     if phase_total_int is not None and phase_total_int > 1:
         phase_cur_raw = phase_cur
         c = _safe_int(phase_cur_raw, 0) or 0
@@ -2469,6 +2403,49 @@ def compute_progress_view(
     # Otherwise show cycle progress
     c2 = _safe_int(cur, None)
     t2 = _safe_int(tot, None)
+    # Remap internal step-based progress to user cycles when a macro cycle count
+    # is available from the prompt details.  Agents sometimes report progress in
+    # terms of a large internal step count (e.g. 18) instead of the user requested
+    # number of cycles (e.g. 3).  When a macro_total can be derived from the
+    # prompt_details (max_cycles or max_rounds), compute the effective cycle
+    # index by dividing the step count by the number of steps per cycle and
+    # rounding up.  This preserves the final total cycles while allowing the
+    # progress bar to show 1/3->2/3->3/3 instead of 1/18->2/18->... etc.
+    try:
+        macro_total_ui: Optional[int] = None
+        pd: Any = None
+        # prompt_details may exist in progress_state (ps) or worker_state (ws)
+        if isinstance(ps, dict):
+            pd = ps.get("prompt_details")  # type: ignore[attr-defined]
+        if not pd and isinstance(ws, dict):
+            pd = ws.get("prompt_details")  # type: ignore[attr-defined]
+        if isinstance(pd, dict):
+            # Determine macro_total based on mode; use max_rounds for swarm modes
+            mode_pd = pd.get("mode")
+            mc = None
+            if mode_pd == "swarm":
+                mc = pd.get("max_rounds") or pd.get("max_cycles")
+            else:
+                mc = pd.get("max_cycles") or pd.get("max_rounds")
+            macro_total_ui = _safe_int(mc, None)
+        if (
+            macro_total_ui is not None
+            and t2 is not None
+            and c2 is not None
+            and t2 > 0
+            and macro_total_ui > 0
+            and t2 > macro_total_ui
+        ):
+            import math as _math
+            try:
+                steps_per = float(t2) / float(macro_total_ui)
+                if steps_per > 0.0:
+                    c2 = int(_math.ceil(float(c2) / steps_per))
+                    t2 = macro_total_ui
+            except Exception:
+                pass
+    except Exception:
+        pass
     if c2 is None or t2 is None or t2 <= 0:
         return {"kind": "none", "current": None, "total": None, "fraction": None, "label": ""}
 
@@ -2834,23 +2811,12 @@ def compute_autonomy_view(
     has_active_context = bool(job_payload) or running_like
 
     stable_signal = False
-    # Stable-signal can come from diagnostics OR live worker_state extra.progress flags
     if has_active_context and isinstance(diagnostics_preview, dict):
         stable_signal = bool(
             diagnostics_preview.get("stable_signal")
             or diagnostics_preview.get("equilibrium_detected")
             or diagnostics_preview.get("self_stabilizing")
         )
-    if not stable_signal and has_active_context and isinstance(worker_state, dict):
-        extra = worker_state.get("extra")
-        if isinstance(extra, dict):
-            prog = extra.get("progress")
-            if isinstance(prog, dict):
-                stable_signal = bool(
-                    prog.get("stable_signal")
-                    or prog.get("equilibrium_detected")
-                    or prog.get("self_stabilizing")
-                )
 
     # Features are only credited when config is present.
     has_tools = False
@@ -3048,7 +3014,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
             # Use a readable delta symbol instead of a misencoded character
-            parts.append(f"ÃÂÃÂR {float(d_r):.3f}")
+            parts.append(f"ÃÂR {float(d_r):.3f}")
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
@@ -3861,10 +3827,22 @@ def main() -> None:
     )
 
     # Light history preview for narrative synthesis and stability/autonomy (last ~25 only)
-    history_preview: List[Dict[str, Any]] = _get_cycle_history_for_run(memory, active_run_id)[-25:]
+    history_preview: List[Dict[str, Any]] = []
+    get_cycle_history_preview = getattr(memory, "get_cycle_history", None)
+    if callable(get_cycle_history_preview):
+        try:
+            hist = get_cycle_history_preview() or []
+            if isinstance(hist, list):
+                history_preview = [e for e in hist if isinstance(e, dict)][-25:]
+        except Exception:
+            history_preview = []
     if not history_preview:
         # fallback to finished runs (small)
         history_preview = load_history_from_finished_runs(limit_runs=5)[-25:]
+
+    # Filter the preview to cycles from the active run only when available
+    if active_run_id:
+        history_preview = _get_cycle_history_for_run(history_preview, active_run_id)
 
     # Diagnostics sources (for top bar + live console)
     if active_run_id:
@@ -4403,9 +4381,6 @@ def main() -> None:
                 "goal": goal_clean,
                 "domain": domain_tag,
                 "mode": mode,
-                # For finite UI-triggered runs, never resume from a prior checkpoint by default.
-                # Resume can make a 3-cycle request look like it ran to cycle 200.
-                "resume": False,
                 "total_cycles": total_cycles_requested,
                 "max_cycles": int(cycles) if mode != "swarm" else None,
                 "max_rounds": int(cycles) if mode == "swarm" else None,
@@ -4671,13 +4646,27 @@ def main() -> None:
     st.markdown("---")
     st.subheader("History and advanced analysis")
 
-    # Cycle history should be scoped to the active run. Older stores return a
-    # global history list, which can make it look like a 3-cycle run executed
-    # 200 cycles. Use a run_id-aware loader when possible.
-    history: List[Dict[str, Any]] = _get_cycle_history_for_run(memory, run_id)
+    get_cycle_history = getattr(memory, "get_cycle_history", None)
+    history: List[Dict[str, Any]] = []
+    if callable(get_cycle_history):
+        try:
+            history = get_cycle_history() or []
+        except Exception:
+            history = []
 
     if not history:
         history = load_history_from_finished_runs()
+
+    # Filter history to the active run when available.  This prevents cycles
+    # from previous runs mixing with the currently selected run in the UI.
+    active_run_id_local: Optional[str] = None
+    try:
+        # Attempt to reuse the previously computed active_run_id from the top-level scope
+        active_run_id_local = active_run_id  # type: ignore[name-defined]
+    except Exception:
+        active_run_id_local = None
+    if active_run_id_local:
+        history = _get_cycle_history_for_run(history, active_run_id_local)
 
     if not history:
         st.write("No cycles yet.")
