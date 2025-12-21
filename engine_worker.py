@@ -83,7 +83,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from datetime import datetime
 
-# --- early import marker (helps diagnose ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂno logsÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
+# --- early import marker (helps diagnose ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂno logsÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
 try:
     _module_import_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 except Exception:
@@ -185,7 +185,7 @@ def _normalize_ui_text(s: str) -> str:
     be misinterpreted by downstream decoders. This function attempts to
     re-encode the text as UTF-8 and decode it as ASCII, ignoring any
     problematic bytes. This avoids the dreaded "mojibake" sequences such
-    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
+    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
 
     Args:
         s: The string to normalize.
@@ -1218,6 +1218,56 @@ def _emit_worker_state_file(
         log_exception("worker_state_file_failed", e, status=status, mode=mode, run_id=run_id)
 
 
+def _persist_snapshot_json(
+    *,
+    run_id: str,
+    mode: str,
+    goal: str,
+    domain: str,
+    current_cycle: Optional[int],
+    diagnostics: Optional[Dict[str, Any]],
+) -> None:
+    """
+    Persist a minimal snapshot JSON file to the runs logs snapshots directory.
+
+    This helper writes a snapshot file with basic run metadata, cycle progress,
+    and diagnostics so that the Streamlit UI can discover at least one snapshot.
+    It does not overwrite existing files and will create the snapshots folder
+    if necessary. Errors are swallowed.
+    """
+    try:
+        base_dir = _ensure_runs_logs_dir()
+        snap_dir = base_dir / "snapshots"
+        try:
+            snap_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        timestamp_str = _now_utc_iso()
+        payload: Dict[str, Any] = {
+            "timestamp": timestamp_str,
+            "run_id": run_id,
+            "mode": mode,
+            "goal": goal,
+            "domain": domain,
+            "current_cycle": current_cycle,
+            "diagnostics": diagnostics or {},
+        }
+        # Promote RYE metrics to top-level if present
+        try:
+            if isinstance(diagnostics, dict):
+                metrics = diagnostics.get("rye_metrics") or diagnostics.get("metrics")
+                if isinstance(metrics, dict):
+                    payload["metrics"] = metrics
+        except Exception:
+            pass
+        safe_ts = timestamp_str.replace(":", "_").replace("/", "_")
+        file_name = f"{run_id}_{safe_ts}.json"
+        file_path = snap_dir / file_name
+        atomic_write_json(file_path, payload, indent=2)
+    except Exception:
+        return
+
+
 def _emit_run_progress_file(
     *,
     run_id: str,
@@ -1456,8 +1506,8 @@ HARD_MAX_CYCLES: int = _parse_int_env("WORKER_HARD_MAX_CYCLES", 10_000_000)
 HARD_MAX_ROUNDS: int = _parse_int_env("WORKER_HARD_MAX_ROUNDS", HARD_MAX_CYCLES)
 # Disable the hard minute clamp by default.  When WORKER_HARD_MAX_MINUTES
 # is unset, default to 0.0 which instructs _clamp_minutes() to treat
-# time budgets as unlimited (no cap).  This allows multiÃ¢ÂÂmonth runs
-# without unexpectedly hitting the 90Ã¢ÂÂday hard cap.
+# time budgets as unlimited (no cap).  This allows multiÃÂ¢ÃÂÃÂmonth runs
+# without unexpectedly hitting the 90ÃÂ¢ÃÂÃÂday hard cap.
 HARD_MAX_MINUTES: float = _parse_float_env("WORKER_HARD_MAX_MINUTES", 0.0)
 
 
@@ -2990,6 +3040,39 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 current_cycle=len(normalized_cycles),
                 diagnostics=diag,
             )
+        else:
+            # Always write a final snapshot when a run completes to allow
+            # Streamlit to display snapshots even if disabled in config.  Compose
+            # a fallback snapshot configuration that ensures snapshots are
+            # enabled and uses a small interval so at least one snapshot is
+            # persisted.  See snapshot tab for more details.
+            try:
+                fallback_cfg = dict(snapshot_cfg) if isinstance(snapshot_cfg, dict) else {}
+            except Exception:
+                fallback_cfg = {}
+            fallback_cfg["enabled"] = True
+            # Use a small interval to ensure at least one snapshot is written
+            if "interval" not in fallback_cfg:
+                fallback_cfg["interval"] = 1
+            _write_snapshot(
+                agent,
+                run_id=run_id,
+                mode=mode,
+                goal=goal,
+                domain=domain,
+                snapshot_cfg=fallback_cfg,
+                current_cycle=len(normalized_cycles),
+                diagnostics=diag,
+            )
+            # Persist a minimal snapshot JSON to the logs for the UI to discover
+            _persist_snapshot_json(
+                run_id=run_id,
+                mode=mode,
+                goal=goal,
+                domain=domain,
+                current_cycle=len(normalized_cycles),
+                diagnostics=diag,
+            )
 
         intelligence_info = _run_post_run_intelligence(
             agent,
@@ -4512,7 +4595,7 @@ def _write_job_progress(
                 phase_idx = 0
             # Build an extra payload for stability signals.  When at least one
             # cycle has executed (current >= 1), emit flags so the UI can
-            # interpret the run as selfÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂstabilizing.  Otherwise omit these.
+            # interpret the run as selfÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂstabilizing.  Otherwise omit these.
             extra_local: Optional[Dict[str, Any]] = None
             try:
                 if isinstance(phase_idx, (int, float)) and phase_idx >= 1:
@@ -5010,7 +5093,7 @@ def _process_single_job(
                         # Use the reported status if provided; otherwise default to 'running_job'.
                         ws_status = status_local if status_local else "running_job"
                         # Normalize to supported refresh statuses used by the Streamlit UI.  The UI only
-                        # autoÃÂ¢ÃÂÃÂrefreshes for a handful of values (running, active, in_progress, working), so
+                        # autoÃÂÃÂ¢ÃÂÃÂÃÂÃÂrefreshes for a handful of values (running, active, in_progress, working), so
                         # map our internal 'running_job' status to 'running'.
                         if ws_status == "running_job":
                             ws_status = "running"
@@ -5299,6 +5382,37 @@ def _process_single_job(
                 goal=goal,
                 domain=domain,
                 snapshot_cfg=snapshot_cfg,
+                current_cycle=final_current,
+                diagnostics=diag,
+            )
+        else:
+            # Always write a final snapshot when snapshotting is disabled so that
+            # the snapshots tab is never empty.  Merge the existing
+            # snapshot configuration with a setting that forces snapshots to be
+            # enabled and ensures at least one snapshot is saved.
+            try:
+                fallback_cfg = dict(snapshot_cfg) if isinstance(snapshot_cfg, dict) else {}
+            except Exception:
+                fallback_cfg = {}
+            fallback_cfg["enabled"] = True
+            if "interval" not in fallback_cfg:
+                fallback_cfg["interval"] = 1
+            _write_snapshot(
+                agent,
+                run_id=run_id,
+                mode=mode,
+                goal=goal,
+                domain=domain,
+                snapshot_cfg=fallback_cfg,
+                current_cycle=final_current,
+                diagnostics=diag,
+            )
+            # Persist a minimal snapshot JSON for the UI snapshot listing
+            _persist_snapshot_json(
+                run_id=run_id,
+                mode=mode,
+                goal=goal,
+                domain=domain,
                 current_cycle=final_current,
                 diagnostics=diag,
             )
@@ -6271,6 +6385,35 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         current_cycle=len(normalized_cycles),
                         diagnostics=diag,
                     )
+                else:
+                    # Always write a snapshot on run completion so that the snapshot
+                    # UI has at least one entry even when snapshots are disabled.
+                    try:
+                        fallback_cfg = dict(snapshot_cfg) if isinstance(snapshot_cfg, dict) else {}
+                    except Exception:
+                        fallback_cfg = {}
+                    fallback_cfg["enabled"] = True
+                    if "interval" not in fallback_cfg:
+                        fallback_cfg["interval"] = 1
+                    _write_snapshot(
+                        agent,
+                        run_id=run_id,
+                        mode="single",
+                        goal=goal,
+                        domain=domain,
+                        snapshot_cfg=fallback_cfg,
+                        current_cycle=len(normalized_cycles),
+                        diagnostics=diag,
+                    )
+                    # Persist a minimal snapshot JSON for Streamlit snapshot discovery
+                    _persist_snapshot_json(
+                        run_id=run_id,
+                        mode="single",
+                        goal=goal,
+                        domain=domain,
+                        current_cycle=len(normalized_cycles),
+                        diagnostics=diag,
+                    )
 
                 intelligence_info = _run_post_run_intelligence(
                     agent,
@@ -6665,6 +6808,35 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         goal=goal,
                         domain=domain,
                         snapshot_cfg=snapshot_cfg,
+                        current_cycle=len(normalized_cycles),
+                        diagnostics=diag,
+                    )
+                else:
+                    # Always write a snapshot when a swarm run completes so the
+                    # snapshots tab is populated even if snapshots are disabled.
+                    try:
+                        fallback_cfg = dict(snapshot_cfg) if isinstance(snapshot_cfg, dict) else {}
+                    except Exception:
+                        fallback_cfg = {}
+                    fallback_cfg["enabled"] = True
+                    if "interval" not in fallback_cfg:
+                        fallback_cfg["interval"] = 1
+                    _write_snapshot(
+                        agent,
+                        run_id=run_id,
+                        mode="swarm",
+                        goal=goal,
+                        domain=domain,
+                        snapshot_cfg=fallback_cfg,
+                        current_cycle=len(normalized_cycles),
+                        diagnostics=diag,
+                    )
+                    # Persist a minimal snapshot JSON to the logs for UI listing
+                    _persist_snapshot_json(
+                        run_id=run_id,
+                        mode="swarm",
+                        goal=goal,
+                        domain=domain,
                         current_cycle=len(normalized_cycles),
                         diagnostics=diag,
                     )
@@ -7325,6 +7497,36 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         goal=goal,
                         domain=domain,
                         snapshot_cfg=snapshot_cfg,
+                        current_cycle=len(normalized_cycles),
+                        diagnostics=diag,
+                    )
+                else:
+                    # Always write a snapshot when a meta run completes so the
+                    # snapshots tab can display at least one snapshot even when
+                    # snapshots are disabled in the config.
+                    try:
+                        fallback_cfg = dict(snapshot_cfg) if isinstance(snapshot_cfg, dict) else {}
+                    except Exception:
+                        fallback_cfg = {}
+                    fallback_cfg["enabled"] = True
+                    if "interval" not in fallback_cfg:
+                        fallback_cfg["interval"] = 1
+                    _write_snapshot(
+                        agent,
+                        run_id=run_id,
+                        mode="meta",
+                        goal=goal,
+                        domain=domain,
+                        snapshot_cfg=fallback_cfg,
+                        current_cycle=len(normalized_cycles),
+                        diagnostics=diag,
+                    )
+                    # Persist a minimal snapshot JSON for Streamlit discovery
+                    _persist_snapshot_json(
+                        run_id=run_id,
+                        mode="meta",
+                        goal=goal,
+                        domain=domain,
                         current_cycle=len(normalized_cycles),
                         diagnostics=diag,
                     )
