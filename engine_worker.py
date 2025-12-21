@@ -4878,15 +4878,20 @@ def _process_single_job(
                 nonlocal last_progress_current, last_progress_total
                 try:
                     # Extract current/total cycle values from the update. Fallback to macro_total.
+                    # Extract progress strictly from cycle-aware fields.  In earlier versions
+                    # of the engine the generic "current" and "total" keys were overloaded
+                    # to reflect internal phase or step counts.  This caused the UI to
+                    # display inflated values (e.g. 18 instead of 3 cycles) because the
+                    # total number of internal steps was interpreted as cycles.  To avoid
+                    # that confusion, prefer cycle-specific keys and avoid using
+                    # update["current"]/update["total"] when inferring cycle progress.
                     cur_val = (
                         update.get("current_cycle")
                         or update.get("cycle")
-                        or update.get("current")
                         or update.get("progress_cycle")
                     )
                     tot_val = (
                         update.get("total_cycles")
-                        or update.get("total")
                         or update.get("max_cycles")
                         or update.get("progress_total")
                         or macro_total
