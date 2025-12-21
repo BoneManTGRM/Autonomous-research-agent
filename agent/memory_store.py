@@ -1043,6 +1043,84 @@ class MemoryStore:
         return self.prune_history(threshold=threshold, max_keep=max_keep)
 
     # ------------------------------------------------------------------
+    # Cycle history writers (for engine_worker)
+    # ------------------------------------------------------------------
+    def write_cycle_history(self, run_id: str, cycles: List[Dict[str, Any]]) -> None:
+        """
+        Persist a list of cycle logs for a given run.  This method is used by
+        engine_worker to save cycles in bulk.  It updates both the per-run
+        ``cycle_history`` and a flattened ``cycles`` list used by the UI.
+
+        Args:
+            run_id: The run identifier associated with the cycles.
+            cycles: A list of cycle dictionaries to append.
+        """
+        if not isinstance(cycles, list) or not cycles:
+            return
+        try:
+            # Ensure cycle_history structure exists
+            hist: Dict[str, List[Dict[str, Any]]] = self._data.setdefault("cycle_history", {})  # type: ignore[assignment]
+            lst = hist.setdefault(run_id, [])
+            for c in cycles:
+                if not isinstance(c, dict):
+                    continue
+                # Attach run_id if missing for per-run filtering
+                if run_id and isinstance(c, dict) and c.get("run_id") is None:
+                    c["run_id"] = run_id
+                lst.append(c)
+            # Bound per-run list growth
+            if len(lst) > MAX_CYCLES:
+                hist[run_id] = lst[-MAX_CYCLES:]
+            # Also append to flattened cycles list for global history
+            flat = self._data.setdefault("cycles", [])
+            if not isinstance(flat, list):
+                flat = []
+            flat.extend(cycles)
+            # Bound flattened history
+            if len(flat) > MAX_CYCLES:
+                flat = flat[-MAX_CYCLES:]
+            self._data["cycles"] = flat
+            self._save()
+        except Exception:
+            # Fail silently to avoid interrupting caller
+            return
+
+    def append_cycle_log(self, run_id: str, cycle: Dict[str, Any], index: Optional[int] = None) -> None:
+        """
+        Append a single cycle log entry for a given run.  This mirrors
+        ``write_cycle_history`` but for one cycle at a time.  engine_worker
+        calls this when writing cycles sequentially.
+
+        Args:
+            run_id: The run identifier associated with the cycle.
+            cycle: The cycle dictionary to append.
+            index: Optional index hint (ignored).
+        """
+        if not isinstance(cycle, dict):
+            return
+        try:
+            # Attach run_id if missing
+            if run_id and cycle.get("run_id") is None:
+                cycle["run_id"] = run_id
+            # Update per-run cycle_history
+            hist: Dict[str, List[Dict[str, Any]]] = self._data.setdefault("cycle_history", {})  # type: ignore[assignment]
+            lst = hist.setdefault(run_id, [])
+            lst.append(cycle)
+            if len(lst) > MAX_CYCLES:
+                hist[run_id] = lst[-MAX_CYCLES:]
+            # Update flattened cycles list
+            flat = self._data.setdefault("cycles", [])
+            if not isinstance(flat, list):
+                flat = []
+            flat.append(cycle)
+            if len(flat) > MAX_CYCLES:
+                flat = flat[-MAX_CYCLES:]
+            self._data["cycles"] = flat
+            self._save()
+        except Exception:
+            return
+
+    # ------------------------------------------------------------------
     # Internal helpers for goal index
     # ------------------------------------------------------------------
     def _touch_goal_index(
