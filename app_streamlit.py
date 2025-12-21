@@ -2817,6 +2817,23 @@ def compute_autonomy_view(
             or diagnostics_preview.get("equilibrium_detected")
             or diagnostics_preview.get("self_stabilizing")
         )
+    # Fallback: if no stable signal was detected from diagnostics, attempt to
+    # derive stability from the worker_state progress.  In some cases
+    # diagnostics_preview may not yet include stable flags, but the
+    # worker_state's extra.progress section may contain them.  This
+    # ensures the autonomy score can advance to "Self-stabilizing" (4/4)
+    # when the engine sets stability flags in the worker_state, even
+    # if diagnostics are lagging.  Errors are swallowed.
+    if not stable_signal and has_active_context and isinstance(worker_state, dict):
+        try:
+            extra = worker_state.get("extra") or {}
+            if isinstance(extra, dict):
+                progress = extra.get("progress") or {}
+                if isinstance(progress, dict):
+                    if progress.get("stable_signal") or progress.get("equilibrium_detected") or progress.get("self_stabilizing"):
+                        stable_signal = True
+        except Exception:
+            pass
 
     # Features are only credited when config is present.
     has_tools = False
@@ -3366,7 +3383,21 @@ def load_verification_log() -> List[Dict[str, Any]]:
 
 def equilibrium_from_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Optional[float]]:
     """Extract equilibrium related metrics from a snapshot if present."""
-    metrics = snapshot.get("metrics") or snapshot.get("rye_metrics") or {}
+    # Extract metrics from a snapshot.  In some cases the snapshot may not include a
+    # dedicated 'metrics' key, but diagnostic values may be flattened into
+    # 'diagnostics' or the top-level snapshot.  Fall back through several
+    # potential sources.
+    metrics: Any = snapshot.get("metrics") or snapshot.get("rye_metrics")
+    if metrics is None:
+        # Fallback to diagnostics dict if present
+        diag_val = snapshot.get("diagnostics")
+        if isinstance(diag_val, dict):
+            metrics = diag_val
+        # As a last resort, consider the snapshot itself as the metrics dict if it
+        # contains expected fields; this allows equilibrium views to work even when
+        # metrics are flattened.
+        elif isinstance(snapshot, dict):
+            metrics = snapshot
     if not isinstance(metrics, dict):
         metrics = {}
     return {
