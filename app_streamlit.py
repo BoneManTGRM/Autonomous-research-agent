@@ -82,8 +82,8 @@ except Exception:  # pragma: no cover
 
 # IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
-# Replace the misâencoded page icon with a valid emoji to prevent mojibake
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ð¬", layout="wide")
+# Replace the misÃ¢ÂÂencoded page icon with a valid emoji to prevent mojibake
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="Ã°ÂÂÂ¬", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -2318,11 +2318,11 @@ def compute_progress_view(
     )
 
     # Select which progress track to display
-    # Only use phase progress when there is a multiâphase pipeline (phase_total > 1).
+    # Only use phase progress when there is a multiÃ¢ÂÂphase pipeline (phase_total > 1).
     phase_total_int = _safe_int(phase_tot, None)
     use_phase = phase_total_int
     # When phase_total is 1 or less, fall back to cycle progress instead of using phase progress.  This
-    # prevents singleâphase runs from displaying as "1 run" when multiple cycles are present.
+    # prevents singleÃ¢ÂÂphase runs from displaying as "1 run" when multiple cycles are present.
     if phase_total_int is not None and phase_total_int > 1:
         phase_cur_raw = phase_cur
         c = _safe_int(phase_cur_raw, 0) or 0
@@ -2938,7 +2938,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
             # Use a readable delta symbol instead of a misencoded character
-            parts.append(f"ÎR {float(d_r):.3f}")
+            parts.append(f"ÃÂR {float(d_r):.3f}")
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
