@@ -74,23 +74,45 @@ class PubMedTool:
     def search(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
         """Search PubMed and return a list of structured results.
 
-        Each result is a dict:
-            {
-              "title":   ...,
-              "snippet": ...,
-              "url":     ...,
-              "source":  "pubmed",
-              "pmid":    ...,
-            }
+        This method sanitizes the incoming query to avoid overly long or malformed
+        search terms being sent to the NCBI API. It also guards against network
+        errors by returning a stubbed result instead of raising exceptions.
+
+        Each result is a dict with the following keys:
+
+            - ``title``: Title of the PubMed article (``"No title"`` if missing).
+            - ``snippet``: A short snippet derived from the first author or source journal.
+            - ``url``: Direct link to the PubMed abstract.
+            - ``source``: Constant string ``"pubmed"``.
+            - ``pmid``: PubMed identifier for the article.
+
+        Args:
+            query: User supplied query string. Newlines and excessive whitespace
+                will be collapsed and the string will be truncated to 200 characters.
+            max_results: Maximum number of PubMed records to return.
+
+        Returns:
+            A list of result dictionaries. If the search fails, a single stub
+            record will be returned containing error details.
         """
+        # Defensive: return empty list on falsy query
         if not query:
             return []
+
+        # ------------------------------------------------------------------
+        # Sanitize the query
+        # ------------------------------------------------------------------
+        # Collapse newlines and excessive whitespace
+        sanitized = " ".join(str(query).strip().split())
+        # Truncate to a reasonable length to avoid hitting URL limits or
+        # triggering PubMed errors (200 chars is often sufficient)
+        sanitized = sanitized[:200]
 
         try:
             # Step 1: esearch to get PMIDs
             params = {
                 "db": self.DB,
-                "term": query,
+                "term": sanitized,
                 "retmax": max_results,
                 "retmode": "json",
             }
@@ -133,7 +155,7 @@ class PubMedTool:
             # Safe fallback: stubbed result so TGRM does not break
             return [
                 {
-                    "title": f"[STUB] PubMed error for query='{query}'",
+                    "title": f"[STUB] PubMed error for query='{sanitized}'",
                     "snippet": f"PubMed request failed: {e}",
                     "url": "",
                     "source": "pubmed",
