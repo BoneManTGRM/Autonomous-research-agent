@@ -2447,9 +2447,10 @@ def _write_snapshot(
         return
 
     try:
-        # Determine snapshot parameters: label/tag, included sections and snapshot cap.
-        tag = snapshot_cfg.get("tag")
-        tag_str = str(tag) if isinstance(tag, (str, int, float)) else None
+        # Determine snapshot parameters.  Ignore tags entirely for snapshots.
+        # Older configs may include a "tag" or label, but we intentionally
+        # suppress it so snapshots are not labelled with user-provided tags.
+        tag_str = None
         include_sections = snapshot_cfg.get("include_sections")
         # Keep last_n or max_snapshots_per_run controls how many snapshots to retain
         max_snaps_raw = snapshot_cfg.get("keep_last_n") or snapshot_cfg.get("max_snapshots_per_run")
@@ -2482,7 +2483,7 @@ def _write_snapshot(
                     "enabled": True,
                     "include_sections": include_sections,
                     "max_snapshots_per_run": max_snaps,
-                    "label": tag_str,
+                    # Do not include a label; omit tags entirely
                 }
                 ms.maybe_write_snapshot_from_config(
                     run_id=run_id,
@@ -2506,8 +2507,7 @@ def _write_snapshot(
             "current_cycle": current_cycle,
             "diagnostics": diagnostics or {},
         }
-        if tag_str:
-            snap["tag"] = tag_str
+        # Do not include a tag field in the inline snapshot
         data_attr = getattr(ms, "data", getattr(ms, "_data", None))
         if isinstance(data_attr, dict):
             all_snaps = data_attr.setdefault("snapshots", {})
