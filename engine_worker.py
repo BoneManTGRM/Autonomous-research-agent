@@ -3289,7 +3289,6 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         }
 
         if snapshot_enabled:
-            # Use safe wrapper to ensure snapshot errors do not crash the worker
             _safe_write_snapshot(
                 agent,
                 run_id=run_id,
@@ -5128,7 +5127,6 @@ def _process_single_job(
                             interval = 25
                         try:
                             if interval and interval > 0 and cur_int % interval == 0:
-                                # Use safe wrapper to avoid snapshot errors crashing the worker
                                 _safe_write_snapshot(
                                     agent,
                                     run_id=run_id,
@@ -5445,7 +5443,6 @@ def _process_single_job(
         )
 
         if snapshot_enabled:
-            # Use safe wrapper to avoid snapshot errors crashing the worker
             _safe_write_snapshot(
                 agent,
                 run_id=run_id,
@@ -5480,7 +5477,6 @@ def _process_single_job(
             fallback_cfg["enabled"] = True
             if "interval" not in fallback_cfg:
                 fallback_cfg["interval"] = 1
-            # Use safe wrapper to avoid snapshot errors crashing the worker
             _safe_write_snapshot(
                 agent,
                 run_id=run_id,
@@ -6462,7 +6458,6 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 )
 
                 if snapshot_enabled:
-                    # Use safe wrapper to avoid snapshot errors crashing the worker
                     _safe_write_snapshot(
                         agent,
                         run_id=run_id,
@@ -6495,7 +6490,6 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     fallback_cfg["enabled"] = True
                     if "interval" not in fallback_cfg:
                         fallback_cfg["interval"] = 1
-                    # Use safe wrapper to avoid snapshot errors crashing the worker
                     _safe_write_snapshot(
                         agent,
                         run_id=run_id,
@@ -6905,7 +6899,6 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 )
 
                 if snapshot_enabled:
-                    # Use safe wrapper to avoid snapshot errors crashing the worker
                     _safe_write_snapshot(
                         agent,
                         run_id=run_id,
@@ -6938,7 +6931,6 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     fallback_cfg["enabled"] = True
                     if "interval" not in fallback_cfg:
                         fallback_cfg["interval"] = 1
-                    # Use safe wrapper to avoid snapshot errors crashing the worker
                     _safe_write_snapshot(
                         agent,
                         run_id=run_id,
@@ -7611,7 +7603,6 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 )
 
                 if snapshot_enabled:
-                    # Use safe wrapper to avoid snapshot errors crashing the worker
                     _safe_write_snapshot(
                         agent,
                         run_id=run_id,
@@ -7645,7 +7636,6 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     fallback_cfg["enabled"] = True
                     if "interval" not in fallback_cfg:
                         fallback_cfg["interval"] = 1
-                    # Use safe wrapper to avoid snapshot errors crashing the worker
                     _safe_write_snapshot(
                         agent,
                         run_id=run_id,
