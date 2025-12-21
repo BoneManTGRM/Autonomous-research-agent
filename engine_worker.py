@@ -1268,6 +1268,14 @@ def _persist_snapshot_json(
                     or diagnostics.get("rye")
                 )
                 if isinstance(metrics, dict):
+                    # Normalize stability index naming differences.  Some
+                    # diagnostics emit "stability_idx" instead of
+                    # "stability_index".  Copy the value over if missing.
+                    try:
+                        if "stability_index" not in metrics and "stability_idx" in metrics:
+                            metrics["stability_index"] = metrics.get("stability_idx")
+                    except Exception:
+                        pass
                     payload["metrics"] = metrics
         except Exception:
             pass
