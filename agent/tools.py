@@ -53,6 +53,15 @@ try:
 except Exception:
     pd = None  # type: ignore
 
+# Optional PubMed ingestion tool. This is loaded lazily to allow
+# deployments without PubMed support to degrade gracefully. When the
+# import fails, PubMedTool will be set to None and pubmed_search will
+# return stubbed results.
+try:
+    from .tools_pubmed import PubMedTool  # type: ignore
+except Exception:
+    PubMedTool = None  # type: ignore
+
 # Optional SQLAlchemy for richer SQL
 try:
     import sqlalchemy  # type: ignore
@@ -1285,6 +1294,137 @@ def web_search_tool(
 
 
 # ----------------------------------------------------------
+# PubMed search capability
+# ----------------------------------------------------------
+
+def pubmed_search(
+    query: str,
+    *,
+    tool_usage: Optional[ToolUsage] = None,
+    max_results: int = 5,
+    **extra: Any,
+) -> Dict[str, Any]:
+    """
+    Unified PubMed search entry point for the agent.
+
+    This wraps the PubMedTool defined in tools_pubmed.py and returns a
+    dictionary structure consistent with other search tools. It records
+    pubmed-specific tool usage and handles graceful degradation when the
+    PubMed client is unavailable or disabled via environment variables.
+
+    Args:
+        query: Free text query string to send to PubMed. This will be
+            sanitized internally by PubMedTool to remove excessive
+            whitespace and truncate long queries.
+        tool_usage: Optional ToolUsage tracker for accounting energy usage.
+        max_results: Maximum number of results to retrieve (default 5).
+        **extra: Ignored, present for signature compatibility.
+
+    Returns:
+        A dict with the following keys:
+            - ``query``: the original query string.
+            - ``stubbed``: boolean indicating whether results are real or stubbed.
+            - ``results``: list of result dicts with title, snippet, url, source, pmid.
+            - Additional metadata fields (response_time, request_id, etc.) set to None.
+            - ``error``: populated only when stubbed is True and there is an error.
+    """
+    # Record usage tokens for query text
+    if tool_usage is not None:
+        tool_usage.record_pubmed_call(query)
+
+    # Global disable flag for offline or analysis-only runs
+    disable_flag = str(os.getenv("DISABLE_PUBMED_SEARCH", "")).strip().lower()
+    if disable_flag in {"1", "true", "yes", "on"}:
+        return {
+            "query": query,
+            "stubbed": True,
+            "error": "PubMed search is disabled by DISABLE_PUBMED_SEARCH environment variable",
+            "results": [],
+            "response_time": None,
+            "request_id": None,
+            "info_gain": None,
+            "search_energy": None,
+            "difficulty": None,
+            "semantic_diversity": None,
+        }
+
+    # If the PubMed tool cannot be imported, degrade gracefully
+    if PubMedTool is None:
+        return {
+            "query": query,
+            "stubbed": True,
+            "error": "PubMedTool not available (dependency missing)",
+            "results": [],
+            "response_time": None,
+            "request_id": None,
+            "info_gain": None,
+            "search_energy": None,
+            "difficulty": None,
+            "semantic_diversity": None,
+        }
+
+    # Perform the search via PubMedTool
+    import time
+    started = time.time()
+    try:
+        # Instantiate a fresh PubMedTool; email/api_key read from env
+        tool = PubMedTool()
+        results_list = tool.search(query, max_results=max_results)
+        elapsed = time.time() - started
+        # Determine if stubbed by checking for stub marker in first title
+        stubbed = True
+        if results_list:
+            first_title = results_list[0].get("title", "")
+            if not first_title.startswith("[STUB]"):
+                stubbed = False
+        return {
+            "query": query,
+            "stubbed": stubbed,
+            "results": results_list,
+            "response_time": elapsed,
+            "request_id": None,
+            "info_gain": None,
+            "search_energy": None,
+            "difficulty": None,
+            "semantic_diversity": None,
+        }
+    except Exception as e:
+        # On unexpected error, return a stub result with error message
+        elapsed = time.time() - started
+        return {
+            "query": query,
+            "stubbed": True,
+            "error": f"PubMed search error: {e}",
+            "results": [],
+            "response_time": elapsed,
+            "request_id": None,
+            "info_gain": None,
+            "search_energy": None,
+            "difficulty": None,
+            "semantic_diversity": None,
+        }
+
+
+def pubmed_search_tool(
+    query: str,
+    *,
+    tool_usage: Optional[ToolUsage] = None,
+    max_results: int = 5,
+    **extra: Any,
+) -> Dict[str, Any]:
+    """
+    Thin wrapper used by tgrm_loop and other modules that expect a function
+    named pubmed_search_tool. Delegates to pubmed_search with the same signature.
+    """
+    return pubmed_search(
+        query=query,
+        tool_usage=tool_usage,
+        max_results=max_results,
+        **extra,
+    )
+
+
+# ----------------------------------------------------------
 # Toolbelt facade for CoreAgent
 # ----------------------------------------------------------
 
@@ -1362,6 +1502,22 @@ TOOL_REGISTRY: Dict[str, Dict[str, Any]] = {
         "kind": "web",
         "class": BrowserTool,
         "description": "Alias indicating internet browsing/scraping.",
+    },
+
+    # PubMed search capabilities (independent of Tavily/web)
+    # The "pubmed" key exposes the core PubMed tool class for direct use
+    # and the fn uses pubmed_search_tool to provide a unified search API.
+    "pubmed": {
+        "kind": "pubmed",
+        "class": PubMedTool,
+        "description": "PubMed search tool using NCBI E-utilities (scientific literature).",
+        "fn": pubmed_search_tool,
+    },
+    "pubmed_search": {
+        "kind": "pubmed",
+        "class": PubMedTool,
+        "description": "Alias for the PubMed search tool.",
+        "fn": pubmed_search_tool,
     },
 
     # Code / sandbox capabilities
