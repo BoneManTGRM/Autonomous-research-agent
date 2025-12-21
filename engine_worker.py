@@ -83,7 +83,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 from datetime import datetime
 
-# --- early import marker (helps diagnose ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂno logsÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
+# --- early import marker (helps diagnose ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂno logsÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
 try:
     _module_import_utc = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 except Exception:
@@ -185,7 +185,7 @@ def _normalize_ui_text(s: str) -> str:
     be misinterpreted by downstream decoders. This function attempts to
     re-encode the text as UTF-8 and decode it as ASCII, ignoring any
     problematic bytes. This avoids the dreaded "mojibake" sequences such
-    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
+    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
 
     Args:
         s: The string to normalize.
@@ -1456,8 +1456,8 @@ HARD_MAX_CYCLES: int = _parse_int_env("WORKER_HARD_MAX_CYCLES", 10_000_000)
 HARD_MAX_ROUNDS: int = _parse_int_env("WORKER_HARD_MAX_ROUNDS", HARD_MAX_CYCLES)
 # Disable the hard minute clamp by default.  When WORKER_HARD_MAX_MINUTES
 # is unset, default to 0.0 which instructs _clamp_minutes() to treat
-# time budgets as unlimited (no cap).  This allows multiÃÂ¢ÃÂÃÂmonth runs
-# without unexpectedly hitting the 90ÃÂ¢ÃÂÃÂday hard cap.
+# time budgets as unlimited (no cap).  This allows multiÃ¢ÂÂmonth runs
+# without unexpectedly hitting the 90Ã¢ÂÂday hard cap.
 HARD_MAX_MINUTES: float = _parse_float_env("WORKER_HARD_MAX_MINUTES", 0.0)
 
 
@@ -2704,12 +2704,25 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     preset_snapshot = preset_cfg.get("snapshot")
     if isinstance(preset_snapshot, dict):
         snapshot_cfg.update(preset_snapshot)
-    job_snapshot = cfg.get("snapshot")
+    # Merge job-provided snapshot config.  Accept both "snapshot" and
+    # "snapshot_config" keys and normalize common option names.
+    job_snapshot = cfg.get("snapshot") or cfg.get("snapshot_config")
     if isinstance(job_snapshot, dict):
         snapshot_cfg.update(job_snapshot)
-    # Enable snapshots by default.  If snapshot_enabled is explicitly set
-    # in the job config, respect it; otherwise default to True so that
-    # snapshots are written unless explicitly disabled.
+    # Normalize interval: prefer "interval", but map "every_n_cycles" when present.
+    if "every_n_cycles" in snapshot_cfg and "interval" not in snapshot_cfg:
+        try:
+            snapshot_cfg["interval"] = int(snapshot_cfg.get("every_n_cycles"))
+        except Exception:
+            pass
+    # Normalize keep_last_n alias: map "max_snapshots_per_run" to "keep_last_n" when missing.
+    if "max_snapshots_per_run" in snapshot_cfg and "keep_last_n" not in snapshot_cfg:
+        try:
+            snapshot_cfg["keep_last_n"] = int(snapshot_cfg.get("max_snapshots_per_run"))
+        except Exception:
+            pass
+    # Snapshots are enabled by default unless explicitly disabled via
+    # cfg["snapshot_enabled"] or snapshot_cfg["enabled"].
     snapshot_enabled = bool(cfg.get("snapshot_enabled", snapshot_cfg.get("enabled", True)))
     snapshot_cfg["enabled"] = snapshot_enabled
 
@@ -2787,7 +2800,10 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         except Exception:
             stop_rye = None
 
-    resume = bool(cfg.get("resume", True))
+    # Default resume to False for direct jobs unless explicitly set in the
+    # configuration.  This prevents automatic resumption of prior run
+    # checkpoints.  To enable resume, set cfg["resume"] to True.
+    resume = bool(cfg.get("resume", False))
     watchdog_minutes = float(cfg.get("watchdog_minutes", 5.0))
 
     cfg_for_sources = dict(base_config)
@@ -4496,7 +4512,7 @@ def _write_job_progress(
                 phase_idx = 0
             # Build an extra payload for stability signals.  When at least one
             # cycle has executed (current >= 1), emit flags so the UI can
-            # interpret the run as selfÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂstabilizing.  Otherwise omit these.
+            # interpret the run as selfÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂstabilizing.  Otherwise omit these.
             extra_local: Optional[Dict[str, Any]] = None
             try:
                 if isinstance(phase_idx, (int, float)) and phase_idx >= 1:
@@ -4654,38 +4670,35 @@ def _process_single_job(
         runtime_profile = cfg.get("runtime_profile", preset_cfg.get("default_runtime_profile"))
 
         snapshot_cfg: Dict[str, Any] = {}
+        # Merge snapshot configurations from preset and job.  The job may specify
+        # configuration under either the "snapshot" key or the deprecated
+        # "snapshot_config" key.  To avoid confusing the worker, merge these
+        # dictionaries here and normalize common option names.  The keys
+        # "every_n_cycles" and "interval" are treated as synonyms; likewise
+        # "keep_last_n" and "max_snapshots_per_run".  Snapshots are enabled by
+        # default unless explicitly disabled via "snapshot_enabled".
         preset_snapshot = preset_cfg.get("snapshot")
         if isinstance(preset_snapshot, dict):
             snapshot_cfg.update(preset_snapshot)
-        # UI can provide snapshot configuration under multiple keys.
-        # Keep backward compatibility while accepting the Streamlit UI shape:
-        #   snapshot_config: { enabled: bool, every_n_cycles: int, ... }
-        # as well as the older:
-        #   snapshot: { enabled: bool, interval: int, ... }
-        job_snapshot = cfg.get("snapshot")
+        # Job can set a full snapshot config in "snapshot" or in
+        # "snapshot_config".  Apply both if present.
+        job_snapshot = cfg.get("snapshot") or cfg.get("snapshot_config")
         if isinstance(job_snapshot, dict):
             snapshot_cfg.update(job_snapshot)
-        job_snapshot2 = cfg.get("snapshot_config")
-        if isinstance(job_snapshot2, dict):
-            # Normalize key names
-            if "enabled" in job_snapshot2:
-                snapshot_cfg["enabled"] = bool(job_snapshot2.get("enabled"))
-            if "every_n_cycles" in job_snapshot2 and "interval" not in job_snapshot2:
-                try:
-                    snapshot_cfg["interval"] = int(job_snapshot2.get("every_n_cycles"))
-                except Exception:
-                    pass
-            # Merge any remaining keys
-            for k, v in job_snapshot2.items():
-                if k in {"every_n_cycles"}:
-                    continue
-                snapshot_cfg.setdefault(str(k), v)
-
-        # Snapshots enabled flag can also be provided as snapshots_enabled.
-        if "snapshots_enabled" in cfg and "snapshot_enabled" not in cfg:
-            cfg["snapshot_enabled"] = bool(cfg.get("snapshots_enabled"))
-
-        # Snapshots are enabled by default unless explicitly disabled.
+        # Normalize interval: "every_n_cycles" -> "interval"
+        if "every_n_cycles" in snapshot_cfg and "interval" not in snapshot_cfg:
+            try:
+                snapshot_cfg["interval"] = int(snapshot_cfg.get("every_n_cycles"))
+            except Exception:
+                pass
+        # Normalize keep_last_n: "max_snapshots_per_run" -> "keep_last_n"
+        if "max_snapshots_per_run" in snapshot_cfg and "keep_last_n" not in snapshot_cfg:
+            try:
+                snapshot_cfg["keep_last_n"] = int(snapshot_cfg.get("max_snapshots_per_run"))
+            except Exception:
+                pass
+        # Snapshots are enabled by default unless explicitly disabled in the
+        # job configuration or in the merged snapshot_cfg.
         snapshot_enabled = bool(cfg.get("snapshot_enabled", snapshot_cfg.get("enabled", True)))
         snapshot_cfg["enabled"] = snapshot_enabled
 
@@ -4763,9 +4776,9 @@ def _process_single_job(
             except Exception:
                 stop_rye = None
 
-        # For finite queued runs, default resume to False.
-        # Resume can cause the cycle table to continue from a prior checkpoint
-        # (e.g. starting at cycle 198 and ending at 200 even when you requested 3).
+        # When resume is not specified, default to False so new jobs do not
+        # accidentally pick up prior checkpoints.  The caller can explicitly
+        # enable resume in the job config if desired.
         resume = bool(cfg.get("resume", False))
         watchdog_minutes = float(cfg.get("watchdog_minutes", 5.0))
 
@@ -4903,58 +4916,51 @@ def _process_single_job(
             def _progress_cb(update: Dict[str, Any]) -> None:
                 nonlocal last_progress_current, last_progress_total
                 try:
-                    # Extract cycle progress.
-                    # Many CoreAgent engines emit *internal step* counters using generic
-                    # keys like current/total. We only trust explicit cycle keys when
-                    # present. Otherwise we infer a steps-per-cycle ratio and map steps
-                    # back onto user-requested cycles (macro_total).
-
-                    raw_cur = (
+                    # Extract current/total cycle values from the update. Fallback to macro_total.
+                    cur_val = (
                         update.get("current_cycle")
                         or update.get("cycle")
-                        or update.get("progress_cycle")
                         or update.get("current")
+                        or update.get("progress_cycle")
                     )
-                    raw_tot = (
+                    tot_val = (
                         update.get("total_cycles")
+                        or update.get("total")
                         or update.get("max_cycles")
                         or update.get("progress_total")
-                        or update.get("total")
+                        or macro_total
                     )
-
-                    raw_cur_i = _to_int(raw_cur)
-                    raw_tot_i = _to_int(raw_tot)
-
-                    # Default to the user-requested total cycles
-                    tot_int: Optional[int] = macro_total
-                    cur_int: Optional[int] = raw_cur_i
-
-                    # If the engine is emitting step totals (e.g., 18 when user asked 3),
-                    # map step index -> cycle index.
+                    cur_int = _to_int(cur_val)
+                    tot_int = _to_int(tot_val)
+                    # Map step-based progress to cycle progress. Some agents report progress
+                    # in terms of internal steps which may exceed the user requested number of
+                    # cycles (macro_total). When this happens, compute an approximate cycle
+                    # index by dividing the step count by the number of steps per cycle and
+                    # rounding up. Otherwise retain the reported current cycle.
+                    eff_cur = cur_int
+                    eff_tot = macro_total
                     try:
-                        if (
-                            isinstance(raw_tot_i, int)
-                            and isinstance(macro_total, int)
-                            and raw_tot_i > macro_total
-                            and macro_total > 0
-                            and raw_tot_i % macro_total == 0
-                        ):
-                            steps_per_cycle = max(1, raw_tot_i // macro_total)
-                            if isinstance(raw_cur_i, int) and raw_cur_i is not None:
-                                # steps are usually 0-based or 1-based; ceil division is robust
-                                mapped = (raw_cur_i + (steps_per_cycle - 1)) // steps_per_cycle
-                                cur_int = max(0, min(int(mapped), macro_total))
+                        # Only remap when both current and total are valid and total exceeds
+                        # the macro_total. Otherwise treat the reported current as the cycle.
+                        if cur_int is not None and tot_int is not None and isinstance(macro_total, (int, float)) and macro_total:
+                            if tot_int > macro_total and tot_int > 0:
+                                import math as _math
+                                steps_per_cycle = float(tot_int) / float(macro_total)
+                                if steps_per_cycle > 0.0:
+                                    eff_cur = int(_math.ceil(float(cur_int) / steps_per_cycle))
+                                else:
+                                    eff_cur = cur_int
+                            else:
+                                eff_cur = cur_int
+                        else:
+                            eff_cur = cur_int
                     except Exception:
-                        pass
-
-                    # If we got an explicit total_cycles that is small and sane, honor it.
-                    if isinstance(raw_tot_i, int) and raw_tot_i > 0 and raw_tot_i <= macro_total:
-                        tot_int = raw_tot_i
-                    # Update last progress values
-                    if cur_int is not None:
-                        last_progress_current = cur_int
-                    if tot_int is not None:
-                        last_progress_total = tot_int
+                        eff_cur = cur_int
+                    # Update last progress values based on effective cycle progress
+                    if eff_cur is not None:
+                        last_progress_current = eff_cur
+                    if macro_total is not None:
+                        last_progress_total = macro_total
                     # Determine status/note
                     status_local = update.get("status") or "running_job"
                     note_local = update.get("note") or update.get("message") or ""
@@ -4982,13 +4988,16 @@ def _process_single_job(
                                 )
                         except Exception:
                             pass
-                    # Write progress artifact
+                    # Write progress artifact using effective cycle progress.  The UI
+                    # displays cycles out of the user requested total.  When agents
+                    # report internal step progress, eff_cur maps steps to cycles and
+                    # macro_total represents the user requested total.
                     _write_job_progress(
                         run_id,
                         status=status_local,
                         note=str(note_local),
-                        current=cur_int,
-                        total=tot_int,
+                        current=eff_cur,
+                        total=macro_total,
                         goal=goal,
                         domain=domain,
                         job_config=cfg,
@@ -5001,7 +5010,7 @@ def _process_single_job(
                         # Use the reported status if provided; otherwise default to 'running_job'.
                         ws_status = status_local if status_local else "running_job"
                         # Normalize to supported refresh statuses used by the Streamlit UI.  The UI only
-                        # autoÃÂÃÂ¢ÃÂÃÂÃÂÃÂrefreshes for a handful of values (running, active, in_progress, working), so
+                        # autoÃÂ¢ÃÂÃÂrefreshes for a handful of values (running, active, in_progress, working), so
                         # map our internal 'running_job' status to 'running'.
                         if ws_status == "running_job":
                             ws_status = "running"
@@ -5017,16 +5026,19 @@ def _process_single_job(
                             max_minutes=max_minutes,
                             run_id=run_id,
                             experiment_mode="queue_worker",
-                            current=cur_int,
-                            total=tot_int,
+                            current=eff_cur,
+                            total=macro_total,
                             extra={
                                 "experiment_fingerprint": experiment_fingerprint,
                                 "job_meta": job_meta,
                                 "job_config": cfg,
                                 "prompt_details": prompt_details,
+                                # Provide both effective and raw progress values in the progress block.
                                 "progress": {
-                                    "current_cycle": cur_int,
-                                    "total_cycles": tot_int,
+                                    "current_cycle": eff_cur,
+                                    "total_cycles": macro_total,
+                                    "raw_current_cycle": cur_int,
+                                    "raw_total_cycles": tot_int,
                                     "note": _truncate_text(str(note_local), 300),
                                 },
                             },
