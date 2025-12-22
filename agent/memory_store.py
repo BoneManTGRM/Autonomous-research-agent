@@ -2309,7 +2309,7 @@ class MemoryStore:
             state["extra"] = existing_extra
 
             # Promote stability-related flags to top-level keys when present.
-            # This helps the UI quickly detect selfÃÂ¢ÃÂÃÂstabilizing runs without
+            # This helps the UI quickly detect self-stabilizing runs without
             # having to inspect nested structures.  Only copy known flags and
             # leave others inside state["extra"].
             try:
