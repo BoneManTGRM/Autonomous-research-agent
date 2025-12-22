@@ -2936,7 +2936,9 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
     macro_total = max_rounds if mode == "swarm" else max_cycles
 
-    forever_env = _env_bool("WORKER_FOREVER", default=False)
+    # Default to forever mode when no explicit config is provided.  This allows
+    # jobs to run indefinitely unless a user or environment variable overrides it.
+    forever_env = _env_bool("WORKER_FOREVER", default=True)
     forever_cfg = bool(cfg.get("forever", False))
     forever = forever_env or forever_cfg
 
@@ -4911,6 +4913,30 @@ def _write_job_progress(
                 extra=extra_local,
                 force=status.lower() in {"finished", "error", "failed", "stopped", "retrying"},
             )
+            # After emitting the progress artifact, write a narrative event
+            # indicating that the job is actively running.  This helps the UI
+            # display a clear "still running" status in the event timeline.
+            try:
+                # Only emit running events for non-terminal states; terminal states are
+                # already covered by job_done or job_failed events elsewhere.
+                low_status = str(status).lower() if isinstance(status, str) else ""
+                if low_status not in {"finished", "error", "failed", "stopped", "retrying"}:
+                    msg = note or "Job still running"
+                    throttle_key = f"job_running_{run_id}"
+                    # Throttle to once per minute per job to avoid log spam
+                    _event(
+                        run_id=run_id,
+                        kind="job_running",
+                        message=msg,
+                        level="info",
+                        domain=str(domain or ""),
+                        data={"current_cycle": current, "total_cycles": total},
+                        throttle_key=throttle_key,
+                        throttle_min_interval_s=60.0,
+                    )
+            except Exception:
+                # Avoid any exception propagation from event logging
+                pass
         except Exception:
             pass
 
@@ -5119,7 +5145,9 @@ def _process_single_job(
         max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
         macro_total = max_rounds if mode == "swarm" else max_cycles
 
-        forever_env = _env_bool("WORKER_FOREVER", default=False)
+        # Default to forever mode when no explicit config is provided.  This allows
+        # jobs to run indefinitely unless a user or environment variable overrides it.
+        forever_env = _env_bool("WORKER_FOREVER", default=True)
         forever_cfg = bool(cfg.get("forever", False))
         forever = forever_env or forever_cfg
 
