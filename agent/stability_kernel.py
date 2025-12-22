@@ -107,6 +107,37 @@ def _safe_float(value: Any) -> Optional[float]:
         return None
 
 
+def _finite_series(series: List[float]) -> List[float]:
+    """
+    Return only finite numeric values from a sequence.
+
+    This helper iterates through a sequence of numbers and keeps only
+    those elements that can be coerced to floats and are finite (not
+    NaN, +inf or -inf). Non-numeric entries are ignored.
+
+    Parameters
+    ----------
+    series:
+        A sequence of values which may include numbers, strings or other
+        objects.
+
+    Returns
+    -------
+    List[float]
+        A list containing only finite floats extracted from ``series``.
+    """
+    out: List[float] = []
+    for x in series:
+        if isinstance(x, (int, float)):
+            try:
+                f = float(x)
+            except Exception:
+                continue
+            if math.isfinite(f):
+                out.append(f)
+    return out
+
+
 def _extract_series(history: List[Dict[str, Any]], field: str) -> List[float]:
     """Extract a numeric series from history by field name.
 
@@ -205,6 +236,7 @@ def stability_index_from_rye(
 
     Returns None if there is not enough data.
     """
+    rye_series = _finite_series(rye_series)
     if not rye_series:
         return None
 
@@ -278,6 +310,7 @@ def recovery_momentum_from_rye(
         0 or near 0:
             Mixed behavior or not enough data.
     """
+    rye_series = _finite_series(rye_series)
     if not rye_series or len(rye_series) < 4:
         return None
 
@@ -333,16 +366,22 @@ def volatility_signature_from_rye(
 
     Returns a dict:
 
-        {
-            "std": float or None,
-            "mean": float or None,
-            "min": float or None,
-            "max": float or None,
-            "range": float or None,
-            "volatility_score": float (0 to ~3),
-            "regime": "low" | "medium" | "high" | "extreme",
-        }
+        The dictionary contains both classical and robust statistics:
+
+        * ``std``: population standard deviation of the tail segment
+        * ``mean``: arithmetic mean of the tail segment
+        * ``median``: median of the tail segment
+        * ``mad``: median absolute deviation (a robust dispersion measure)
+        * ``min``: minimum value in the tail
+        * ``max``: maximum value in the tail
+        * ``range``: difference between max and min
+        * ``volatility_score``: heuristic volatility metric based on normalized std and range
+        * ``regime``: qualitative regime label derived from the volatility_score
+        * ``norm_std``: normalized standard deviation (std / abs(mean))
+        * ``norm_range``: normalized range (range / abs(mean))
+        * ``norm_mad``: normalized median absolute deviation (mad / abs(median))
     """
+    rye_series = _finite_series(rye_series)
     if not rye_series:
         return {
             "std": None,
@@ -369,19 +408,36 @@ def volatility_signature_from_rye(
     w = max(5, min(window, len(rye_series)))
     tail = rye_series[-w:]
 
+    # Basic statistics
     mean_val = statistics.fmean(tail)
     std_val = statistics.pstdev(tail)
     min_val = min(tail)
     max_val = max(tail)
     rng_val = max_val - min_val
 
-    scale = abs(mean_val) + 1e-6
-    norm_std = std_val / scale
-    norm_range = rng_val / scale
+    # Robust statistics based on the median
+    try:
+        median_val = statistics.median(tail)
+    except Exception:
+        median_val = mean_val
+    try:
+        mad_val = statistics.median([abs(x - median_val) for x in tail])
+    except Exception:
+        mad_val = 0.0
+    # Use the average absolute value as the scaling denominator for standard
+    # deviation and range to avoid excessive blow-ups when the mean is near zero.
+    avg_abs = statistics.fmean([abs(x) for x in tail]) + 1e-6
+    # Use the median of absolute values to scale MAD (more robust than abs(median))
+    median_abs = statistics.median([abs(x) for x in tail]) + 1e-6
 
-    # Compact volatility metric
+    norm_std = std_val / avg_abs
+    norm_range = rng_val / avg_abs
+    norm_mad = mad_val / median_abs
+
+    # Compact volatility metric (original heuristic)
     volatility_score = norm_std + 0.5 * norm_range
 
+    # Assign regime based on volatility_score
     if volatility_score < 0.2:
         regime = "low"
     elif volatility_score < 0.6:
@@ -394,11 +450,16 @@ def volatility_signature_from_rye(
     return {
         "std": std_val,
         "mean": mean_val,
+        "median": median_val,
+        "mad": mad_val,
         "min": min_val,
         "max": max_val,
         "range": rng_val,
         "volatility_score": volatility_score,
         "regime": regime,
+        "norm_std": norm_std,
+        "norm_range": norm_range,
+        "norm_mad": norm_mad,
     }
 
 
@@ -419,6 +480,7 @@ def oscillation_profile_from_rye(
         - peak_to_trough:
             Distance between local peaks and troughs.
     """
+    rye_series = _finite_series(rye_series)
     if not rye_series or len(rye_series) < 4:
         return {
             "sign_flip_rate": None,
@@ -509,6 +571,7 @@ def detect_equilibrium_window(
         ``end_index`` (exclusive), ``equilibrium_fraction`` (the fraction of
         the series covered), ``mean``, ``range`` and ``reason``.
     """
+    rye_series = _finite_series(rye_series)
     n = len(rye_series)
     # Handle empty input
     if n == 0:
@@ -617,6 +680,7 @@ def detect_critical_transitions(
             "kind": "up" | "down",
         }
     """
+    rye_series = _finite_series(rye_series)
     if not rye_series or len(rye_series) < 3:
         return []
 
