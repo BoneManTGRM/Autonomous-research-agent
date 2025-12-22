@@ -1769,6 +1769,27 @@ def _configure_tavily_from_env() -> None:
                 has_existing=bool(existing),
             )
 
+    # Propagate Tavily concurrency and retry settings from worker-level
+    # environment variables to the global environment consumed by tools.py.
+    # This allows dynamic tuning of search concurrency limits without
+    # modifying code. Only propagate if user-level variables are absent.
+    for _worker_var, _target_var in [
+        ("WORKER_TAVILY_MAX_CONCURRENCY", "TAVILY_MAX_CONCURRENCY"),
+        ("WORKER_TAVILY_MAX_RETRIES", "TAVILY_MAX_RETRIES"),
+    ]:
+        worker_val = os.getenv(_worker_var)
+        existing_val = os.getenv(_target_var)
+        if worker_val and not existing_val:
+            os.environ[_target_var] = worker_val
+            if _VERBOSE_LOGS:
+                log_kv(
+                    "tavily_setting_propagated",
+                    level="DEBUG",
+                    from_env=_worker_var,
+                    to_env=_target_var,
+                    value=worker_val,
+                )
+
 
 def _build_source_controls(config: Dict[str, Any]) -> Dict[str, bool]:
     """
