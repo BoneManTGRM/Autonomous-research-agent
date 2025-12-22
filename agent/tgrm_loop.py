@@ -3364,3 +3364,9 @@ class TGRMLoop:
             "total_cycles": total_cycles,
             "avg_rye": avg_rye,
             "cycles": cycles,
+            "experiment_mode": experiment_mode,
+            "msil_mode": msil_mode,
+            "msil_track_mode": msil_track_mode,
+            "rye_mode": rye_mode,
+            "run_id": run_id,
+        }
