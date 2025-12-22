@@ -79,16 +79,43 @@ except Exception:
 # Singleton instance for module level web_search bridge
 _WEB_RESEARCH_INSTANCE: Optional[Any] = None
 
-# ----------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Tavily concurrency and backoff controls
-# ----------------------------------------------------------
-# Limit the maximum number of concurrent Tavily search calls across a process.
-# This helps prevent bursts of simultaneous requests from a swarm of agents.
-_TAVILY_MAX_CONCURRENCY = int(os.getenv("TAVILY_MAX_CONCURRENCY", "4") or "4")
-# Number of attempts to retry a Tavily search when rate-limited or network errors occur.
-_TAVILY_RETRY_ATTEMPTS = int(os.getenv("TAVILY_RETRY_ATTEMPTS", "5") or "5")
-# Module-level semaphore used to bound concurrency for Tavily search calls.
-_tavily_sem = threading.Semaphore(_TAVILY_MAX_CONCURRENCY)
+#
+# When performing web_search via TavilyBrowserTool, it is easy to exhaust
+# remote API limits or trigger timeouts when many agents hit the service at
+# once. To mitigate this, we gate calls behind a global semaphore and
+# implement exponential backoff when certain classes of errors occur. The
+# concurrency limit and retry counts can be tuned via environment variables
+# `TAVILY_MAX_CONCURRENCY` and `TAVILY_MAX_RETRIES`. If these are not set,
+# sensible defaults are used (4 concurrent calls and 3 retries). The
+# backoff includes jitter to avoid synchronized retries across agents.
+
+_DEFAULT_TAVILY_MAX_CONCURRENCY = 4
+_DEFAULT_TAVILY_MAX_RETRIES = 3
+
+# Read concurrency and retry settings from environment variables. Fall back to
+# defaults if not set or invalid. Keep the values within reasonable bounds
+# to avoid resource exhaustion.
+def _parse_int_env(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        val = int(raw)
+        # Constrain to at least 1 to avoid deadlock from zero concurrency
+        return max(val, 1)
+    except Exception:
+        return default
+
+_TAVILY_MAX_CONCURRENCY = _parse_int_env("TAVILY_MAX_CONCURRENCY", _DEFAULT_TAVILY_MAX_CONCURRENCY)
+_TAVILY_MAX_RETRIES = _parse_int_env("TAVILY_MAX_RETRIES", _DEFAULT_TAVILY_MAX_RETRIES)
+
+# Global semaphore to limit concurrent Tavily search calls. Protects both
+# synchronous and potential asynchronous contexts. Note: Playwright and
+# requests within TavilyBrowserTool are already concurrent safe; this is an
+# extra guard at the tool layer.
+_tavily_semaphore = threading.Semaphore(_TAVILY_MAX_CONCURRENCY)
 
 
 def _get_web_research_instance() -> Optional[Any]:
@@ -1218,12 +1245,18 @@ def web_search(
         mapped_depth = "advanced"
 
     if tool is not None:
-        # Bound concurrency and retry Tavily search calls when rate limits or network errors occur.
-        last_err: Optional[Exception] = None
-        for attempt in range(_TAVILY_RETRY_ATTEMPTS):
-            with _tavily_sem:
-                start_ts = time.time()
-                try:
+        # Attempt to call Tavily search with concurrency limits and retries
+        started = time.time()
+        last_exception: Optional[Exception] = None
+        results: Optional[List[Dict[str, Any]]] = None
+        # Perform up to _TAVILY_MAX_RETRIES attempts. On specific errors
+        # (HTTP 429, rate limiting, timeouts), exponential backoff is used.
+        for attempt in range(_TAVILY_MAX_RETRIES):
+            try:
+                # Acquire semaphore before making the remote call to bound
+                # concurrency. This protects against many agents flooding
+                # Tavily at once.
+                with _tavily_semaphore:
                     results = tool.search(
                         query=query,
                         max_results=max_results,
@@ -1235,59 +1268,85 @@ def web_search(
                         auto_parameters=bool(extra.get("auto_parameters", False)),
                         include_images=bool(extra.get("include_images", False)),
                     )
-                    elapsed = time.time() - start_ts
-                    caps = {}
-                    try:
-                        caps = tool.describe_capabilities()
-                    except Exception:
-                        caps = {}
-                    stubbed = bool(
-                        caps.get(
-                            "stub_mode",
-                            True if caps.get("mode") not in {None, "real"} else False,
-                        )
-                    )
-                    return {
-                        "query": query,
-                        "stubbed": stubbed,
-                        "results": results,
-                        "response_time": elapsed,
-                        "request_id": None,
-                        "info_gain": None,
-                        "search_energy": None,
-                        "difficulty": None,
-                        "semantic_diversity": None,
-                    }
-                except Exception as e:
-                    last_err = e
-                    msg = str(e).lower()
-                    if "429" in msg or "rate" in msg or "timeout" in msg:
-                        # Exponential backoff with jitter
-                        backoff_s = (2 ** attempt) + random.random()
-                        try:
-                            time.sleep(backoff_s)
-                        except Exception:
-                            pass
-                        continue
-                    raise
-        # If all retries fail, fall through to the fallback below; last_err will be used.
+                # If call succeeds, break out of retry loop
+                break
+            except Exception as e:
+                last_exception = e
+                # Inspect exception text for common transient failure patterns.
+                msg = str(e).lower()
+                # Check for HTTP 429 or rate limit or timeout errors. Include
+                # generic timeout keywords to cover both sync and async
+                # execution contexts.
+                is_rate_limited = any(
+                    kw in msg
+                    for kw in ["429", "rate limit", "rate-limit", "too many", "quota"]
+                )
+                is_timeout = any(
+                    kw in msg
+                    for kw in ["timeout", "timed out", "time out", "connection aborted"]
+                )
+                if is_rate_limited or is_timeout:
+                    # Use exponential backoff with jitter. Sleep duration grows
+                    # exponentially with the attempt number. Cap at a modest
+                    # duration to avoid long stalls while allowing API to
+                    # recover. Jitter reduces synchronization across agents.
+                    sleep_s = min(30.0, (2 ** attempt) + random.random())
+                    time.sleep(sleep_s)
+                    continue  # Retry
+                # For other exceptions, break and fall back to stub below
+                break
+        elapsed = time.time() - started
+
+        if results is not None:
+            # Inspect capabilities to determine stub status. Some deployments
+            # run Tavily in stubbed/offline mode, which is reflected in
+            # describe_capabilities().
+            caps: Dict[str, Any] = {}
+            try:
+                caps = tool.describe_capabilities()
+            except Exception:
+                caps = {}
+            stubbed = bool(
+                caps.get(
+                    "stub_mode",
+                    True if caps.get("mode") not in {None, "real"} else False,
+                )
+            )
+            return {
+                "query": query,
+                "stubbed": stubbed,
+                "results": results,
+                "response_time": elapsed,
+                "request_id": None,
+                "info_gain": None,
+                "search_energy": None,
+                "difficulty": None,
+                "semantic_diversity": None,
+            }
+        # If all retries fail, fall back to stubbed search below. Attach
+        # the last exception string for traceability.
+        error_str: Optional[str] = None
+        if last_exception is not None:
+            error_str = str(last_exception)
+        # proceed to fallback section after this block
 
     # Fallback: browser based stub search so the system keeps working
+    # Fallback: browser based stub search so the system keeps working. This
+    # fallback is used when Tavily is unavailable or repeated failures occur.
     browser = BrowserTool()
     url = f"https://duckduckgo.com/html/?q={query}"
     page = browser.fetch_page(url)
 
-    # Build a fallback error message: prefer the page error, otherwise use last_err or a generic message.
-    fallback_error: Optional[str] = None
-    try:
-        fallback_error = page.error  # type: ignore[attr-defined]
-    except Exception:
-        fallback_error = None
-    if not fallback_error:
-        if 'last_err' in locals() and last_err is not None:
-            fallback_error = str(last_err)
-        else:
-            fallback_error = "TavilyBrowserTool not available"
+    fallback_error = None
+    # Prefer the recorded Tavily failure message if present; otherwise
+    # propagate any browser fetch error.
+    if 'error_str' in locals() and error_str:
+        fallback_error = error_str
+    elif page.error:
+        fallback_error = page.error
+    else:
+        fallback_error = "TavilyBrowserTool not available"
+
     return {
         "query": query,
         "stubbed": True,
