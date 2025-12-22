@@ -4952,6 +4952,46 @@ def _write_job_progress(
                 parts.append(f"note={safe_repr(_truncate_text(note, 200), 220)}")
             log_kv("job_progress", level="INFO", msg=" ".join(parts))
 
+        # ------------------------------------------------------------------
+        # Persist per-run progress and emit heartbeat for UI rehydration.  This
+        # ensures that after a page refresh the UI can recover cycle counts and
+        # shows a live heartbeat line in the console.  Failures are ignored.
+        try:
+            runs_root = RUNS_LOGS_DIR.parent if 'RUNS_LOGS_DIR' in globals() else None
+            # Write a progress.json into the run-specific folder under runs_root.
+            if runs_root is not None:
+                run_dir = runs_root / str(run_id)
+                run_dir.mkdir(parents=True, exist_ok=True)
+                # Phase progress is always single-phase for finite runs.
+                phase_index_local = current if isinstance(current, (int, float)) and current is not None else 0
+                phase_total_local = 1
+                per_run_payload = {
+                    "run_id": run_id,
+                    "cycle_current": current,
+                    "cycle_total": total,
+                    "phase_index": phase_index_local,
+                    "phase_total": phase_total_local,
+                    "status": status,
+                    "note": _truncate_text(note, 800) if isinstance(note, str) else note,
+                    "last_update_utc": _now_utc_iso(),
+                }
+                try:
+                    atomic_write_json(run_dir / "progress.json", per_run_payload, indent=2)
+                except Exception:
+                    with open(run_dir / "progress.json", "w", encoding="utf-8") as f:
+                        json.dump(per_run_payload, f, indent=2)
+            # Emit a heartbeat log line.  Use '?' for unknown totals.
+            hb_cur_str = str(current) if current is not None else "?"
+            hb_tot_str = str(total) if total is not None else "?"
+            hb_phase_idx = phase_index_local if 'phase_index_local' in locals() else (
+                current if isinstance(current, (int, float)) and current is not None else 0
+            )
+            hb_phase_tot = phase_total_local if 'phase_total_local' in locals() else 1
+            hb_line = f"HEARTBEAT run_id={run_id} cycle={hb_cur_str}/{hb_tot_str} phase={hb_phase_idx}/{hb_phase_tot}"
+            _emit_log_line(hb_line)
+        except Exception:
+            pass
+
         # Cleanup for terminal-ish states (no longer active)
         if status.lower() in {"finished", "error", "failed", "stopped", "retrying"}:
             try:
