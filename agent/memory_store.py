@@ -1043,86 +1043,101 @@ class MemoryStore:
         return self.prune_history(threshold=threshold, max_keep=max_keep)
 
     # ------------------------------------------------------------------
-    # Cycle history helpers
+    # Cycle history write helpers
     # ------------------------------------------------------------------
-    def get_cycle_history(self) -> List[Dict[str, Any]]:
-        """
-        Return a copy of the current cycle history from memory.
-
-        This helper exposes the in-memory cycle list so that UIs can
-        render and prune cycles directly from the MemoryStore instead
-        of reconstructing history from result JSON files.  Each entry
-        in the returned list is a shallow copy of the underlying cycle
-        dictionary.  The original ``cycles`` list is not modified.
-
-        Returns:
-            A list of cycle dicts in the order they were recorded.
-        """
-        cycles = self._data.get("cycles")
-        if not isinstance(cycles, list) or not cycles:
-            return []
-        out: List[Dict[str, Any]] = []
-        for item in cycles:
-            if isinstance(item, dict):
-                out.append(dict(item))
-        return out
-
-    def append_cycle_log(self, run_id: str, cycle: Dict[str, Any], index: Optional[int] = None) -> None:
-        """
-        Append a single cycle entry to the store, stamping the run_id.
-
-        If the ``cycles`` list exceeds its cap after appending, the
-        oldest entry is dropped.  The cycle entry is shallow copied
-        and augmented with a ``run_id`` if not already present.
-
-        Args:
-            run_id: The run identifier.
-            cycle: The cycle dictionary to append.
-            index: Unused here but kept for API compatibility.
-        """
-        if not isinstance(cycle, dict):
-            return
-        cyc = dict(cycle)
-        # Attach run_id if missing
-        if run_id and "run_id" not in cyc:
-            cyc["run_id"] = run_id
-        # Append and cap
-        cycles = self._data.get("cycles")
-        if not isinstance(cycles, list):
-            cycles = []
-        cycles.append(cyc)
-        # Cap length
-        if len(cycles) > MAX_CYCLES:
-            cycles = cycles[-MAX_CYCLES:]
-        self._data["cycles"] = cycles
-        self._save()
-
     def write_cycle_history(self, run_id: str, cycles: List[Dict[str, Any]]) -> None:
         """
-        Replace the current cycle history with a new list of cycles.
+        Persist a full list of cycles for a given run.
 
-        Each cycle is shallow copied and stamped with the given ``run_id``
-        if not already present.  If the list exceeds the MAX_CYCLES cap,
-        only the most recent entries are kept.
+        This helper stores the provided ``cycles`` in two places:
+        ``cycle_history[run_id]`` (per-run history) and the flattened
+        ``cycles`` list (global across runs).  Each cycle is shallow
+        copied and augmented with a ``run_id`` field if missing.  Caps
+        are applied to prevent unbounded growth (only the most recent
+        ``MAX_CYCLES`` cycles are retained globally).
 
         Args:
-            run_id: The run identifier for all cycles.
-            cycles: The list of cycles to persist.
+            run_id: The run identifier associated with the cycles.
+            cycles: A list of cycle dictionaries to persist.
         """
-        if not isinstance(cycles, list):
+        # Validate input
+        if not isinstance(cycles, list) or not cycles:
             return
+        # Prepare per-run history list
         new_cycles: List[Dict[str, Any]] = []
         for item in cycles:
             if not isinstance(item, dict):
                 continue
-            c2 = dict(item)
+            c2: Dict[str, Any] = dict(item)
             if run_id and "run_id" not in c2:
                 c2["run_id"] = run_id
             new_cycles.append(c2)
-        # Cap length
-        if len(new_cycles) > MAX_CYCLES:
-            new_cycles = new_cycles[-MAX_CYCLES:]
-        self._data["cycles"] = new_cycles
+
+        # Update per-run cycle_history
+        hist = self._data.setdefault("cycle_history", {})
+        if not isinstance(hist, dict):
+            hist = {}
+        hist[run_id] = new_cycles
+        self._data["cycle_history"] = hist
+
+        # Flatten into global cycles list
+        all_cycles = self._data.get("cycles")
+        if not isinstance(all_cycles, list):
+            all_cycles = []
+        # Append new cycles
+        all_cycles.extend(new_cycles)
+        # Cap to MAX_CYCLES (keep most recent entries)
+        if len(all_cycles) > MAX_CYCLES:
+            all_cycles = all_cycles[-MAX_CYCLES:]
+        self._data["cycles"] = all_cycles
+        # Persist
+        self._save()
+
+    def append_cycle_log(self, run_id: str, cycle: Dict[str, Any], index: Optional[int] = None) -> None:
+        """
+        Append a single cycle entry to the store.
+
+        The entry is shallow copied, stamped with ``run_id`` if missing,
+        and appended to both the per-run ``cycle_history`` and the
+        flattened ``cycles`` list.  Caps are applied to each list to
+        prevent unbounded growth.  The ``index`` argument is accepted
+        for API compatibility but is ignored in this implementation.
+
+        Args:
+            run_id: The run identifier.
+            cycle: The cycle dictionary to append.
+            index: Unused; present for API compatibility.
+        """
+        if not isinstance(cycle, dict):
+            return
+        c2: Dict[str, Any] = dict(cycle)
+        if run_id and "run_id" not in c2:
+            c2["run_id"] = run_id
+
+        # Update per-run cycle_history
+        hist = self._data.setdefault("cycle_history", {})
+        if not isinstance(hist, dict):
+            hist = {}
+        run_hist = hist.get(run_id)
+        if not isinstance(run_hist, list):
+            run_hist = []
+        run_hist.append(c2)
+        # Cap per-run history
+        if len(run_hist) > MAX_CYCLES:
+            run_hist = run_hist[-MAX_CYCLES:]
+        hist[run_id] = run_hist
+        self._data["cycle_history"] = hist
+
+        # Append to global cycles list
+        all_cycles = self._data.get("cycles")
+        if not isinstance(all_cycles, list):
+            all_cycles = []
+        all_cycles.append(c2)
+        if len(all_cycles) > MAX_CYCLES:
+            all_cycles = all_cycles[-MAX_CYCLES:]
+        self._data["cycles"] = all_cycles
+
+        # Persist
         self._save()
 
     # ------------------------------------------------------------------
