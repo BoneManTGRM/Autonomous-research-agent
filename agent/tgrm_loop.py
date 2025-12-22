@@ -2160,15 +2160,104 @@ class TGRMLoop:
         return params
 
     def _web_search(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        """Safely call self.web_tool.search with only supported kwargs.
+        """Perform a web search with resilience to Tavily limits and failures.
 
-        This prevents TypeError when different WebResearchTool implementations
-        accept different keyword sets (e.g. level vs search_depth).
+        This method prefers the unified `core_web_search` from tools.py when available,
+        which incorporates concurrency limits and retry/backoff logic. It falls back
+        to `self.web_tool.search` only when the unified search is unavailable.
+
+        Args:
+            query: The search query string.
+            params: Optional mapping of search parameters such as max_results,
+                search_depth, topic, include_raw_content, and level.
+
+        Returns:
+            A list of normalized result dictionaries with the keys: title, url,
+            source, content, and raw_html. When no results are found or on
+            unrecoverable errors, an empty list is returned.
         """
+        # Ensure query does not exceed Tavily limits
         query = _clamp_query(query)
+        # Normalize params dictionary
         params = dict(params or {})
 
-        # If tool supports **kwargs, we can pass through.
+        # If a unified search helper is available, use it. This helper handles
+        # Tavily concurrency limits and implements retry/backoff. It returns
+        # a dict with a 'results' key which we convert into our normalized
+        # result format. We avoid passing ToolUsage into core_web_search here
+        # because TGRM energy accounting is handled separately.
+        if core_web_search is not None:
+            # Extract supported parameters for core_web_search
+            # Determine max_results, search_depth and topic from params; allow
+            # fallback from legacy 'level'.
+            max_results = params.get("max_results")
+            if not isinstance(max_results, int) or max_results <= 0:
+                max_results = 8
+
+            search_depth = params.get("search_depth")
+            if not isinstance(search_depth, str) or not search_depth:
+                # Derive search_depth from level: level<=1 -> basic, else advanced
+                level = params.get("level")
+                if isinstance(level, int) and level <= 1:
+                    search_depth = "basic"
+                else:
+                    search_depth = "advanced"
+
+            topic = params.get("topic")
+            if not isinstance(topic, str) or not topic:
+                topic = "general"
+
+            try:
+                # Try the most complete signature first; degrade gracefully
+                res = core_web_search(
+                    query=query,
+                    max_results=max_results,
+                    search_depth=search_depth,
+                    topic=topic,
+                )
+            except TypeError:
+                try:
+                    res = core_web_search(
+                        query=query,
+                        max_results=max_results,
+                        search_depth=search_depth,
+                    )
+                except TypeError:
+                    try:
+                        res = core_web_search(
+                            query=query,
+                            max_results=max_results,
+                        )
+                    except Exception:
+                        res = None
+                except Exception:
+                    res = None
+            except Exception:
+                res = None
+
+            if isinstance(res, dict) and isinstance(res.get("results"), list):
+                items: List[Dict[str, Any]] = []
+                for item in res.get("results") or []:
+                    if not isinstance(item, dict):
+                        continue
+                    # Normalize into expected fields. Some fields like content/raw_html
+                    # may not be present; map snippet into content.
+                    items.append(
+                        {
+                            "title": item.get("title") or "",
+                            "url": item.get("url") or "",
+                            "source": item.get("source") or res.get("provider") or "web",
+                            "content": item.get("snippet") or item.get("content") or "",
+                            "raw_html": item.get("raw_html") or "",
+                        }
+                    )
+                return items
+            # If unified search failed or returned an unexpected structure, fall
+            # through to the legacy tool below.
+
+        # Fallback to the underlying web tool. Filter params to match the tool
+        # signature to prevent TypeError when different implementations accept
+        # different keyword sets (e.g. level vs search_depth).
         filtered = params
         try:
             sig = inspect.signature(self.web_tool.search)  # type: ignore[attr-defined]
@@ -3275,9 +3364,3 @@ class TGRMLoop:
             "total_cycles": total_cycles,
             "avg_rye": avg_rye,
             "cycles": cycles,
-            "experiment_mode": experiment_mode,
-            "msil_mode": msil_mode,
-            "msil_track_mode": msil_track_mode,
-            "rye_mode": rye_mode,
-            "run_id": run_id,
-        }
