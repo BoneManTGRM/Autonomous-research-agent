@@ -2447,10 +2447,9 @@ def _write_snapshot(
         return
 
     try:
-        # Determine snapshot parameters.  Ignore tags entirely for snapshots.
-        # Older configs may include a "tag" or label, but we intentionally
-        # suppress it so snapshots are not labelled with user-provided tags.
-        tag_str = None
+        # Determine snapshot parameters: label/tag, included sections and snapshot cap.
+        tag = snapshot_cfg.get("tag")
+        tag_str = str(tag) if isinstance(tag, (str, int, float)) else None
         include_sections = snapshot_cfg.get("include_sections")
         # Keep last_n or max_snapshots_per_run controls how many snapshots to retain
         max_snaps_raw = snapshot_cfg.get("keep_last_n") or snapshot_cfg.get("max_snapshots_per_run")
@@ -2483,7 +2482,7 @@ def _write_snapshot(
                     "enabled": True,
                     "include_sections": include_sections,
                     "max_snapshots_per_run": max_snaps,
-                    # Do not include a label; omit tags entirely
+                    "label": tag_str,
                 }
                 ms.maybe_write_snapshot_from_config(
                     run_id=run_id,
@@ -2507,7 +2506,8 @@ def _write_snapshot(
             "current_cycle": current_cycle,
             "diagnostics": diagnostics or {},
         }
-        # Do not include a tag field in the inline snapshot
+        if tag_str:
+            snap["tag"] = tag_str
         data_attr = getattr(ms, "data", getattr(ms, "_data", None))
         if isinstance(data_attr, dict):
             all_snaps = data_attr.setdefault("snapshots", {})
@@ -3897,6 +3897,28 @@ class FileQueue:
                         dest=str(dest),
                     )
                     continue
+
+                # After moving the job metadata back to pending, remove any stale progress
+                # artifact in the active directory. When a worker crashes, the progress
+                # file (<run_id>_progress.json) may remain, causing the UI to believe
+                # the run is still active. Clean it up here.
+                try:
+                    prog_path: Optional[Path] = None
+                    # progress_path may be provided by run_jobs; if not, fall back
+                    if progress_path is not None:
+                        try:
+                            prog_path = progress_path(job.run_id)  # type: ignore[call-arg]
+                        except Exception:
+                            prog_path = None
+                    if not prog_path:
+                        prog_path = _fallback_progress_path(job.run_id)
+                    if prog_path and prog_path.exists():
+                        try:
+                            prog_path.unlink()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
                 # Release lock if present (stale lock recovery)
                 self.release_lock(job.run_id)
