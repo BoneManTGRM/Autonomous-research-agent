@@ -5671,24 +5671,35 @@ def main() -> None:
     # Auto-refresh (only while worker appears active)
     # ------------------------------
     if auto_refresh:
+        # Determine if the worker appears to be running or recently active
         health_class, _ = derive_health_class(ws, watchdog)
         status_now = str((ws or {}).get("status") or "").lower()
-        running_like2 = status_now in {"running", "active", "in_progress", "working"} or health_class in {"healthy", "stale"}
+        running_like2 = (
+            status_now in {"running", "active", "in_progress", "working"}
+            or health_class in {"healthy", "stale"}
+        )
         if running_like2:
+            refresh_ms = int(refresh_seconds * 1000)
             if callable(st_autorefresh):
+                # Use the autorefresh component when available
                 try:
-                    st_autorefresh(interval=int(refresh_seconds * 1000), key="ara_autorefresh")
+                    st_autorefresh(interval=refresh_ms, key="ara_autorefresh")  # type: ignore[call-arg]
                 except Exception:
-                    # fallback to sleep+rereun
+                    # On failure, fall back to a manual sleep and rerun
                     time.sleep(float(refresh_seconds))
                     try:
-                        st.rerun()
+                        st.experimental_rerun()
                     except Exception:
-                        try:
-                            st.experimental_rerun()
-                        except Exception:
-                            pass
+                        pass
             else:
+                # When autorefresh is not available, fall back to manual sleep and rerun
                 time.sleep(float(refresh_seconds))
                 try:
-                    st.rerun()
+                    st.experimental_rerun()
+                except Exception:
+                    pass
+
+
+# Streamlit entry point
+if __name__ == "__main__":
+    main()
