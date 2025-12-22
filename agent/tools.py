@@ -117,15 +117,21 @@ _TAVILY_MAX_CONCURRENCY = _parse_int_env("TAVILY_MAX_CONCURRENCY", _DEFAULT_TAVI
 _TAVILY_MAX_RETRIES = _parse_int_env("TAVILY_MAX_RETRIES", _DEFAULT_TAVILY_MAX_RETRIES)
 
 # --------------------------------------------------------------------------
-# Tavily search call timeout
+# Tavily search hard timeout + fail-fast safety
 #
-# In some cases, the underlying TavilyBrowserTool search may hang indefinitely
-# or take excessively long to return. To ensure the agent makes forward
-# progress, enforce a maximum time limit on each Tavily search call. If the
-# call does not complete within this timeout, the search attempt is treated
-# as failed and the retry/backoff logic will kick in. The timeout can be
-# tuned via the TAVILY_TIMEOUT_SECONDS environment variable. If unset or
-# invalid, a sensible default (30 seconds) is used.
+# ARA can appear "stuck" if the underlying Tavily client hangs (socket stall,
+# DNS/TLS issues, etc.) because the agent waits for a web_search tool call to
+# return before it can advance cycles.
+#
+# We enforce a hard upper bound on each Tavily search call by running it in a
+# daemon thread and joining with a timeout. If it times out, we fail fast and
+# fall back to the built-in BrowserTool (DuckDuckGo HTML) so the run keeps
+# making forward progress.
+#
+# You can tune this via env vars on the *worker* service:
+#   - TAVILY_TIMEOUT_SECONDS (float, default 20)
+#   - TAVILY_DISABLE_AFTER_TIMEOUTS (int, default 1)
+#   - TAVILY_COOLDOWN_SECONDS (float, default 900)
 
 def _parse_float_env(name: str, default: float) -> float:
     raw = os.getenv(name)
@@ -136,8 +142,52 @@ def _parse_float_env(name: str, default: float) -> float:
     except Exception:
         return default
 
-_DEFAULT_TAVILY_TIMEOUT_S: float = 30.0
+
+_DEFAULT_TAVILY_TIMEOUT_S: float = 20.0
 _TAVILY_TIMEOUT_S: float = _parse_float_env("TAVILY_TIMEOUT_SECONDS", _DEFAULT_TAVILY_TIMEOUT_S)
+
+# If Tavily times out repeatedly, disable it temporarily so the run continues
+# offline rather than spending minutes retrying.
+_TAVILY_DISABLE_AFTER_TIMEOUTS: int = _parse_int_env("TAVILY_DISABLE_AFTER_TIMEOUTS", 1)
+_TAVILY_COOLDOWN_SECONDS: float = _parse_float_env("TAVILY_COOLDOWN_SECONDS", 900.0)
+
+_tavily_state_lock = threading.Lock()
+_tavily_timeout_count: int = 0
+_tavily_disabled_until_ts: float = 0.0
+
+
+def _log_tools(msg: str) -> None:
+    """Best-effort log to stdout (Render captures stdout/stderr)."""
+    try:
+        print(msg, flush=True)
+    except Exception:
+        pass
+
+
+def _tavily_is_temporarily_disabled() -> bool:
+    with _tavily_state_lock:
+        return time.time() < _tavily_disabled_until_ts
+
+
+def _tavily_register_timeout(reason: str) -> None:
+    """Track Tavily timeouts and disable it for a cooldown window if needed."""
+    global _tavily_timeout_count, _tavily_disabled_until_ts, _WEB_RESEARCH_INSTANCE
+    now = time.time()
+    with _tavily_state_lock:
+        _tavily_timeout_count += 1
+        if _tavily_timeout_count >= max(1, _TAVILY_DISABLE_AFTER_TIMEOUTS):
+            _tavily_timeout_count = 0
+            _tavily_disabled_until_ts = now + max(0.0, _TAVILY_COOLDOWN_SECONDS)
+            # Drop the shared instance so future calls can re-init after cooldown.
+            _WEB_RESEARCH_INSTANCE = None
+            _log_tools(
+                f"[tools:web_search] Tavily disabled for {int(_TAVILY_COOLDOWN_SECONDS)}s "
+                f"after timeout: {reason}"
+            )
+        else:
+            _log_tools(
+                f"[tools:web_search] Tavily timeout ({_tavily_timeout_count}/{_TAVILY_DISABLE_AFTER_TIMEOUTS}): {reason}"
+            )
 
 # Global semaphore to limit concurrent Tavily search calls. Protects both
 # synchronous and potential asynchronous contexts. Note: Playwright and
@@ -1261,7 +1311,15 @@ def web_search(
             "semantic_diversity": None,
         }
 
-    tool = _get_web_research_instance()
+    # If Tavily recently stalled, fail fast and fall back so the run keeps
+    # progressing. This avoids the "job running" heartbeat loop with no
+    # cycle advancement.
+    error_str: Optional[str] = None
+    tool = None
+    if _tavily_is_temporarily_disabled():
+        error_str = "Tavily temporarily disabled due to previous timeouts"
+    else:
+        tool = _get_web_research_instance()
 
     # Map search_depth to something sensible for TavilyBrowserTool
     depth_norm = (search_depth or "advanced").strip().lower()
@@ -1283,9 +1341,11 @@ def web_search(
             try:
                 # Acquire semaphore before making the remote call to bound
                 # concurrency. This protects against many agents flooding
-                # Tavily at once. We also enforce a hard timeout on the call
-                # by executing it in a separate thread. If the call exceeds
-                # the timeout, a TimeoutError is raised.
+                # Tavily at once.
+                #
+                # IMPORTANT: Tavily can sometimes hang indefinitely. To
+                # prevent the whole run from freezing in cycle 1/2, execute
+                # the search in a daemon thread and enforce a hard timeout.
                 with _tavily_semaphore:
                     result_container: List[Any] = []
                     error_container: List[Exception] = []
@@ -1307,22 +1367,17 @@ def web_search(
                         except Exception as exc:
                             error_container.append(exc)
 
-                    # Launch the search in a daemon thread so that it does not block
-                    # process exit if it hangs. Join with timeout to enforce a hard
-                    # limit on call duration.
                     t = threading.Thread(target=_search_call, daemon=True)
                     t.start()
-                    t.join(_TAVILY_TIMEOUT_S)
+                    t.join(max(0.1, float(_TAVILY_TIMEOUT_S)))
                     if t.is_alive():
-                        # Timed out; treat as failure so retry/backoff logic applies
                         raise TimeoutError(
                             f"Tavily search exceeded {_TAVILY_TIMEOUT_S} seconds timeout"
                         )
                     if error_container:
-                        # Reraise the captured exception from the search call
                         raise error_container[0]
-                    # Successful call; extract result
                     results = result_container[0] if result_container else None
+
                 # If call succeeds, break out of retry loop
                 break
             except Exception as e:
@@ -1340,14 +1395,19 @@ def web_search(
                     kw in msg
                     for kw in ["timeout", "timed out", "time out", "connection aborted"]
                 ) or isinstance(e, TimeoutError)
-                if is_rate_limited or is_timeout:
-                    # Use exponential backoff with jitter. Sleep duration grows
-                    # exponentially with the attempt number. Cap at a modest
-                    # duration to avoid long stalls while allowing API to
-                    # recover. Jitter reduces synchronization across agents.
+
+                # FAIL FAST on timeouts. Timeouts are the main source of
+                # "job claimed" + "still running" with no cycle advance.
+                if is_timeout:
+                    _tavily_register_timeout(str(e))
+                    break
+
+                # For rate limits, retry with exponential backoff + jitter.
+                if is_rate_limited:
                     sleep_s = min(30.0, (2 ** attempt) + random.random())
                     time.sleep(sleep_s)
                     continue  # Retry
+
                 # For other exceptions, break and fall back to stub below
                 break
         elapsed = time.time() - started
