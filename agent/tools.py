@@ -91,7 +91,12 @@ _WEB_RESEARCH_INSTANCE: Optional[Any] = None
 # sensible defaults are used (4 concurrent calls and 3 retries). The
 # backoff includes jitter to avoid synchronized retries across agents.
 
-_DEFAULT_TAVILY_MAX_CONCURRENCY = 4
+# When only a single web search service is available for all agents, the
+# default concurrency limit should be low to avoid saturating that shared
+# endpoint. We default to 1 concurrent call when the environment does not
+# override it via TAVILY_MAX_CONCURRENCY. You can raise this via the env var
+# if multiple independent search services are available.
+_DEFAULT_TAVILY_MAX_CONCURRENCY = 1
 _DEFAULT_TAVILY_MAX_RETRIES = 3
 
 # Read concurrency and retry settings from environment variables. Fall back to
