@@ -23,7 +23,18 @@ from __future__ import annotations
 import time
 import uuid
 import copy
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    ProcessPoolExecutor,
+    as_completed,
+)
+
+# InterpreterPoolExecutor was added in Python 3.14; import lazily to
+# gracefully handle older versions where it is unavailable.
+try:  # pragma: no cover
+    from concurrent.futures import InterpreterPoolExecutor  # type: ignore
+except Exception:  # pragma: no cover
+    InterpreterPoolExecutor = None  # type: ignore
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
@@ -327,6 +338,26 @@ class SwarmOrchestrator:
     discovery_manager: Any = None
     protocol_synthesizer: Any = None
 
+    # ------------------------------------------------------------------
+    # Extended configuration options
+    #
+    # ``executor_type`` controls which executor implementation to use for
+    # parallel agent execution. The default of ``"thread"`` preserves the
+    # existing behaviour of using a ``ThreadPoolExecutor``. Other supported
+    # values are ``"process"`` (uses ``ProcessPoolExecutor`` to leverage
+    # multiple CPU cores for CPU‑bound workloads) and ``"interpreter"``
+    # (uses ``InterpreterPoolExecutor`` when running on Python 3.14+).  If
+    # the requested executor is unavailable (for example, on older Python
+    # versions), the orchestrator will automatically fall back to the
+    # threaded executor to maintain compatibility.
+    executor_type: str = "thread"
+
+    # ``randomize_roles`` optionally randomizes role selection for each
+    # swarm based on the role weights.  When set to ``True``, roles are
+    # sampled without replacement using their weights as probabilities.
+    # This can encourage greater diversity in role ordering across runs.
+    randomize_roles: bool = False
+
     def __post_init__(self) -> None:
         # Load roles from YAML or defaults
         if not self.roles:
@@ -573,27 +604,78 @@ class SwarmOrchestrator:
         swarm_size: int,
         domain: str,
     ) -> List[RoleSpec]:
-        """Pick a list of roles for this swarm, biased by weight and domain."""
+        """Pick a list of roles for this swarm, biased by weight and domain.
+
+        By default the orchestrator repeats roles proportionally to their
+        weights in a deterministic round‑robin manner.  If
+        ``self.randomize_roles`` is true, roles are selected randomly based
+        on their weights using ``random.choices``.  This provides a
+        lightweight mechanism to introduce variety across swarms while
+        respecting weight biases.
+        """
+        # Ensure we have at least some roles defined
         if not self.roles:
             self.roles = _default_roles()
 
+        # Filter roles by domain when possible
         domain_roles = [r for r in self.roles if r.domain == domain]
         pool = domain_roles or self.roles
 
+        # Build a simple weight vector proportional to each role's weight.
+        weights = [max(0.0, r.weight) for r in pool]
+        # If all weights are zero, give each role equal probability.
+        if all(w == 0.0 for w in weights):
+            weights = [1.0 for _ in pool]
+
+        if self.randomize_roles:
+            # Sample without replacement if possible.  When swarm_size
+            # exceeds the number of available roles, sample with
+            # replacement.  random.sample does not accept weights prior
+            # to Python 3.11; therefore we use random.choices when
+            # replacement is needed and fallback to sampling by ranks.
+            import random
+
+            chosen: List[RoleSpec] = []
+            if swarm_size <= len(pool):
+                # Normalize weights for sample without replacement
+                # Approach: compute cumulative distribution and draw
+                # sequentially while updating weights to avoid
+                # re‑selecting roles.  This avoids external
+                # dependencies such as numpy.
+                available = list(pool)
+                current_weights = list(weights)
+                for _ in range(swarm_size):
+                    total = sum(current_weights)
+                    # Fall back to uniform probabilities if total is zero
+                    probs = [w / total if total > 0 else 1.0 / len(available) for w in current_weights]
+                    # Draw one role based on probabilities
+                    r = random.choices(available, weights=probs, k=1)[0]
+                    chosen.append(r)
+                    # Remove selected role from available list and weights
+                    idx = available.index(r)
+                    del available[idx]
+                    del current_weights[idx]
+            else:
+                # Need to sample with replacement when swarm_size > pool
+                import random
+                chosen = random.choices(pool, weights=weights, k=swarm_size)
+            return chosen
+
+        # Deterministic round‑robin selection using weight repetition
         weighted: List[RoleSpec] = []
         for role in pool:
             reps = max(1, int(round(role.weight * 2)))
             weighted.extend([role] * reps)
 
         if not weighted:
-            weighted = pool
+            weighted = list(pool)
 
+        # Fill the selection by cycling through weighted list
         chosen: List[RoleSpec] = []
         idx = 0
         while len(chosen) < swarm_size:
             chosen.append(weighted[idx % len(weighted)])
             idx += 1
-
         return chosen
 
     def _build_agent_payload(
@@ -670,6 +752,7 @@ class SwarmOrchestrator:
         if not payloads:
             return []
 
+        # Determine worker count based on mode
         if mode == "pulse":
             workers = min(len(payloads), max(1, self.max_workers // 2))
         else:
@@ -679,7 +762,20 @@ class SwarmOrchestrator:
         start_time = time.time()
         deadline = start_time + soft_timeout_s if soft_timeout_s else None
 
-        with ThreadPoolExecutor(max_workers=workers) as executor:
+        # Select an executor implementation based on executor_type
+        executor_cls: Any
+        exec_type = (self.executor_type or "thread").lower()
+        if exec_type == "process":
+            executor_cls = ProcessPoolExecutor
+        elif exec_type == "interpreter" and InterpreterPoolExecutor is not None:
+            executor_cls = InterpreterPoolExecutor
+        else:
+            # Default fallback to threads
+            executor_cls = ThreadPoolExecutor
+
+        # Create executor context and execute payloads
+        with executor_cls(max_workers=workers) as executor:
+            # Submit all tasks immediately to preserve ordering
             future_to_index = {
                 executor.submit(agent_fn, payload): idx
                 for idx, payload in enumerate(payloads)
@@ -688,7 +784,7 @@ class SwarmOrchestrator:
             for future in as_completed(future_to_index):
                 idx = future_to_index[future]
 
-                # Global soft timeout for the swarm
+                # Soft timeout for the swarm
                 if deadline is not None and time.time() > deadline:
                     # Mark remaining agents as timed out
                     for f, j in future_to_index.items():
