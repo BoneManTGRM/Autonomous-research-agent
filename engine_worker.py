@@ -1533,8 +1533,8 @@ HARD_MAX_CYCLES: int = _parse_int_env("WORKER_HARD_MAX_CYCLES", 10_000_000)
 HARD_MAX_ROUNDS: int = _parse_int_env("WORKER_HARD_MAX_ROUNDS", HARD_MAX_CYCLES)
 # Disable the hard minute clamp by default.  When WORKER_HARD_MAX_MINUTES
 # is unset, default to 0.0 which instructs _clamp_minutes() to treat
-# time budgets as unlimited (no cap).  This allows multi-month runs
-# without unexpectedly hitting the 90-day hard cap.
+# time budgets as unlimited (no cap).  This allows multiÃÂ¢ÃÂÃÂmonth runs
+# without unexpectedly hitting the 90ÃÂ¢ÃÂÃÂday hard cap.
 HARD_MAX_MINUTES: float = _parse_float_env("WORKER_HARD_MAX_MINUTES", 0.0)
 
 
@@ -4593,12 +4593,40 @@ class _WorkerWatchdog(threading.Thread):
         heartbeat_getter,
         heartbeat_stall_s: float,
         check_interval_s: float,
+        progress_stall_s: Optional[float] = None,
     ):
+        """
+        Watchdog thread that monitors both heartbeat and job progress to detect
+        stalled workers. If the heartbeat stalls for longer than
+        ``heartbeat_stall_s`` seconds, a warning is emitted. If the current
+        job's progress file has not been updated for longer than
+        ``progress_stall_s`` seconds (when provided), the watchdog will mark
+        the job as recoverable, request shutdown, and exit the process. This
+        helps prevent stuck swarm jobs from appearing healthy when no forward
+        progress is occurring.
+
+        Args:
+            queue: The underlying FileQueue used by the worker.
+            heartbeat_getter: Callable returning the timestamp of the last
+                heartbeat (monotonic time).
+            heartbeat_stall_s: Number of seconds after which to warn when
+                heartbeats have not been updated.
+            check_interval_s: How often (in seconds) to check for stalls.
+            progress_stall_s: Optional number of seconds after which a lack
+                of updates to the current job's progress file will trigger
+                a recoverable shutdown. If None or zero/negative, progress
+                stall detection is disabled.
+        """
         super().__init__(daemon=True, name="worker-watchdog")
         self.queue = queue
         self.heartbeat_getter = heartbeat_getter
         self.heartbeat_stall_s = heartbeat_stall_s
         self.check_interval_s = check_interval_s
+        # progress_stall_s <= 0 disables progress stall detection
+        if progress_stall_s is not None and progress_stall_s <= 0:
+            self.progress_stall_s: Optional[float] = None
+        else:
+            self.progress_stall_s = progress_stall_s
         self._stop = threading.Event()
         self._last_warn = 0.0
         self._job_timeout_grace_s = _env_float_value("WORKER_JOB_TIMEOUT_GRACE_SECONDS", 15.0)
@@ -4612,6 +4640,7 @@ class _WorkerWatchdog(threading.Thread):
             heartbeat_stall_s=self.heartbeat_stall_s,
             check_interval_s=self.check_interval_s,
             max_job_wall_s=self.queue.max_job_wall_seconds,
+            progress_stall_s=self.progress_stall_s,
         )
         while not self._stop.is_set():
             try:
@@ -4626,6 +4655,66 @@ class _WorkerWatchdog(threading.Thread):
                             level="WARNING",
                             stall_s=round(now - last_hb, 2),
                         )
+
+                # Progress stall detection: if enabled, check whether the current
+                # job's progress file has been updated recently. Use wall-clock
+                # timestamps for the progress file; if the file's mtime has not
+                # advanced for longer than ``progress_stall_s``, mark the job as
+                # recoverable and exit. This prevents a job from appearing
+                # healthy via heartbeats while no work is actually occurring.
+                if self.progress_stall_s:
+                    job = _get_current_job()
+                    if job is not None:
+                        try:
+                            run_id = getattr(job, "run_id", None)
+                            if run_id:
+                                # Determine progress file path. Use run_jobs.progress_path
+                                # when available, otherwise fall back to _fallback_progress_path.
+                                prog_path: Optional[Path] = None
+                                # progress_path may be set in this module if run_jobs is imported
+                                try:
+                                    if progress_path is not None:
+                                        try:
+                                            prog_path = progress_path(run_id)  # type: ignore[call-arg]
+                                        except Exception:
+                                            prog_path = None
+                                except Exception:
+                                    prog_path = None
+                                if not prog_path:
+                                    prog_path = _fallback_progress_path(run_id)
+                                # Only check if the progress file exists
+                                if prog_path and prog_path.exists():
+                                    try:
+                                        mtime = prog_path.stat().st_mtime
+                                    except Exception:
+                                        mtime = None  # unable to read mtime
+                                    if mtime:
+                                        now_wall = time.time()
+                                        # Compute wall-clock stall duration
+                                        stall_s = now_wall - float(mtime)
+                                        if stall_s > float(self.progress_stall_s):
+                                            # Warn once per progress stall interval
+                                            if now - self._last_warn > float(self.progress_stall_s):
+                                                self._last_warn = now
+                                                log_kv(
+                                                    "watchdog_progress_stall",
+                                                    level="WARNING",
+                                                    run_id=run_id,
+                                                    stall_s=int(stall_s),
+                                                )
+                                            # Best effort: mark recoverable and request shutdown
+                                            try:
+                                                self.queue.mark_recoverable_shutdown(
+                                                    job, reason="progress_stall_exceeded"
+                                                )
+                                            except Exception:
+                                                pass
+                                            # Brief grace period for main thread to unwind
+                                            time.sleep(max(0.1, float(self._job_timeout_grace_s)))
+                                            os._exit(4)
+                        except Exception as e:
+                            # Catch any exceptions from progress stall detection
+                            log_exception("watchdog_progress_check_error", e)
 
                 # Job wall time enforcement: if job exceeds max wall, attempt to requeue and then
                 # force process restart if still running after a short grace window.
@@ -4794,7 +4883,7 @@ def _write_job_progress(
                 phase_idx = 0
             # Build an extra payload for stability signals.  When at least one
             # cycle has executed (current >= 1), emit flags so the UI can
-            # interpret the run as self-stabilizing.  Otherwise omit these.
+            # interpret the run as selfÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂstabilizing.  Otherwise omit these.
             extra_local: Optional[Dict[str, Any]] = None
             try:
                 if isinstance(phase_idx, (int, float)) and phase_idx >= 1:
@@ -5292,7 +5381,7 @@ def _process_single_job(
                         # Use the reported status if provided; otherwise default to 'running_job'.
                         ws_status = status_local if status_local else "running_job"
                         # Normalize to supported refresh statuses used by the Streamlit UI.  The UI only
-                        # auto-refreshes for a handful of values (running, active, in_progress, working), so
+                        # autoÃÂÃÂ¢ÃÂÃÂÃÂÃÂrefreshes for a handful of values (running, active, in_progress, working), so
                         # map our internal 'running_job' status to 'running'.
                         if ws_status == "running_job":
                             ws_status = "running"
@@ -5977,11 +6066,35 @@ def run_job_queue_worker() -> None:
     def _get_last_hb() -> float:
         return last_hb_mono
 
+    # Detect progress stalls using optional environment variable. If the value is
+    # zero or negative, progress stall detection is disabled. This ensures
+    # compatibility with existing deployments where such detection was absent.
+    # Determine progress stall threshold. If the environment variable is
+    # provided, use it directly. Otherwise derive a reasonable default
+    # based on the heartbeat stall interval: a minimum of 30 minutes (1800s)
+    # or ten times the heartbeat stall, whichever is larger. This ensures
+    # long-running cycles have ample time while still detecting genuine
+    # stalls. Set to None or a non-positive number to disable detection.
+    progress_stall_s_val: Optional[float] = None
+    env_raw = os.getenv("WORKER_PROGRESS_STALL_SECONDS")
+    try:
+        if env_raw is not None and env_raw.strip() != "":
+            progress_stall_s_val = float(env_raw.strip())
+        else:
+            # Compute default: max(heartbeat_stall_s * 10, 1800)
+            try:
+                default_progress_stall = max(float(heartbeat_stall_s) * 10.0, 1800.0)
+            except Exception:
+                default_progress_stall = 1800.0
+            progress_stall_s_val = default_progress_stall
+    except Exception:
+        progress_stall_s_val = None
     watchdog = _WorkerWatchdog(
         queue=queue,
         heartbeat_getter=_get_last_hb,
         heartbeat_stall_s=float(heartbeat_stall_s),
         check_interval_s=_env_float_value("WORKER_WATCHDOG_CHECK_INTERVAL_SECONDS", 5.0),
+        progress_stall_s=progress_stall_s_val,
     )
     watchdog.start()
 
