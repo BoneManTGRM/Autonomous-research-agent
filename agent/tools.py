@@ -116,6 +116,29 @@ def _parse_int_env(name: str, default: int) -> int:
 _TAVILY_MAX_CONCURRENCY = _parse_int_env("TAVILY_MAX_CONCURRENCY", _DEFAULT_TAVILY_MAX_CONCURRENCY)
 _TAVILY_MAX_RETRIES = _parse_int_env("TAVILY_MAX_RETRIES", _DEFAULT_TAVILY_MAX_RETRIES)
 
+# --------------------------------------------------------------------------
+# Tavily search call timeout
+#
+# In some cases, the underlying TavilyBrowserTool search may hang indefinitely
+# or take excessively long to return. To ensure the agent makes forward
+# progress, enforce a maximum time limit on each Tavily search call. If the
+# call does not complete within this timeout, the search attempt is treated
+# as failed and the retry/backoff logic will kick in. The timeout can be
+# tuned via the TAVILY_TIMEOUT_SECONDS environment variable. If unset or
+# invalid, a sensible default (30 seconds) is used.
+
+def _parse_float_env(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except Exception:
+        return default
+
+_DEFAULT_TAVILY_TIMEOUT_S: float = 30.0
+_TAVILY_TIMEOUT_S: float = _parse_float_env("TAVILY_TIMEOUT_SECONDS", _DEFAULT_TAVILY_TIMEOUT_S)
+
 # Global semaphore to limit concurrent Tavily search calls. Protects both
 # synchronous and potential asynchronous contexts. Note: Playwright and
 # requests within TavilyBrowserTool are already concurrent safe; this is an
@@ -1260,19 +1283,46 @@ def web_search(
             try:
                 # Acquire semaphore before making the remote call to bound
                 # concurrency. This protects against many agents flooding
-                # Tavily at once.
+                # Tavily at once. We also enforce a hard timeout on the call
+                # by executing it in a separate thread. If the call exceeds
+                # the timeout, a TimeoutError is raised.
                 with _tavily_semaphore:
-                    results = tool.search(
-                        query=query,
-                        max_results=max_results,
-                        search_depth=mapped_depth,
-                        include_answer=False,
-                        include_raw_content=False,
-                        topic=topic,
-                        time_range=extra.get("time_range"),
-                        auto_parameters=bool(extra.get("auto_parameters", False)),
-                        include_images=bool(extra.get("include_images", False)),
-                    )
+                    result_container: List[Any] = []
+                    error_container: List[Exception] = []
+
+                    def _search_call() -> None:
+                        try:
+                            res = tool.search(
+                                query=query,
+                                max_results=max_results,
+                                search_depth=mapped_depth,
+                                include_answer=False,
+                                include_raw_content=False,
+                                topic=topic,
+                                time_range=extra.get("time_range"),
+                                auto_parameters=bool(extra.get("auto_parameters", False)),
+                                include_images=bool(extra.get("include_images", False)),
+                            )
+                            result_container.append(res)
+                        except Exception as exc:
+                            error_container.append(exc)
+
+                    # Launch the search in a daemon thread so that it does not block
+                    # process exit if it hangs. Join with timeout to enforce a hard
+                    # limit on call duration.
+                    t = threading.Thread(target=_search_call, daemon=True)
+                    t.start()
+                    t.join(_TAVILY_TIMEOUT_S)
+                    if t.is_alive():
+                        # Timed out; treat as failure so retry/backoff logic applies
+                        raise TimeoutError(
+                            f"Tavily search exceeded {_TAVILY_TIMEOUT_S} seconds timeout"
+                        )
+                    if error_container:
+                        # Reraise the captured exception from the search call
+                        raise error_container[0]
+                    # Successful call; extract result
+                    results = result_container[0] if result_container else None
                 # If call succeeds, break out of retry loop
                 break
             except Exception as e:
@@ -1289,7 +1339,7 @@ def web_search(
                 is_timeout = any(
                     kw in msg
                     for kw in ["timeout", "timed out", "time out", "connection aborted"]
-                )
+                ) or isinstance(e, TimeoutError)
                 if is_rate_limited or is_timeout:
                     # Use exponential backoff with jitter. Sleep duration grows
                     # exponentially with the attempt number. Cap at a modest
