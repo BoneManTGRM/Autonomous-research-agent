@@ -27,9 +27,11 @@ from concurrent.futures import (
     ThreadPoolExecutor,
     ProcessPoolExecutor,
     as_completed,
+    wait,
+    FIRST_COMPLETED,
 )
 
-# InterpreterPoolExecutor was added in Python 3.14; import lazily to
+# InterpreterPoolExecutor was added in PythonÂ 3.14; import lazily to
 # gracefully handle older versions where it is unavailable.
 try:  # pragma: no cover
     from concurrent.futures import InterpreterPoolExecutor  # type: ignore
@@ -345,8 +347,8 @@ class SwarmOrchestrator:
     # parallel agent execution. The default of ``"thread"`` preserves the
     # existing behaviour of using a ``ThreadPoolExecutor``. Other supported
     # values are ``"process"`` (uses ``ProcessPoolExecutor`` to leverage
-    # multiple CPU cores for CPU‑bound workloads) and ``"interpreter"``
-    # (uses ``InterpreterPoolExecutor`` when running on Python 3.14+).  If
+    # multiple CPU cores for CPUâbound workloads) and ``"interpreter"``
+    # (uses ``InterpreterPoolExecutor`` when running on PythonÂ 3.14+).  If
     # the requested executor is unavailable (for example, on older Python
     # versions), the orchestrator will automatically fall back to the
     # threaded executor to maintain compatibility.
@@ -607,7 +609,7 @@ class SwarmOrchestrator:
         """Pick a list of roles for this swarm, biased by weight and domain.
 
         By default the orchestrator repeats roles proportionally to their
-        weights in a deterministic round‑robin manner.  If
+        weights in a deterministic roundârobin manner.  If
         ``self.randomize_roles`` is true, roles are selected randomly based
         on their weights using ``random.choices``.  This provides a
         lightweight mechanism to introduce variety across swarms while
@@ -631,7 +633,7 @@ class SwarmOrchestrator:
             # Sample without replacement if possible.  When swarm_size
             # exceeds the number of available roles, sample with
             # replacement.  random.sample does not accept weights prior
-            # to Python 3.11; therefore we use random.choices when
+            # to PythonÂ 3.11; therefore we use random.choices when
             # replacement is needed and fallback to sampling by ranks.
             import random
 
@@ -640,7 +642,7 @@ class SwarmOrchestrator:
                 # Normalize weights for sample without replacement
                 # Approach: compute cumulative distribution and draw
                 # sequentially while updating weights to avoid
-                # re‑selecting roles.  This avoids external
+                # reâselecting roles.  This avoids external
                 # dependencies such as numpy.
                 available = list(pool)
                 current_weights = list(weights)
@@ -661,7 +663,7 @@ class SwarmOrchestrator:
                 chosen = random.choices(pool, weights=weights, k=swarm_size)
             return chosen
 
-        # Deterministic round‑robin selection using weight repetition
+        # Deterministic roundârobin selection using weight repetition
         weighted: List[RoleSpec] = []
         for role in pool:
             reps = max(1, int(round(role.weight * 2)))
@@ -748,7 +750,17 @@ class SwarmOrchestrator:
         mode: str,
         soft_timeout_s: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
-        """Run agents in parallel using a bounded thread pool."""
+        """Run agents in parallel with a *real* soft timeout.
+
+        Why this exists:
+        - `as_completed()` will block forever if one future never completes.
+        - Using an executor as a context manager (`with ThreadPoolExecutor(...)`) will
+          also wait for all running futures at exit.
+
+        So we implement a polling loop with `wait(..., timeout=...)` and when the
+        deadline is reached we mark remaining agents as timed out and shutdown the
+        executor without waiting.
+        """
         if not payloads:
             return []
 
@@ -760,7 +772,7 @@ class SwarmOrchestrator:
 
         results: List[Optional[Dict[str, Any]]] = [None] * len(payloads)
         start_time = time.time()
-        deadline = start_time + soft_timeout_s if soft_timeout_s else None
+        deadline = start_time + float(soft_timeout_s) if soft_timeout_s else None
 
         # Select an executor implementation based on executor_type
         executor_cls: Any
@@ -770,43 +782,78 @@ class SwarmOrchestrator:
         elif exec_type == "interpreter" and InterpreterPoolExecutor is not None:
             executor_cls = InterpreterPoolExecutor
         else:
-            # Default fallback to threads
             executor_cls = ThreadPoolExecutor
 
-        # Create executor context and execute payloads
-        with executor_cls(max_workers=workers) as executor:
+        executor = executor_cls(max_workers=workers)
+        timed_out = False
+        future_to_index: Dict[Any, int] = {}
+        pending = set()
+
+        try:
             # Submit all tasks immediately to preserve ordering
-            future_to_index = {
-                executor.submit(agent_fn, payload): idx
-                for idx, payload in enumerate(payloads)
-            }
+            for idx, payload in enumerate(payloads):
+                fut = executor.submit(agent_fn, payload)
+                future_to_index[fut] = idx
+                pending.add(fut)
 
-            for future in as_completed(future_to_index):
-                idx = future_to_index[future]
+            # Poll until all futures complete OR the deadline is hit.
+            while pending:
+                if deadline is not None:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        timed_out = True
+                        break
+                    # Wake up periodically so we can observe the deadline.
+                    timeout = min(0.5, max(0.0, remaining))
+                else:
+                    timeout = 0.5
 
-                # Soft timeout for the swarm
-                if deadline is not None and time.time() > deadline:
-                    # Mark remaining agents as timed out
-                    for f, j in future_to_index.items():
-                        if results[j] is None:
-                            results[j] = {
-                                "agent_index": j,
-                                "role": payloads[j].get("role", "Unknown"),
-                                "domain": payloads[j].get("domain", "general"),
-                                "status": "timeout",
-                            }
-                    break
+                done, pending = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
 
+                for fut in done:
+                    idx = future_to_index.get(fut)
+                    if idx is None:
+                        continue
+                    try:
+                        results[idx] = fut.result()
+                    except Exception as exc:  # pragma: no cover - robustness
+                        results[idx] = {
+                            "agent_index": idx,
+                            "role": payloads[idx].get("role", "Unknown"),
+                            "domain": payloads[idx].get("domain", "general"),
+                            "status": "error",
+                            "error": str(exc),
+                        }
+
+            if timed_out and pending:
+                # Mark remaining agents as timed out and attempt cancellation.
+                for fut in list(pending):
+                    idx = future_to_index.get(fut)
+                    if idx is None:
+                        continue
+                    try:
+                        fut.cancel()
+                    except Exception:
+                        pass
+                    if results[idx] is None:
+                        results[idx] = {
+                            "agent_index": idx,
+                            "role": payloads[idx].get("role", "Unknown"),
+                            "domain": payloads[idx].get("domain", "general"),
+                            "status": "timeout",
+                        }
+
+        finally:
+            # If we hit a soft timeout, do NOT wait for stuck futures.
+            try:
+                executor.shutdown(wait=not timed_out, cancel_futures=True)
+            except TypeError:
+                executor.shutdown(wait=not timed_out)
+            except Exception:
                 try:
-                    results[idx] = future.result()
-                except Exception as exc:  # pragma: no cover - robustness
-                    results[idx] = {
-                        "agent_index": idx,
-                        "role": payloads[idx].get("role", "Unknown"),
-                        "domain": payloads[idx].get("domain", "general"),
-                        "status": "error",
-                        "error": str(exc),
-                    }
+                    executor.shutdown(wait=False)
+                except Exception:
+                    pass
 
         return [r or {} for r in results]
 
