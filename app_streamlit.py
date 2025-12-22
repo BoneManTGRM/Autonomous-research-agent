@@ -83,7 +83,8 @@ except Exception:  # pragma: no cover
 # IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
 # Replace the misÃ¢ÂÂencoded page icon with a valid emoji to prevent mojibake
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="Ã°ÂÂÂ¬", layout="wide")
+# Use a valid Unicode emoji for the page icon instead of a doubleâdecoded byte sequence
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ð¬", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -2918,10 +2919,21 @@ def render_agent_presence(
     st.markdown('<div class="ara-card-title">Agent presence</div>', unsafe_allow_html=True)
     st.markdown('<div class="ara-card-sub">Roles currently configured for the active run.</div>', unsafe_allow_html=True)
 
-    chips = []
-    for a in agents[:MAX_SWARM_AGENTS]:
+    # Deduplicate agent names to avoid duplicate chips in the UI
+    seen_agents: Set[str] = set()
+    unique_agents: List[str] = []
+    for name in agents:
+        name_str = str(name)
+        if name_str not in seen_agents:
+            seen_agents.add(name_str)
+            unique_agents.append(name_str)
+
+    chips: List[str] = []
+    for a in unique_agents[:MAX_SWARM_AGENTS]:
         a_clean = str(a)
-        is_active = active_agent and (a_clean == active_agent or a_clean.split("_", 1)[0] == str(active_agent))
+        is_active = active_agent and (
+            a_clean == active_agent or a_clean.split("_", 1)[0] == str(active_agent)
+        )
         cls = "ara-chip active" if is_active else "ara-chip"
         # Use a plain ASCII marker instead of a misencoded Unicode bullet
         chips.append(f'<span class="{cls}">* {html.escape(a_clean)}</span>')
