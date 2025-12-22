@@ -32,6 +32,8 @@ import traceback
 import math
 import subprocess
 import time
+import threading
+import random
 
 # Optional HTTP and HTML parsing for browser like scraping
 try:
@@ -76,6 +78,17 @@ except Exception:
 
 # Singleton instance for module level web_search bridge
 _WEB_RESEARCH_INSTANCE: Optional[Any] = None
+
+# ----------------------------------------------------------
+# Tavily concurrency and backoff controls
+# ----------------------------------------------------------
+# Limit the maximum number of concurrent Tavily search calls across a process.
+# This helps prevent bursts of simultaneous requests from a swarm of agents.
+_TAVILY_MAX_CONCURRENCY = int(os.getenv("TAVILY_MAX_CONCURRENCY", "4") or "4")
+# Number of attempts to retry a Tavily search when rate-limited or network errors occur.
+_TAVILY_RETRY_ATTEMPTS = int(os.getenv("TAVILY_RETRY_ATTEMPTS", "5") or "5")
+# Module-level semaphore used to bound concurrency for Tavily search calls.
+_tavily_sem = threading.Semaphore(_TAVILY_MAX_CONCURRENCY)
 
 
 def _get_web_research_instance() -> Optional[Any]:
@@ -1205,54 +1218,80 @@ def web_search(
         mapped_depth = "advanced"
 
     if tool is not None:
-        started = time.time()
-        results = tool.search(
-            query=query,
-            max_results=max_results,
-            search_depth=mapped_depth,
-            include_answer=False,
-            include_raw_content=False,
-            topic=topic,
-            time_range=extra.get("time_range"),
-            auto_parameters=bool(extra.get("auto_parameters", False)),
-            include_images=bool(extra.get("include_images", False)),
-        )
-        elapsed = time.time() - started
-
-        caps = {}
-        try:
-            caps = tool.describe_capabilities()
-        except Exception:
-            caps = {}
-        # tools_web.BrowserTool.describe_capabilities exposes stub_mode and mode
-        stubbed = bool(
-            caps.get(
-                "stub_mode",
-                True if caps.get("mode") not in {None, "real"} else False,
-            )
-        )
-
-        return {
-            "query": query,
-            "stubbed": stubbed,
-            "results": results,
-            "response_time": elapsed,
-            "request_id": None,
-            "info_gain": None,
-            "search_energy": None,
-            "difficulty": None,
-            "semantic_diversity": None,
-        }
+        # Bound concurrency and retry Tavily search calls when rate limits or network errors occur.
+        last_err: Optional[Exception] = None
+        for attempt in range(_TAVILY_RETRY_ATTEMPTS):
+            with _tavily_sem:
+                start_ts = time.time()
+                try:
+                    results = tool.search(
+                        query=query,
+                        max_results=max_results,
+                        search_depth=mapped_depth,
+                        include_answer=False,
+                        include_raw_content=False,
+                        topic=topic,
+                        time_range=extra.get("time_range"),
+                        auto_parameters=bool(extra.get("auto_parameters", False)),
+                        include_images=bool(extra.get("include_images", False)),
+                    )
+                    elapsed = time.time() - start_ts
+                    caps = {}
+                    try:
+                        caps = tool.describe_capabilities()
+                    except Exception:
+                        caps = {}
+                    stubbed = bool(
+                        caps.get(
+                            "stub_mode",
+                            True if caps.get("mode") not in {None, "real"} else False,
+                        )
+                    )
+                    return {
+                        "query": query,
+                        "stubbed": stubbed,
+                        "results": results,
+                        "response_time": elapsed,
+                        "request_id": None,
+                        "info_gain": None,
+                        "search_energy": None,
+                        "difficulty": None,
+                        "semantic_diversity": None,
+                    }
+                except Exception as e:
+                    last_err = e
+                    msg = str(e).lower()
+                    if "429" in msg or "rate" in msg or "timeout" in msg:
+                        # Exponential backoff with jitter
+                        backoff_s = (2 ** attempt) + random.random()
+                        try:
+                            time.sleep(backoff_s)
+                        except Exception:
+                            pass
+                        continue
+                    raise
+        # If all retries fail, fall through to the fallback below; last_err will be used.
 
     # Fallback: browser based stub search so the system keeps working
     browser = BrowserTool()
     url = f"https://duckduckgo.com/html/?q={query}"
     page = browser.fetch_page(url)
 
+    # Build a fallback error message: prefer the page error, otherwise use last_err or a generic message.
+    fallback_error: Optional[str] = None
+    try:
+        fallback_error = page.error  # type: ignore[attr-defined]
+    except Exception:
+        fallback_error = None
+    if not fallback_error:
+        if 'last_err' in locals() and last_err is not None:
+            fallback_error = str(last_err)
+        else:
+            fallback_error = "TavilyBrowserTool not available"
     return {
         "query": query,
         "stubbed": True,
-        "error": page.error or "TavilyBrowserTool not available",
+        "error": fallback_error,
         "results": [
             {
                 "title": page.title or "",
