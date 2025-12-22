@@ -60,6 +60,17 @@ import time
 from dataclasses import dataclass, field, asdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+# Concurrency utilities
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    ProcessPoolExecutor,
+    as_completed,
+)
+try:  # PythonÂ 3.14 introduced InterpreterPoolExecutor
+    from concurrent.futures import InterpreterPoolExecutor  # type: ignore
+except Exception:
+    InterpreterPoolExecutor = None  # type: ignore
+
 try:
     # Optional import. SwarmManager does not strictly require CoreAgent
     from .core_agent import CoreAgent
@@ -203,6 +214,9 @@ class SwarmManager:
         base_goal: str,
         runtime_profile_name: str = "24_hours",
         logger: Optional[Callable[[str], None]] = None,
+        *,
+        max_workers: int = 1,
+        executor_type: str = "thread",
     ) -> None:
         self.preset_name = preset_name
         self.base_goal = base_goal
@@ -224,6 +238,14 @@ class SwarmManager:
         self._logger = logger or (lambda msg: None)
         self._start_time: Optional[float] = None
         self._step_index: int = 0
+
+        # Concurrency options
+        # ``max_workers`` controls the degree of parallelism when executing
+        # agent steps.  A value of 1 preserves sequential behaviour.  If
+        # greater than 1, agents will be run concurrently using the
+        # executor specified by ``executor_type``.
+        self.max_workers = max_workers
+        self.executor_type = executor_type.lower()
 
         self._log(
             f"[SwarmManager] Initialized for preset='{preset_name}', "
@@ -304,10 +326,63 @@ class SwarmManager:
         now = time.time()
         agent_results: List[Dict[str, Any]] = []
 
-        for agent, state in zip(self._agents, self._agent_states):
-            result = step_fn(agent, state, global_context)
-            agent_results.append(result)
-            self._update_agent_state_from_result(state, result)
+        # Execute agent steps, optionally in parallel
+        if self.max_workers > 1:
+            # Determine executor class based on requested type
+            exec_type = self.executor_type
+            if exec_type == "process":
+                executor_cls = ProcessPoolExecutor  # type: ignore
+            elif exec_type == "interpreter" and InterpreterPoolExecutor is not None:
+                executor_cls = InterpreterPoolExecutor  # type: ignore
+            else:
+                executor_cls = ThreadPoolExecutor  # type: ignore
+            # Submit tasks concurrently
+            with executor_cls(max_workers=min(self.max_workers, len(self._agents))) as executor:
+                future_to_index: Dict[Any, int] = {}
+                # Preallocate results list to preserve ordering
+                temp_results: List[Optional[Dict[str, Any]]] = [None] * len(self._agents)
+                for idx, (agent, state) in enumerate(zip(self._agents, self._agent_states)):
+                    # Wrap step_fn call to catch exceptions
+                    def _call_step(agent=agent, state=state):  # default args bind current values
+                        try:
+                            return step_fn(agent, state, global_context)
+                        except Exception as exc:  # pragma: no cover
+                            return {
+                                "status": "error",
+                                "error": str(exc),
+                            }
+                    future = executor.submit(_call_step)
+                    future_to_index[future] = idx
+                for future in as_completed(future_to_index):
+                    idx = future_to_index[future]
+                    result = future.result()
+                    temp_results[idx] = result
+                    # Update state only if a dict was returned
+                    if isinstance(result, dict):
+                        try:
+                            self._update_agent_state_from_result(
+                                self._agent_states[idx], result
+                            )
+                        except Exception:
+                            # Do not allow a faulty update to break the loop
+                            pass
+                # Append results in original order
+                for r in temp_results:
+                    if r is not None:
+                        agent_results.append(r)
+        else:
+            # Sequential execution
+            for agent, state in zip(self._agents, self._agent_states):
+                try:
+                    result = step_fn(agent, state, global_context)
+                except Exception as exc:  # pragma: no cover
+                    result = {
+                        "status": "error",
+                        "error": str(exc),
+                    }
+                agent_results.append(result)
+                if isinstance(result, dict):
+                    self._update_agent_state_from_result(state, result)
 
         step_seconds = max(0.0, time.time() - step_start)
         swarm_metrics = self._compute_swarm_metrics(
