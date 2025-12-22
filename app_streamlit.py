@@ -5206,31 +5206,21 @@ def main() -> None:
                 s1 = snapshots[idx1]
                 s2 = snapshots[idx2]
 
-                # Display equilibrium views for the selected snapshots using only available metrics
                 st.markdown("#### Snapshot 1 equilibrium view")
                 eq1 = equilibrium_from_snapshot(s1["data"])
-                # Only show RYE avg and stability index to avoid exposing unsupported metrics
-                col_eq1 = st.columns(2)
-                col_eq1[0].metric(
-                    "RYE avg",
-                    f"{eq1['rye_avg']:.3f}" if eq1.get("rye_avg") is not None else "n/a",
-                )
-                col_eq1[1].metric(
-                    "Stability idx",
-                    f"{eq1['stability_index']:.3f}" if eq1.get("stability_index") is not None else "n/a",
-                )
+                col_eq1 = st.columns(4)
+                col_eq1[0].metric("RYE avg", f"{eq1['rye_avg']:.3f}" if eq1["rye_avg"] is not None else "n/a")
+                col_eq1[1].metric("Stability idx", f"{eq1['stability_index']:.3f}" if eq1["stability_index"] is not None else "n/a")
+                col_eq1[2].metric("Coherence plateau", f"{eq1['coherence_plateau']:.3f}" if eq1["coherence_plateau"] is not None else "n/a")
+                col_eq1[3].metric("Equilibrium fraction", f"{eq1['equilibrium_fraction']:.3f}" if eq1["equilibrium_fraction"] is not None else "n/a")
 
                 st.markdown("#### Snapshot 2 equilibrium view")
                 eq2 = equilibrium_from_snapshot(s2["data"])
-                col_eq2 = st.columns(2)
-                col_eq2[0].metric(
-                    "RYE avg",
-                    f"{eq2['rye_avg']:.3f}" if eq2.get("rye_avg") is not None else "n/a",
-                )
-                col_eq2[1].metric(
-                    "Stability idx",
-                    f"{eq2['stability_index']:.3f}" if eq2.get("stability_index") is not None else "n/a",
-                )
+                col_eq2 = st.columns(4)
+                col_eq2[0].metric("RYE avg", f"{eq2['rye_avg']:.3f}" if eq2["rye_avg"] is not None else "n/a")
+                col_eq2[1].metric("Stability idx", f"{eq2['stability_index']:.3f}" if eq2["stability_index"] is not None else "n/a")
+                col_eq2[2].metric("Coherence plateau", f"{eq2['coherence_plateau']:.3f}" if eq2["coherence_plateau"] is not None else "n/a")
+                col_eq2[3].metric("Equilibrium fraction", f"{eq2['equilibrium_fraction']:.3f}" if eq2["equilibrium_fraction"] is not None else "n/a")
 
                 st.markdown("#### Equilibrium delta (snapshot2 minus snapshot1)")
 
@@ -5239,20 +5229,17 @@ def main() -> None:
                         return None
                     return b - a
 
-                d_rye = _delta(eq1.get("rye_avg"), eq2.get("rye_avg"))
-                d_stab = _delta(eq1.get("stability_index"), eq2.get("stability_index"))
+                d_rye = _delta(eq1["rye_avg"], eq2["rye_avg"])
+                d_stab = _delta(eq1["stability_index"], eq2["stability_index"])
+                d_plateau = _delta(eq1["coherence_plateau"], eq2["coherence_plateau"])
+                d_eqfrac = _delta(eq1["equilibrium_fraction"], eq2["equilibrium_fraction"])
 
-                col_de = st.columns(2)
-                col_de[0].metric(
-                    "Delta RYE avg",
-                    f"{d_rye:+.3f}" if d_rye is not None else "n/a",
-                )
-                col_de[1].metric(
-                    "Delta stability",
-                    f"{d_stab:+.3f}" if d_stab is not None else "n/a",
-                )
+                col_de = st.columns(4)
+                col_de[0].metric("Delta RYE avg", f"{d_rye:+.3f}" if d_rye is not None else "n/a")
+                col_de[1].metric("Delta stability", f"{d_stab:+.3f}" if d_stab is not None else "n/a")
+                col_de[2].metric("Delta plateau", f"{d_plateau:+.3f}" if d_plateau is not None else "n/a")
+                col_de[3].metric("Delta equilibrium", f"{d_eqfrac:+.3f}" if d_eqfrac is not None else "n/a")
 
-                # Raw JSON expanders for snapshots
                 with st.expander("Raw snapshot 1 JSON"):
                     preview, note = safe_json_preview(s1["data"])
                     if preview is not None:
@@ -5355,7 +5342,9 @@ def main() -> None:
                         st.error(f"Pruning error: {error_msg}")
                     else:
                         st.success(f"Pruning completed. Approx entries removed: {pruned_count}")
-                        st.info("Reload the page to reflect updated history and diagnostics.")
+                        # Automatically reload the page so updated counts reflect the pruned history
+                        st.info("Reloading the page to reflect updated history and diagnostics...")
+                        st.rerun()
 
         with tab_verify:
             st.markdown("### Verification and cure oriented findings")
@@ -5703,13 +5692,3 @@ def main() -> None:
                 time.sleep(float(refresh_seconds))
                 try:
                     st.rerun()
-                except Exception:
-                    try:
-                        st.experimental_rerun()
-                    except Exception:
-                        pass
-
-
-# Streamlit entry point
-if __name__ == "__main__":
-    main()
