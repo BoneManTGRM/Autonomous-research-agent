@@ -928,3 +928,150 @@ def summarize_for_ui(
         "critical_transition_count": len(profile.get("critical_transitions") or []),
     }
     return out
+
+
+# ---------------------------------------------------------------------------
+# Stateful StabilityKernel class
+# ---------------------------------------------------------------------------
+
+class StabilityKernel:
+    """
+    Stateful wrapper around the pure stability functions defined in this module.
+
+    The `StabilityKernel` class tracks a rolling history of cycle metrics and
+    produces a stability snapshot on each update.  It is designed to be
+    instantiated by higher level components (for example the TGRM loop) and
+    called once per cycle.  Internally it collects the supplied `RYE`,
+    `delta_R`, and `energy_E` values, along with optional equilibrium
+    information and arbitrary metadata, then derives a rich stability profile
+    using the pure analytic helpers in this module.
+
+    Only a fixed amount of history is retained (default 1000 cycles) to bound
+    memory usage in long autonomous runs.  If more cycles are processed the
+    oldest entries are dropped.
+
+    Parameters
+    ----------
+    window_short: int, optional
+        Size of the short window used for oscillation metrics.  Defaults to
+        10.  Must be at least 3.
+    window_long: int, optional
+        Size of the long window used for stability and volatility metrics.
+        Defaults to 50.  Must be at least 5.
+    max_history: int, optional
+        Maximum number of history entries to retain.  Defaults to 1000.
+
+    Examples
+    --------
+
+    >>> sk = StabilityKernel()
+    >>> snapshot = sk.update_from_cycle(rye=1.0, delta_r=2.0, energy_e=1.0, equilibrium_info={'equilibrium_label': 'high_equilibrium'})
+    >>> 'stability_index' in snapshot
+    True
+    """
+
+    def __init__(
+        self,
+        *,
+        window_short: int = 10,
+        window_long: int = 50,
+        max_history: int = 1000,
+    ) -> None:
+        # Validate and clamp window sizes
+        self.window_short = max(3, int(window_short))
+        self.window_long = max(5, int(window_long))
+        # Track history of cycles (each entry is a dict)
+        self._history: List[Dict[str, Any]] = []
+        # Bound how many entries we keep to avoid unbounded growth
+        self._max_history = max(10, int(max_history))
+
+    def update_from_cycle(
+        self,
+        *,
+        rye: Optional[float] = None,
+        delta_r: Optional[float] = None,
+        energy_e: Optional[float] = None,
+        equilibrium_info: Optional[Dict[str, Any]] = None,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Update the internal history with a new cycle and return a stability snapshot.
+
+        All numeric inputs are sanitized via `_safe_float` to guard against
+        invalid or non-finite values.  Missing values are permitted and will
+        simply be skipped in the resulting series.
+
+        Parameters
+        ----------
+        rye: float, optional
+            The raw RYE value for the cycle.  If provided and finite this
+            populates the ``RYE`` field of the stored history entry.  When
+            omitted or non-numeric the entry will lack a ``RYE`` field.
+        delta_r: float, optional
+            The delta improvement value for the cycle.  Sanitized and stored
+            under ``delta_R`` when finite.
+        energy_e: float, optional
+            The energy cost for the cycle.  Sanitized and stored under
+            ``energy_E`` when finite.
+        equilibrium_info: dict, optional
+            Any equilibrium metadata computed by other components.  Copied
+            directly into the history entry under the key ``equilibrium``.
+        meta: dict, optional
+            Arbitrary metadata associated with the cycle.  Stored under
+            ``meta`` for later inspection (not used by stability metrics).
+
+        Returns
+        -------
+        Dict[str, Any]
+            A stability snapshot containing at least ``stability_index`` and
+            ``recovery_momentum`` keys, along with volatility, oscillation,
+            equilibrium and critical transitions.  Additional fields may be
+            included for diagnostics.
+        """
+        # Build a new entry and sanitize numeric fields
+        entry: Dict[str, Any] = {}
+        v_rye = _safe_float(rye)
+        if v_rye is not None:
+            entry["RYE"] = v_rye
+        v_dr = _safe_float(delta_r)
+        if v_dr is not None:
+            entry["delta_R"] = v_dr
+        v_e = _safe_float(energy_e)
+        if v_e is not None:
+            entry["energy_E"] = v_e
+
+        # Attach equilibrium info if provided and dict-like
+        if isinstance(equilibrium_info, dict) and equilibrium_info:
+            entry["equilibrium"] = dict(equilibrium_info)
+        # Attach meta if provided
+        if isinstance(meta, dict) and meta:
+            entry["meta"] = dict(meta)
+
+        # Append entry to history and enforce history cap
+        if entry:
+            self._history.append(entry)
+            if len(self._history) > self._max_history:
+                # Drop oldest entries to bound memory
+                excess = len(self._history) - self._max_history
+                if excess > 0:
+                    self._history = self._history[excess:]
+
+        # Build stability profile based on accumulated history
+        profile = build_stability_profile(
+            self._history,
+            window_short=self.window_short,
+            window_long=self.window_long,
+        )
+        # Prepare snapshot with key metrics
+        snapshot: Dict[str, Any] = {
+            "stability_index": profile.get("stability_index"),
+            "recovery_momentum": profile.get("recovery_momentum"),
+            "volatility": profile.get("volatility"),
+            "oscillation": profile.get("oscillation"),
+            "equilibrium": profile.get("equilibrium"),
+            "critical_transitions": profile.get("critical_transitions"),
+            "windows": profile.get("windows"),
+            # Optionally include raw series length for diagnostics
+            "history_length": len(self._history),
+        }
+        return snapshot
