@@ -979,6 +979,11 @@ class MemoryStore:
             The number of cycles removed.
         """
         try:
+            # Reload latest cycles from disk before pruning
+            try:
+                self._load()
+            except Exception:
+                pass
             cycles = self._data.get("cycles")
             if not isinstance(cycles, list) or not cycles:
                 return 0
@@ -1832,41 +1837,80 @@ class MemoryStore:
         self._save()
 
     def get_cycle_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Return the history of cycles (oldest to newest).
+        """
+        Return the history of cycles (oldest to newest).
+
+        This method reloads the underlying JSON file from disk before
+        returning the in-memory list of cycles.  This ensures that
+        callers such as the Streamlit UI see the most up-to-date data
+        when other processes (like the engine worker) append cycles or
+        perform pruning.
 
         Args:
-            limit:
-                If provided and > 0, returns only the most recent `limit` cycles,
-                still ordered oldest->newest (stable for learning windows).
+            limit: If provided and > 0, returns only the most recent
+                ``limit`` cycles, still ordered oldest->newest.
+
+        Returns:
+            A list of cycle dictionaries.
         """
+        # Reload from disk to pick up changes from other processes
+        try:
+            self._load()
+        except Exception:
+            pass
         cycles = self._data.get("cycles", [])
         if not isinstance(cycles, list):
             return []
+        # No limit or invalid limit -> return full history
         if limit is None:
             return list(cycles)
         try:
             lim = int(limit)
         except Exception:
-            lim = 0
+            return list(cycles)
         if lim <= 0:
             return []
         return list(cycles[-lim:])
 
     def get_cycle_history_for_goal(self, goal: str, limit: int = 200) -> List[Dict[str, Any]]:
-        """Return recent cycles for a goal, oldest to newest, up to limit.
-
-        This helper is used by TGRM learning functions that need an
-        ordered recent window for RYE gradient and equilibrium signals.
         """
-        history = [c for c in self._data.get("cycles", []) if c.get("goal") == goal]
+        Return recent cycles for a goal, oldest to newest, up to ``limit``.
+
+        This helper reloads the underlying memory from disk before
+        returning results so that goal-specific history remains in sync
+        with other processes writing cycles.  It is primarily used by
+        TGRM learning functions that need an ordered recent window
+        for RYE gradient and equilibrium signals.
+
+        Args:
+            goal: The goal identifier to filter cycles by.
+            limit: The maximum number of cycles to return.
+
+        Returns:
+            A list of cycle dictionaries filtered by goal.
+        """
+        # Reload to ensure we have latest state
+        try:
+            self._load()
+        except Exception:
+            pass
+        history = [c for c in self._data.get("cycles", []) if isinstance(c, dict) and c.get("goal") == goal]
+        # Sort newest to oldest then slice
         history_sorted = sorted(
             history,
             key=lambda c: c.get("timestamp", ""),
             reverse=True,
         )
         # Take most recent limit and reverse so oldest is first
-        window = list(reversed(history_sorted[:limit]))
-        return window
+        try:
+            lim = int(limit)
+        except Exception:
+            lim = 0
+        if lim <= 0:
+            subset = history_sorted
+        else:
+            subset = history_sorted[:lim]
+        return list(reversed(subset))
 
     def get_cycles_for_run(
         self,
