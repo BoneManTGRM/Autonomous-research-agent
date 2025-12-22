@@ -116,84 +116,69 @@ def _parse_int_env(name: str, default: int) -> int:
 _TAVILY_MAX_CONCURRENCY = _parse_int_env("TAVILY_MAX_CONCURRENCY", _DEFAULT_TAVILY_MAX_CONCURRENCY)
 _TAVILY_MAX_RETRIES = _parse_int_env("TAVILY_MAX_RETRIES", _DEFAULT_TAVILY_MAX_RETRIES)
 
-# --------------------------------------------------------------------------
-# Tavily search hard timeout + fail-fast safety
-#
-# ARA can appear "stuck" if the underlying Tavily client hangs (socket stall,
-# DNS/TLS issues, etc.) because the agent waits for a web_search tool call to
-# return before it can advance cycles.
-#
-# We enforce a hard upper bound on each Tavily search call by running it in a
-# daemon thread and joining with a timeout. If it times out, we fail fast and
-# fall back to the built-in BrowserTool (DuckDuckGo HTML) so the run keeps
-# making forward progress.
-#
-# You can tune this via env vars on the *worker* service:
-#   - TAVILY_TIMEOUT_SECONDS (float, default 20)
-#   - TAVILY_DISABLE_AFTER_TIMEOUTS (int, default 1)
-#   - TAVILY_COOLDOWN_SECONDS (float, default 900)
+# Global semaphore to limit concurrent Tavily search calls. Protects both
+# synchronous and potential asynchronous contexts. Note: Playwright and
+# requests within TavilyBrowserTool are already concurrent safe; this is an
+# extra guard at the tool layer.
+_tavily_semaphore = threading.Semaphore(_TAVILY_MAX_CONCURRENCY)
+
+
+# Hard timeout for a single Tavily search. This prevents a hung network call
+# from freezing an entire run (especially in swarm mode).
+_DEFAULT_TAVILY_TIMEOUT_S: float = 20.0
+
 
 def _parse_float_env(name: str, default: float) -> float:
     raw = os.getenv(name)
     if not raw:
         return default
     try:
-        return float(raw)
+        val = float(raw)
+        return val if val > 0 else default
     except Exception:
         return default
 
 
-_DEFAULT_TAVILY_TIMEOUT_S: float = 20.0
-_TAVILY_TIMEOUT_S: float = _parse_float_env("TAVILY_TIMEOUT_SECONDS", _DEFAULT_TAVILY_TIMEOUT_S)
+_TAVILY_TIMEOUT_S = _parse_float_env("TAVILY_TIMEOUT_SECONDS", _DEFAULT_TAVILY_TIMEOUT_S)
 
-# If Tavily times out repeatedly, disable it temporarily so the run continues
-# offline rather than spending minutes retrying.
-_TAVILY_DISABLE_AFTER_TIMEOUTS: int = _parse_int_env("TAVILY_DISABLE_AFTER_TIMEOUTS", 1)
-_TAVILY_COOLDOWN_SECONDS: float = _parse_float_env("TAVILY_COOLDOWN_SECONDS", 900.0)
+# Simple circuit breaker: after a timeout, stop using Tavily for a short period
+# and fall back to the browser stub search. This avoids piling up stuck threads.
+_DEFAULT_TAVILY_CIRCUIT_OPEN_S: float = 900.0
+_TAVILY_CIRCUIT_OPEN_S = _parse_float_env("TAVILY_CIRCUIT_OPEN_SECONDS", _DEFAULT_TAVILY_CIRCUIT_OPEN_S)
 
-_tavily_state_lock = threading.Lock()
-_tavily_timeout_count: int = 0
-_tavily_disabled_until_ts: float = 0.0
+_TAVILY_DISABLED_UNTIL_TS: float = 0.0
+_TAVILY_STATE_LOCK = threading.Lock()
 
 
 def _log_tools(msg: str) -> None:
-    """Best-effort log to stdout (Render captures stdout/stderr)."""
     try:
+        if str(os.getenv("TOOLS_LOGGING", "1")).strip().lower() in {"0", "false", "no", "off"}:
+            return
         print(msg, flush=True)
     except Exception:
         pass
 
 
 def _tavily_is_temporarily_disabled() -> bool:
-    with _tavily_state_lock:
-        return time.time() < _tavily_disabled_until_ts
+    try:
+        with _TAVILY_STATE_LOCK:
+            return time.time() < _TAVILY_DISABLED_UNTIL_TS
+    except Exception:
+        return False
 
 
-def _tavily_register_timeout(reason: str) -> None:
-    """Track Tavily timeouts and disable it for a cooldown window if needed."""
-    global _tavily_timeout_count, _tavily_disabled_until_ts, _WEB_RESEARCH_INSTANCE
-    now = time.time()
-    with _tavily_state_lock:
-        _tavily_timeout_count += 1
-        if _tavily_timeout_count >= max(1, _TAVILY_DISABLE_AFTER_TIMEOUTS):
-            _tavily_timeout_count = 0
-            _tavily_disabled_until_ts = now + max(0.0, _TAVILY_COOLDOWN_SECONDS)
-            # Drop the shared instance so future calls can re-init after cooldown.
-            _WEB_RESEARCH_INSTANCE = None
-            _log_tools(
-                f"[tools:web_search] Tavily disabled for {int(_TAVILY_COOLDOWN_SECONDS)}s "
-                f"after timeout: {reason}"
-            )
-        else:
-            _log_tools(
-                f"[tools:web_search] Tavily timeout ({_tavily_timeout_count}/{_TAVILY_DISABLE_AFTER_TIMEOUTS}): {reason}"
-            )
-
-# Global semaphore to limit concurrent Tavily search calls. Protects both
-# synchronous and potential asynchronous contexts. Note: Playwright and
-# requests within TavilyBrowserTool are already concurrent safe; this is an
-# extra guard at the tool layer.
-_tavily_semaphore = threading.Semaphore(_TAVILY_MAX_CONCURRENCY)
+def _tavily_register_timeout(reason: str = "") -> None:
+    global _TAVILY_DISABLED_UNTIL_TS
+    try:
+        now = time.time()
+        with _TAVILY_STATE_LOCK:
+            _TAVILY_DISABLED_UNTIL_TS = max(_TAVILY_DISABLED_UNTIL_TS, now + float(_TAVILY_CIRCUIT_OPEN_S))
+            until = _TAVILY_DISABLED_UNTIL_TS
+        _log_tools(
+            f"[tools:web_search] Tavily timeout; disabling Tavily for {_TAVILY_CIRCUIT_OPEN_S:.0f}s. Reason: {reason}"
+        )
+    except Exception:
+        pass
 
 
 def _get_web_research_instance() -> Optional[Any]:
@@ -1311,10 +1296,10 @@ def web_search(
             "semantic_diversity": None,
         }
 
-    # If Tavily recently stalled, fail fast and fall back so the run keeps
-    # progressing. This avoids the "job running" heartbeat loop with no
-    # cycle advancement.
     error_str: Optional[str] = None
+
+    # If Tavily recently stalled, fail fast and fall back so the run keeps
+    # progressing (instead of sitting in 'job still running' forever).
     tool = None
     if _tavily_is_temporarily_disabled():
         error_str = "Tavily temporarily disabled due to previous timeouts"
@@ -1342,11 +1327,10 @@ def web_search(
                 # Acquire semaphore before making the remote call to bound
                 # concurrency. This protects against many agents flooding
                 # Tavily at once.
-                #
-                # IMPORTANT: Tavily can sometimes hang indefinitely. To
-                # prevent the whole run from freezing in cycle 1/2, execute
-                # the search in a daemon thread and enforce a hard timeout.
                 with _tavily_semaphore:
+                    # IMPORTANT: Tavily can sometimes hang indefinitely (socket/DNS/TLS stall).
+                    # Execute the search in a daemon thread and enforce a hard timeout so
+                    # the entire run cannot freeze inside cycle 1/2.
                     result_container: List[Any] = []
                     error_container: List[Exception] = []
 
@@ -1367,17 +1351,27 @@ def web_search(
                         except Exception as exc:
                             error_container.append(exc)
 
+                    q_preview = (query or "").strip().replace("\n", " ")
+                    if len(q_preview) > 100:
+                        q_preview = q_preview[:97] + "..."
+                    _log_tools(
+                        f"[tools:web_search] tavily start attempt={attempt+1}/{_TAVILY_MAX_RETRIES} depth={mapped_depth} q=\"{q_preview}\""
+                    )
+
                     t = threading.Thread(target=_search_call, daemon=True)
                     t.start()
                     t.join(max(0.1, float(_TAVILY_TIMEOUT_S)))
                     if t.is_alive():
-                        raise TimeoutError(
-                            f"Tavily search exceeded {_TAVILY_TIMEOUT_S} seconds timeout"
-                        )
+                        raise TimeoutError(f"Tavily search exceeded {_TAVILY_TIMEOUT_S} seconds timeout")
                     if error_container:
                         raise error_container[0]
                     results = result_container[0] if result_container else None
-
+                    try:
+                        _log_tools(
+                            f"[tools:web_search] tavily ok attempt={attempt+1} results={len(results) if isinstance(results, list) else 'n/a'}"
+                        )
+                    except Exception:
+                        pass
                 # If call succeeds, break out of retry loop
                 break
             except Exception as e:
@@ -1397,17 +1391,19 @@ def web_search(
                 ) or isinstance(e, TimeoutError)
 
                 # FAIL FAST on timeouts. Timeouts are the main source of
-                # "job claimed" + "still running" with no cycle advance.
+                # 'job claimed' + 'still running' with no cycle advance.
                 if is_timeout:
                     _tavily_register_timeout(str(e))
                     break
 
-                # For rate limits, retry with exponential backoff + jitter.
                 if is_rate_limited:
+                    # Use exponential backoff with jitter. Sleep duration grows
+                    # exponentially with the attempt number. Cap at a modest
+                    # duration to avoid long stalls while allowing API to
+                    # recover. Jitter reduces synchronization across agents.
                     sleep_s = min(30.0, (2 ** attempt) + random.random())
                     time.sleep(sleep_s)
                     continue  # Retry
-
                 # For other exceptions, break and fall back to stub below
                 break
         elapsed = time.time() - started
@@ -1440,7 +1436,6 @@ def web_search(
             }
         # If all retries fail, fall back to stubbed search below. Attach
         # the last exception string for traceability.
-        error_str: Optional[str] = None
         if last_exception is not None:
             error_str = str(last_exception)
         # proceed to fallback section after this block
@@ -1455,7 +1450,7 @@ def web_search(
     fallback_error = None
     # Prefer the recorded Tavily failure message if present; otherwise
     # propagate any browser fetch error.
-    if 'error_str' in locals() and error_str:
+    if error_str:
         fallback_error = error_str
     elif page.error:
         fallback_error = page.error
