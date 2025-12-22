@@ -3436,7 +3436,29 @@ class QueueDirs:
 
 
 def _resolve_queue_dirs(base: Path) -> QueueDirs:
-    # Default layout
+    """
+    Resolve the queue directories used by the file-based queue.
+
+    This helper constructs the queue layout (pending/active/finished/error/bad_jobs/locks)
+    based off of the provided base directory.  When the `agent.run_jobs` module is
+    available it will prefer the queue root and individual directory constants
+    defined there.  This ensures that the worker and the job enqueue logic in
+    run_jobs share the exact same physical locations, even if environment
+    variables such as ARA_QUEUE_ROOT or ARA_RUNS_DIR point outside of the
+    worker's `BASE_DIR`.  In particular, we update the `base` to match
+    `agent.run_jobs.QUEUE_ROOT` when available and use its `LOCKS_DIR` for
+    lock files.  Without this override the worker would default to placing
+    locks under `<BASE_DIR>/locks` which can prevent claims if the queue root
+    differs from the base.
+
+    Args:
+        base: The base path resolved from ARA_RUNS_DIR or a default.
+
+    Returns:
+        QueueDirs: A dataclass containing concrete paths for each queue folder.
+    """
+    # Start with the provided base directory; by default jobs live under
+    # <base>/pending, <base>/active, etc.
     pending = base / "pending"
     active = base / "active"
     finished = base / "finished"
@@ -3444,32 +3466,56 @@ def _resolve_queue_dirs(base: Path) -> QueueDirs:
     bad_jobs = base / "bad_jobs"
     locks = base / "locks"
 
-    # Prefer agent.run_jobs directory constants if present
     try:
+        # If the run_jobs module defines a QUEUE_ROOT, prefer that over base.
         import agent.run_jobs as run_jobs_mod  # type: ignore[import]
 
-        for name, attr in [
-            ("pending", "PENDING_DIR"),
-            ("active", "ACTIVE_DIR"),
-            ("finished", "FINISHED_DIR"),
-            ("error", "ERROR_DIR"),
-        ]:
-            v = getattr(run_jobs_mod, attr, None)
-            if v is not None:
-                p = Path(v)
-                if name == "pending":
-                    pending = p
-                elif name == "active":
-                    active = p
-                elif name == "finished":
-                    finished = p
-                elif name == "error":
-                    error = p
-        # Some repos may define BAD_JOBS_DIR; if not, keep default
-        v_bad = getattr(run_jobs_mod, "BAD_JOBS_DIR", None)
-        if v_bad is not None:
-            bad_jobs = Path(v_bad)
+        # Prefer the explicit queue root from run_jobs if present.  This
+        # root incorporates ARA_QUEUE_ROOT when set and ensures that the
+        # worker watches the same folder that enqueue_job writes to.
+        queue_root = getattr(run_jobs_mod, "QUEUE_ROOT", None)
+        if queue_root:
+            base = Path(queue_root)
+            # Recompute defaults off of queue_root
+            pending = Path(run_jobs_mod.PENDING_DIR) if getattr(run_jobs_mod, "PENDING_DIR", None) else base / "pending"
+            active = Path(run_jobs_mod.ACTIVE_DIR) if getattr(run_jobs_mod, "ACTIVE_DIR", None) else base / "active"
+            finished = Path(run_jobs_mod.FINISHED_DIR) if getattr(run_jobs_mod, "FINISHED_DIR", None) else base / "finished"
+            error = Path(run_jobs_mod.ERROR_DIR) if getattr(run_jobs_mod, "ERROR_DIR", None) else base / "error"
+            # bad_jobs may not always exist in older versions
+            bad_jobs_dir = getattr(run_jobs_mod, "BAD_JOBS_DIR", None)
+            bad_jobs = Path(bad_jobs_dir) if bad_jobs_dir else base / "bad_jobs"
+            # Use the run_jobs locks directory if available
+            locks_dir = getattr(run_jobs_mod, "LOCKS_DIR", None)
+            locks = Path(locks_dir) if locks_dir else base / "locks"
+        else:
+            # Even if QUEUE_ROOT is not defined, prefer individual dir constants
+            for name, attr in [
+                ("pending", "PENDING_DIR"),
+                ("active", "ACTIVE_DIR"),
+                ("finished", "FINISHED_DIR"),
+                ("error", "ERROR_DIR"),
+            ]:
+                v = getattr(run_jobs_mod, attr, None)
+                if v is not None:
+                    p = Path(v)
+                    if name == "pending":
+                        pending = p
+                    elif name == "active":
+                        active = p
+                    elif name == "finished":
+                        finished = p
+                    elif name == "error":
+                        error = p
+            # BAD_JOBS_DIR may be defined; use it if present
+            v_bad = getattr(run_jobs_mod, "BAD_JOBS_DIR", None)
+            if v_bad is not None:
+                bad_jobs = Path(v_bad)
+            # LOCKS_DIR may be defined; prefer it over base/locks
+            v_lock = getattr(run_jobs_mod, "LOCKS_DIR", None)
+            if v_lock is not None:
+                locks = Path(v_lock)
     except Exception:
+        # If run_jobs is not importable, fall back to base-only layout.
         pass
 
     return QueueDirs(
