@@ -57,18 +57,54 @@ import math
 # ---------------------------------------------------------------------------
 
 def _safe_float(value: Any) -> Optional[float]:
-    """Convert any numeric like value into a float, otherwise return None."""
+    """
+    Convert any numeric-like value into a finite float.  
+
+    This helper attempts to coerce integers, floats and numeric strings into
+    Python ``float`` objects.  If the input is ``None``, empty, not numeric
+    or results in a NaN/inf value, the function returns ``None`` instead.
+
+    Examples:
+
+        >>> _safe_float("42")
+        42.0
+        >>> _safe_float("\t")
+        None
+        >>> _safe_float(float('nan'))
+        None
+
+    Parameters
+    ----------
+    value:
+        A candidate value to convert. It may be a number, a numeric string
+        or any other Python object. Unsupported types are ignored quietly.
+
+    Returns
+    -------
+    Optional[float]
+        The converted finite float or ``None`` if conversion is impossible
+        or the resulting value is not finite.
+    """
     try:
+        # Fast path for native numeric types.
         if isinstance(value, (int, float)):
-            return float(value)
-        if isinstance(value, str):
+            result = float(value)
+        elif isinstance(value, str):
             v = value.strip()
             if not v:
                 return None
-            return float(v)
+            result = float(v)
+        else:
+            # Unknown types cannot be converted
+            return None
+        # Guard against NaN and infinity which can poison downstream metrics
+        if math.isfinite(result):
+            return result
+        else:
+            return None
     except Exception:
+        # Conversion failed; return None to skip value
         return None
-    return None
 
 
 def _extract_series(history: List[Dict[str, Any]], field: str) -> List[float]:
@@ -435,34 +471,46 @@ def detect_equilibrium_window(
     window: int = 25,
     tolerance: float = 0.20,
 ) -> Dict[str, Any]:
-    """Detect an approximate equilibrium window in a RYE series.
+    """
+    Detect an approximate equilibrium segment in a RYE series.
 
-    Parameters:
+    This function searches for a contiguous plateau where the series oscillates
+    within a relatively narrow band.  It uses a relative range criterion:
+    a segment is considered an equilibrium if
 
-        rye_series:
-            Sequence of RYE values.
+    ``(max(segment) - min(segment)) / (abs(mean(segment)) + eps) <= tolerance``.
 
-        window:
-            Minimum size of the equilibrium candidate window.
+    The algorithm begins with a minimum required window length but then
+    attempts to extend candidate windows as far as possible.  The longest
+    qualifying segment is selected.  If no segment meets the criteria,
+    the result indicates that no equilibrium was found.
 
-        tolerance:
-            Relative amplitude allowed inside the equilibrium band.
-            If the range over the window is <= tolerance * mean, we
-            consider it an equilibrium plateau.
+    Parameters
+    ----------
+    rye_series:
+        Sequence of numeric RYE values.  Short or empty sequences return
+        immediately with an explanation.
 
-    Returns dict:
+    window:
+        Minimum size of the equilibrium candidate window.  Values shorter
+        than this are not considered unless the whole series is shorter,
+        in which case the entire series is examined.
 
-        {
-            "in_equilibrium": bool,
-            "start_index": Optional[int],
-            "end_index": Optional[int],
-            "equilibrium_fraction": Optional[float],
-            "mean": Optional[float],
-            "range": Optional[float],
-            "reason": Optional[str],
-        }
+    tolerance:
+        Relative amplitude allowed inside the equilibrium band.  Smaller
+        values demand flatter plateaus.  Expressed as a fraction of the
+        absolute mean of the segment.
+
+    Returns
+    -------
+    Dict[str, Any]
+        Summary describing whether an equilibrium was found and, if so,
+        where it lies.  Keys include ``in_equilibrium``, ``start_index``,
+        ``end_index`` (exclusive), ``equilibrium_fraction`` (the fraction of
+        the series covered), ``mean``, ``range`` and ``reason``.
     """
     n = len(rye_series)
+    # Handle empty input
     if n == 0:
         return {
             "in_equilibrium": False,
@@ -474,42 +522,55 @@ def detect_equilibrium_window(
             "reason": "no_data",
         }
 
-    if n < window:
-        # Try with smaller window if possible
-        if n < 5:
-            return {
-                "in_equilibrium": False,
-                "start_index": None,
-                "end_index": None,
-                "equilibrium_fraction": None,
-                "mean": statistics.fmean(rye_series),
-                "range": max(rye_series) - min(rye_series),
-                "reason": "too_short",
-            }
-        window = n
+    # For very short series we cannot infer a meaningful plateau
+    if n < max(5, window):
+        return {
+            "in_equilibrium": False,
+            "start_index": None,
+            "end_index": None,
+            "equilibrium_fraction": None,
+            "mean": statistics.fmean(rye_series),
+            "range": max(rye_series) - min(rye_series),
+            "reason": "too_short",
+        }
 
-    best_start = None
-    best_end = None
+    # Clamp window to sensible bounds
+    min_window = max(3, min(window, n))
+
+    best_start: Optional[int] = None
+    best_end: Optional[int] = None
     best_fraction = 0.0
-    best_mean = None
-    best_range = None
+    best_mean: Optional[float] = None
+    best_range: Optional[float] = None
 
-    for start in range(0, n - window + 1):
-        segment = rye_series[start:start + window]
-        mean_val = statistics.fmean(segment)
-        rng = max(segment) - min(segment)
-        denom = abs(mean_val) + 1e-6
-        rel_range = rng / denom
-        if rel_range <= tolerance:
-            # Candidate equilibrium window
-            eq_fraction = len(segment) / float(n)
-            if eq_fraction > best_fraction:
-                best_fraction = eq_fraction
-                best_start = start
-                best_end = start + window
-                best_mean = mean_val
-                best_range = rng
+    # Search for the largest contiguous segment satisfying the tolerance
+    for start in range(0, n - min_window + 1):
+        # Expand candidate until the tolerance is violated
+        segment: List[float] = []
+        for end in range(start, n):
+            segment.append(rye_series[end])
+            if len(segment) < min_window:
+                continue
+            mean_val = statistics.fmean(segment)
+            rng = max(segment) - min(segment)
+            denom = abs(mean_val) + 1e-6
+            rel_range = rng / denom
+            if rel_range <= tolerance:
+                # Valid equilibrium candidate of current length
+                eq_fraction = len(segment) / float(n)
+                if eq_fraction > best_fraction:
+                    best_fraction = eq_fraction
+                    best_start = start
+                    best_end = end + 1  # end is inclusive, convert to exclusive
+                    best_mean = mean_val
+                    best_range = rng
+                # Continue extending; a longer segment might still satisfy tolerance
+                continue
+            else:
+                # Tolerance violated; break early for this start
+                break
 
+    # Provide fallback if no plateau found
     if best_start is None:
         return {
             "in_equilibrium": False,
