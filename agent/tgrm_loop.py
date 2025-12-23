@@ -101,6 +101,7 @@ import inspect
 import os
 import time
 from datetime import datetime
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any, Dict, List, Optional, Tuple, Sequence
 
 from .rye_metrics import compute_delta_r, compute_rye
@@ -536,6 +537,11 @@ class TGRMLoop:
         except Exception:
             self._seen_question_ttl_s = float(6 * 3600)
 
+        # Citation dedupe cache (scoped per goal). This prevents the same external
+        # source from being appended over and over across cycles when web search
+        # returns the same top results (common with Tavily).
+        self._seen_citation_fps: Dict[str, set] = {}
+
         # TGRM level: 1 (basic), 2 (targeted), 3 (domain plus swarm aware).
         try:
             self.tgrm_level = int(self.config.get("tgrm_level", 3))
@@ -637,6 +643,136 @@ class TGRMLoop:
     # ------------------------------------------------------------------
     # Citation helpers
     # ------------------------------------------------------------------
+
+    def _canonicalize_url(self, url: str) -> str:
+        """Canonicalize a URL for robust citation de-duplication.
+
+        Tavily and other web sources often return the same page with minor URL
+        variations (tracking params, fragments, http/https). Canonicalization
+        reduces those variants to a stable key.
+        """
+        if not isinstance(url, str):
+            return ""
+
+        raw = url.strip()
+        if not raw:
+            return ""
+
+        # Ensure urlparse sees a netloc for bare domains.
+        candidate = raw
+        if "://" not in candidate and candidate.startswith("www."):
+            candidate = "https://" + candidate
+
+        try:
+            parsed = urlparse(candidate)
+        except Exception:
+            return raw.lower()
+
+        scheme = (parsed.scheme or "").lower()
+        netloc = (parsed.netloc or "").lower()
+        path = parsed.path or ""
+
+        # Some inputs may still be path-only; fall back to lowercased raw.
+        if not netloc and scheme:
+            return raw.lower()
+
+        # Normalize common noise
+        if path != "/" and path.endswith("/"):
+            path = path[:-1]
+
+        # Drop fragments and common tracking query params
+        try:
+            pairs = parse_qsl(parsed.query or "", keep_blank_values=True)
+        except Exception:
+            pairs = []
+
+        filtered: List[Tuple[str, str]] = []
+        for k, v in pairs:
+            kl = (k or "").lower()
+            if kl.startswith("utm_"):
+                continue
+            if kl in {"gclid", "fbclid", "mc_cid", "mc_eid", "igshid"}:
+                continue
+            filtered.append((k, v))
+
+        # Keep ordering stable for fingerprinting
+        filtered.sort(key=lambda kv: ((kv[0] or "").lower(), kv[1] or ""))
+        query = urlencode(filtered, doseq=True) if filtered else ""
+
+        # Prefer https in fingerprints when scheme is missing/unknown
+        if not scheme:
+            scheme = "https"
+
+        try:
+            return urlunparse((scheme, netloc, path, "", query, ""))
+        except Exception:
+            # Fallback to raw lowercased
+            return raw.lower()
+
+    def _citation_fingerprint(self, item: Any) -> Optional[str]:
+        """Build a stable fingerprint for a citation-like object."""
+        doi = ""
+        url = ""
+        title = ""
+
+        if isinstance(item, dict):
+            doi = str(item.get("doi") or item.get("DOI") or "").strip().lower()
+            url = str(item.get("url") or item.get("link") or item.get("href") or "").strip()
+            title = str(item.get("title") or item.get("name") or "").strip().lower()
+        else:
+            text = str(item).strip()
+            if not text:
+                return None
+            # Heuristic: treat obvious URLs as URLs, otherwise as title
+            if text.startswith("http://") or text.startswith("https://") or text.startswith("www."):
+                url = text
+            else:
+                title = text.lower()
+
+        if doi:
+            return f"doi:{doi}"
+
+        canon = self._canonicalize_url(url)
+        if canon:
+            return f"url:{canon}"
+
+        if title:
+            return f"title:{title}"
+
+        return None
+
+    def _get_seen_citation_fps(self, goal: str) -> set:
+        """Return (and seed) the per-goal set of seen citation fingerprints."""
+        if not isinstance(goal, str) or not goal:
+            goal = "_"
+
+        seen = self._seen_citation_fps.get(goal)
+        if seen is not None:
+            return seen
+
+        seen = set()
+
+        # Seed from recent history so restarts/resumes don't re-add the same
+        # citations over and over.
+        try:
+            history_rows = self._get_recent_history_for_goal(goal, limit=200)
+            for row in history_rows or []:
+                if not isinstance(row, dict):
+                    continue
+                for k in ("citations", "sources", "source_list"):
+                    items = row.get(k)
+                    if not isinstance(items, list):
+                        continue
+                    for it in items:
+                        fp = self._citation_fingerprint(it)
+                        if fp:
+                            seen.add(fp)
+        except Exception:
+            pass
+
+        self._seen_citation_fps[goal] = seen
+        return seen
+
     def _tag_citations(
         self,
         citations: List[Dict[str, Any]],
@@ -648,6 +784,9 @@ class TGRMLoop:
     ) -> List[Dict[str, Any]]:
         """Ensure every citation has minimal provenance fields."""
         stamped: List[Dict[str, Any]] = []
+        # Robust de-dupe across cycles: only emit/log citations we have not
+        # already seen for this goal.
+        seen_fps = self._get_seen_citation_fps(goal)
         created_at = datetime.utcnow().isoformat() + "Z"
 
         for c in citations or []:
@@ -661,6 +800,12 @@ class TGRMLoop:
             c.setdefault("created_at", created_at)
             if not c.get("source"):
                 c["source"] = channel
+
+            fp = self._citation_fingerprint(c)
+            if fp and fp in seen_fps:
+                continue
+            if fp:
+                seen_fps.add(fp)
             stamped.append(c)
 
         return stamped
