@@ -2912,11 +2912,14 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         or ("rounds" in cfg and cfg.get("rounds") is not None)
     )
 
-    raw_cycles = cfg.get("max_cycles")
-    if raw_cycles is None:
-        raw_cycles = cfg.get("cycles")
-    if raw_cycles is None:
-        raw_cycles = HARD_MAX_CYCLES
+        raw_cycles = cfg.get("max_cycles")
+        # If no explicit max_cycles, fall back to the shorter alias or total_cycles.
+        if raw_cycles is None:
+            raw_cycles = cfg.get("cycles")
+        if raw_cycles is None:
+            raw_cycles = cfg.get("total_cycles")
+        if raw_cycles is None:
+            raw_cycles = HARD_MAX_CYCLES
     try:
         requested_cycles = int(raw_cycles)
     except Exception:
@@ -5159,8 +5162,12 @@ def _process_single_job(
         )
 
         raw_cycles = cfg.get("max_cycles")
+        # If no explicit max_cycles, fall back to the shorter alias or total_cycles.
         if raw_cycles is None:
             raw_cycles = cfg.get("cycles")
+        if raw_cycles is None:
+            # Some UIs provide a total_cycles field (requested cycles across all agents).
+            raw_cycles = cfg.get("total_cycles")
         if raw_cycles is None:
             raw_cycles = HARD_MAX_CYCLES
         try:
