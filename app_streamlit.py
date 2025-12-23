@@ -5558,6 +5558,22 @@ def main() -> None:
     st.markdown("---")
     st.subheader("Generate report")
 
+    # Large reports can be thousands of lines. By default, avoid dumping them
+    # inline (which forces a ton of scrolling) and encourage downloads.
+    show_reports_inline = st.checkbox(
+        "Show report text inline (can be very long)",
+        value=False,
+        key="show_reports_inline",
+        help="If off, the report will appear in a collapsed preview and you can download it instead.",
+    )
+
+    def _present_report(md: str, preview_label: str = "Preview") -> None:
+        if show_reports_inline:
+            st.markdown(md)
+        else:
+            with st.expander(preview_label, expanded=False):
+                st.markdown(md)
+
     raw_memory_history: List[Dict[str, Any]] = []
     if callable(getattr(memory, "get_cycle_history", None)):
         try:
@@ -5590,7 +5606,7 @@ def main() -> None:
                     report_md = build_outcome_summary(history_for_reports)
                 else:
                     report_md = generate_report(memory_store=memory, goal=None)  # type: ignore[misc]
-                st.markdown(report_md)
+                _present_report(report_md, "Full history report preview")
                 st.download_button("Download full report (Markdown)", data=report_md, file_name="autonomous_research_report.md", mime="text/markdown")
 
                 if not used_fallback_history and callable(generate_report_pdf):
@@ -5629,7 +5645,7 @@ def main() -> None:
                     parts.append(f"\n\n_Approximate hours between first and last recorded cycle: {hours_run_for_reports:.2f}_\n")
 
                 option_c_md = "".join(parts)
-                st.markdown(option_c_md)
+                _present_report(option_c_md, "Option C learning report preview")
                 st.download_button("Download Option C learning report (Markdown)", data=option_c_md, file_name="option_c_learning_report.md", mime="text/markdown")
 
     with col_rep2:
@@ -5641,7 +5657,7 @@ def main() -> None:
                     findings_md = build_findings_report_from_history(history_for_reports)
                 else:
                     findings_md = generate_findings_report(memory_store=memory, goal=None)  # type: ignore[misc]
-                st.markdown(findings_md)
+                _present_report(findings_md, "Findings report preview")
                 st.download_button("Download findings report (Markdown)", data=findings_md, file_name="findings_report.md", mime="text/markdown")
 
                 if not used_fallback_history and callable(generate_findings_report_pdf):
@@ -5662,7 +5678,7 @@ def main() -> None:
                 st.info("No cycles logged yet, breakthrough snapshot is empty.")
             else:
                 br_md = build_breakthrough_report(history_for_reports, discoveries_for_reports)
-                st.markdown(br_md)
+                _present_report(br_md, "Breakthrough snapshot preview")
                 st.download_button("Download breakthrough snapshot (Markdown)", data=br_md, file_name="breakthrough_snapshot_report.md", mime="text/markdown")
 
         if history_for_reports:
