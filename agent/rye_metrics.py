@@ -1095,6 +1095,12 @@ def rye_volatility_signature(
 
 # RYE Equilibrium Detector
 
+# Minimum number of data points required to evaluate equilibrium.
+# If fewer than this number of RYE values are available in the history or
+# diagnostics bundle, the equilibrium detector will always return
+# ``in_equilibrium = False`` with ``reason = 'insufficient_data'``.
+MIN_EQUILIBRIUM_CYCLES: int = 10
+
 def detect_rye_equilibrium(
     history_or_diagnostics: Any,
     *,
@@ -1105,14 +1111,44 @@ def detect_rye_equilibrium(
     """
     Detect whether the system appears to be in a RYE equilibrium zone.
 
-    Accepts either:
-        - full history (list)
-        - diagnostics dict produced by build_run_diagnostics
+    This function tries to distinguish between a genuine plateau in repair
+    efficiency and a degenerate "flatline" where nothing is happening.  In
+    addition to the original conditions (regression slope within
+    ``slope_tolerance`` and nonâexcessive volatility), it enforces a few
+    additional gating criteria:
 
-    Conditions (heuristic):
-        - enough recent points
-        - regression slope magnitude below slope_tolerance
-        - volatility is not excessive
+      * **Minimum data requirement** â at least ``MIN_EQUILIBRIUM_CYCLES``
+        recent RYE observations are needed before equilibrium can be
+        considered.  With fewer points the detector returns
+        ``in_equilibrium = False`` and ``reason = 'insufficient_data'``.
+
+      * **Nonâdegenerate volatility** â the recent window must exhibit some
+        range (i.e., max(RYE) â min(RYE) > 0) and a finite volatility
+        score.  A completely flat sequence (volatility range â 0) is
+        treated as stasis rather than equilibrium.  When the range is zero
+        or the volatility signature cannot be computed, the detector
+        returns ``in_equilibrium = False`` and ``reason = 'no_volatility'``.
+
+      * **Evidence of progress** â the run must show some improvement in
+        efficiency.  This is estimated via ``trend_simple``, the difference
+        between average RYE in the second half of the history and the first
+        half.  If ``trend_simple`` is not available or is nonâpositive,
+        equilibrium is not declared and the reason will be
+        ``'no_progress'``.  Callers that wish to override this gate can
+        precompute a custom progress metric and pass it via the
+        ``history_or_diagnostics`` parameter.
+
+    Accepts either:
+        * full history (list)
+        * diagnostics dict produced by ``build_run_diagnostics``
+
+    Returns a dict with keys:
+        ``in_equilibrium`` (bool),
+        ``reason`` (str),
+        ``window_size`` (int or None),
+        ``local_slope`` (float or None),
+        ``local_volatility_score`` (float or None),
+        and, when in diagnostics mode, ``progress`` (float or None).
     """
     # Prefer explicit history kwarg if provided
     if "history" in kwargs and kwargs["history"] is not None:
@@ -1130,6 +1166,30 @@ def detect_rye_equilibrium(
         count = diag.get("count")
         window_size = int(count) if isinstance(count, int) else None
 
+        # Always require a minimum number of samples
+        if window_size is None or window_size < MIN_EQUILIBRIUM_CYCLES:
+            return {
+                "in_equilibrium": False,
+                "reason": "insufficient_data",
+                "window_size": window_size,
+                "local_slope": None,
+                "local_volatility_score": None,
+                "progress": None,
+            }
+
+        # Extract additional signals
+        progress = None
+        try:
+            # trend_simple is positive when recent performance exceeds early performance
+            progress = _safe_float(diag.get("trend_simple"))
+        except Exception:
+            progress = None
+
+        vol_sig = rye_volatility_signature(diag)
+        vol_score = vol_sig.get("volatility_score")
+        vol_range = vol_sig.get("range")
+
+        # Gating: require slope to be defined
         if slope is None:
             return {
                 "in_equilibrium": False,
@@ -1137,38 +1197,74 @@ def detect_rye_equilibrium(
                 "window_size": window_size,
                 "local_slope": None,
                 "local_volatility_score": vol_score,
+                "progress": progress,
             }
 
-        if vol_score is None:
-            in_eq = abs(slope) <= slope_tolerance
+        # Gating: require volatility signature to exist and have nonâzero range
+        if vol_score is None or vol_range is None or vol_range <= 0:
+            return {
+                "in_equilibrium": False,
+                "reason": "no_volatility",
+                "window_size": window_size,
+                "local_slope": slope,
+                "local_volatility_score": vol_score,
+                "progress": progress,
+            }
+
+        # Gating: require progress (trend_simple > 0) to avoid flatline stasis
+        if progress is None or progress <= 0:
+            return {
+                "in_equilibrium": False,
+                "reason": "no_progress",
+                "window_size": window_size,
+                "local_slope": slope,
+                "local_volatility_score": vol_score,
+                "progress": progress,
+            }
+
+        # Core equilibrium heuristic: slope within tolerance and volatility high enough
+        if abs(slope) <= slope_tolerance and vol_score >= 0.4:
+            return {
+                "in_equilibrium": True,
+                "reason": "equilibrium",
+                "window_size": window_size,
+                "local_slope": slope,
+                "local_volatility_score": vol_score,
+                "progress": progress,
+            }
         else:
-            in_eq = (abs(slope) <= slope_tolerance) and (vol_score >= 0.4)
-
-        reason = "equilibrium" if in_eq else "non_equilibrium"
-
-        return {
-            "in_equilibrium": in_eq,
-            "reason": reason,
-            "window_size": window_size,
-            "local_slope": slope,
-            "local_volatility_score": vol_score,
-        }
+            return {
+                "in_equilibrium": False,
+                "reason": "non_equilibrium",
+                "window_size": window_size,
+                "local_slope": slope,
+                "local_volatility_score": vol_score,
+                "progress": progress,
+            }
 
     # History mode: original series based implementation
     vals = _extract_rye_series(data if isinstance(data, list) else [])
     n = len(vals)
-    if n < window:
+    # Require at least the larger of MIN_EQUILIBRIUM_CYCLES or the requested window size
+    if n < max(MIN_EQUILIBRIUM_CYCLES, window):
         return {
             "in_equilibrium": False,
-            "reason": "not_enough_data",
+            "reason": "insufficient_data",
             "window_size": n,
             "local_slope": None,
             "local_volatility_score": None,
         }
 
-    recent_vals = vals[-window:]
+    # Only evaluate the most recent portion of the series
+    recent_window = max(window, MIN_EQUILIBRIUM_CYCLES)
+    recent_vals = vals[-recent_window:]
     slope = regression_rye_slope(recent_vals)
-    vol_sig = rye_volatility_signature(recent_vals, window=window)
+    vol_sig = rye_volatility_signature(recent_vals, window=recent_window)
+    vol_score = vol_sig.get("volatility_score")
+    vol_range = vol_sig.get("range")
+
+    # Compute simple progress over the recent window: compare first and last halves
+    progress = efficiency_trend(recent_vals) if isinstance(recent_vals, list) else None
 
     if slope is None:
         return {
@@ -1176,24 +1272,46 @@ def detect_rye_equilibrium(
             "reason": "no_slope",
             "window_size": len(recent_vals),
             "local_slope": None,
-            "local_volatility_score": vol_sig.get("volatility_score"),
+            "local_volatility_score": vol_score,
         }
 
-    vol_score = vol_sig.get("volatility_score")
-    if vol_score is None:
-        in_eq = abs(slope) <= slope_tolerance
+    # Gating: require volatility signature and nonâzero range
+    if vol_score is None or vol_range is None or vol_range <= 0:
+        return {
+            "in_equilibrium": False,
+            "reason": "no_volatility",
+            "window_size": len(recent_vals),
+            "local_slope": slope,
+            "local_volatility_score": vol_score,
+        }
+
+    # Gating: require progress
+    if progress is None or progress <= 0:
+        return {
+            "in_equilibrium": False,
+            "reason": "no_progress",
+            "window_size": len(recent_vals),
+            "local_slope": slope,
+            "local_volatility_score": vol_score,
+        }
+
+    # Final equilibrium heuristic
+    if abs(slope) <= slope_tolerance and vol_score >= 0.4:
+        return {
+            "in_equilibrium": True,
+            "reason": "equilibrium",
+            "window_size": len(recent_vals),
+            "local_slope": slope,
+            "local_volatility_score": vol_score,
+        }
     else:
-        in_eq = (abs(slope) <= slope_tolerance) and (vol_score >= 0.4)
-
-    reason = "equilibrium" if in_eq else "non_equilibrium"
-
-    return {
-        "in_equilibrium": in_eq,
-        "reason": reason,
-        "window_size": len(recent_vals),
-        "local_slope": slope,
-        "local_volatility_score": vol_score,
-    }
+        return {
+            "in_equilibrium": False,
+            "reason": "non_equilibrium",
+            "window_size": len(recent_vals),
+            "local_slope": slope,
+            "local_volatility_score": vol_score,
+        }
 
 
 # TGRM Harmonic Index (proxy)
