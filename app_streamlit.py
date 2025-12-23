@@ -73,12 +73,44 @@ import pandas as pd
 import streamlit as st
 import yaml
 import unicodedata
+from pathlib import Path
+
+from typing import List
 
 # Optional auto-refresh component (preferred over sleep+rereun if installed)
 try:  # pragma: no cover
     from streamlit_autorefresh import st_autorefresh  # type: ignore[import]
 except Exception:  # pragma: no cover
     st_autorefresh = None  # type: ignore[assignment]
+
+def tail_lines(path: Path, max_lines: int = 200) -> List[str]:
+    """Return the last ``max_lines`` lines from a text file.
+
+    Reads the entire file into memory in order to retrieve the tail
+    efficiently for moderately sized event logs.  Lines are returned
+    without trailing newline characters.  On any error (file missing,
+    decode error, etc.), an empty list is returned.
+
+    Args:
+        path: Filesystem path to the file to tail.
+        max_lines: Maximum number of lines to return. Defaults to 200.
+
+    Returns:
+        A list of the last ``max_lines`` lines, in order, stripped of
+        trailing newline characters.
+    """
+    try:
+        if not isinstance(path, Path):
+            path = Path(path)
+        if not path.exists() or not path.is_file():
+            return []
+        with path.open("r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        # Strip trailing newlines and take the tail
+        tail = [l.rstrip("\n") for l in lines[-max_lines:]]
+        return tail
+    except Exception:
+        return []
 
 # IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
@@ -4238,6 +4270,54 @@ def main() -> None:
         render_agent_presence(agents0, active_agent=active_agent)
 
     with right_console:
+
+        # Display a live event feed when a runâscoped JSONL log is present.  The
+        # engine worker emits JSON lines into ``events.jsonl`` under the
+        # run directory.  Tail the last few lines and refresh periodically
+        # while the run is active.  Only attempt to load events when an
+        # active run ID is known.
+        try:
+            run_id_feed = active_run_id  # type: ignore[name-defined]
+        except Exception:
+            run_id_feed = None
+        events_lines: List[str] = []
+        if run_id_feed:
+            try:
+                run_dir_path = Path(get_runs_root()) / str(run_id_feed)
+                events_path = run_dir_path / "events.jsonl"
+                events_lines = tail_lines(events_path, max_lines=250)
+            except Exception:
+                events_lines = []
+        if events_lines:
+            # Auto refresh the console while the run is active.  Derive the
+            # running flag from the worker status if available.
+            if st_autorefresh:
+                try:
+                    status0 = str((ws0.get("status") or "")).lower()  # type: ignore[name-defined]
+                except Exception:
+                    status0 = ""
+                run_active = status0 in {
+                    "running",
+                    "active",
+                    "in_progress",
+                    "working",
+                    "busy",
+                    "running_job",
+                    "running_cycle",
+                    "processing",
+                }
+                if run_active:
+                    st_autorefresh(interval=750, key=f"console_refresh_{run_id_feed}")  # type: ignore[misc]
+            # Render the live events as a simple text block.  Do not apply
+            # syntax highlighting since events are freeform.  A small header
+            # distinguishes this feed from the narrative feed below.
+            st.markdown("#### Live events")
+            try:
+                st.code("\n".join(events_lines), language="text")
+            except Exception:
+                st.write("\n".join(events_lines))
+
+        # Narrative feed (synthesized from history if no event log exists)
         render_narrative_feed(narrative_events, source_label=event_src0 if event_src0 != "not found" else "synthesized")
 
         with st.expander("Raw event log JSON (if available)"):
@@ -5852,6 +5932,16 @@ def main() -> None:
                     st.info("No progress JSON found. If you want smooth 1/3 -> 2/3 updates, have the worker write `<run_id>_progress.json` each phase/cycle.")
 
     with st.expander("Diagnostics discovery (files checked)"):
+        # Move the report inline toggle into this section.  Users expect to
+        # control report rendering where they inspect run diagnostics and
+        # citations.  The checkbox is declared here with the same key
+        # ``show_reports_inline`` to preserve existing session state.
+        st.checkbox(
+            "Show report text inline (can be very long)",
+            key="show_reports_inline",
+            help="When enabled, clicking a report button will render the full text on this page.",
+        )
+
         st.write("These are the standard locations the UI checks for diagnostics artifacts.")
         paths = _candidate_state_paths(run_id=run_id)
         for k in ["worker_state", "run_state", "heartbeat", "events", "progress"]:
@@ -5870,14 +5960,11 @@ def main() -> None:
     st.markdown("---")
     st.subheader("Generate report")
 
-    # Large reports can be thousands of lines. By default, avoid dumping them
-    # inline (which forces a ton of scrolling) and encourage downloads.
-    show_reports_inline = st.checkbox(
-        "Show report text inline (can be very long)",
-        value=False,
-        key="show_reports_inline",
-        help="If off, the report will appear in a collapsed preview and you can download it instead.",
-    )
+    # Large reports can be thousands of lines. By default, avoid dumping
+    # them inline (which forces a ton of scrolling) and encourage downloads.
+    # The inline toggle is now located in the diagnostics discovery section;
+    # retrieve its state from ``st.session_state`` here.
+    show_reports_inline = bool(st.session_state.get("show_reports_inline", False))
 
     def _present_report(md: str, preview_label: str = "Preview") -> None:
         if show_reports_inline:
