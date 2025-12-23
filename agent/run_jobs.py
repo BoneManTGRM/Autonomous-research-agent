@@ -1173,11 +1173,33 @@ def update_worker_state(update: Dict[str, Any], *, replace: bool = False) -> Pat
     except Exception:
         pass
 
+    # Persist the worker state to the primary path and also mirror it to
+    # additional well-known locations so that UIs monitoring different
+    # directories will always see the latest state.  In particular,
+    # Streamlit may read from either runs/worker_state.json or
+    # runs/logs/worker_state.json depending on deployment.  Write to
+    # WORKER_STATE_PATH first, then mirror to logs and queue root.
     _atomic_write_json(WORKER_STATE_PATH, state)
-
-    # Mirror worker_state into runs/logs for Streamlit compatibility (best-effort).
     try:
-        _atomic_write_json(LOGS_DIR / "worker_state.json", state)
+        # Mirror to logs/worker_state.json if it differs from the main path
+        logs_state_path = None
+        try:
+            logs_state_path = (LOGS_DIR / "worker_state.json").resolve()
+        except Exception:
+            logs_state_path = None
+        # Mirror to queue root (shared) worker_state.json
+        queue_state_path = None
+        try:
+            queue_state_path = (QUEUE_ROOT / "worker_state.json").resolve()
+        except Exception:
+            queue_state_path = None
+        # Write to any alternate path that is distinct from the main one
+        for alt in [logs_state_path, queue_state_path]:
+            if alt and alt != WORKER_STATE_PATH:
+                try:
+                    _atomic_write_json(alt, state)
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -2369,13 +2391,6 @@ def write_progress(run_id: str, progress: Dict[str, Any]) -> Path:
 
     path = progress_path(run_id)
     _atomic_write_json(path, payload)
-
-    # Mirror progress into runs/logs/<run_id>_progress.json for Streamlit compatibility.
-    try:
-        safe_id = _sanitize_run_id_for_filename(run_id)
-        _atomic_write_json(LOGS_DIR / f"{safe_id}_progress.json", payload)
-    except Exception:
-        pass
 
     # Best-effort: bump watchdog heartbeat using progress as the driver signal.
     try:
