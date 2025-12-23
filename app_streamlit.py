@@ -1290,93 +1290,6 @@ def extract_unique_citations_from_history(
     collected: List[Dict[str, Any]] = []
     seen_keys: Set[Tuple[Optional[str], Optional[str]]] = set()
 
-    def _norm_text(val: Any) -> str:
-        """Normalize free-text for de-dupe keys."""
-        try:
-            s = str(val or "")
-        except Exception:
-            s = ""
-        s = s.strip().lower()
-        if not s:
-            return ""
-        # Collapse whitespace
-        try:
-            s = " ".join(s.split())
-        except Exception:
-            pass
-        return s
-
-    def _canon_url(val: Any) -> str:
-        """Canonicalize URLs by stripping fragments and common tracking params."""
-        try:
-            raw = str(val or "").strip()
-        except Exception:
-            return ""
-        if not raw:
-            return ""
-        raw = raw.strip().strip("<>").strip()
-        # Drop fragment early
-        raw = raw.split("#", 1)[0].strip()
-        if not raw:
-            return ""
-        try:
-            from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
-
-            parts = urlsplit(raw)
-            scheme = (parts.scheme or "").lower()
-            netloc = (parts.netloc or "").lower()
-            path = parts.path or ""
-            if len(path) > 1 and path.endswith("/"):
-                path = path[:-1]
-
-            filtered: List[Tuple[str, str]] = []
-            try:
-                for k, v in parse_qsl(parts.query or "", keep_blank_values=True):
-                    lk = (k or "").lower()
-                    if lk.startswith("utm_") or lk in {
-                        "gclid",
-                        "fbclid",
-                        "mc_cid",
-                        "mc_eid",
-                        "igshid",
-                        "ref",
-                        "ref_src",
-                    }:
-                        continue
-                    filtered.append((k, v))
-            except Exception:
-                filtered = []
-
-            query = urlencode(filtered, doseq=True) if filtered else ""
-            return urlunsplit((scheme, netloc, path, query, ""))
-        except Exception:
-            return raw
-
-    def _citation_key(item: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
-        """Return a stable key that collapses duplicate citations across cycles."""
-        # Prefer DOI when present
-        try:
-            doi_val = item.get("doi") or item.get("DOI") or item.get("doi_url") or ""
-            doi_norm = _norm_text(doi_val)
-            if doi_norm:
-                doi_norm = doi_norm.replace("https://doi.org/", "").replace("http://doi.org/", "").strip()
-                if doi_norm:
-                    return (f"doi:{doi_norm}", None)
-        except Exception:
-            pass
-
-        # Prefer canonical URL
-        url_norm = _canon_url(item.get("url") or item.get("link") or item.get("href") or "")
-        if url_norm:
-            return (f"url:{url_norm}", None)
-
-        # Fall back to normalized title/name
-        title_norm = _norm_text(item.get("title") or item.get("name") or "")
-        if title_norm:
-            return (f"title:{title_norm}", None)
-
-        return (None, None)
-
     for entry in history:
         for key in ("citations", "sources", "source_list"):
             items = entry.get(key)
@@ -1387,9 +1300,7 @@ def extract_unique_citations_from_history(
                     title = item.get("title") or item.get("name") or ""
                     url = item.get("url") or item.get("link") or ""
                     provider = item.get("source") or item.get("provider") or ""
-                    key_tuple = _citation_key(item)
-                    if key_tuple == (None, None):
-                        continue
+                    key_tuple = (title.strip() or None, url.strip() or None)
                     if key_tuple in seen_keys:
                         continue
                     seen_keys.add(key_tuple)
@@ -1406,10 +1317,7 @@ def extract_unique_citations_from_history(
                     text = str(item).strip()
                     if not text:
                         continue
-                    norm_text = _norm_text(text)
-                    if not norm_text:
-                        continue
-                    key_tuple = (f"text:{norm_text}", None)
+                    key_tuple = (text, None)
                     if key_tuple in seen_keys:
                         continue
                     seen_keys.add(key_tuple)
@@ -1538,25 +1446,58 @@ def render_result_details(result: Dict[str, Any]) -> None:
             sources = flattened_citations
 
     if isinstance(sources, list) and sources:
-        st.markdown("#### Sources and citations")
-        for s in sources:
-            if not isinstance(s, dict):
-                st.markdown(f"- {s}")
-                continue
-            title = s.get("title", "Source")
-            url = s.get("url") or s.get("link")
-            snippet = s.get("snippet") or s.get("summary") or ""
-            provider = s.get("source") or s.get("provider") or ""
-            line = ""
-            if provider:
-                line += f"[{provider}] "
-            if url:
-                line += f"[{title}]({url})"
-            else:
-                line += title
-            if snippet:
-                line += f"  \n  {snippet}"
-            st.markdown(f"- {line}")
+        # Toggle to hide/show citations inline (this list can be long)
+        rid_for_toggle = str(base.get("run_id") or result.get("run_id") or "")
+        toggle_key = f"show_sources_inline__{rid_for_toggle}" if rid_for_toggle else "show_sources_inline"
+        show_sources_inline = st.toggle(
+            "Show sources and citations",
+            value=bool(st.session_state.get(toggle_key, False)),
+            key=toggle_key,
+            help="Hide/show the live sources list embedded in the report. Use the Source citation viewer tab for full details.",
+        )
+
+        if show_sources_inline:
+            st.markdown("#### Sources and citations")
+
+            # De-dupe sources (Tavily errors and repeated URLs are common)
+            deduped_sources: List[Any] = []
+            seen: Set[Any] = set()
+            for s in sources:
+                if isinstance(s, dict):
+                    url = str(s.get("url") or s.get("link") or "").strip()
+                    title = str(s.get("title") or "Source").strip()
+                    provider = str(s.get("source") or s.get("provider") or "").strip()
+                    key = (url or title, provider)
+                else:
+                    key = str(s).strip()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                deduped_sources.append(s)
+
+            if len(deduped_sources) != len(sources):
+                st.caption(f"De-duplicated sources: showing {len(deduped_sources)} unique of {len(sources)} total.")
+
+            for s in deduped_sources:
+                if not isinstance(s, dict):
+                    st.markdown(f"- {s}")
+                    continue
+                title = s.get("title", "Source")
+                url = s.get("url") or s.get("link")
+                snippet = s.get("snippet") or s.get("summary") or ""
+                provider = s.get("source") or s.get("provider") or ""
+                line = ""
+                if provider:
+                    line += f"[{provider}] "
+                if url:
+                    line += f"[{title}]({url})"
+                else:
+                    line += title
+                if snippet:
+                    line += f"  \n  {snippet}"
+                st.markdown(f"- {line}")
+        else:
+            st.caption(f"Sources and citations hidden ({len(sources)} items). Toggle on to view.")
 
     debug = base.get("debug") or base.get("diagnostics") or result.get("debug") or result.get("diagnostics")
     if debug:
@@ -1800,6 +1741,55 @@ def _load_json_file(path: Path) -> Optional[Any]:
         return None
 
 
+def _extract_state_timestamp_seconds(state: Any, path: Optional[Path] = None) -> Optional[float]:
+    """Extract a best-effort timestamp (seconds) from a worker/run/progress dict.
+
+    Different components emit different fields depending on version.
+    We support:
+      - Numeric: ts, timestamp
+      - Strings: utc, updated_at, timestamp_utc
+
+    If the dict doesn't contain any known timestamp field, we fall back to the
+    file mtime when a path is provided.
+    """
+    if not isinstance(state, dict):
+        try:
+            if path is not None and path.exists():
+                return float(path.stat().st_mtime)
+        except Exception:
+            return None
+        return None
+
+    # 1) Numeric timestamps are the most reliable.
+    for key in ("ts", "timestamp"):
+        try:
+            v = _maybe_float(state.get(key))
+            if v is not None and v > 0:
+                return float(v)
+        except Exception:
+            pass
+
+    # 2) ISO-ish timestamps.
+    for key in ("utc", "updated_at", "timestamp_utc", "time_utc"):
+        raw = state.get(key)
+        if isinstance(raw, str) and raw.strip():
+            dt = _parse_timestamp_str(raw)
+            if dt is not None:
+                try:
+                    return float(dt.replace(tzinfo=timezone.utc).timestamp())
+                except Exception:
+                    pass
+
+    # 3) Fallback to file mtime.
+    try:
+        if path is not None and path.exists():
+            return float(path.stat().st_mtime)
+    except Exception:
+        return None
+
+    return None
+
+
 def _first_existing_json(paths: List[Path]) -> Tuple[Optional[Any], Optional[Path]]:
     """Return (json_data, path) for the first readable JSON in paths."""
     for p in paths:
@@ -1821,29 +1811,31 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
 
     # Generic filenames (shared)
     worker_state = [
+        # Root-level (run_jobs defaults)
+        runs_root / "worker_state.json",
+        runs_root / "engine_worker_state.json",
         logs / "worker_state.json",
         logs / "engine_worker_state.json",
         logs / "worker_status.json",
-        runs_root / "worker_state.json",
         queue_root / "worker_state.json",
         q_active / "worker_state.json",
     ]
     run_state = [
+        # Root-level (some deployments write run_state.json here)
+        runs_root / "run_state.json",
         logs / "run_state.json",
         logs / "last_run_state.json",
-        runs_root / "run_state.json",
-        runs_root / "last_run_state.json",
         queue_root / "run_state.json",
         q_active / "run_state.json",
     ]
     heartbeat = [
+        # Root-level (run_jobs watchdog heartbeat default)
+        runs_root / "watchdog_heartbeat.json",
         logs / "watchdog_heartbeat.json",
         logs / "heartbeat.json",
         logs / "worker_heartbeat.json",
         logs / "watchdog.json",
         logs / "watchdog_state.json",
-        runs_root / "watchdog_heartbeat.json",
-        runs_root / "heartbeat.json",
         queue_root / "watchdog_heartbeat.json",
         q_active / "watchdog_heartbeat.json",
     ]
@@ -1851,8 +1843,6 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
         logs / "event_log.json",
         logs / "events.json",
         logs / "timeline.json",
-        runs_root / "event_log.json",
-        runs_root / "events.json",
         queue_root / "event_log.json",
     ]
 
@@ -1894,8 +1884,6 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
     if run_id:
         progress = [
             logs / f"{run_id}_progress.json",
-            runs_root / f"{run_id}_progress.json",
-            runs_root / "active" / f"{run_id}_progress.json",
             queue_root / f"{run_id}_progress.json",
             q_active / f"{run_id}_progress.json",
             q_finished / f"{run_id}_progress.json",
@@ -2217,35 +2205,59 @@ def load_worker_state_unified(
     run_id_hint: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """Load worker state, preferring MemoryStore but with file fallbacks."""
+    ws_mem: Optional[Dict[str, Any]] = None
+    ws_mem_src: Optional[str] = None
+
     # MemoryStore methods (try multiple names)
     for name in ("get_worker_state", "read_worker_state", "load_worker_state"):
         func = getattr(memory, name, None)
-        if callable(func):
-            raw = None
-            try:
-                if run_id_hint:
-                    # try keyword then positional then no-arg fallback
+        if not callable(func):
+            continue
+        raw = None
+        try:
+            if run_id_hint:
+                # try keyword then positional then no-arg fallback
+                try:
+                    raw = func(run_id=run_id_hint)  # type: ignore[misc]
+                except TypeError:
                     try:
-                        raw = func(run_id=run_id_hint)  # type: ignore[misc]
+                        raw = func(run_id_hint)  # type: ignore[misc]
                     except TypeError:
-                        try:
-                            raw = func(run_id_hint)  # type: ignore[misc]
-                        except TypeError:
-                            raw = func()  # type: ignore[misc]
-                else:
-                    raw = func()  # type: ignore[misc]
-            except Exception:
-                raw = None
+                        raw = func()  # type: ignore[misc]
+            else:
+                raw = func()  # type: ignore[misc]
+        except Exception:
+            raw = None
 
-            ws = _normalize_worker_state(raw)
-            if ws:
-                return ws, f"MemoryStore.{name}"
+        ws = _normalize_worker_state(raw)
+        if ws:
+            ws_mem = ws
+            ws_mem_src = f"MemoryStore.{name}"
+            break
 
+    ws_disk: Optional[Dict[str, Any]] = None
+    ws_disk_src: Optional[str] = None
+    ws_disk_path: Optional[Path] = None
     paths = _candidate_state_paths(run_id=run_id_hint)["worker_state"]
     raw2, p = _first_existing_json(paths)
     ws2 = _normalize_worker_state(raw2)
     if ws2 and p is not None:
-        return ws2, str(p)
+        ws_disk = ws2
+        ws_disk_src = str(p)
+        ws_disk_path = p
+
+    # If both exist, prefer the freshest payload.
+    if ws_mem and ws_disk:
+        ts_mem = _extract_state_timestamp_seconds(ws_mem, None)
+        ts_disk = _extract_state_timestamp_seconds(ws_disk, ws_disk_path)
+        if ts_disk is not None and (ts_mem is None or ts_disk >= ts_mem):
+            return ws_disk, ws_disk_src or "disk"
+        return ws_mem, ws_mem_src or "MemoryStore"
+
+    if ws_disk:
+        return ws_disk, ws_disk_src or "disk"
+    if ws_mem:
+        return ws_mem, ws_mem_src or "MemoryStore"
 
     return None, "not found"
 
@@ -2255,6 +2267,8 @@ def load_run_state_unified(
     run_id_hint: Optional[str] = None,
 ) -> Tuple[Optional[Dict[str, Any]], str]:
     """Load last saved run state, preferring MemoryStore but with file fallbacks."""
+    rs_mem: Optional[Dict[str, Any]] = None
+    rs_mem_src: Optional[str] = None
     func = getattr(memory, "load_run_state", None)
     if callable(func):
         raw = None
@@ -2273,12 +2287,30 @@ def load_run_state_unified(
             raw = None
 
         if isinstance(raw, dict) and raw:
-            return raw, "MemoryStore.load_run_state"
+            rs_mem = raw
+            rs_mem_src = "MemoryStore.load_run_state"
 
+    rs_disk: Optional[Dict[str, Any]] = None
+    rs_disk_src: Optional[str] = None
+    rs_disk_path: Optional[Path] = None
     paths = _candidate_state_paths(run_id=run_id_hint)["run_state"]
     raw2, p = _first_existing_json(paths)
     if isinstance(raw2, dict) and raw2 and p is not None:
-        return raw2, str(p)
+        rs_disk = raw2
+        rs_disk_src = str(p)
+        rs_disk_path = p
+
+    if rs_mem and rs_disk:
+        ts_mem = _extract_state_timestamp_seconds(rs_mem, None)
+        ts_disk = _extract_state_timestamp_seconds(rs_disk, rs_disk_path)
+        if ts_disk is not None and (ts_mem is None or ts_disk >= ts_mem):
+            return rs_disk, rs_disk_src or "disk"
+        return rs_mem, rs_mem_src or "MemoryStore"
+
+    if rs_disk:
+        return rs_disk, rs_disk_src or "disk"
+    if rs_mem:
+        return rs_mem, rs_mem_src or "MemoryStore"
 
     return None, "not found"
 
@@ -2425,7 +2457,7 @@ def compute_progress_view(
     hb_last = (watchdog or {}).get("last_beat")
     hb_age = _maybe_float((watchdog or {}).get("seconds_since_last"))
     heartbeat_fresh = hb_age is None or hb_age <= 600.0
-    running_like = status_s in {"running", "running_job", "active", "in_progress", "working"}
+    running_like = status_s in {"running", "active", "in_progress", "working"}
     started_like = bool(running_like or hb_count > 0 or (hb_last and heartbeat_fresh))
 
     # Preferred: phase progress (3-phase pipeline etc.) (preserve 0 values)
@@ -2594,7 +2626,7 @@ def derive_health_class(
 
     # Heartbeat driven
     if seconds_since is None:
-        if status in {"running", "active", "in_progress", "working"}:
+        if status in {"running", "active", "in_progress", "working", "running_job", "running_cycle", "processing", "busy"}:
             return "stale", "Running (no heartbeat)"
         return "unknown", "Unknown"
 
@@ -2603,7 +2635,7 @@ def derive_health_class(
         return "healthy", "Healthy"
     if seconds_since <= 300:
         return "stale", "Stale"
-    if status in {"running", "active", "in_progress", "working"} and hb_count > 0:
+    if status in {"running", "active", "in_progress", "working", "running_job", "running_cycle", "processing", "busy"} and hb_count > 0:
         return "offline", "Heartbeat lost"
     return "offline", "Offline"
 
@@ -3952,7 +3984,17 @@ def main() -> None:
         active_run_hint = str(active_run_hint)
 
     status0 = str((ws0 or {}).get("status") or "").lower()
-    running_like = status0 in {"running", "active", "in_progress", "working"}
+    # Treat additional engine-worker statuses as "running" for active run detection.
+    running_like = status0 in {
+        "running",
+        "active",
+        "in_progress",
+        "working",
+        "running_job",
+        "running_cycle",
+        "processing",
+        "busy",
+    }
 
     active_run_from_run_state: Optional[str] = None
     if isinstance(run_state_global, dict):
@@ -4135,7 +4177,16 @@ def main() -> None:
         if isinstance(cur, int) and isinstance(tot, int) and tot > 0:
             # Display progress differently when total count is one or unknown.
             status_cur = str((ws0.get("status") or "")).lower()
-            running_like = status_cur in {"running", "active", "in_progress", "working"}
+            running_like = status_cur in {
+                "running",
+                "active",
+                "in_progress",
+                "working",
+                "running_job",
+                "running_cycle",
+                "processing",
+                "busy",
+            }
             if tot > 1:
                 st.sidebar.caption(f"Progress: {cur}/{tot} {label}".strip())
             else:
@@ -4665,6 +4716,15 @@ def main() -> None:
                 "monitoring": monitoring_config,
             }
 
+            # Back-compat: some engine/agent versions use `cycles`/`rounds` keys.
+            # We keep these consistent with max_cycles/max_rounds when present.
+            if mode != "swarm":
+                run_config.setdefault("cycles", int(cycles))
+                run_config.setdefault("total_cycles", int(total_cycles_requested))
+            else:
+                run_config.setdefault("rounds", int(cycles))
+                run_config.setdefault("total_rounds", int(cycles))
+
             if pdf_payload is not None:
                 run_config["pdf"] = pdf_payload
                 run_config["pdf_payload"] = pdf_payload
@@ -5152,12 +5212,36 @@ def main() -> None:
 
             st.markdown("#### 10x learning dashboard (Option C signals)")
 
+            # Option C signals are derived from the RYE time series for the active run.
+            # Some deployments previously passed a diagnostics dict directly; to keep
+            # compatibility we try the preferred "series" signature first.
+            domain_for_signals = None
+            if isinstance(diagnostics, dict):
+                dom0 = diagnostics.get("domain")
+                if isinstance(dom0, str) and dom0:
+                    domain_for_signals = dom0
+
+            rye_series_for_option_c: List[float] = []
+            try:
+                if isinstance(history, list):
+                    for c in history:
+                        if not isinstance(c, dict):
+                            continue
+                        if domain_for_signals and str(c.get("domain") or "") != domain_for_signals:
+                            continue
+                        v = _maybe_float(c.get("rye"))
+                        if v is not None:
+                            rye_series_for_option_c.append(float(v))
+            except Exception:
+                rye_series_for_option_c = []
+
             volatility_info: Dict[str, Any] = {}
             try:
-                volatility_info = rye_volatility_signature(diagnostics)
+                volatility_info = rye_volatility_signature(rye_series_for_option_c, window=10)  # type: ignore[arg-type]
             except TypeError:
                 try:
-                    volatility_info = rye_volatility_signature(history=history, domain=None, window=10)  # type: ignore[call-arg]
+                    # Back-compat: older signature may accept history/domain/window
+                    volatility_info = rye_volatility_signature(history=history, domain=domain_for_signals, window=10)  # type: ignore[call-arg]
                 except Exception:
                     volatility_info = {}
             except Exception:
@@ -5165,10 +5249,10 @@ def main() -> None:
 
             equilibrium_info: Dict[str, Any] = {}
             try:
-                equilibrium_info = detect_rye_equilibrium(diagnostics)
+                equilibrium_info = detect_rye_equilibrium(rye_series_for_option_c)  # type: ignore[arg-type]
             except TypeError:
                 try:
-                    equilibrium_info = detect_rye_equilibrium(history=history, domain=None, window=10)  # type: ignore[call-arg]
+                    equilibrium_info = detect_rye_equilibrium(history=history, domain=domain_for_signals, window=10)  # type: ignore[call-arg]
                 except Exception:
                     equilibrium_info = {}
             except Exception:
@@ -5176,10 +5260,13 @@ def main() -> None:
 
             harmonic_val: Optional[float] = None
             try:
-                harmonic_val = tgrm_harmonic_index(diagnostics)
+                if isinstance(diagnostics, dict):
+                    harmonic_val = tgrm_harmonic_index(diagnostics.get("stability_index"), diagnostics.get("recovery_momentum"))  # type: ignore[arg-type]
+                else:
+                    harmonic_val = tgrm_harmonic_index(None, None)  # type: ignore[arg-type]
             except TypeError:
                 try:
-                    harmonic_val = tgrm_harmonic_index(history=history, domain=None, window=10)  # type: ignore[call-arg]
+                    harmonic_val = tgrm_harmonic_index(history=history, domain=domain_for_signals, window=10)  # type: ignore[call-arg]
                 except Exception:
                     harmonic_val = None
             except Exception:
@@ -5187,9 +5274,13 @@ def main() -> None:
 
             vol_score = volatility_info.get("volatility_score")
             vol_regime = volatility_info.get("regime") or volatility_info.get("label")
-            eq_flag = equilibrium_info.get("in_equilibrium")
+            eq_flag = equilibrium_info.get("equilibrium")
+            if eq_flag is None:
+                eq_flag = equilibrium_info.get("in_equilibrium")
             eq_reason = equilibrium_info.get("reason")
             eq_state_text = "yes" if eq_flag is True else ("no" if eq_flag is False else "unknown")
+            if str(eq_reason).lower() in {"not_enough_data", "insufficient_data", "no_data"}:
+                eq_state_text = "n/a"
 
             oc_cols = st.columns(3)
             with oc_cols[0]:
@@ -5920,9 +6011,43 @@ def main() -> None:
         # Determine if the worker appears to be running or recently active
         health_class, _ = derive_health_class(ws, watchdog)
         status_now = str((ws or {}).get("status") or "").lower()
+        progress_status = str((progress_raw or {}).get("status") or "").lower() if isinstance(progress_raw, dict) else ""
+
+        # Some worker versions emit richer status strings (e.g. "running_job").
+        running_statuses = {
+            "running",
+            "active",
+            "in_progress",
+            "working",
+            "running_job",
+            "running_cycle",
+            "processing",
+            "busy",
+        }
+
+        # Detect queue activity even if worker_state/watchdog are missing.
+        queue_active_has_jobs = False
+        try:
+            q_active = Path(get_queue_root()) / "active"
+            queue_active_has_jobs = any(q_active.glob("*_job.json"))
+        except Exception:
+            queue_active_has_jobs = False
+
+        # If progress indicates an unfinished run, keep refreshing.
+        progress_frac = None
+        try:
+            if isinstance(progress_view, dict):
+                progress_frac = progress_view.get("fraction")
+        except Exception:
+            progress_frac = None
+        progress_incomplete = isinstance(progress_frac, (int, float)) and float(progress_frac) < 1.0
+
         running_like2 = (
-            status_now in {"running", "active", "in_progress", "working"}
+            status_now in running_statuses
+            or progress_status in {"active", "running", "in_progress", "working"}
             or health_class in {"healthy", "stale"}
+            or queue_active_has_jobs
+            or (run_id is not None and progress_incomplete)
         )
         if running_like2:
             refresh_ms = int(refresh_seconds * 1000)
