@@ -125,11 +125,22 @@ try:
         progress_path,
     )
 except Exception:  # pragma: no cover
-    RunJob = None  # type: ignore[assignment]
-    load_next_pending_job = None  # type: ignore[assignment]
-    save_job_result = None  # type: ignore[assignment]
-    mark_job_error = None  # type: ignore[assignment]
-    progress_path = None  # type: ignore[assignment]
+    # Some deployments place run_jobs.py at repo root rather than in agent/.
+    # Try that import path before disabling queue helpers.
+    try:
+        from run_jobs import (  # type: ignore[import]
+            RunJob,
+            load_next_pending_job,
+            save_job_result,
+            mark_job_error,
+            progress_path,
+        )
+    except Exception:  # pragma: no cover
+        RunJob = None  # type: ignore[assignment]
+        load_next_pending_job = None  # type: ignore[assignment]
+        save_job_result = None  # type: ignore[assignment]
+        mark_job_error = None  # type: ignore[assignment]
+        progress_path = None  # type: ignore[assignment]
 
 CONFIG_PATH_DEFAULT = "config/settings.yaml"
 
@@ -839,7 +850,11 @@ def _to_jsonable(
 try:  # pragma: no cover
     from agent.event_log import log_event as _event_log_write  # type: ignore[import]
 except Exception:  # pragma: no cover
-    _event_log_write = None  # type: ignore[assignment]
+    # Some deployments place event_log.py at repo root rather than in agent/.
+    try:
+        from event_log import log_event as _event_log_write  # type: ignore[import]
+    except Exception:  # pragma: no cover
+        _event_log_write = None  # type: ignore[assignment]
 
 _EVENT_LOG_ENABLED: bool = _env_bool("WORKER_EVENT_LOG", default=True)
 
@@ -1943,6 +1958,81 @@ def _get_memory_store(agent: CoreAgent) -> Optional[MemoryStore]:
     ms = getattr(agent, "memory_store", None)
     if isinstance(ms, MemoryStore):
         return ms
+    return None
+
+
+def _infer_cycle_count_from_memory(agent: CoreAgent, run_id: str) -> Optional[int]:
+    """
+    Best-effort cycle counter for the live UI.
+
+    Some agent implementations do not invoke progress callbacks frequently.
+    This helper attempts to infer the current completed cycle count from the
+    MemoryStore so the Streamlit dashboard can show incremental progress (e.g. 1/3, 2/3)
+    instead of jumping from 0/3 directly to 3/3.
+
+    Never raises; returns None when no reasonable signal can be found.
+    """
+    try:
+        rid = str(run_id).strip()
+        if not rid:
+            return None
+    except Exception:
+        return None
+
+    ms = _get_memory_store(agent)
+    if ms is None:
+        return None
+
+    # 1) Try common MemoryStore APIs (best-effort, signatures vary across versions)
+    for name in ("get_cycle_history", "load_cycle_history", "read_cycle_history", "get_history", "get_run_history"):
+        fn = getattr(ms, name, None)
+        if callable(fn):
+            try:
+                hist = None
+                try:
+                    hist = fn(run_id=rid)  # type: ignore[misc]
+                except TypeError:
+                    try:
+                        hist = fn(rid)  # type: ignore[misc]
+                    except TypeError:
+                        hist = fn()  # type: ignore[misc]
+                if isinstance(hist, list):
+                    return len([x for x in hist if x is not None])
+            except Exception:
+                pass
+
+    # 2) Inspect the underlying data dict for common layouts
+    try:
+        data_attr = getattr(ms, "data", getattr(ms, "_data", None))
+        if isinstance(data_attr, dict):
+            # Common: data["cycle_history"][run_id] = [ ... ]
+            for key in ("cycle_history", "cycle_histories", "cycle_log", "cycle_logs", "history", "histories"):
+                v = data_attr.get(key)
+                if isinstance(v, dict):
+                    rv = v.get(rid)
+                    if isinstance(rv, list):
+                        return len([x for x in rv if x is not None])
+                elif isinstance(v, list):
+                    # Common: data["cycle_log"] = [{run_id:..., ...}, ...]
+                    if v and isinstance(v[0], dict):
+                        return sum(
+                            1
+                            for item in v
+                            if isinstance(item, dict) and str(item.get("run_id", "")).strip() == rid
+                        )
+
+            # Occasionally stored directly under the run_id key
+            direct = data_attr.get(rid)
+            if isinstance(direct, list):
+                return len([x for x in direct if x is not None])
+            if isinstance(direct, dict):
+                for k in ("cycles", "history", "cycle_history", "cycle_log"):
+                    vv = direct.get(k)
+                    if isinstance(vv, list):
+                        return len([x for x in vv if x is not None])
+    except Exception:
+        pass
+
     return None
 
 
@@ -3451,16 +3541,14 @@ def _resolve_queue_dirs(base: Path) -> QueueDirs:
     Resolve the queue directories used by the file-based queue.
 
     This helper constructs the queue layout (pending/active/finished/error/bad_jobs/locks)
-    based off of the provided base directory.  When the `agent.run_jobs` module is
-    available it will prefer the queue root and individual directory constants
-    defined there.  This ensures that the worker and the job enqueue logic in
-    run_jobs share the exact same physical locations, even if environment
-    variables such as ARA_QUEUE_ROOT or ARA_RUNS_DIR point outside of the
-    worker's `BASE_DIR`.  In particular, we update the `base` to match
-    `agent.run_jobs.QUEUE_ROOT` when available and use its `LOCKS_DIR` for
-    lock files.  Without this override the worker would default to placing
-    locks under `<BASE_DIR>/locks` which can prevent claims if the queue root
-    differs from the base.
+    based off of the provided base directory.
+
+    Priority order (to keep engine_worker, Streamlit, and run_jobs aligned):
+
+      1) ARA_QUEUE_ROOT environment variable (explicit override)
+      2) Auto-detect <base>/queue when it exists (common unified layout)
+      3) run_jobs.QUEUE_ROOT / directory constants (agent.run_jobs or run_jobs)
+      4) Legacy <base> layout (pending/active/...) as a last resort
 
     Args:
         base: The base path resolved from ARA_RUNS_DIR or a default.
@@ -3468,93 +3556,78 @@ def _resolve_queue_dirs(base: Path) -> QueueDirs:
     Returns:
         QueueDirs: A dataclass containing concrete paths for each queue folder.
     """
-    # If ARA_QUEUE_ROOT is set, prefer it as the queue root.
-    env_q = os.getenv("ARA_QUEUE_ROOT")
-    if isinstance(env_q, str) and env_q.strip():
-        try:
-            base = Path(env_q.strip()).expanduser().resolve()
-        except Exception:
-            base = Path(env_q.strip())
-    else:
-        # Auto-detect the common layout: <ARA_RUNS_DIR>/queue/{pending,active,...}
-        # This prevents silent "no jobs picked up" when the UI enqueues into
-        # <runs>/queue/pending but the worker defaults to <runs>/pending.
-        try:
-            candidate = (base / "queue").expanduser().resolve()
-        except Exception:
-            candidate = base / "queue"
-        try:
-            if (candidate / "pending").is_dir():
-                base = candidate
-        except Exception:
-            pass
+    # 1) Explicit override via environment
+    try:
+        env_q = os.getenv("ARA_QUEUE_ROOT")
+        if isinstance(env_q, str) and env_q.strip():
+            base = Path(env_q.strip()).resolve()
+    except Exception:
+        pass
 
-    # Start with the resolved queue root; by default jobs live under
-    # <base>/pending, <base>/active, etc.
+    # 2) Auto-detect the common "<runs>/queue" layout if present
+    try:
+        candidate = base / "queue"
+        if (candidate / "pending").is_dir():
+            base = candidate.resolve()
+    except Exception:
+        pass
+
+    # Start with defaults under the (possibly adjusted) base directory.
     pending = base / "pending"
     active = base / "active"
     finished = base / "finished"
     error = base / "error"
     bad_jobs = base / "bad_jobs"
+    # Keep locks under a stable hidden folder (matches run_jobs default)
     locks = base / ".locks"
 
-    def _try_apply_run_jobs_module(run_jobs_mod: Any) -> None:
-        """Override queue directories from a run_jobs module if available."""
+    def _apply_run_jobs_layout(run_jobs_mod: Any) -> None:
+        """Best-effort: adopt queue dirs defined by a run_jobs module."""
         nonlocal base, pending, active, finished, error, bad_jobs, locks
+        try:
+            queue_root = getattr(run_jobs_mod, "QUEUE_ROOT", None)
+            if queue_root:
+                base = Path(queue_root)
 
-        queue_root = getattr(run_jobs_mod, "QUEUE_ROOT", None)
-        if queue_root:
-            base = Path(queue_root)
-            pending = Path(getattr(run_jobs_mod, "PENDING_DIR", base / "pending"))
-            active = Path(getattr(run_jobs_mod, "ACTIVE_DIR", base / "active"))
-            finished = Path(getattr(run_jobs_mod, "FINISHED_DIR", base / "finished"))
-            error = Path(getattr(run_jobs_mod, "ERROR_DIR", base / "error"))
-            bad_jobs_dir = getattr(run_jobs_mod, "BAD_JOBS_DIR", None)
-            bad_jobs = Path(bad_jobs_dir) if bad_jobs_dir else base / "bad_jobs"
-            locks_dir = getattr(run_jobs_mod, "LOCKS_DIR", None)
-            locks = Path(locks_dir) if locks_dir else base / ".locks"
+            # Prefer explicit directory constants when present (otherwise fall back to base/*)
+            v = getattr(run_jobs_mod, "PENDING_DIR", None)
+            if v is not None:
+                pending = Path(v)
+            v = getattr(run_jobs_mod, "ACTIVE_DIR", None)
+            if v is not None:
+                active = Path(v)
+            v = getattr(run_jobs_mod, "FINISHED_DIR", None)
+            if v is not None:
+                finished = Path(v)
+            v = getattr(run_jobs_mod, "ERROR_DIR", None)
+            if v is not None:
+                error = Path(v)
+
+            # BAD_JOBS_DIR may not exist in older versions
+            v_bad = getattr(run_jobs_mod, "BAD_JOBS_DIR", None)
+            if v_bad is not None:
+                bad_jobs = Path(v_bad)
+
+            # Lock dir naming differs across versions; prefer public LOCKS_DIR then internal _LOCKS_DIR.
+            v_lock = getattr(run_jobs_mod, "LOCKS_DIR", None)
+            if v_lock is None:
+                v_lock = getattr(run_jobs_mod, "_LOCKS_DIR", None)
+            if v_lock is not None:
+                locks = Path(v_lock)
+        except Exception:
             return
 
-        # Even if QUEUE_ROOT is not defined, prefer individual dir constants
-        for name, attr in [
-            ("pending", "PENDING_DIR"),
-            ("active", "ACTIVE_DIR"),
-            ("finished", "FINISHED_DIR"),
-            ("error", "ERROR_DIR"),
-        ]:
-            v = getattr(run_jobs_mod, attr, None)
-            if v is not None:
-                p = Path(v)
-                if name == "pending":
-                    pending = p
-                elif name == "active":
-                    active = p
-                elif name == "finished":
-                    finished = p
-                elif name == "error":
-                    error = p
-        v_bad = getattr(run_jobs_mod, "BAD_JOBS_DIR", None)
-        if v_bad is not None:
-            bad_jobs = Path(v_bad)
-        v_lock = getattr(run_jobs_mod, "LOCKS_DIR", None)
-        if v_lock is not None:
-            locks = Path(v_lock)
-
-    # Prefer the queue root and folders defined by the run_jobs module.
-    # Support both layouts:
-    #   - agent/run_jobs.py  (package layout)
-    #   - run_jobs.py        (repo-root module layout)
+    # 3) Import either agent.run_jobs or run_jobs (repo-root) and align paths
     try:
         import agent.run_jobs as run_jobs_mod  # type: ignore[import]
 
-        _try_apply_run_jobs_module(run_jobs_mod)
+        _apply_run_jobs_layout(run_jobs_mod)
     except Exception:
         try:
-            import run_jobs as run_jobs_mod2  # type: ignore[import]
+            import run_jobs as run_jobs_mod  # type: ignore[import]
 
-            _try_apply_run_jobs_module(run_jobs_mod2)
+            _apply_run_jobs_layout(run_jobs_mod)
         except Exception:
-            # If run_jobs is not importable, fall back to base-only layout.
             pass
 
     return QueueDirs(
@@ -5350,9 +5423,13 @@ def _process_single_job(
 
         last_progress_current: Optional[int] = None
         last_progress_total: Optional[int] = macro_total
+        last_progress_note: str = ""
+        progress_lock = threading.Lock()
 
         hb_stop: Optional[threading.Event] = None
         hb_thread: Optional[threading.Thread] = None
+        pulse_stop: Optional[threading.Event] = None
+        pulse_thread: Optional[threading.Thread] = None
         try:
             try:
                 hb_stop, hb_thread = _start_heartbeat_loop(
@@ -5379,7 +5456,7 @@ def _process_single_job(
             # Progress callback used by run_goal/run_continuous/run_swarm_continuous. This updates
             # last_progress_current/total and persists progress to disk and Streamlit UI artifacts.
             def _progress_cb(update: Dict[str, Any]) -> None:
-                nonlocal last_progress_current, last_progress_total
+                nonlocal last_progress_current, last_progress_total, last_progress_note
                 try:
                     # Extract current/total cycle values from the update. Fallback to macro_total.
                     cur_val = (
@@ -5422,13 +5499,25 @@ def _process_single_job(
                     except Exception:
                         eff_cur = cur_int
                     # Update last progress values based on effective cycle progress
-                    if eff_cur is not None:
-                        last_progress_current = eff_cur
-                    if macro_total is not None:
-                        last_progress_total = macro_total
+                    try:
+                        with progress_lock:
+                            if eff_cur is not None:
+                                last_progress_current = eff_cur
+                            if macro_total is not None:
+                                last_progress_total = macro_total
+                    except Exception:
+                        if eff_cur is not None:
+                            last_progress_current = eff_cur
+                        if macro_total is not None:
+                            last_progress_total = macro_total
                     # Determine status/note
                     status_local = update.get("status") or "running_job"
                     note_local = update.get("note") or update.get("message") or ""
+                    try:
+                        with progress_lock:
+                            last_progress_note = str(note_local) if note_local is not None else ""
+                    except Exception:
+                        pass
                     # Periodically write snapshot if enabled
                     if snapshot_enabled and cur_int is not None:
                         try:
@@ -5516,6 +5605,146 @@ def _process_single_job(
                     except Exception:
                         pass
 
+
+            # ------------------------------------------------------------------
+            # Progress pulse loop (live console + watchdog friendliness)
+            #
+            # Some agent implementations can be quiet between cycles (or do not
+            # call the progress callback). This background loop keeps the
+            # progress artifacts and worker_state "fresh" so:
+            #   - Streamlit Live console updates continuously
+            #   - The watchdog does not falsely conclude the job is stalled
+            # ------------------------------------------------------------------
+            try:
+                pulse_interval_s = float(_env_float_value("WORKER_PROGRESS_PULSE_SECONDS", 5.0))
+            except Exception:
+                pulse_interval_s = 5.0
+
+            def _progress_pulse_loop() -> None:
+                nonlocal last_progress_current, last_progress_total, last_progress_note, pulse_stop
+                last_emitted_cycle: Optional[int] = None
+
+                while pulse_stop is not None and not pulse_stop.is_set():
+                    try:
+                        try:
+                            with progress_lock:
+                                cur = last_progress_current
+                                note = last_progress_note
+                        except Exception:
+                            cur = last_progress_current
+                            note = last_progress_note
+
+                        # If we don't have progress yet, or the callback is quiet, infer from MemoryStore.
+                        inferred = _infer_cycle_count_from_memory(agent, run_id)
+                        if isinstance(inferred, int):
+                            if cur is None or inferred > int(cur or 0):
+                                cur = inferred
+                                try:
+                                    with progress_lock:
+                                        last_progress_current = inferred
+                                except Exception:
+                                    last_progress_current = inferred
+
+                        # Clamp any inferred counter so it never exceeds the configured macro cycle total.
+                        try:
+                            if isinstance(cur, int):
+                                if cur < 0:
+                                    cur = 0
+                                if isinstance(macro_total, int) and macro_total > 0 and cur > macro_total:
+                                    cur = macro_total
+                        except Exception:
+                            pass
+
+                        # Write a lightweight "still running" progress heartbeat so the UI stays live.
+                        _write_job_progress(
+                            run_id,
+                            status="running_job",
+                            note=(note or "Job running"),
+                            current=cur,
+                            total=macro_total,
+                            goal=goal,
+                            domain=domain,
+                            job_config=cfg,
+                            prompt_details=prompt_details,
+                        )
+
+                        # Keep a fresh worker_state timestamp even when the agent is quiet.
+                        try:
+                            _update_worker_state(
+                                agent,
+                                status="running",
+                                mode=mode,
+                                goal=goal,
+                                domain=domain,
+                                roles=roles_list if mode == "swarm" else [role],
+                                runtime_profile=runtime_profile,
+                                stop_rye=stop_rye,
+                                max_minutes=max_minutes,
+                                run_id=run_id,
+                                experiment_mode="queue_worker",
+                                current=cur,
+                                total=macro_total,
+                                extra={
+                                    "experiment_fingerprint": experiment_fingerprint,
+                                    "job_meta": job_meta,
+                                    "job_config": cfg,
+                                    "prompt_details": prompt_details,
+                                    "progress": {
+                                        "current_cycle": cur,
+                                        "total_cycles": macro_total,
+                                        "note": _truncate_text(str(note or ""), 300),
+                                        "inferred": True,
+                                    },
+                                },
+                            )
+                        except Exception:
+                            pass
+
+                        # Emit a per-cycle event only when the cycle number changes (keeps it "real").
+                        try:
+                            if isinstance(cur, int) and cur >= 1 and cur != last_emitted_cycle:
+                                last_emitted_cycle = cur
+                                _event(
+                                    run_id=run_id,
+                                    kind="cycle_progress",
+                                    message=f"Cycle {cur}/{macro_total}",
+                                    level="info",
+                                    domain=domain,
+                                    cycle=cur,
+                                    data={"current_cycle": cur, "total_cycles": macro_total},
+                                    throttle_key=f"cycle_progress:{run_id}:{cur}",
+                                    throttle_min_interval_s=0.0,
+                                )
+                        except Exception:
+                            pass
+
+                        # Also bump the watchdog heartbeat.
+                        try:
+                            _heartbeat(agent, label="queue_job_pulse", run_id=run_id)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                    # Interruptible wait
+                    try:
+                        pulse_stop.wait(timeout=pulse_interval_s)  # type: ignore[union-attr]
+                    except Exception:
+                        time.sleep(pulse_interval_s if pulse_interval_s else 5.0)
+
+            # Start the pulse thread (best-effort)
+            try:
+                pulse_stop = threading.Event()
+                pulse_thread = threading.Thread(
+                    target=_progress_pulse_loop,
+                    daemon=True,
+                    name=f"progress-pulse-{run_id}",
+                )
+                pulse_thread.start()
+            except Exception:
+                pulse_stop = None
+                pulse_thread = None
+
             with _job_wall_time_guard(max_wall_seconds):
                 # Prefer run_goal with progress callback
                 if hasattr(agent, "run_goal"):
@@ -5539,7 +5768,13 @@ def _process_single_job(
                     try:
                         full_result = agent.run_goal(goal=goal, config=goal_config, progress_callback=_progress_cb)
                     except TypeError:
-                        full_result = agent.run_goal(goal=goal, config=goal_config)  # type: ignore[arg-type]
+                        try:
+                            full_result = agent.run_goal(goal=goal, config=goal_config, progress_cb=_progress_cb)  # type: ignore[arg-type]
+                        except TypeError:
+                            try:
+                                full_result = agent.run_goal(goal=goal, config=goal_config, on_progress=_progress_cb)  # type: ignore[arg-type]
+                            except TypeError:
+                                full_result = agent.run_goal(goal=goal, config=goal_config)  # type: ignore[arg-type]
 
                     if isinstance(full_result, dict):
                         cycles_from_result = full_result.get("cycles") or full_result.get("summaries") or []
@@ -5696,6 +5931,14 @@ def _process_single_job(
                                     )
 
         finally:
+            if pulse_stop is not None:
+                pulse_stop.set()
+            if pulse_thread is not None and pulse_thread.is_alive():
+                try:
+                    pulse_thread.join(timeout=1.0)
+                except Exception:
+                    pass
+
             if hb_stop is not None:
                 hb_stop.set()
             if hb_thread is not None and hb_thread.is_alive():
