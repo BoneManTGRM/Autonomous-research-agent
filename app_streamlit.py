@@ -4300,6 +4300,126 @@ def main() -> None:
         help="This build uses finite mode only.",
     )
 
+    # ------------------------------------------------------------------
+    # Sidebar: Reports & exports (quick access)
+    # ------------------------------------------------------------------
+    # Provide easy access to the report generation features directly from the sidebar to avoid long scrolling.
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Reports & exports")
+    # Load history for reports using the same logic as the main report section.
+    history_for_reports_sidebar: List[Dict[str, Any]] = []
+    raw_history_sidebar: List[Dict[str, Any]] = []
+    if callable(getattr(memory, "get_cycle_history", None)):
+        try:
+            raw_history_sidebar = memory.get_cycle_history() or []
+        except Exception:
+            raw_history_sidebar = []
+    if raw_history_sidebar:
+        history_for_reports_sidebar = raw_history_sidebar
+        used_fallback_history_sidebar = False
+    else:
+        history_for_reports_sidebar = load_history_from_finished_runs()
+        used_fallback_history_sidebar = bool(history_for_reports_sidebar)
+    hours_run_sidebar = compute_run_hours(history_for_reports_sidebar) if history_for_reports_sidebar else None
+    msil_profile_sidebar = compute_msil_profile(history_for_reports_sidebar) if history_for_reports_sidebar else None
+    discoveries_sidebar = load_discovery_log()
+    if not discoveries_sidebar:
+        discoveries_sidebar = load_discoveries_from_finished_runs()
+    # Full history report button
+    if st.sidebar.button("Full history report", key="full_history_report_btn_sidebar"):
+        if not history_for_reports_sidebar:
+            st.sidebar.info("No cycles logged yet, nothing to report.")
+        else:
+            # Use fallback when report_generator module is missing or fallback history loaded.
+            if used_fallback_history_sidebar or not callable(generate_report):
+                report_md_sidebar = build_outcome_summary(history_for_reports_sidebar)
+            else:
+                report_md_sidebar = generate_report(memory_store=memory, goal=None)  # type: ignore[misc]
+            # Provide a download button for the markdown report.
+            st.sidebar.download_button(
+                "Download full report (Markdown)",
+                data=report_md_sidebar,
+                file_name="autonomous_research_report.md",
+                mime="text/markdown",
+            )
+            # Provide PDF download if supported.
+            if not used_fallback_history_sidebar and callable(generate_report_pdf):
+                try:
+                    pdf_path_sidebar = generate_report_pdf(memory_store=memory, goal=None, output_path="autonomous_research_report.pdf")  # type: ignore[misc]
+                    with open(pdf_path_sidebar, "rb") as f_sidebar:
+                        st.sidebar.download_button(
+                            "Download full report (PDF)",
+                            data=f_sidebar,
+                            file_name="autonomous_research_report.pdf",
+                            mime="application/pdf",
+                        )
+                except RuntimeError as e_pdf:
+                    st.sidebar.info(str(e_pdf))
+                except Exception:
+                    st.sidebar.info("PDF generation failed unexpectedly. Check server logs for details.")
+            elif not callable(generate_report_pdf):
+                st.sidebar.info("PDF export not available (report generator module missing or PDF backend unavailable).")
+    # Findings report button
+    if st.sidebar.button("Findings report", key="findings_report_btn_sidebar"):
+        if not history_for_reports_sidebar:
+            st.sidebar.info("No cycles logged yet, findings report is empty.")
+        else:
+            if used_fallback_history_sidebar or not callable(generate_findings_report):
+                findings_md_sidebar = build_findings_report_from_history(history_for_reports_sidebar)
+            else:
+                findings_md_sidebar = generate_findings_report(memory_store=memory, goal=None)  # type: ignore[misc]
+            st.sidebar.download_button(
+                "Download findings report (Markdown)",
+                data=findings_md_sidebar,
+                file_name="findings_report.md",
+                mime="text/markdown",
+            )
+    # Option C learning report button
+    if st.sidebar.button("Learning speed report", key="option_c_report_btn_sidebar"):
+        if not history_for_reports_sidebar:
+            st.sidebar.info("No cycles logged yet, learning speed report is empty.")
+        else:
+            parts_sidebar: List[str] = []
+            parts_sidebar.append(build_outcome_summary(history_for_reports_sidebar))
+            parts_sidebar.append("\n\n---\n\n")
+            parts_sidebar.append(build_breakthrough_report(history_for_reports_sidebar, discoveries_sidebar))
+            if msil_profile_sidebar:
+                parts_sidebar.append("\n\n---\n\n")
+                parts_sidebar.append("# MSIL meta skill profile snapshot\n\n")
+                try:
+                    msil_json_sidebar = json.dumps(msil_profile_sidebar, indent=2)
+                except Exception:
+                    msil_json_sidebar = str(msil_profile_sidebar)
+                parts_sidebar.append("```json\n")
+                parts_sidebar.append(msil_json_sidebar)
+                parts_sidebar.append("\n```")
+            if isinstance(hours_run_sidebar, (int, float)):
+                parts_sidebar.append(
+                    f"\n\n_Approximate hours between first and last recorded cycle: {hours_run_sidebar:.2f}_\n"
+                )
+            option_c_md_sidebar = "".join(parts_sidebar)
+            st.sidebar.download_button(
+                "Download learning speed report (Markdown)",
+                data=option_c_md_sidebar,
+                file_name="learning_speed_report.md",
+                mime="text/markdown",
+            )
+    # TGRM cycle history JSON download button
+    if st.sidebar.button("Download cycle history (JSON)", key="download_cycle_history_btn_sidebar"):
+        if not history_for_reports_sidebar:
+            st.sidebar.info("No cycles logged yet, nothing to export.")
+        else:
+            try:
+                raw_json_sidebar = json.dumps(history_for_reports_sidebar, indent=2)
+                st.sidebar.download_button(
+                    "Download cycle history (JSON)",
+                    data=raw_json_sidebar,
+                    file_name="cycle_history.json",
+                    mime="application/json",
+                )
+            except Exception:
+                st.sidebar.info("Failed to generate cycle history JSON.")
+
     stop_rye_threshold: Optional[float] = None
 
     # -----------------------------
