@@ -1283,12 +1283,87 @@ def extract_unique_citations_from_history(
     history: List[Dict[str, Any]],
     max_items: int = 200,
 ) -> List[Dict[str, Any]]:
-    """Flatten citations from a list of cycle history entries and deduplicate them."""
+    """Flatten citations from a list of cycle history entries and deduplicate them.
+
+    Dedupe is intentionally robust:
+        1) Prefer URL (canonicalized: strip fragments and common tracking params)
+        2) Fall back to DOI if present
+        3) Fall back to normalized title/text
+
+    This prevents repeated Tavily/web citations from showing up over and over
+    across cycles even when the title varies slightly.
+    """
     if not history:
         return []
 
+    # Local import keeps this helper self-contained and avoids impacting
+    # the wider module import surface.
+    try:
+        from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+    except Exception:  # pragma: no cover
+        parse_qsl = None  # type: ignore[assignment]
+        urlencode = None  # type: ignore[assignment]
+        urlparse = None  # type: ignore[assignment]
+        urlunparse = None  # type: ignore[assignment]
+
+    def _canonicalize_url(url: str) -> str:
+        if not isinstance(url, str):
+            return ""
+        raw = url.strip()
+        if not raw:
+            return ""
+
+        candidate = raw
+        if "://" not in candidate and candidate.startswith("www."):
+            candidate = "https://" + candidate
+
+        if urlparse is None or urlunparse is None:
+            # Best-effort fallback
+            return candidate.split("#", 1)[0].rstrip("/").lower()
+
+        try:
+            parsed = urlparse(candidate)
+        except Exception:
+            return candidate.split("#", 1)[0].rstrip("/").lower()
+
+        scheme = (parsed.scheme or "").lower() or "https"
+        netloc = (parsed.netloc or "").lower()
+        path = parsed.path or ""
+        if path != "/" and path.endswith("/"):
+            path = path[:-1]
+
+        # Remove fragments and common tracking params
+        pairs = []
+        try:
+            if parse_qsl is not None:
+                pairs = parse_qsl(parsed.query or "", keep_blank_values=True)
+        except Exception:
+            pairs = []
+
+        filtered = []
+        for k, v in pairs:
+            kl = (k or "").lower()
+            if kl.startswith("utm_"):
+                continue
+            if kl in {"gclid", "fbclid", "mc_cid", "mc_eid", "igshid"}:
+                continue
+            filtered.append((k, v))
+
+        filtered.sort(key=lambda kv: ((kv[0] or "").lower(), kv[1] or ""))
+        query = ""
+        try:
+            if filtered and urlencode is not None:
+                query = urlencode(filtered, doseq=True)
+        except Exception:
+            query = ""
+
+        try:
+            return urlunparse((scheme, netloc, path, "", query, ""))
+        except Exception:
+            return candidate.split("#", 1)[0].rstrip("/").lower()
+
     collected: List[Dict[str, Any]] = []
-    seen_keys: Set[Tuple[Optional[str], Optional[str]]] = set()
+    seen_keys: Set[str] = set()
 
     for entry in history:
         for key in ("citations", "sources", "source_list"):
@@ -1299,11 +1374,28 @@ def extract_unique_citations_from_history(
                 if isinstance(item, dict):
                     title = item.get("title") or item.get("name") or ""
                     url = item.get("url") or item.get("link") or ""
+                    doi = item.get("doi") or item.get("DOI") or ""
                     provider = item.get("source") or item.get("provider") or ""
-                    key_tuple = (title.strip() or None, url.strip() or None)
-                    if key_tuple in seen_keys:
+
+                    # Dedupe key: URL (canonicalized) -> DOI -> title
+                    key = ""
+                    canon = _canonicalize_url(str(url))
+                    if canon:
+                        key = f"url:{canon}"
+                    else:
+                        doi_s = str(doi).strip().lower()
+                        if doi_s:
+                            key = f"doi:{doi_s}"
+                        else:
+                            t = str(title).strip().lower()
+                            key = f"title:{t}" if t else ""
+
+                    if not key:
                         continue
-                    seen_keys.add(key_tuple)
+
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
                     collected.append(
                         {
                             "title": title,
@@ -1317,10 +1409,10 @@ def extract_unique_citations_from_history(
                     text = str(item).strip()
                     if not text:
                         continue
-                    key_tuple = (text, None)
-                    if key_tuple in seen_keys:
+                    key = f"text:{text.strip().lower()}"
+                    if key in seen_keys:
                         continue
-                    seen_keys.add(key_tuple)
+                    seen_keys.add(key)
                     collected.append(
                         {
                             "title": text,
@@ -1446,34 +1538,25 @@ def render_result_details(result: Dict[str, Any]) -> None:
             sources = flattened_citations
 
     if isinstance(sources, list) and sources:
-        # Add a toggle to show or hide the sources/citations section. The section
-        # will be hidden by default and only shown when the user toggles it on.
-        show_sources = st.toggle(
-            "Show sources and citations",
-            value=False,
-            key="show_sources_and_citations",
-            help="Toggle to display the list of sources and citations collected for this run."
-        )
-        if show_sources:
-            st.markdown("#### Sources and citations")
-            for s in sources:
-                if not isinstance(s, dict):
-                    st.markdown(f"- {s}")
-                    continue
-                title = s.get("title", "Source")
-                url = s.get("url") or s.get("link")
-                snippet = s.get("snippet") or s.get("summary") or ""
-                provider = s.get("source") or s.get("provider") or ""
-                line = ""
-                if provider:
-                    line += f"[{provider}] "
-                if url:
-                    line += f"[{title}]({url})"
-                else:
-                    line += title
-                if snippet:
-                    line += f"  \n  {snippet}"
-                st.markdown(f"- {line}")
+        st.markdown("#### Sources and citations")
+        for s in sources:
+            if not isinstance(s, dict):
+                st.markdown(f"- {s}")
+                continue
+            title = s.get("title", "Source")
+            url = s.get("url") or s.get("link")
+            snippet = s.get("snippet") or s.get("summary") or ""
+            provider = s.get("source") or s.get("provider") or ""
+            line = ""
+            if provider:
+                line += f"[{provider}] "
+            if url:
+                line += f"[{title}]({url})"
+            else:
+                line += title
+            if snippet:
+                line += f"  \n  {snippet}"
+            st.markdown(f"- {line}")
 
     debug = base.get("debug") or base.get("diagnostics") or result.get("debug") or result.get("diagnostics")
     if debug:
@@ -5688,10 +5771,13 @@ def main() -> None:
     st.subheader("Generate report")
 
     # Large reports can be thousands of lines. By default, avoid dumping them
-    # inline (which forces a ton of scrolling) and encourage downloads. Always
-    # collapse long reports by default (no inline checkbox needed).
-    # Instead of exposing a checkbox to the user, just set this flag here.
-    show_reports_inline = False
+    # inline (which forces a ton of scrolling) and encourage downloads.
+    show_reports_inline = st.checkbox(
+        "Show report text inline (can be very long)",
+        value=False,
+        key="show_reports_inline",
+        help="If off, the report will appear in a collapsed preview and you can download it instead.",
+    )
 
     def _present_report(md: str, preview_label: str = "Preview") -> None:
         if show_reports_inline:
