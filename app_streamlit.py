@@ -1446,25 +1446,34 @@ def render_result_details(result: Dict[str, Any]) -> None:
             sources = flattened_citations
 
     if isinstance(sources, list) and sources:
-        st.markdown("#### Sources and citations")
-        for s in sources:
-            if not isinstance(s, dict):
-                st.markdown(f"- {s}")
-                continue
-            title = s.get("title", "Source")
-            url = s.get("url") or s.get("link")
-            snippet = s.get("snippet") or s.get("summary") or ""
-            provider = s.get("source") or s.get("provider") or ""
-            line = ""
-            if provider:
-                line += f"[{provider}] "
-            if url:
-                line += f"[{title}]({url})"
-            else:
-                line += title
-            if snippet:
-                line += f"  \n  {snippet}"
-            st.markdown(f"- {line}")
+        # Add a toggle to show or hide the sources/citations section. The section
+        # will be hidden by default and only shown when the user toggles it on.
+        show_sources = st.toggle(
+            "Show sources and citations",
+            value=False,
+            key="show_sources_and_citations",
+            help="Toggle to display the list of sources and citations collected for this run."
+        )
+        if show_sources:
+            st.markdown("#### Sources and citations")
+            for s in sources:
+                if not isinstance(s, dict):
+                    st.markdown(f"- {s}")
+                    continue
+                title = s.get("title", "Source")
+                url = s.get("url") or s.get("link")
+                snippet = s.get("snippet") or s.get("summary") or ""
+                provider = s.get("source") or s.get("provider") or ""
+                line = ""
+                if provider:
+                    line += f"[{provider}] "
+                if url:
+                    line += f"[{title}]({url})"
+                else:
+                    line += title
+                if snippet:
+                    line += f"  \n  {snippet}"
+                st.markdown(f"- {line}")
 
     debug = base.get("debug") or base.get("diagnostics") or result.get("debug") or result.get("diagnostics")
     if debug:
@@ -5679,13 +5688,10 @@ def main() -> None:
     st.subheader("Generate report")
 
     # Large reports can be thousands of lines. By default, avoid dumping them
-    # inline (which forces a ton of scrolling) and encourage downloads.
-    show_reports_inline = st.checkbox(
-        "Show report text inline (can be very long)",
-        value=False,
-        key="show_reports_inline",
-        help="If off, the report will appear in a collapsed preview and you can download it instead.",
-    )
+    # inline (which forces a ton of scrolling) and encourage downloads. Always
+    # collapse long reports by default (no inline checkbox needed).
+    # Instead of exposing a checkbox to the user, just set this flag here.
+    show_reports_inline = False
 
     def _present_report(md: str, preview_label: str = "Preview") -> None:
         if show_reports_inline:
