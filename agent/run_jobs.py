@@ -756,6 +756,48 @@ def _sanitize_limits_in_config(config: Dict[str, Any]) -> Dict[str, Any]:
                 sanitize_key(sub, key)
             cfg[section_key] = sub
 
+    # -----------------------------------------------------------------
+    # Back-compat + safety: normalize common synonyms so the worker/agent
+    # always sees the intended finite limits.
+    #
+    # Some engine/agent implementations may look for "cycles" or
+    # "total_cycles" instead of "max_cycles" (similar for rounds).
+    # To avoid falling back to default (often 200), we mirror values when
+    # a preferred key is missing.
+    # -----------------------------------------------------------------
+    try:
+        mode = str(cfg.get("mode") or cfg.get("engine_mode") or "").lower()
+
+        # Cycles (non-swarm)
+        if mode != "swarm":
+            mc = cfg.get("max_cycles")
+            if mc is None:
+                mc2 = _coerce_positive_int(cfg.get("total_cycles") or cfg.get("cycles"))
+                if mc2 is not None:
+                    cfg["max_cycles"] = mc2
+                    mc = mc2
+            if mc is not None:
+                if cfg.get("cycles") is None:
+                    cfg["cycles"] = int(mc)
+                if cfg.get("total_cycles") is None:
+                    cfg["total_cycles"] = int(mc)
+
+        # Rounds (swarm)
+        mr = cfg.get("max_rounds")
+        if mr is None:
+            mr2 = _coerce_positive_int(cfg.get("total_rounds") or cfg.get("rounds"))
+            if mr2 is not None:
+                cfg["max_rounds"] = mr2
+                mr = mr2
+        if mr is not None:
+            if cfg.get("rounds") is None:
+                cfg["rounds"] = int(mr)
+            if cfg.get("total_rounds") is None:
+                cfg["total_rounds"] = int(mr)
+    except Exception:
+        # Never fail sanitization on these helpers.
+        pass
+
     return cfg
 
 
@@ -1173,35 +1215,7 @@ def update_worker_state(update: Dict[str, Any], *, replace: bool = False) -> Pat
     except Exception:
         pass
 
-    # Persist the worker state to the primary path and also mirror it to
-    # additional well-known locations so that UIs monitoring different
-    # directories will always see the latest state.  In particular,
-    # Streamlit may read from either runs/worker_state.json or
-    # runs/logs/worker_state.json depending on deployment.  Write to
-    # WORKER_STATE_PATH first, then mirror to logs and queue root.
     _atomic_write_json(WORKER_STATE_PATH, state)
-    try:
-        # Mirror to logs/worker_state.json if it differs from the main path
-        logs_state_path = None
-        try:
-            logs_state_path = (LOGS_DIR / "worker_state.json").resolve()
-        except Exception:
-            logs_state_path = None
-        # Mirror to queue root (shared) worker_state.json
-        queue_state_path = None
-        try:
-            queue_state_path = (QUEUE_ROOT / "worker_state.json").resolve()
-        except Exception:
-            queue_state_path = None
-        # Write to any alternate path that is distinct from the main one
-        for alt in [logs_state_path, queue_state_path]:
-            if alt and alt != WORKER_STATE_PATH:
-                try:
-                    _atomic_write_json(alt, state)
-                except Exception:
-                    pass
-    except Exception:
-        pass
 
     # Best-effort: bump watchdog heartbeat from any worker-state update.
     try:
