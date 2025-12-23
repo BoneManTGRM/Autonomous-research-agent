@@ -2912,14 +2912,11 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         or ("rounds" in cfg and cfg.get("rounds") is not None)
     )
 
-        raw_cycles = cfg.get("max_cycles")
-        # If no explicit max_cycles, fall back to the shorter alias or total_cycles.
-        if raw_cycles is None:
-            raw_cycles = cfg.get("cycles")
-        if raw_cycles is None:
-            raw_cycles = cfg.get("total_cycles")
-        if raw_cycles is None:
-            raw_cycles = HARD_MAX_CYCLES
+    raw_cycles = cfg.get("max_cycles")
+    if raw_cycles is None:
+        raw_cycles = cfg.get("cycles")
+    if raw_cycles is None:
+        raw_cycles = HARD_MAX_CYCLES
     try:
         requested_cycles = int(raw_cycles)
     except Exception:
@@ -3471,66 +3468,94 @@ def _resolve_queue_dirs(base: Path) -> QueueDirs:
     Returns:
         QueueDirs: A dataclass containing concrete paths for each queue folder.
     """
-    # Start with the provided base directory; by default jobs live under
+    # If ARA_QUEUE_ROOT is set, prefer it as the queue root.
+    env_q = os.getenv("ARA_QUEUE_ROOT")
+    if isinstance(env_q, str) and env_q.strip():
+        try:
+            base = Path(env_q.strip()).expanduser().resolve()
+        except Exception:
+            base = Path(env_q.strip())
+    else:
+        # Auto-detect the common layout: <ARA_RUNS_DIR>/queue/{pending,active,...}
+        # This prevents silent "no jobs picked up" when the UI enqueues into
+        # <runs>/queue/pending but the worker defaults to <runs>/pending.
+        try:
+            candidate = (base / "queue").expanduser().resolve()
+        except Exception:
+            candidate = base / "queue"
+        try:
+            if (candidate / "pending").is_dir():
+                base = candidate
+        except Exception:
+            pass
+
+    # Start with the resolved queue root; by default jobs live under
     # <base>/pending, <base>/active, etc.
     pending = base / "pending"
     active = base / "active"
     finished = base / "finished"
     error = base / "error"
     bad_jobs = base / "bad_jobs"
-    locks = base / "locks"
+    locks = base / ".locks"
 
-    try:
-        # If the run_jobs module defines a QUEUE_ROOT, prefer that over base.
-        import agent.run_jobs as run_jobs_mod  # type: ignore[import]
+    def _try_apply_run_jobs_module(run_jobs_mod: Any) -> None:
+        """Override queue directories from a run_jobs module if available."""
+        nonlocal base, pending, active, finished, error, bad_jobs, locks
 
-        # Prefer the explicit queue root from run_jobs if present.  This
-        # root incorporates ARA_QUEUE_ROOT when set and ensures that the
-        # worker watches the same folder that enqueue_job writes to.
         queue_root = getattr(run_jobs_mod, "QUEUE_ROOT", None)
         if queue_root:
             base = Path(queue_root)
-            # Recompute defaults off of queue_root
-            pending = Path(run_jobs_mod.PENDING_DIR) if getattr(run_jobs_mod, "PENDING_DIR", None) else base / "pending"
-            active = Path(run_jobs_mod.ACTIVE_DIR) if getattr(run_jobs_mod, "ACTIVE_DIR", None) else base / "active"
-            finished = Path(run_jobs_mod.FINISHED_DIR) if getattr(run_jobs_mod, "FINISHED_DIR", None) else base / "finished"
-            error = Path(run_jobs_mod.ERROR_DIR) if getattr(run_jobs_mod, "ERROR_DIR", None) else base / "error"
-            # bad_jobs may not always exist in older versions
+            pending = Path(getattr(run_jobs_mod, "PENDING_DIR", base / "pending"))
+            active = Path(getattr(run_jobs_mod, "ACTIVE_DIR", base / "active"))
+            finished = Path(getattr(run_jobs_mod, "FINISHED_DIR", base / "finished"))
+            error = Path(getattr(run_jobs_mod, "ERROR_DIR", base / "error"))
             bad_jobs_dir = getattr(run_jobs_mod, "BAD_JOBS_DIR", None)
             bad_jobs = Path(bad_jobs_dir) if bad_jobs_dir else base / "bad_jobs"
-            # Use the run_jobs locks directory if available
             locks_dir = getattr(run_jobs_mod, "LOCKS_DIR", None)
-            locks = Path(locks_dir) if locks_dir else base / "locks"
-        else:
-            # Even if QUEUE_ROOT is not defined, prefer individual dir constants
-            for name, attr in [
-                ("pending", "PENDING_DIR"),
-                ("active", "ACTIVE_DIR"),
-                ("finished", "FINISHED_DIR"),
-                ("error", "ERROR_DIR"),
-            ]:
-                v = getattr(run_jobs_mod, attr, None)
-                if v is not None:
-                    p = Path(v)
-                    if name == "pending":
-                        pending = p
-                    elif name == "active":
-                        active = p
-                    elif name == "finished":
-                        finished = p
-                    elif name == "error":
-                        error = p
-            # BAD_JOBS_DIR may be defined; use it if present
-            v_bad = getattr(run_jobs_mod, "BAD_JOBS_DIR", None)
-            if v_bad is not None:
-                bad_jobs = Path(v_bad)
-            # LOCKS_DIR may be defined; prefer it over base/locks
-            v_lock = getattr(run_jobs_mod, "LOCKS_DIR", None)
-            if v_lock is not None:
-                locks = Path(v_lock)
+            locks = Path(locks_dir) if locks_dir else base / ".locks"
+            return
+
+        # Even if QUEUE_ROOT is not defined, prefer individual dir constants
+        for name, attr in [
+            ("pending", "PENDING_DIR"),
+            ("active", "ACTIVE_DIR"),
+            ("finished", "FINISHED_DIR"),
+            ("error", "ERROR_DIR"),
+        ]:
+            v = getattr(run_jobs_mod, attr, None)
+            if v is not None:
+                p = Path(v)
+                if name == "pending":
+                    pending = p
+                elif name == "active":
+                    active = p
+                elif name == "finished":
+                    finished = p
+                elif name == "error":
+                    error = p
+        v_bad = getattr(run_jobs_mod, "BAD_JOBS_DIR", None)
+        if v_bad is not None:
+            bad_jobs = Path(v_bad)
+        v_lock = getattr(run_jobs_mod, "LOCKS_DIR", None)
+        if v_lock is not None:
+            locks = Path(v_lock)
+
+    # Prefer the queue root and folders defined by the run_jobs module.
+    # Support both layouts:
+    #   - agent/run_jobs.py  (package layout)
+    #   - run_jobs.py        (repo-root module layout)
+    try:
+        import agent.run_jobs as run_jobs_mod  # type: ignore[import]
+
+        _try_apply_run_jobs_module(run_jobs_mod)
     except Exception:
-        # If run_jobs is not importable, fall back to base-only layout.
-        pass
+        try:
+            import run_jobs as run_jobs_mod2  # type: ignore[import]
+
+            _try_apply_run_jobs_module(run_jobs_mod2)
+        except Exception:
+            # If run_jobs is not importable, fall back to base-only layout.
+            pass
 
     return QueueDirs(
         base=base,
@@ -5162,12 +5187,8 @@ def _process_single_job(
         )
 
         raw_cycles = cfg.get("max_cycles")
-        # If no explicit max_cycles, fall back to the shorter alias or total_cycles.
         if raw_cycles is None:
             raw_cycles = cfg.get("cycles")
-        if raw_cycles is None:
-            # Some UIs provide a total_cycles field (requested cycles across all agents).
-            raw_cycles = cfg.get("total_cycles")
         if raw_cycles is None:
             raw_cycles = HARD_MAX_CYCLES
         try:
