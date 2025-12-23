@@ -750,16 +750,25 @@ class SwarmOrchestrator:
         mode: str,
         soft_timeout_s: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
-        """Run agents in parallel with a *real* soft timeout.
+        """Run agents in parallel using a bounded executor.
 
-        Why this exists:
-        - `as_completed()` will block forever if one future never completes.
-        - Using an executor as a context manager (`with ThreadPoolExecutor(...)`) will
-          also wait for all running futures at exit.
+        Important: "soft_timeout_s" must never cause the orchestrator to
+        block forever.
 
-        So we implement a polling loop with `wait(..., timeout=...)` and when the
-        deadline is reached we mark remaining agents as timed out and shutdown the
-        executor without waiting.
+        The previous implementation used:
+
+            for fut in as_completed(...):
+                if time.time() > deadline: break
+
+        ...but that pattern can still block indefinitely because
+        "as_completed" without a timeout waits for a future to finish before
+        the loop body runs (so the deadline check never triggers if a task
+        hangs). Additionally, leaving the executor in a context manager can
+        block on shutdown(wait=True).
+
+        This implementation uses wait(..., FIRST_COMPLETED) in a loop so we
+        can observe elapsed time even when nothing completes, and it shuts
+        down the executor with wait=False when timing out.
         """
         if not payloads:
             return []
@@ -772,7 +781,7 @@ class SwarmOrchestrator:
 
         results: List[Optional[Dict[str, Any]]] = [None] * len(payloads)
         start_time = time.time()
-        deadline = start_time + float(soft_timeout_s) if soft_timeout_s else None
+        deadline = start_time + soft_timeout_s if soft_timeout_s else None
 
         # Select an executor implementation based on executor_type
         executor_cls: Any
@@ -782,33 +791,41 @@ class SwarmOrchestrator:
         elif exec_type == "interpreter" and InterpreterPoolExecutor is not None:
             executor_cls = InterpreterPoolExecutor
         else:
+            # Default fallback to threads
             executor_cls = ThreadPoolExecutor
 
-        executor = executor_cls(max_workers=workers)
-        timed_out = False
+        executor: Any = executor_cls(max_workers=workers)
         future_to_index: Dict[Any, int] = {}
-        pending = set()
 
         try:
             # Submit all tasks immediately to preserve ordering
             for idx, payload in enumerate(payloads):
-                fut = executor.submit(agent_fn, payload)
-                future_to_index[fut] = idx
-                pending.add(fut)
+                future_to_index[executor.submit(agent_fn, payload)] = idx
 
-            # Poll until all futures complete OR the deadline is hit.
+            pending = set(future_to_index.keys())
+
+            # Drain futures until completion or timeout.
             while pending:
                 if deadline is not None:
                     remaining = deadline - time.time()
                     if remaining <= 0:
-                        timed_out = True
                         break
-                    # Wake up periodically so we can observe the deadline.
-                    timeout = min(0.5, max(0.0, remaining))
+                    # Poll in short intervals so we can enforce the deadline
+                    # even if nothing completes.
+                    poll_timeout = min(1.0, max(0.05, remaining))
                 else:
-                    timeout = 0.5
+                    poll_timeout = None
 
-                done, pending = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
+                done, pending = wait(
+                    pending,
+                    timeout=poll_timeout,
+                    return_when=FIRST_COMPLETED,
+                )
+
+                # If we're in deadline mode and nothing finished during this
+                # polling window, loop again so we can re-check remaining time.
+                if not done:
+                    continue
 
                 for fut in done:
                     idx = future_to_index.get(fut)
@@ -825,16 +842,12 @@ class SwarmOrchestrator:
                             "error": str(exc),
                         }
 
-            if timed_out and pending:
-                # Mark remaining agents as timed out and attempt cancellation.
+            # Timeout path: mark any unfinished agents.
+            if pending:
                 for fut in list(pending):
                     idx = future_to_index.get(fut)
                     if idx is None:
                         continue
-                    try:
-                        fut.cancel()
-                    except Exception:
-                        pass
                     if results[idx] is None:
                         results[idx] = {
                             "agent_index": idx,
@@ -842,18 +855,24 @@ class SwarmOrchestrator:
                             "domain": payloads[idx].get("domain", "general"),
                             "status": "timeout",
                         }
+                    # Best-effort cancel (will only cancel if not started)
+                    try:
+                        fut.cancel()
+                    except Exception:
+                        pass
 
         finally:
-            # If we hit a soft timeout, do NOT wait for stuck futures.
+            # Crucial: do not block forever waiting for hung tasks.
             try:
-                executor.shutdown(wait=not timed_out, cancel_futures=True)
+                executor.shutdown(wait=False, cancel_futures=True)
             except TypeError:
-                executor.shutdown(wait=not timed_out)
-            except Exception:
+                # cancel_futures not supported in older Python
                 try:
                     executor.shutdown(wait=False)
                 except Exception:
                     pass
+            except Exception:
+                pass
 
         return [r or {} for r in results]
 
