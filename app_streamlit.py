@@ -1283,87 +1283,99 @@ def extract_unique_citations_from_history(
     history: List[Dict[str, Any]],
     max_items: int = 200,
 ) -> List[Dict[str, Any]]:
-    """Flatten citations from a list of cycle history entries and deduplicate them.
-
-    Dedupe is intentionally robust:
-        1) Prefer URL (canonicalized: strip fragments and common tracking params)
-        2) Fall back to DOI if present
-        3) Fall back to normalized title/text
-
-    This prevents repeated Tavily/web citations from showing up over and over
-    across cycles even when the title varies slightly.
-    """
+    """Flatten citations from a list of cycle history entries and deduplicate them."""
     if not history:
         return []
 
-    # Local import keeps this helper self-contained and avoids impacting
-    # the wider module import surface.
-    try:
-        from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
-    except Exception:  # pragma: no cover
-        parse_qsl = None  # type: ignore[assignment]
-        urlencode = None  # type: ignore[assignment]
-        urlparse = None  # type: ignore[assignment]
-        urlunparse = None  # type: ignore[assignment]
+    collected: List[Dict[str, Any]] = []
+    seen_keys: Set[Tuple[Optional[str], Optional[str]]] = set()
 
-    def _canonicalize_url(url: str) -> str:
-        if not isinstance(url, str):
+    def _norm_text(val: Any) -> str:
+        """Normalize free-text for de-dupe keys."""
+        try:
+            s = str(val or "")
+        except Exception:
+            s = ""
+        s = s.strip().lower()
+        if not s:
             return ""
-        raw = url.strip()
+        # Collapse whitespace
+        try:
+            s = " ".join(s.split())
+        except Exception:
+            pass
+        return s
+
+    def _canon_url(val: Any) -> str:
+        """Canonicalize URLs by stripping fragments and common tracking params."""
+        try:
+            raw = str(val or "").strip()
+        except Exception:
+            return ""
         if not raw:
             return ""
-
-        candidate = raw
-        if "://" not in candidate and candidate.startswith("www."):
-            candidate = "https://" + candidate
-
-        if urlparse is None or urlunparse is None:
-            # Best-effort fallback
-            return candidate.split("#", 1)[0].rstrip("/").lower()
-
+        raw = raw.strip().strip("<>").strip()
+        # Drop fragment early
+        raw = raw.split("#", 1)[0].strip()
+        if not raw:
+            return ""
         try:
-            parsed = urlparse(candidate)
+            from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+
+            parts = urlsplit(raw)
+            scheme = (parts.scheme or "").lower()
+            netloc = (parts.netloc or "").lower()
+            path = parts.path or ""
+            if len(path) > 1 and path.endswith("/"):
+                path = path[:-1]
+
+            filtered: List[Tuple[str, str]] = []
+            try:
+                for k, v in parse_qsl(parts.query or "", keep_blank_values=True):
+                    lk = (k or "").lower()
+                    if lk.startswith("utm_") or lk in {
+                        "gclid",
+                        "fbclid",
+                        "mc_cid",
+                        "mc_eid",
+                        "igshid",
+                        "ref",
+                        "ref_src",
+                    }:
+                        continue
+                    filtered.append((k, v))
+            except Exception:
+                filtered = []
+
+            query = urlencode(filtered, doseq=True) if filtered else ""
+            return urlunsplit((scheme, netloc, path, query, ""))
         except Exception:
-            return candidate.split("#", 1)[0].rstrip("/").lower()
+            return raw
 
-        scheme = (parsed.scheme or "").lower() or "https"
-        netloc = (parsed.netloc or "").lower()
-        path = parsed.path or ""
-        if path != "/" and path.endswith("/"):
-            path = path[:-1]
-
-        # Remove fragments and common tracking params
-        pairs = []
+    def _citation_key(item: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
+        """Return a stable key that collapses duplicate citations across cycles."""
+        # Prefer DOI when present
         try:
-            if parse_qsl is not None:
-                pairs = parse_qsl(parsed.query or "", keep_blank_values=True)
+            doi_val = item.get("doi") or item.get("DOI") or item.get("doi_url") or ""
+            doi_norm = _norm_text(doi_val)
+            if doi_norm:
+                doi_norm = doi_norm.replace("https://doi.org/", "").replace("http://doi.org/", "").strip()
+                if doi_norm:
+                    return (f"doi:{doi_norm}", None)
         except Exception:
-            pairs = []
+            pass
 
-        filtered = []
-        for k, v in pairs:
-            kl = (k or "").lower()
-            if kl.startswith("utm_"):
-                continue
-            if kl in {"gclid", "fbclid", "mc_cid", "mc_eid", "igshid"}:
-                continue
-            filtered.append((k, v))
+        # Prefer canonical URL
+        url_norm = _canon_url(item.get("url") or item.get("link") or item.get("href") or "")
+        if url_norm:
+            return (f"url:{url_norm}", None)
 
-        filtered.sort(key=lambda kv: ((kv[0] or "").lower(), kv[1] or ""))
-        query = ""
-        try:
-            if filtered and urlencode is not None:
-                query = urlencode(filtered, doseq=True)
-        except Exception:
-            query = ""
+        # Fall back to normalized title/name
+        title_norm = _norm_text(item.get("title") or item.get("name") or "")
+        if title_norm:
+            return (f"title:{title_norm}", None)
 
-        try:
-            return urlunparse((scheme, netloc, path, "", query, ""))
-        except Exception:
-            return candidate.split("#", 1)[0].rstrip("/").lower()
-
-    collected: List[Dict[str, Any]] = []
-    seen_keys: Set[str] = set()
+        return (None, None)
 
     for entry in history:
         for key in ("citations", "sources", "source_list"):
@@ -1374,28 +1386,13 @@ def extract_unique_citations_from_history(
                 if isinstance(item, dict):
                     title = item.get("title") or item.get("name") or ""
                     url = item.get("url") or item.get("link") or ""
-                    doi = item.get("doi") or item.get("DOI") or ""
                     provider = item.get("source") or item.get("provider") or ""
-
-                    # Dedupe key: URL (canonicalized) -> DOI -> title
-                    key = ""
-                    canon = _canonicalize_url(str(url))
-                    if canon:
-                        key = f"url:{canon}"
-                    else:
-                        doi_s = str(doi).strip().lower()
-                        if doi_s:
-                            key = f"doi:{doi_s}"
-                        else:
-                            t = str(title).strip().lower()
-                            key = f"title:{t}" if t else ""
-
-                    if not key:
+                    key_tuple = _citation_key(item)
+                    if key_tuple == (None, None):
                         continue
-
-                    if key in seen_keys:
+                    if key_tuple in seen_keys:
                         continue
-                    seen_keys.add(key)
+                    seen_keys.add(key_tuple)
                     collected.append(
                         {
                             "title": title,
@@ -1409,10 +1406,13 @@ def extract_unique_citations_from_history(
                     text = str(item).strip()
                     if not text:
                         continue
-                    key = f"text:{text.strip().lower()}"
-                    if key in seen_keys:
+                    norm_text = _norm_text(text)
+                    if not norm_text:
                         continue
-                    seen_keys.add(key)
+                    key_tuple = (f"text:{norm_text}", None)
+                    if key_tuple in seen_keys:
+                        continue
+                    seen_keys.add(key_tuple)
                     collected.append(
                         {
                             "title": text,
@@ -1824,12 +1824,15 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
         logs / "worker_state.json",
         logs / "engine_worker_state.json",
         logs / "worker_status.json",
+        runs_root / "worker_state.json",
         queue_root / "worker_state.json",
         q_active / "worker_state.json",
     ]
     run_state = [
         logs / "run_state.json",
         logs / "last_run_state.json",
+        runs_root / "run_state.json",
+        runs_root / "last_run_state.json",
         queue_root / "run_state.json",
         q_active / "run_state.json",
     ]
@@ -1839,6 +1842,8 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
         logs / "worker_heartbeat.json",
         logs / "watchdog.json",
         logs / "watchdog_state.json",
+        runs_root / "watchdog_heartbeat.json",
+        runs_root / "heartbeat.json",
         queue_root / "watchdog_heartbeat.json",
         q_active / "watchdog_heartbeat.json",
     ]
@@ -1846,6 +1851,8 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
         logs / "event_log.json",
         logs / "events.json",
         logs / "timeline.json",
+        runs_root / "event_log.json",
+        runs_root / "events.json",
         queue_root / "event_log.json",
     ]
 
@@ -1887,6 +1894,8 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
     if run_id:
         progress = [
             logs / f"{run_id}_progress.json",
+            runs_root / f"{run_id}_progress.json",
+            runs_root / "active" / f"{run_id}_progress.json",
             queue_root / f"{run_id}_progress.json",
             q_active / f"{run_id}_progress.json",
             q_finished / f"{run_id}_progress.json",
@@ -2416,7 +2425,7 @@ def compute_progress_view(
     hb_last = (watchdog or {}).get("last_beat")
     hb_age = _maybe_float((watchdog or {}).get("seconds_since_last"))
     heartbeat_fresh = hb_age is None or hb_age <= 600.0
-    running_like = status_s in {"running", "active", "in_progress", "working"}
+    running_like = status_s in {"running", "running_job", "active", "in_progress", "working"}
     started_like = bool(running_like or hb_count > 0 or (hb_last and heartbeat_fresh))
 
     # Preferred: phase progress (3-phase pipeline etc.) (preserve 0 values)
