@@ -122,63 +122,190 @@ _TAVILY_MAX_RETRIES = _parse_int_env("TAVILY_MAX_RETRIES", _DEFAULT_TAVILY_MAX_R
 # extra guard at the tool layer.
 _tavily_semaphore = threading.Semaphore(_TAVILY_MAX_CONCURRENCY)
 
+# Circuit breaker state.
+#
+# If Tavily starts timing out / rate limiting / failing due to billing,
+# letting every agent keep hammering it can stall the whole run (especially
+# in swarm mode). We therefore:
+#   - enforce a hard per-call timeout
+#   - open a short "circuit" after repeated failures so the engine can
+#     keep making progress using the fallback search.
+_TAVILY_CIRCUIT_OPEN_UNTIL: float = 0.0
+_TAVILY_CONSECUTIVE_FAILURES: int = 0
 
-# Hard timeout for a single Tavily search. This prevents a hung network call
-# from freezing an entire run (especially in swarm mode).
-_DEFAULT_TAVILY_TIMEOUT_S: float = 20.0
+# Default timeouts and circuit settings (override via Render env vars)
+_DEFAULT_TAVILY_TIMEOUT_SECONDS = 20.0
+_DEFAULT_TAVILY_CONNECT_TIMEOUT_SECONDS = 10.0
+_DEFAULT_TAVILY_READ_TIMEOUT_SECONDS = 20.0
+_DEFAULT_TAVILY_CIRCUIT_FAIL_THRESHOLD = 2
+_DEFAULT_TAVILY_CIRCUIT_OPEN_SECONDS = 120.0
+_DEFAULT_TAVILY_QUOTA_OPEN_SECONDS = 3600.0
 
 
-def _parse_float_env(name: str, default: float) -> float:
+def _tavily_env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
-    if not raw:
+    if raw is None or raw == "":
         return default
     try:
-        val = float(raw)
-        return val if val > 0 else default
+        v = float(raw)
+        if v <= 0:
+            return default
+        return v
     except Exception:
         return default
 
 
-_TAVILY_TIMEOUT_S = _parse_float_env("TAVILY_TIMEOUT_SECONDS", _DEFAULT_TAVILY_TIMEOUT_S)
-
-# Simple circuit breaker: after a timeout, stop using Tavily for a short period
-# and fall back to the browser stub search. This avoids piling up stuck threads.
-_DEFAULT_TAVILY_CIRCUIT_OPEN_S: float = 900.0
-_TAVILY_CIRCUIT_OPEN_S = _parse_float_env("TAVILY_CIRCUIT_OPEN_SECONDS", _DEFAULT_TAVILY_CIRCUIT_OPEN_S)
-
-_TAVILY_DISABLED_UNTIL_TS: float = 0.0
-_TAVILY_STATE_LOCK = threading.Lock()
-
-
-def _log_tools(msg: str) -> None:
+def _tavily_env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
     try:
-        if str(os.getenv("TOOLS_LOGGING", "1")).strip().lower() in {"0", "false", "no", "off"}:
-            return
-        print(msg, flush=True)
+        v = int(raw)
+        if v <= 0:
+            return default
+        return v
+    except Exception:
+        return default
+
+
+def _tavily_log(msg: str) -> None:
+    """Best-effort log line that shows up in Render logs."""
+    try:
+        # Keep logs ASCII-friendly (Render console can be picky)
+        safe = msg.encode("utf-8", errors="ignore").decode("ascii", errors="ignore")
+    except Exception:
+        safe = msg
+    try:
+        print(safe, flush=True)
     except Exception:
         pass
 
 
-def _tavily_is_temporarily_disabled() -> bool:
-    try:
-        with _TAVILY_STATE_LOCK:
-            return time.time() < _TAVILY_DISABLED_UNTIL_TS
-    except Exception:
-        return False
+def _tavily_open_circuit(seconds: float) -> None:
+    global _TAVILY_CIRCUIT_OPEN_UNTIL
+    _TAVILY_CIRCUIT_OPEN_UNTIL = max(_TAVILY_CIRCUIT_OPEN_UNTIL, time.time() + max(1.0, seconds))
 
 
-def _tavily_register_timeout(reason: str = "") -> None:
-    global _TAVILY_DISABLED_UNTIL_TS
-    try:
-        now = time.time()
-        with _TAVILY_STATE_LOCK:
-            _TAVILY_DISABLED_UNTIL_TS = max(_TAVILY_DISABLED_UNTIL_TS, now + float(_TAVILY_CIRCUIT_OPEN_S))
-            until = _TAVILY_DISABLED_UNTIL_TS
-        _log_tools(
-            f"[tools:web_search] Tavily timeout; disabling Tavily for {_TAVILY_CIRCUIT_OPEN_S:.0f}s. Reason: {reason}"
+def _tavily_note_success() -> None:
+    global _TAVILY_CONSECUTIVE_FAILURES
+    global _TAVILY_CIRCUIT_OPEN_UNTIL
+    _TAVILY_CONSECUTIVE_FAILURES = 0
+    _TAVILY_CIRCUIT_OPEN_UNTIL = 0.0
+
+
+def _tavily_note_failure(open_seconds: float) -> None:
+    global _TAVILY_CONSECUTIVE_FAILURES
+    _TAVILY_CONSECUTIVE_FAILURES += 1
+    threshold = _tavily_env_int("TAVILY_CIRCUIT_FAIL_THRESHOLD", _DEFAULT_TAVILY_CIRCUIT_FAIL_THRESHOLD)
+    if _TAVILY_CONSECUTIVE_FAILURES >= threshold:
+        _tavily_open_circuit(open_seconds)
+
+
+def _call_with_timeout(fn: Any, timeout_s: float, *args: Any, **kwargs: Any) -> Any:
+    """Run a blocking call in a daemon thread and enforce a hard timeout."""
+    out: Dict[str, Any] = {}
+    err: Dict[str, Any] = {}
+
+    def _target() -> None:
+        try:
+            out["value"] = fn(*args, **kwargs)
+        except Exception as e:
+            err["error"] = e
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout=max(0.1, float(timeout_s)))
+    if t.is_alive():
+        raise TimeoutError(f"Tavily call exceeded {timeout_s:.1f}s")
+    if "error" in err:
+        raise err["error"]
+    return out.get("value")
+
+
+def _tavily_direct_api_search(
+    *,
+    query: str,
+    max_results: int,
+    search_depth: str,
+    topic: str,
+    include_images: bool = False,
+    time_range: Any = None,
+    auto_parameters: bool = False,
+) -> List[Dict[str, Any]]:
+    """Call Tavily's HTTP API directly (requests + timeouts)."""
+    if requests is None:
+        raise RuntimeError("requests not available")
+
+    api_key = (
+        os.getenv("TAVILY_API_KEY")
+        or os.getenv("TAVILY_KEY")
+        or os.getenv("TAVILY_TOKEN")
+        or os.getenv("TAVILY_API_TOKEN")
+    )
+    if not api_key:
+        raise RuntimeError("TAVILY_API_KEY not set")
+
+    url = os.getenv("TAVILY_API_URL", "https://api.tavily.com/search")
+    payload: Dict[str, Any] = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": int(max_results),
+        "search_depth": search_depth,
+        "include_answer": False,
+        "include_raw_content": False,
+        "topic": topic,
+        "include_images": bool(include_images),
+        "auto_parameters": bool(auto_parameters),
+    }
+    if time_range is not None:
+        payload["time_range"] = time_range
+
+    connect_t = _tavily_env_float("TAVILY_CONNECT_TIMEOUT_SECONDS", _DEFAULT_TAVILY_CONNECT_TIMEOUT_SECONDS)
+    read_t = _tavily_env_float("TAVILY_READ_TIMEOUT_SECONDS", _DEFAULT_TAVILY_READ_TIMEOUT_SECONDS)
+
+    resp = requests.post(
+        url,
+        json=payload,
+        headers={"Content-Type": "application/json"},
+        timeout=(connect_t, read_t),
+    )
+
+    # Raise helpful errors for non-2xx codes.
+    if getattr(resp, "status_code", 0) >= 400:
+        body = ""
+        try:
+            body = (resp.text or "")[:300]
+        except Exception:
+            body = ""
+        raise RuntimeError(f"Tavily HTTP {resp.status_code}: {body}")
+
+    data: Any = resp.json()
+    if not isinstance(data, dict):
+        raise RuntimeError("Tavily returned non-dict JSON")
+
+    results = data.get("results")
+    if results is None:
+        # Some Tavily responses include an 'answer' but no results
+        return []
+    if not isinstance(results, list):
+        raise RuntimeError("Tavily 'results' is not a list")
+
+    # Normalize to the tool schema we expect downstream.
+    norm: List[Dict[str, Any]] = []
+    for r in results:
+        if not isinstance(r, dict):
+            continue
+        norm.append(
+            {
+                "title": r.get("title") or "",
+                "url": r.get("url") or "",
+                # Tavily typically returns 'content' as snippet-like text
+                "snippet": r.get("content") or r.get("snippet") or "",
+                "source": r.get("source") or "tavily",
+                **({"score": r.get("score")} if "score" in r else {}),
+            }
         )
-    except Exception:
-        pass
+    return norm
 
 
 def _get_web_research_instance() -> Optional[Any]:
@@ -1296,13 +1423,15 @@ def web_search(
             "semantic_diversity": None,
         }
 
-    error_str: Optional[str] = None
-
-    # If Tavily recently stalled, fail fast and fall back so the run keeps
-    # progressing (instead of sitting in 'job still running' forever).
-    tool = None
-    if _tavily_is_temporarily_disabled():
-        error_str = "Tavily temporarily disabled due to previous timeouts"
+    # If Tavily is in a circuit-open cooldown window, skip it and immediately
+    # fall back to the lightweight browser search below.
+    now_ts = time.time()
+    if _TAVILY_CIRCUIT_OPEN_UNTIL and now_ts < _TAVILY_CIRCUIT_OPEN_UNTIL:
+        # Don't hard-fail the run; just degrade to fallback.
+        _tavily_log(
+            f"[tools.web_search] Tavily circuit open for ~{int(_TAVILY_CIRCUIT_OPEN_UNTIL - now_ts)}s; using fallback search"
+        )
+        tool = None
     else:
         tool = _get_web_research_instance()
 
@@ -1315,114 +1444,144 @@ def web_search(
     else:
         mapped_depth = "advanced"
 
-    if tool is not None:
-        # Attempt to call Tavily search with concurrency limits and retries
+    if tool is not None or os.getenv("TAVILY_API_KEY"):
+        # Attempt Tavily with concurrency limits, a hard timeout, and retries.
         started = time.time()
+        timeout_s = _tavily_env_float("TAVILY_TIMEOUT_SECONDS", _DEFAULT_TAVILY_TIMEOUT_SECONDS)
+        log_every = str(os.getenv("TAVILY_LOG_EVERY_CALL", "1")).strip().lower() in {"1", "true", "yes", "on"}
+
         last_exception: Optional[Exception] = None
         results: Optional[List[Dict[str, Any]]] = None
-        # Perform up to _TAVILY_MAX_RETRIES attempts. On specific errors
-        # (HTTP 429, rate limiting, timeouts), exponential backoff is used.
+        used_backend: Optional[str] = None
+
+        if log_every:
+            _tavily_log(
+                f"[tools.web_search] tavily_start depth={mapped_depth} max_results={max_results} topic={topic} q={query[:140]!r}"
+            )
+
         for attempt in range(_TAVILY_MAX_RETRIES):
+            acquired = False
             try:
-                # Acquire semaphore before making the remote call to bound
-                # concurrency. This protects against many agents flooding
-                # Tavily at once.
-                with _tavily_semaphore:
-                    # IMPORTANT: Tavily can sometimes hang indefinitely (socket/DNS/TLS stall).
-                    # Execute the search in a daemon thread and enforce a hard timeout so
-                    # the entire run cannot freeze inside cycle 1/2.
-                    result_container: List[Any] = []
-                    error_container: List[Exception] = []
+                # Acquire semaphore with timeout so we don't deadlock.
+                acquired = _tavily_semaphore.acquire(timeout=min(30.0, max(0.1, timeout_s)))
+                if not acquired:
+                    raise TimeoutError("Timed out waiting for Tavily concurrency slot")
 
-                    def _search_call() -> None:
-                        try:
-                            res = tool.search(
-                                query=query,
-                                max_results=max_results,
-                                search_depth=mapped_depth,
-                                include_answer=False,
-                                include_raw_content=False,
-                                topic=topic,
-                                time_range=extra.get("time_range"),
-                                auto_parameters=bool(extra.get("auto_parameters", False)),
-                                include_images=bool(extra.get("include_images", False)),
-                            )
-                            result_container.append(res)
-                        except Exception as exc:
-                            error_container.append(exc)
-
-                    q_preview = (query or "").strip().replace("\n", " ")
-                    if len(q_preview) > 100:
-                        q_preview = q_preview[:97] + "..."
-                    _log_tools(
-                        f"[tools:web_search] tavily start attempt={attempt+1}/{_TAVILY_MAX_RETRIES} depth={mapped_depth} q=\"{q_preview}\""
+                # Prefer direct HTTP API when API key + requests exist.
+                if os.getenv("TAVILY_API_KEY") and requests is not None:
+                    results = _tavily_direct_api_search(
+                        query=query,
+                        max_results=max_results,
+                        search_depth=mapped_depth,
+                        topic=topic,
+                        include_images=bool(extra.get("include_images", False)),
+                        time_range=extra.get("time_range"),
+                        auto_parameters=bool(extra.get("auto_parameters", False)),
                     )
+                    used_backend = "tavily_http"
+                else:
+                    # Fall back to BrowserTool implementation (may block) but enforce
+                    # a hard timeout so runs don't get stuck forever.
+                    if tool is None:
+                        raise RuntimeError("Tavily tool unavailable")
+                    results = _call_with_timeout(
+                        tool.search,
+                        timeout_s,
+                        query=query,
+                        max_results=max_results,
+                        search_depth=mapped_depth,
+                        include_answer=False,
+                        include_raw_content=False,
+                        topic=topic,
+                        time_range=extra.get("time_range"),
+                        auto_parameters=bool(extra.get("auto_parameters", False)),
+                        include_images=bool(extra.get("include_images", False)),
+                    )
+                    used_backend = "tavily_tool"
 
-                    t = threading.Thread(target=_search_call, daemon=True)
-                    t.start()
-                    t.join(max(0.1, float(_TAVILY_TIMEOUT_S)))
-                    if t.is_alive():
-                        raise TimeoutError(f"Tavily search exceeded {_TAVILY_TIMEOUT_S} seconds timeout")
-                    if error_container:
-                        raise error_container[0]
-                    results = result_container[0] if result_container else None
-                    try:
-                        _log_tools(
-                            f"[tools:web_search] tavily ok attempt={attempt+1} results={len(results) if isinstance(results, list) else 'n/a'}"
-                        )
-                    except Exception:
-                        pass
-                # If call succeeds, break out of retry loop
+                # Success
+                _tavily_note_success()
                 break
+
             except Exception as e:
                 last_exception = e
-                # Inspect exception text for common transient failure patterns.
                 msg = str(e).lower()
-                # Check for HTTP 429 or rate limit or timeout errors. Include
-                # generic timeout keywords to cover both sync and async
-                # execution contexts.
-                is_rate_limited = any(
-                    kw in msg
-                    for kw in ["429", "rate limit", "rate-limit", "too many", "quota"]
-                )
-                is_timeout = any(
-                    kw in msg
-                    for kw in ["timeout", "timed out", "time out", "connection aborted"]
-                ) or isinstance(e, TimeoutError)
 
-                # FAIL FAST on timeouts. Timeouts are the main source of
-                # 'job claimed' + 'still running' with no cycle advance.
-                if is_timeout:
-                    _tavily_register_timeout(str(e))
+                # Error classification
+                is_timeout = any(kw in msg for kw in ["timeout", "timed out", "time out", "exceeded", "connection aborted"])
+                is_rate_limited = any(kw in msg for kw in ["429", "rate limit", "rate-limit", "too many requests"])
+                # Billing/quota errors should not be retried repeatedly.
+                is_quota = any(
+                    kw in msg
+                    for kw in [
+                        "insufficient",
+                        "payment",
+                        "billing",
+                        "credits",
+                        "quota exceeded",
+                        "plan",
+                        "402",
+                        "403",
+                        "401",
+                    ]
+                )
+
+                if is_quota:
+                    open_s = _tavily_env_float("TAVILY_QUOTA_OPEN_SECONDS", _DEFAULT_TAVILY_QUOTA_OPEN_SECONDS)
+                    _tavily_note_failure(open_s)
+                    _tavily_log(f"[tools.web_search] tavily_quota_error -> circuit open {int(open_s)}s: {e}")
                     break
 
-                if is_rate_limited:
-                    # Use exponential backoff with jitter. Sleep duration grows
-                    # exponentially with the attempt number. Cap at a modest
-                    # duration to avoid long stalls while allowing API to
-                    # recover. Jitter reduces synchronization across agents.
-                    sleep_s = min(30.0, (2 ** attempt) + random.random())
+                if is_timeout:
+                    open_s = _tavily_env_float("TAVILY_CIRCUIT_OPEN_SECONDS", _DEFAULT_TAVILY_CIRCUIT_OPEN_SECONDS)
+                    _tavily_note_failure(open_s)
+                    _tavily_log(f"[tools.web_search] tavily_timeout attempt={attempt+1}/{_TAVILY_MAX_RETRIES}: {e}")
+                elif is_rate_limited:
+                    open_s = _tavily_env_float("TAVILY_CIRCUIT_OPEN_SECONDS", _DEFAULT_TAVILY_CIRCUIT_OPEN_SECONDS)
+                    _tavily_note_failure(open_s)
+                    _tavily_log(f"[tools.web_search] tavily_rate_limited attempt={attempt+1}/{_TAVILY_MAX_RETRIES}: {e}")
+                else:
+                    # Unknown error: don't spin.
+                    _tavily_note_failure(_tavily_env_float("TAVILY_CIRCUIT_OPEN_SECONDS", _DEFAULT_TAVILY_CIRCUIT_OPEN_SECONDS))
+                    _tavily_log(f"[tools.web_search] tavily_error attempt={attempt+1}/{_TAVILY_MAX_RETRIES}: {e}")
+                    break
+
+                # Small backoff with jitter (keep small so we don't stall the run).
+                # If we are on the last attempt, don't sleep.
+                if attempt < _TAVILY_MAX_RETRIES - 1:
+                    sleep_s = min(5.0, (2 ** attempt) + random.random())
                     time.sleep(sleep_s)
-                    continue  # Retry
-                # For other exceptions, break and fall back to stub below
-                break
+
+            finally:
+                if acquired:
+                    try:
+                        _tavily_semaphore.release()
+                    except Exception:
+                        pass
+
         elapsed = time.time() - started
 
         if results is not None:
-            # Inspect capabilities to determine stub status. Some deployments
-            # run Tavily in stubbed/offline mode, which is reflected in
-            # describe_capabilities().
+            # Determine stub status (some Tavily deployments may be stubbed).
+            stubbed = False
             caps: Dict[str, Any] = {}
-            try:
-                caps = tool.describe_capabilities()
-            except Exception:
-                caps = {}
-            stubbed = bool(
-                caps.get(
-                    "stub_mode",
-                    True if caps.get("mode") not in {None, "real"} else False,
+            if tool is not None:
+                try:
+                    caps = tool.describe_capabilities()
+                except Exception:
+                    caps = {}
+                stubbed = bool(
+                    caps.get(
+                        "stub_mode",
+                        True if caps.get("mode") not in {None, "real"} else False,
+                    )
                 )
-            )
+
+            if log_every:
+                _tavily_log(
+                    f"[tools.web_search] tavily_done backend={used_backend} results={len(results)} elapsed={elapsed:.2f}s"
+                )
+
             return {
                 "query": query,
                 "stubbed": stubbed,
@@ -1433,12 +1592,11 @@ def web_search(
                 "search_energy": None,
                 "difficulty": None,
                 "semantic_diversity": None,
+                "backend": used_backend,
             }
-        # If all retries fail, fall back to stubbed search below. Attach
-        # the last exception string for traceability.
-        if last_exception is not None:
-            error_str = str(last_exception)
-        # proceed to fallback section after this block
+
+        # If all attempts failed, proceed to fallback below.
+        error_str: Optional[str] = str(last_exception) if last_exception is not None else None
 
     # Fallback: browser based stub search so the system keeps working
     # Fallback: browser based stub search so the system keeps working. This
@@ -1450,7 +1608,7 @@ def web_search(
     fallback_error = None
     # Prefer the recorded Tavily failure message if present; otherwise
     # propagate any browser fetch error.
-    if error_str:
+    if 'error_str' in locals() and error_str:
         fallback_error = error_str
     elif page.error:
         fallback_error = page.error
