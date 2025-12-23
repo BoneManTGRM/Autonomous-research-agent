@@ -689,14 +689,29 @@ def _resolve_base_dir() -> Path:
     env_val = raw.strip() if isinstance(raw, str) and raw.strip() else None
     base: Path = Path(env_val) if env_val else Path("runs")
 
+    # Prefer the queue layer's BASE_DIR if available so worker + Streamlit + enqueue
+    # logic always agree on where "runs/" lives. Some repos place run_jobs.py under
+    # agent/, others at repo root; we support both.
+    got_run_jobs_base = False
     try:
         import agent.run_jobs as _run_jobs_mod  # type: ignore[import]
 
         rj_base = getattr(_run_jobs_mod, "BASE_DIR", None)
         if rj_base is not None:
             base = Path(rj_base)
+            got_run_jobs_base = True
     except Exception:
-        pass
+        got_run_jobs_base = False
+
+    if not got_run_jobs_base:
+        try:
+            import run_jobs as _run_jobs_mod  # type: ignore[import]
+
+            rj_base = getattr(_run_jobs_mod, "BASE_DIR", None)
+            if rj_base is not None:
+                base = Path(rj_base)
+        except Exception:
+            pass
 
     try:
         base = base.expanduser().resolve()
@@ -951,6 +966,72 @@ def _disk_write_json(
 
 def _worker_state_file_path() -> Path:
     return _ensure_runs_logs_dir() / "worker_state.json"
+
+
+def _worker_state_file_paths() -> List[Path]:
+    """Return all worker_state.json paths to keep in sync.
+
+    In this repo, different parts of the stack may read worker state from:
+      - run_jobs.WORKER_STATE_PATH (defaults to <runs_root>/worker_state.json)
+      - <runs_root>/logs/worker_state.json
+
+    Writing only one of these can make the Streamlit UI look "stuck" (live
+    console never changes) even though the worker is alive. To keep the system
+    robust across layouts, we write BOTH (plus any explicit override).
+    """
+    candidates: List[Path] = []
+
+    # 1) Explicit override (matches run_jobs behavior)
+    try:
+        raw = os.getenv("ARA_WORKER_STATE_PATH")
+        if isinstance(raw, str) and raw.strip():
+            candidates.append(Path(raw.strip()))
+    except Exception:
+        pass
+
+    # 2) If run_jobs defines WORKER_STATE_PATH, honor it
+    try:
+        import agent.run_jobs as _rj  # type: ignore[import]
+
+        p = getattr(_rj, "WORKER_STATE_PATH", None)
+        if p:
+            candidates.append(Path(p))
+    except Exception:
+        try:
+            import run_jobs as _rj  # type: ignore[import]
+
+            p = getattr(_rj, "WORKER_STATE_PATH", None)
+            if p:
+                candidates.append(Path(p))
+        except Exception:
+            pass
+
+    # 3) Default legacy location: <runs_root>/worker_state.json
+    try:
+        candidates.append(BASE_DIR / "worker_state.json")
+    except Exception:
+        pass
+
+    # 4) Newer location: <runs_root>/logs/worker_state.json
+    try:
+        candidates.append(_worker_state_file_path())
+    except Exception:
+        pass
+
+    # Normalize + dedupe while preserving order
+    out: List[Path] = []
+    seen: set = set()
+    for p in candidates:
+        try:
+            rp = p.expanduser().resolve()
+        except Exception:
+            rp = Path(str(p))
+        key = str(rp)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(rp)
+    return out
 
 
 def _watchdog_heartbeat_file_path() -> Path:
@@ -1228,15 +1309,23 @@ def _emit_worker_state_file(
         terminalish = str(status).lower() in {"error", "failed", "stopped"} or (
             current is not None and total is not None and current == total
         )
-        _disk_write_json(
-            _worker_state_file_path(),
-            payload,
-            throttle_key="worker_state_file",
-            throttle_min_interval_s=_env_float_value(
-                "WORKER_WORKER_STATE_FILE_MIN_INTERVAL_SECONDS", 0.5
-            ),
-            force=force or terminalish,
-        )
+        # Write worker state to all known locations (root + logs). Without this,
+        # the Streamlit UI can look "stuck" when it reads a different path than
+        # the one the worker is updating.
+        for idx, path in enumerate(_worker_state_file_paths()):
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            _disk_write_json(
+                path,
+                payload,
+                throttle_key=f"worker_state_file_{idx}",
+                throttle_min_interval_s=_env_float_value(
+                    "WORKER_WORKER_STATE_FILE_MIN_INTERVAL_SECONDS", 0.5
+                ),
+                force=force or terminalish,
+            )
     except Exception as e:
         log_exception("worker_state_file_failed", e, status=status, mode=mode, run_id=run_id)
 
@@ -3557,10 +3646,23 @@ def _resolve_queue_dirs(base: Path) -> QueueDirs:
         QueueDirs: A dataclass containing concrete paths for each queue folder.
     """
     # 1) Explicit override via environment
+    #
+    # Note: Users sometimes (incorrectly) set ARA_QUEUE_ROOT to the *pending*
+    # directory (e.g. "/.../runs/queue/pending") instead of the queue root
+    # ("/.../runs/queue"). If we treat a leaf "pending" path as the queue
+    # root, we end up scanning "pending/pending" and will never see jobs.
+    # Normalize common leaf folder values back to their parent.
     try:
         env_q = os.getenv("ARA_QUEUE_ROOT")
         if isinstance(env_q, str) and env_q.strip():
-            base = Path(env_q.strip()).resolve()
+            env_path = Path(env_q.strip())
+            try:
+                leaf = env_path.name.strip().lower()
+                if leaf in {"pending", "active", "finished", "error", "bad_jobs", ".locks", "locks"}:
+                    env_path = env_path.parent
+            except Exception:
+                pass
+            base = env_path.resolve()
     except Exception:
         pass
 
