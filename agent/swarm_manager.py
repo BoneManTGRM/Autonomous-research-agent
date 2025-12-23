@@ -57,6 +57,7 @@ hints. It does not own network, UI, or storage concerns.
 from __future__ import annotations
 
 import time
+import os
 from dataclasses import dataclass, field, asdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -65,6 +66,8 @@ from concurrent.futures import (
     ThreadPoolExecutor,
     ProcessPoolExecutor,
     as_completed,
+    wait,
+    FIRST_COMPLETED,
 )
 try:  # PythonÂ 3.14 introduced InterpreterPoolExecutor
     from concurrent.futures import InterpreterPoolExecutor  # type: ignore
@@ -336,40 +339,104 @@ class SwarmManager:
                 executor_cls = InterpreterPoolExecutor  # type: ignore
             else:
                 executor_cls = ThreadPoolExecutor  # type: ignore
-            # Submit tasks concurrently
-            with executor_cls(max_workers=min(self.max_workers, len(self._agents))) as executor:
-                future_to_index: Dict[Any, int] = {}
-                # Preallocate results list to preserve ordering
-                temp_results: List[Optional[Dict[str, Any]]] = [None] * len(self._agents)
+            # Soft timeout for a single swarm step.
+            #
+            # Without this, a single hung tool call (e.g. web search) can
+            # cause the whole step to block forever because the executor
+            # context manager waits for all futures.
+            step_timeout_s: Optional[float] = None
+            try:
+                v = global_context.get("soft_timeout_s")
+                if isinstance(v, (int, float)) and float(v) > 0:
+                    step_timeout_s = float(v)
+            except Exception:
+                step_timeout_s = None
+            if step_timeout_s is None:
+                try:
+                    env_v = os.getenv("SWARM_STEP_TIMEOUT_SECONDS")
+                    if env_v:
+                        step_timeout_s = float(env_v)
+                except Exception:
+                    step_timeout_s = None
+
+            deadline: Optional[float] = (time.time() + step_timeout_s) if step_timeout_s else None
+
+            executor: Any = executor_cls(max_workers=min(self.max_workers, len(self._agents)))
+            future_to_index: Dict[Any, int] = {}
+            temp_results: List[Optional[Dict[str, Any]]] = [None] * len(self._agents)
+
+            try:
                 for idx, (agent, state) in enumerate(zip(self._agents, self._agent_states)):
                     # Wrap step_fn call to catch exceptions
                     def _call_step(agent=agent, state=state):  # default args bind current values
                         try:
                             return step_fn(agent, state, global_context)
                         except Exception as exc:  # pragma: no cover
-                            return {
-                                "status": "error",
-                                "error": str(exc),
-                            }
-                    future = executor.submit(_call_step)
-                    future_to_index[future] = idx
-                for future in as_completed(future_to_index):
-                    idx = future_to_index[future]
-                    result = future.result()
-                    temp_results[idx] = result
-                    # Update state only if a dict was returned
-                    if isinstance(result, dict):
+                            return {"status": "error", "error": str(exc)}
+
+                    fut = executor.submit(_call_step)
+                    future_to_index[fut] = idx
+
+                pending = set(future_to_index.keys())
+
+                while pending:
+                    if deadline is not None:
+                        remaining = deadline - time.time()
+                        if remaining <= 0:
+                            break
+                        poll_timeout = min(1.0, max(0.05, remaining))
+                    else:
+                        poll_timeout = None
+
+                    done, pending = wait(pending, timeout=poll_timeout, return_when=FIRST_COMPLETED)
+                    if not done:
+                        continue
+
+                    for fut in done:
+                        idx = future_to_index.get(fut)
+                        if idx is None:
+                            continue
                         try:
-                            self._update_agent_state_from_result(
-                                self._agent_states[idx], result
-                            )
+                            result = fut.result()
+                        except Exception as exc:  # pragma: no cover
+                            result = {"status": "error", "error": str(exc)}
+
+                        temp_results[idx] = result
+                        if isinstance(result, dict):
+                            try:
+                                self._update_agent_state_from_result(self._agent_states[idx], result)
+                            except Exception:
+                                pass
+
+                # Timeout path: mark unfinished agents.
+                if pending:
+                    for fut in list(pending):
+                        idx = future_to_index.get(fut)
+                        if idx is None:
+                            continue
+                        if temp_results[idx] is None:
+                            temp_results[idx] = {"status": "timeout"}
+                        try:
+                            fut.cancel()
                         except Exception:
-                            # Do not allow a faulty update to break the loop
                             pass
-                # Append results in original order
-                for r in temp_results:
-                    if r is not None:
-                        agent_results.append(r)
+
+            finally:
+                # Do not block forever waiting for hung tasks.
+                try:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    try:
+                        executor.shutdown(wait=False)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+            # Append results in original order
+            for r in temp_results:
+                if r is not None:
+                    agent_results.append(r)
         else:
             # Sequential execution
             for agent, state in zip(self._agents, self._agent_states):
