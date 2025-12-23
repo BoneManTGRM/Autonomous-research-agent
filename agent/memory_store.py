@@ -2215,21 +2215,21 @@ class MemoryStore:
         domain = _normalize_ui_text(domain) if isinstance(domain, str) else domain
         roles = _sanitize_for_ui(roles) if roles is not None else []
         runtime_profile = _normalize_ui_text(runtime_profile) if isinstance(runtime_profile, str) else runtime_profile
-        # Sanitize extra dictionary recursively and augment with stability flags
+        # Sanitize the extra dictionary recursively.  Do not inject stability flags here; these
+        # should be determined by run diagnostics rather than inferred from cycle count.
         if extra is None:
             extra = {}
         if isinstance(extra, dict):
             extra = _sanitize_for_ui(extra)
-            # When cycles have begun, mark stability flags to help UI compute autonomy
+            # When cycles have begun, preserve existing progress information without adding
+            # default stability flags.  If a progress dictionary exists, copy it; otherwise
+            # leave it empty.  Do not set stable_signal, self_stabilizing, or equilibrium_detected.
             if current is not None and total is not None and isinstance(current, int) and current >= 1:
                 prog = extra.get("progress")
                 if isinstance(prog, dict):
                     prog = dict(prog)
                 else:
                     prog = {}
-                prog.setdefault("stable_signal", True)
-                prog.setdefault("self_stabilizing", True)
-                prog.setdefault("equilibrium_detected", True)
                 extra["progress"] = prog
 
         # Start from existing worker_state.json if it exists so we keep counters.
