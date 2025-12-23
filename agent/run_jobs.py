@@ -1175,6 +1175,12 @@ def update_worker_state(update: Dict[str, Any], *, replace: bool = False) -> Pat
 
     _atomic_write_json(WORKER_STATE_PATH, state)
 
+    # Mirror worker_state into runs/logs for Streamlit compatibility (best-effort).
+    try:
+        _atomic_write_json(LOGS_DIR / "worker_state.json", state)
+    except Exception:
+        pass
+
     # Best-effort: bump watchdog heartbeat from any worker-state update.
     try:
         bump_watchdog_heartbeat(
@@ -2363,6 +2369,13 @@ def write_progress(run_id: str, progress: Dict[str, Any]) -> Path:
 
     path = progress_path(run_id)
     _atomic_write_json(path, payload)
+
+    # Mirror progress into runs/logs/<run_id>_progress.json for Streamlit compatibility.
+    try:
+        safe_id = _sanitize_run_id_for_filename(run_id)
+        _atomic_write_json(LOGS_DIR / f"{safe_id}_progress.json", payload)
+    except Exception:
+        pass
 
     # Best-effort: bump watchdog heartbeat using progress as the driver signal.
     try:
