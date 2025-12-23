@@ -2241,22 +2241,22 @@ def _update_worker_state(
     domain = _normalize_ui_text(domain)
     roles = _sanitize_for_ui(roles) if roles is not None else roles
     runtime_profile = _normalize_ui_text(runtime_profile) if isinstance(runtime_profile, str) else runtime_profile
-    # Augment extra with stability signals when cycles have started
+    # Augment extra when cycles have started.  Do not inject stability flags here.
+    # Stability flags such as stable_signal, self_stabilizing, and equilibrium_detected
+    # should be computed by dedicated diagnostics modules based on actual run history.
     if extra is None:
         extra = {}
     if isinstance(extra, dict):
         try:
-            # set stable flags when at least one cycle has executed and progress exists
+            # When at least one cycle has executed and a progress dictionary exists, preserve it as-is
             if current is not None and total is not None and isinstance(current, (int, float)) and current >= 1:
-                # nested progress dict may exist; update or create
                 prog = extra.get("progress")
                 if isinstance(prog, dict):
+                    # Copy existing progress dictionary without adding stability flags
                     prog = dict(prog)
                 else:
                     prog = {}
-                prog.setdefault("stable_signal", True)
-                prog.setdefault("self_stabilizing", True)
-                prog.setdefault("equilibrium_detected", True)
+                # Preserve existing progress without injecting default stability flags
                 extra["progress"] = prog
         except Exception:
             pass
@@ -2938,7 +2938,8 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
 
     # Default to forever mode when no explicit config is provided.  This allows
     # jobs to run indefinitely unless a user or environment variable overrides it.
-    forever_env = _env_bool("WORKER_FOREVER", default=True)
+    # In finite mode, default to not running forever unless explicitly enabled by environment.
+    forever_env = _env_bool("WORKER_FOREVER", default=False)
     forever_cfg = bool(cfg.get("forever", False))
     forever = forever_env or forever_cfg
 
@@ -4889,13 +4890,9 @@ def _write_job_progress(
             extra_local: Optional[Dict[str, Any]] = None
             try:
                 if isinstance(phase_idx, (int, float)) and phase_idx >= 1:
-                    extra_local = {
-                        "progress": {
-                            "stable_signal": True,
-                            "self_stabilizing": True,
-                            "equilibrium_detected": True,
-                        }
-                    }
+                    # Do not emit stability flags automatically. Progress should be
+                    # populated with diagnostics-derived fields elsewhere.
+                    extra_local = {}
             except Exception:
                 extra_local = None
             _emit_run_progress_file(
@@ -5187,7 +5184,8 @@ def _process_single_job(
 
         # Default to forever mode when no explicit config is provided.  This allows
         # jobs to run indefinitely unless a user or environment variable overrides it.
-        forever_env = _env_bool("WORKER_FOREVER", default=True)
+        # In finite mode, default to not running forever unless explicitly enabled by environment.
+        forever_env = _env_bool("WORKER_FOREVER", default=False)
         forever_cfg = bool(cfg.get("forever", False))
         forever = forever_env or forever_cfg
 
