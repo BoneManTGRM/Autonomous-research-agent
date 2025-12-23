@@ -5086,7 +5086,16 @@ def _write_job_progress(
                 # after the run ID.  If the progress path follows a
                 # ``<dir>/<run_id>_progress.json`` pattern, then
                 # ``path.parent / run_id`` will be unique per run.
-                run_dir_for_events = path.parent / run_id
+                # Store events at <runs_root>/<run_id>/events.jsonl rather than under
+                # the logs folder so that the Streamlit UI can locate them.  The
+                # progress file lives at <runs_root>/logs/<run_id>_progress.json;
+                # its parent is <runs_root>/logs and grandparent is <runs_root>.
+                # Emit events into <runs_root>/<run_id>/events.jsonl.
+                try:
+                    run_dir_for_events = path.parent.parent / run_id  # typically <runs_root>/<run_id>
+                except Exception:
+                    # Fallback to the original location if parent hierarchy is not as expected
+                    run_dir_for_events = path.parent / run_id
                 note_msg = f"Progress {current}/{total}" if current is not None and total is not None else "Progress update"
                 extra_payload = {
                     "current": current,
@@ -5396,9 +5405,18 @@ def _process_single_job(
             or ("rounds" in cfg and cfg.get("rounds") is not None)
         )
 
+        # Derive the requested number of cycles for singleâagent runs.
+        # Prefer explicit max_cycles or cycles values.  When absent, fall back
+        # to a manual_cycles hint if present before resorting to the hard cap.
         raw_cycles = cfg.get("max_cycles")
         if raw_cycles is None:
             raw_cycles = cfg.get("cycles")
+        # Some job creators (e.g. Streamlit) pass manual_cycles in runtime_hints
+        # but do not set cycles or max_cycles on the topâlevel config.  Honor
+        # manual_cycles as a synonym for max_cycles to avoid defaulting to the
+        # HARD_MAX_CYCLES when the user specified a finite number of cycles.
+        if raw_cycles is None:
+            raw_cycles = cfg.get("manual_cycles")
         if raw_cycles is None:
             raw_cycles = HARD_MAX_CYCLES
         try:
