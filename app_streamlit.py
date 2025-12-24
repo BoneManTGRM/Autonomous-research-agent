@@ -2594,12 +2594,10 @@ def compute_progress_view(
             else:
                 mc = pd.get("max_cycles") or pd.get("max_rounds")
             macro_total_ui = _safe_int(mc, None)
-            # Longevityâonly: disable remapping of microâcycle progress to macro cycles.
-            # By setting macro_total_ui to None here, we skip the logic that
-            # divides internal step counts into user cycles.  This allows
-            # progress to display the full microâcycle counts (e.g. 96/96) when
-            # running swarms or agents with many internal steps.
-            macro_total_ui = None
+            # Compute the effective macro total if present.  In swarm mode use
+            # max_rounds, otherwise max_cycles.  When macro_total_ui is less
+            # than the underlying internal step count, progress will be
+            # remapped to the macro cycle count below.
         if (
             macro_total_ui is not None
             and t2 is not None
@@ -3007,18 +3005,16 @@ def compute_autonomy_view(
         except Exception:
             pass
 
-    # Longevityâonly heuristic: treat completed runs as selfâstabilizing when no
-    # explicit stability flags are set.  In finite mode, short runs often
-    # complete before diagnostics can emit equilibrium or stability signals,
-    # causing the autonomy level to remain at 3/4.  If the worker status
-    # indicates a finished run and no stability has been detected, we
-    # conservatively elevate the autonomy to "Selfâstabilizing" so that
-    # completed runs are rewarded with a 4/4 score.  The status field is
-    # normalized to lowercase earlier in this function.
+    # If a run has finished and no stability signal has been detected, treat it
+    # as self-stabilizing.  Without this fallback, short finite runs can
+    # complete without ever producing explicit stability signals, which leaves
+    # the autonomy score stuck at 3/4.  Checking for finished-like statuses
+    # allows completed runs to receive the maximum autonomy score (4/4)
+    # appropriately.
+    finished_like_labels = {"finished", "done", "completed", "complete", "success"}
     if not stable_signal:
         try:
-            # status is already lowerâcased above
-            if status in {"finished", "done", "completed", "complete", "success"}:
+            if status in finished_like_labels:
                 stable_signal = True
         except Exception:
             pass
