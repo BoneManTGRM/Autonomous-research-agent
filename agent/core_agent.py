@@ -2813,7 +2813,14 @@ class CoreAgent:
                 elif runtime_profile == "forever":
                     pass
 
-            if isinstance(est_cycles, (int, float)) and max_cycles <= 100:
+            # Only override the caller-supplied max_cycles when it is still set to
+            # the default value (100).  Previously this check used ``max_cycles <= 100``,
+            # which unintentionally replaced small user-specified budgets (e.g. 3 or 6)
+            # with much larger estimated cycle counts from the runtime profile.  By
+            # comparing against the exact default (100), we preserve explicit
+            # caller intent while still honoring runtime profiles when the caller
+            # leaves max_cycles at its default.
+            if isinstance(est_cycles, (int, float)) and max_cycles == 100:
                 try:
                     max_cycles = max(1, int(est_cycles))
                 except Exception:
