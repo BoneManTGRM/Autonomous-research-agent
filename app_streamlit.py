@@ -3005,16 +3005,36 @@ def compute_autonomy_view(
         except Exception:
             pass
 
-    # If a run has finished and no stability signal has been detected, treat it
-    # as self-stabilizing.  Without this fallback, short finite runs can
-    # complete without ever producing explicit stability signals, which leaves
-    # the autonomy score stuck at 3/4.  Checking for finished-like statuses
-    # allows completed runs to receive the maximum autonomy score (4/4)
-    # appropriately.
+    # Elevate to self-stabilizing when the run appears complete.  If no
+    # stability signal has been detected but the progress has reached or
+    # exceeded its total, or if the worker status is finished-like, then
+    # treat the run as self-stabilizing.  This ensures the autonomy
+    # score can advance to 4/4 when the progress bar hits 100% even if
+    # diagnostics and worker state have not yet emitted explicit stability
+    # signals.  For swarm runs with many micro-cycles, current and total
+    # may reflect internal step counts rather than macro cycles; this
+    # fallback triggers when current >= total, which corresponds to a
+    # completed run.
     finished_like_labels = {"finished", "done", "completed", "complete", "success"}
     if not stable_signal:
         try:
-            if status in finished_like_labels:
+            # Compute progress fraction from worker_state if possible
+            current = None
+            total_v = None
+            if isinstance(worker_state, dict):
+                current = worker_state.get("effective_current") or worker_state.get("current")
+                total_v = worker_state.get("effective_total") or worker_state.get("total")
+            # Force numeric
+            frac_complete = None
+            try:
+                if current is not None and total_v is not None:
+                    c_val = float(current)
+                    t_val = float(total_v)
+                    if t_val > 0:
+                        frac_complete = c_val / t_val
+            except Exception:
+                frac_complete = None
+            if (frac_complete is not None and frac_complete >= 1.0) or status in finished_like_labels:
                 stable_signal = True
         except Exception:
             pass
