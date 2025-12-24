@@ -2861,6 +2861,54 @@ def _normalize_cycles_for_ui(cycles_list: List[Any]) -> List[Dict[str, Any]]:
         normalized.append(c)
     return normalized
 
+# ---------------------------------------------------------------------------
+# Helper: collapse microâcycles to macro cycles for UI
+#
+# Some agent implementations return many more cycle summaries than the user
+# requested (e.g. 200 micro steps when the user asked for 3 cycles).  When
+# this occurs the UI will display an inflated cycle count.  This helper
+# collapses a longer list of cycle entries down to the requested number by
+# sampling evenly across the list.  If the number of entries is less than or
+# equal to the target total, or if the total is missing, the input list is
+# returned unchanged.  Any exceptions during collapse fall back to returning
+# the original list.
+def _collapse_cycles_for_ui(cycles_list: List[Any], total: Optional[int]) -> List[Any]:
+    """
+    Reduce a list of cycle summaries to a desired total by sampling.
+
+    Args:
+        cycles_list: The original list of cycle summaries (dictionaries or other).
+        total: Desired number of cycles to display.  When ``None`` or when
+            ``len(cycles_list) <= total``, the original list is returned.
+
+    Returns:
+        A list containing at most ``total`` entries sampled from ``cycles_list``.
+    """
+    try:
+        # Guard against nonâlist inputs
+        if not isinstance(cycles_list, list):
+            return cycles_list  # type: ignore[return-value]
+        n = len(cycles_list)
+        # Only collapse when we have more entries than the target
+        if isinstance(total, int) and total > 0 and n > total:
+            import math as _math
+            step = float(n) / float(total)
+            collapsed: List[Any] = []
+            for i in range(total):
+                # Compute the index of the representative entry for this cycle.
+                # We use ceil to bias toward later entries in each segment so that
+                # the collapsed list includes the most recent microâcycles.
+                idx = int(_math.ceil((i + 1) * step)) - 1
+                if idx < 0:
+                    idx = 0
+                if idx >= n:
+                    idx = n - 1
+                collapsed.append(cycles_list[idx])
+            return collapsed
+    except Exception:
+        pass
+    return cycles_list  # type: ignore[return-value]
+
 
 def _aggregate_from_cycles(cycles: List[Dict[str, Any]], key: str) -> List[Any]:
     out: List[Any] = []
@@ -3343,6 +3391,18 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             )
 
         _heartbeat(agent, label="direct_job_finished", run_id=run_id)
+
+        # Collapse any microâcycle summaries down to the requested macro total before
+        # computing diagnostics and writing cycles.  When the agent returns more
+        # summaries than max_cycles/max_rounds (e.g. 200 micro cycles for a 3
+        # cycle request), this will sample the list down to the desired length.
+        try:
+            if mode == "single":
+                summaries = _collapse_cycles_for_ui(summaries, max_cycles)
+            elif mode == "swarm":
+                summaries = _collapse_cycles_for_ui(summaries, max_rounds)
+        except Exception:
+            pass
 
         diag: Dict[str, Any] = {}
         try:
@@ -5474,7 +5534,19 @@ def _process_single_job(
         # manual_cycles as a synonym for max_cycles to avoid defaulting to the
         # HARD_MAX_CYCLES when the user specified a finite number of cycles.
         if raw_cycles is None:
-            raw_cycles = cfg.get("manual_cycles")
+            # Attempt to honor a manual_cycles hint from runtime_hints when present.
+            # Some job creators place manual_cycles inside a nested runtime_hints dict
+            # rather than at the top level.  Prefer this hint over falling back to
+            # the hard cap.  If both are absent, fall back to any manual_cycles on
+            # the top level of the config.
+            try:
+                hints_local = cfg.get("runtime_hints")
+                if isinstance(hints_local, dict) and hints_local.get("manual_cycles") is not None:
+                    raw_cycles = hints_local.get("manual_cycles")
+                else:
+                    raw_cycles = cfg.get("manual_cycles")
+            except Exception:
+                raw_cycles = cfg.get("manual_cycles")
         if raw_cycles is None:
             raw_cycles = HARD_MAX_CYCLES
         try:
@@ -5741,6 +5813,16 @@ def _process_single_job(
                     except Exception:
                         eff_cur = cur_int
                     # Update last progress values based on effective cycle progress
+                    # Capture the previous effective cycle so we can emit an event only
+                    # when the cycle number changes.  This prevents flooding the
+                    # live console with microâstep events and instead records a
+                    # single event per macro cycle.
+                    prev_eff_cur: Optional[int]
+                    try:
+                        with progress_lock:
+                            prev_eff_cur = last_progress_current
+                    except Exception:
+                        prev_eff_cur = last_progress_current
                     try:
                         with progress_lock:
                             if eff_cur is not None:
@@ -5752,6 +5834,38 @@ def _process_single_job(
                             last_progress_current = eff_cur
                         if macro_total is not None:
                             last_progress_total = macro_total
+                    # Emit a progress event when the effective cycle increments.  Use the
+                    # same run directory as the pulse loop.  Only emit when
+                    # ``emit_event`` is available (i.e. events module is present) and
+                    # the cycle number changed.  This allows the Streamlit
+                    # Live console to update on each macro cycle without relying on
+                    # the autoârefresh component.
+                    try:
+                        if emit_event is not None and eff_cur is not None:
+                            if prev_eff_cur is None or int(eff_cur) != int(prev_eff_cur):
+                                # Determine the run directory based on the runs root and run ID.
+                                _run_dir_local: Optional[Path]
+                                try:
+                                    # When RUNS_LOGS_DIR is defined, its parent is runs_root
+                                    if 'RUNS_LOGS_DIR' in globals() and RUNS_LOGS_DIR is not None:
+                                        _run_dir_local = RUNS_LOGS_DIR.parent / str(run_id)
+                                    else:
+                                        # Fallback: derive from the stop flag path or macro_total
+                                        _run_dir_local = _runs_root_local / str(run_id)  # type: ignore[name-defined]
+                                except Exception:
+                                    _run_dir_local = None
+                                if isinstance(_run_dir_local, Path):
+                                    msg = f"Progress {eff_cur}/{macro_total}" if macro_total is not None else f"Progress {eff_cur}"
+                                    extra_payload = {
+                                        "current": eff_cur,
+                                        "total": macro_total,
+                                        "status": status_local,
+                                        "note": note_local,
+                                    }
+                                    emit_event(_run_dir_local, level="info", domain="progress", msg=msg, extra=extra_payload)  # type: ignore[misc]
+                    except Exception:
+                        # Silence any errors when emitting progress events
+                        pass
                     # Determine status/note
                     status_local = update.get("status") or "running_job"
                     note_local = update.get("note") or update.get("message") or ""
@@ -6244,6 +6358,19 @@ def _process_single_job(
             job_config=cfg,
             prompt_details=prompt_details,
         )
+
+        # Collapse microâcycle summaries down to the user requested macro total prior
+        # to diagnostics and normalization.  This sampling prevents runs with
+        # many internal steps (e.g. 200 micro cycles) from appearing as hundreds
+        # of cycles in the UI when the user asked for a handful.  Only collapse
+        # when a finite max_cycles/max_rounds is defined.
+        try:
+            if mode == "single":
+                summaries = _collapse_cycles_for_ui(summaries, max_cycles)
+            elif mode == "swarm":
+                summaries = _collapse_cycles_for_ui(summaries, max_rounds)
+        except Exception:
+            pass
 
         diag: Dict[str, Any] = {}
         try:
