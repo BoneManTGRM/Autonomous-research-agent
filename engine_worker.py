@@ -2881,45 +2881,56 @@ def _collapse_cycles_for_ui(cycles_list: List[Any], total: Optional[int]) -> Lis
     """
     Reduce a list of cycle summaries to a desired total by sampling.
 
-    This helper exists to keep the cycle history tables and graphs compact by
-    sampling a longer list of microâcycle summaries down to a smaller list of
-    macro cycles for display in the UI.  When ``total`` is None or larger than
-    the input length, the full list is returned.  Otherwise the list is
-    downsampled by taking approximately evenly spaced entries.
-
     Args:
         cycles_list: The original list of cycle summaries (dictionaries or other).
-        total: Desired number of cycles to display.
+        total: Desired number of cycles to display.  When ``None`` or when
+            ``len(cycles_list) <= total``, the original list is returned.
 
     Returns:
-        A possibly sampled list of cycle summaries suitable for display.
+        A list containing at most ``total`` entries sampled from ``cycles_list``.
     """
     try:
-        # Guard against non-list inputs
+        # Guard against nonâlist inputs
         if not isinstance(cycles_list, list):
             return cycles_list  # type: ignore[return-value]
         n = len(cycles_list)
-        # No total provided or total >= list length: return original list
-        if total is None:
-            return cycles_list  # type: ignore[return-value]
-        try:
-            t = int(total)
-        except Exception:
-            return cycles_list  # type: ignore[return-value]
-        if t <= 0 or n <= t:
-            return cycles_list  # type: ignore[return-value]
-        # Downsample by approximately uniform spacing
-        step = float(n) / float(t)
-        sampled: List[Any] = []
-        for i in range(t):
-            idx = int(round(i * step))
-            if idx >= n:
-                idx = n - 1
-            sampled.append(cycles_list[idx])
-        return sampled  # type: ignore[return-value]
+        # Only collapse when we have more entries than the target
+        if isinstance(total, int) and total > 0 and n > total:
+            import math as _math
+            step = float(n) / float(total)
+            collapsed: List[Any] = []
+            for i in range(total):
+                # Compute the index of the representative entry for this cycle.
+                # We use ceil to bias toward later entries in each segment so that
+                # the collapsed list includes the most recent microâcycles.
+                idx = int(_math.ceil((i + 1) * step)) - 1
+                if idx < 0:
+                    idx = 0
+                if idx >= n:
+                    idx = n - 1
+                try:
+                    entry = cycles_list[idx]
+                    # When collapsing we want the cycle numbering to reflect the
+                    # macro cycle position rather than the original micro cycle index.
+                    # Preserve a copy so we don't mutate the original list.
+                    if isinstance(entry, dict):
+                        new_entry = dict(entry)
+                        # Reset the cycle field to the current macro index (0âbased).
+                        # Some agent implementations use a 0âbased "cycle" index; the UI
+                        # will display this value. Renumbering here ensures that when
+                        # collapsing from e.g. 200 micro cycles to 3 macro cycles, the
+                        # resulting rows have cycle values 0, 1, 2 instead of 66, 133, 199.
+                        new_entry["cycle"] = i
+                        collapsed.append(new_entry)
+                    else:
+                        collapsed.append(entry)
+                except Exception:
+                    # If anything goes wrong, fall back to using the raw entry.
+                    collapsed.append(cycles_list[idx])
+            return collapsed
     except Exception:
-        # On error, fall back to returning the input unmodified
-        return cycles_list  # type: ignore[return-value]
+        pass
+    return cycles_list  # type: ignore[return-value]
 
 
 def _aggregate_from_cycles(cycles: List[Dict[str, Any]], key: str) -> List[Any]:
@@ -3108,15 +3119,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     base_goal, base_domain = build_goal_and_domain()
 
     goal = str(cfg.get("goal", base_goal))
-    # ------------------------------------------------------------------
-    # Domain restriction: enforce longevity-only mode
-    #
-    # In this longevity-only build, other presets such as general or
-    # math have been removed. To ensure the worker always operates in
-    # longevity mode regardless of what is passed in the job config,
-    # override the domain here. This prevents accidental use of
-    # unsupported presets when reading legacy job configurations.
-    domain = "longevity"
+    domain = str(cfg.get("domain", base_domain))
 
     preset_cfg = get_preset(domain)
     runtime_profile = cfg.get("runtime_profile", preset_cfg.get("default_runtime_profile"))
@@ -3417,30 +3420,16 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         # summaries than max_cycles/max_rounds (e.g. 200 micro cycles for a 3
         # cycle request), this will sample the list down to the desired length.
         try:
-            # Collapse any microâcycle summaries down to a more meaningful total for UI display.
-            #
-            # In singleâagent mode we continue to downsample to the requested
-            # ``max_cycles``.  In swarm mode, however, collapsing to
-            # ``max_rounds`` alone throws away nearly all of the microâcycle
-            # summaries.  For example, a swarm of 32 agents running 3 rounds
-            # will produce roughly 96 micro cycles (3 rounds Ã 32 roles), but
-            # collapsing to ``max_rounds`` (3) results in only 3 entries in
-            # the cycle history table.  To preserve more of the swarm detail
-            # while still keeping the UI responsive, we scale the collapse
-            # target by the number of roles.  This yields one entry per
-            # round per role (e.g. 96 for a 32âagent swarm with 3 rounds).
             if mode == "single":
+                # For single agent runs collapse micro-cycles down to the requested number
                 summaries = _collapse_cycles_for_ui(summaries, max_cycles)
             elif mode == "swarm":
-                # Do not collapse swarm cycle summaries at all.  Sampling down
-                # to a small number of cycles hides the bulk of the microâcycle
-                # history for the swarm.  Returning the full list here lets
-                # the UI display every micro step and enables more accurate
-                # progress and diagnostic reporting.
+                # For swarm runs we do not collapse by default.  Leave the full
+                # history intact so that the UI can display every micro-cycle.
+                # This preserves detailed cycle history for each agent rather than
+                # sampling down to the number of requested rounds.
                 summaries = summaries  # no collapse
         except Exception:
-            # Any failure during collapse should fall back to the original list
-            # so the UI still receives complete cycle data.
             pass
 
         diag: Dict[str, Any] = {}
