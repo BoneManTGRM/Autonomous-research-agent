@@ -2891,7 +2891,8 @@ def render_topbar(
 
     health_class, health_label = derive_health_class(worker_state, watchdog)
 
-    beat_txt = _humanize_seconds(seconds_since) if seconds_since is not None else "n/a"
+    # Use a blank string instead of 'n/a' when the heartbeat time is unknown
+    beat_txt = _humanize_seconds(seconds_since) if seconds_since is not None else ""
 
     # Compact run id for mobile while keeping full id on hover (desktop).
     run_id = (worker_state or {}).get("run_id")
@@ -3350,8 +3351,9 @@ def render_discovery_cards(discoveries: List[Dict[str, Any]]) -> None:
             if len(desc) > 160:
                 desc = desc[:160] + "..."
 
-            conf_txt = f"{conf:.2f}" if isinstance(conf, (int, float)) else "n/a"
-            gain_txt = f"{gain_f:.3f}" if isinstance(gain_f, (int, float)) else "n/a"
+            # When confidence or RYE gain is missing, leave the text empty
+            conf_txt = f"{conf:.2f}" if isinstance(conf, (int, float)) else ""
+            gain_txt = f"{gain_f:.3f}" if isinstance(gain_f, (int, float)) else ""
 
             # Render discovery candidate card with ASCII separators to avoid mojibake.
             st.markdown(
