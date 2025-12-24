@@ -2580,7 +2580,6 @@ def compute_progress_view(
     try:
         macro_total_ui: Optional[int] = None
         pd: Any = None
-        mode_pd: Optional[str] = None  # capture mode for use outside remapping block
         # prompt_details may exist in progress_state (ps) or worker_state (ws)
         if isinstance(ps, dict):
             pd = ps.get("prompt_details")  # type: ignore[attr-defined]
@@ -2591,32 +2590,27 @@ def compute_progress_view(
             mode_pd = pd.get("mode")
             mc = None
             if mode_pd == "swarm":
-                # In swarm mode a single round consists of one cycle per role.
-                # When only ``max_rounds`` is used, the UI remaps hundreds of
-                # microâsteps down to a 1..max_rounds scale (e.g. 1/3â2/3â3/3),
-                # obscuring the true progress through all agents.  To better
-                # reflect the swarmâs workload, scale the macro total by the
-                # number of roles.  For example, 3 rounds with 32 roles
-                # produces 96 logical cycles.  If roles is missing, assume 1.
                 mc = pd.get("max_rounds") or pd.get("max_cycles")
-                roles_list = pd.get("roles") if isinstance(pd.get("roles"), list) else None
-                roles_count = len(roles_list) if roles_list else 1
-                try:
-                    mc_int = _safe_int(mc, None)
-                    if mc_int is not None and roles_count > 0:
-                        macro_total_ui = mc_int * roles_count
-                    else:
-                        macro_total_ui = mc_int
-                except Exception:
-                    macro_total_ui = None
             else:
                 mc = pd.get("max_cycles") or pd.get("max_rounds")
-                macro_total_ui = _safe_int(mc, None)
-        # Only remap internal step counts to a smaller macro cycle total for nonâswarm runs.
-        # In swarm mode we want to preserve the full microâcycle progress (which may
-        # be hundreds of steps) instead of collapsing to the requested number of rounds.
+            macro_total_ui = _safe_int(mc, None)
+        # Only remap internal progress to macro cycles when not in swarm mode.
+        # In swarm mode the worker reports micro-cycle counts across all agents; the
+        # progress bar should reflect the true number of steps rather than forcing
+        # everything into the number of requested rounds.  To achieve this, skip
+        # remapping when the prompt_details indicate swarm mode.
+        remap_ok = True
+        # Detect swarm mode via prompt_details.mode if present
+        try:
+            pd_mode = None
+            if isinstance(pd, dict):
+                pd_mode = pd.get("mode")
+        except Exception:
+            pd_mode = None
+        if pd_mode == "swarm":
+            remap_ok = False
         if (
-            mode_pd != "swarm"
+            remap_ok
             and macro_total_ui is not None
             and t2 is not None
             and c2 is not None
@@ -3020,40 +3014,6 @@ def compute_autonomy_view(
                 if isinstance(progress, dict):
                     if progress.get("stable_signal") or progress.get("equilibrium_detected") or progress.get("self_stabilizing"):
                         stable_signal = True
-        except Exception:
-            pass
-
-    # Elevate to self-stabilizing when the run appears complete.  If no
-    # stability signal has been detected but the progress has reached or
-    # exceeded its total, or if the worker status is finished-like, then
-    # treat the run as self-stabilizing.  This ensures the autonomy
-    # score can advance to 4/4 when the progress bar hits 100% even if
-    # diagnostics and worker state have not yet emitted explicit stability
-    # signals.  For swarm runs with many micro-cycles, current and total
-    # may reflect internal step counts rather than macro cycles; this
-    # fallback triggers when current >= total, which corresponds to a
-    # completed run.
-    finished_like_labels = {"finished", "done", "completed", "complete", "success"}
-    if not stable_signal:
-        try:
-            # Compute progress fraction from worker_state if possible
-            current = None
-            total_v = None
-            if isinstance(worker_state, dict):
-                current = worker_state.get("effective_current") or worker_state.get("current")
-                total_v = worker_state.get("effective_total") or worker_state.get("total")
-            # Force numeric
-            frac_complete = None
-            try:
-                if current is not None and total_v is not None:
-                    c_val = float(current)
-                    t_val = float(total_v)
-                    if t_val > 0:
-                        frac_complete = c_val / t_val
-            except Exception:
-                frac_complete = None
-            if (frac_complete is not None and frac_complete >= 1.0) or status in finished_like_labels:
-                stable_signal = True
         except Exception:
             pass
 
@@ -4444,8 +4404,6 @@ def main() -> None:
         selected_key = "default"
     else:
         preset_labels = list(PRESETS.keys())
-        # Only include the longevity preset; remove other presets such as general or math
-        preset_labels = [key for key in preset_labels if str(key).lower() == "longevity"]
         selected_label = st.sidebar.selectbox(
             "Select preset",
             options=preset_labels,
@@ -4463,8 +4421,7 @@ def main() -> None:
     domain_tag = preset.get("domain") or preset.get("domain_tag") or preset.get("domain_key") or "general"
     if isinstance(domain_tag, dict):
         domain_tag = domain_tag.get("tag") or domain_tag.get("name") or "general"
-    # Override domain_tag to longevity since other presets are disabled.
-    domain_tag = "longevity"
+
     st.sidebar.caption(f"Active domain: **{str(domain_tag).title()}**")
 
     # Runtime profile view (finite only, advisory)
@@ -4854,8 +4811,7 @@ def main() -> None:
 
             run_config: Dict[str, Any] = {
                 "goal": goal_clean,
-                # Always set the domain to longevity
-                "domain": "longevity",
+                "domain": domain_tag,
                 "mode": mode,
                 "total_cycles": total_cycles_requested,
                 "max_cycles": int(cycles) if mode != "swarm" else None,
@@ -4897,8 +4853,7 @@ def main() -> None:
                 "run_label": (run_label or "experiment").strip(),
                 "preset_key": selected_key,
                 "preset_label": preset.get("label", selected_label),
-                # Always set the domain to longevity
-                "domain": "longevity",
+                "domain": domain_tag,
                 "mode": mode,
                 "tavily_enabled": bool(status["has_key"]),
                 "tavily_key_tail": t_tail,
