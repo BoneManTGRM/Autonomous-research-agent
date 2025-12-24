@@ -3426,7 +3426,11 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             if mode == "single":
                 summaries = _collapse_cycles_for_ui(summaries, max_cycles)
             elif mode == "swarm":
-                summaries = _collapse_cycles_for_ui(summaries, max_rounds)
+                # For swarm runs, avoid collapsing cycle summaries.  Each round
+                # comprises multiple agents and collapsing can incorrectly
+                # discard per-agent cycles.  To collapse swarm cycles, define
+                # a separate grouping strategy based on agents/rounds.
+                pass
         except Exception:
             pass
 
@@ -6391,11 +6395,19 @@ def _process_single_job(
         # of cycles in the UI when the user asked for a handful.  Only collapse
         # when a finite max_cycles/max_rounds is defined.
         try:
+            # Collapse microâcycle summaries down to the requested macro total for
+            # singleâagent runs only.  For swarm runs, we no longer collapse
+            # because each agent's cycles should be preserved; collapsing them
+            # discards perâagent history and leads to an incorrect cycle count in
+            # the UI.  Passing None to _collapse_cycles_for_ui will simply
+            # return the original list unmodified.
             if mode == "single":
                 summaries = _collapse_cycles_for_ui(summaries, max_cycles)
             elif mode == "swarm":
-                summaries = _collapse_cycles_for_ui(summaries, max_rounds)
+                # Preserve all swarm cycles (do not collapse)
+                summaries = _collapse_cycles_for_ui(summaries, None)
         except Exception:
+            # If collapsing fails, fall back to the original summaries
             pass
 
         diag: Dict[str, Any] = {}
