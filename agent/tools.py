@@ -139,7 +139,11 @@ _DEFAULT_TAVILY_CONNECT_TIMEOUT_SECONDS = 10.0
 _DEFAULT_TAVILY_READ_TIMEOUT_SECONDS = 20.0
 _DEFAULT_TAVILY_CIRCUIT_FAIL_THRESHOLD = 2
 _DEFAULT_TAVILY_CIRCUIT_OPEN_SECONDS = 120.0
-_DEFAULT_TAVILY_QUOTA_OPEN_SECONDS = 3600.0
+# Lower the default quota cooldown window.  If Tavily returns a
+# billing/quota error we only open the circuit briefly (e.g. five minutes)
+# instead of an hour.  This allows future calls to try again sooner and
+# avoids a 3600 second lockout in payâasâyouâgo plans.
+_DEFAULT_TAVILY_QUOTA_OPEN_SECONDS = 300.0
 
 
 def _tavily_env_float(name: str, default: float) -> float:
