@@ -3101,9 +3101,25 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         or ("rounds" in cfg and cfg.get("rounds") is not None)
     )
 
+    # Determine the requested number of cycles.  Prefer explicit max_cycles or cycles
+    # values.  Fall back to runtime_hints.manual_cycles when provided (used by
+    # Streamlit to avoid defaulting to HARD_MAX_CYCLES) before resorting to
+    # the hard cap.
     raw_cycles = cfg.get("max_cycles")
     if raw_cycles is None:
         raw_cycles = cfg.get("cycles")
+    if raw_cycles is None:
+        # Look for a manual_cycles hint inside runtime_hints.  Some UI layers
+        # pass manual_cycles when they cannot set max_cycles directly on the
+        # top-level config.  Treat manual_cycles as a synonym for max_cycles.
+        try:
+            hints = cfg.get("runtime_hints")
+            if isinstance(hints, dict):
+                mc = hints.get("manual_cycles")
+                if mc is not None:
+                    raw_cycles = mc
+        except Exception:
+            pass
     if raw_cycles is None:
         raw_cycles = HARD_MAX_CYCLES
     try:
@@ -3114,6 +3130,17 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     raw_rounds = cfg.get("max_rounds")
     if raw_rounds is None:
         raw_rounds = cfg.get("rounds")
+    if raw_rounds is None:
+        # For swarms, runtime_hints may contain manual_cycles which should map to
+        # max_rounds as well.  Use the same hint when rounds are unspecified.
+        try:
+            hints2 = cfg.get("runtime_hints")
+            if isinstance(hints2, dict):
+                mc2 = hints2.get("manual_cycles")
+                if mc2 is not None:
+                    raw_rounds = mc2
+        except Exception:
+            pass
     if raw_rounds is None:
         raw_rounds = requested_cycles
     try:
@@ -4758,6 +4785,25 @@ _CURRENT_QUEUE_JOB_LOCK = threading.RLock()
 _CURRENT_QUEUE_JOB: Optional[QueueJobRecord] = None
 
 
+# ---------------------------------------------------------------------------
+# User-stop handling
+# ---------------------------------------------------------------------------
+
+class StopRunRequested(Exception):
+    """
+    Exception raised internally when the user has signaled that a run
+    should stop.  The Streamlit UI creates a ``stop.flag`` file in the
+    run-specific directory (``<runs_root>/<run_id>/stop.flag``) when
+    the "Stop this run" button is clicked.  The engine worker checks
+    for this flag during progress callbacks and raises this exception
+    to abort the run gracefully.  The caller of the agent execution
+    (e.g. the queue worker) should catch this exception and perform
+    any necessary cleanup.
+    """
+
+    pass
+
+
 def _set_current_job(job: Optional[QueueJobRecord]) -> None:
     global _CURRENT_QUEUE_JOB
     with _CURRENT_QUEUE_JOB_LOCK:
@@ -5092,10 +5138,22 @@ def _write_job_progress(
                 # its parent is <runs_root>/logs and grandparent is <runs_root>.
                 # Emit events into <runs_root>/<run_id>/events.jsonl.
                 try:
-                    run_dir_for_events = path.parent.parent / run_id  # typically <runs_root>/<run_id>
+                    # Prefer to derive the run directory from the configured runs logs directory
+                    # so that events are always written under <runs_root>/<run_id>/events.jsonl.  This
+                    # avoids relying on the progress path structure which can vary across
+                    # deployments.  When RUNS_LOGS_DIR is defined (the default in modern
+                    # deployments), its parent is the runs_root.  Otherwise fall back to the
+                    # grandparent of the progress file path.
+                    if 'RUNS_LOGS_DIR' in globals() and RUNS_LOGS_DIR is not None:
+                        run_dir_for_events = RUNS_LOGS_DIR.parent / str(run_id)
+                    else:
+                        run_dir_for_events = path.parent.parent / str(run_id)
                 except Exception:
-                    # Fallback to the original location if parent hierarchy is not as expected
-                    run_dir_for_events = path.parent / run_id
+                    # Fallback: place events one level under the progress file's parent
+                    try:
+                        run_dir_for_events = path.parent / str(run_id)
+                    except Exception:
+                        run_dir_for_events = Path(str(path))  # type: ignore[assignment]
                 note_msg = f"Progress {current}/{total}" if current is not None and total is not None else "Progress update"
                 extra_payload = {
                     "current": current,
@@ -5610,8 +5668,37 @@ def _process_single_job(
                 return None
             # Progress callback used by run_goal/run_continuous/run_swarm_continuous. This updates
             # last_progress_current/total and persists progress to disk and Streamlit UI artifacts.
+
+            # Determine the stop flag path for this run.  The Streamlit UI writes
+            # a ``stop.flag`` file under ``<runs_root>/<run_id>`` when the user
+            # clicks the "Stop this run" button.  Compute the path once here
+            # so the closure can access it cheaply.
+            try:
+                if 'RUNS_LOGS_DIR' in globals() and RUNS_LOGS_DIR is not None:
+                    _runs_root_local = RUNS_LOGS_DIR.parent
+                else:
+                    # Fallback: use the parent of the logs directory derived from BASE_DIR
+                    _runs_root_local = Path(BASE_DIR) / "runs"
+                stop_flag_path: Optional[Path] = _runs_root_local / str(run_id) / "stop.flag"
+            except Exception:
+                stop_flag_path = None  # type: ignore[assignment]
+
             def _progress_cb(update: Dict[str, Any]) -> None:
                 nonlocal last_progress_current, last_progress_total, last_progress_note
+                # Abort early if the user has requested the run to stop.  The stop
+                # signal is detected by presence of the stop.flag file.  If
+                # encountered, raise ``StopRunRequested`` so the surrounding
+                # try/except can handle cleanup.
+                try:
+                    if stop_flag_path is not None and isinstance(stop_flag_path, Path) and stop_flag_path.exists():
+                        raise StopRunRequested()
+                except StopRunRequested:
+                    # Propagate to caller; no further processing in callback
+                    raise
+                except Exception:
+                    # Ignore unexpected errors when checking stop flag
+                    pass
+
                 try:
                     # Extract current/total cycle values from the update. Fallback to macro_total.
                     cur_val = (
@@ -5921,6 +6008,7 @@ def _process_single_job(
                         goal_config["role"] = role
 
                     try:
+                        # Attempt to call run_goal with various progress callback parameter names.
                         full_result = agent.run_goal(goal=goal, config=goal_config, progress_callback=_progress_cb)
                     except TypeError:
                         try:
@@ -5930,6 +6018,27 @@ def _process_single_job(
                                 full_result = agent.run_goal(goal=goal, config=goal_config, on_progress=_progress_cb)  # type: ignore[arg-type]
                             except TypeError:
                                 full_result = agent.run_goal(goal=goal, config=goal_config)  # type: ignore[arg-type]
+                    except StopRunRequested:
+                        # User signaled to stop this run.  Persist the current progress and set
+                        # a special status.  Do not treat as an error; instead mark the job
+                        # as failed gracefully after cleanup.
+                        try:
+                            # Update progress one final time indicating a user stop.
+                            _write_job_progress(
+                                run_id,
+                                status="stopped",
+                                note="Run stopped by user",
+                                current=last_progress_current,
+                                total=macro_total,
+                                goal=goal,
+                                domain=domain,
+                                job_config=cfg,
+                                prompt_details=prompt_details,
+                            )
+                        except Exception:
+                            pass
+                        # Indicate to the outer logic that the run was stopped.
+                        raise
 
                     if isinstance(full_result, dict):
                         cycles_from_result = full_result.get("cycles") or full_result.get("summaries") or []
@@ -6849,6 +6958,38 @@ def run_job_queue_worker() -> None:
                     finalize_to_disk=False,
                     max_wall_seconds=max_job_wall_seconds,
                 )
+            except StopRunRequested:
+                # User requested to stop this run.  Skip retry logic and finalize
+                # as a failure with a user_stop error payload.  Also write a
+                # concise progress update so the UI reflects the stopped status.
+                try:
+                    _write_job_progress(
+                        job.run_id,
+                        status="stopped",
+                        note="Run stopped by user",
+                        current=None,
+                        total=None,
+                        goal=None,
+                        domain=None,
+                        job_config=job.config,
+                        prompt_details=None,
+                    )
+                except Exception:
+                    pass
+                error_payload = {
+                    "error": "user_stop",
+                    "error_type": "StopRunRequested",
+                    "error_summary": "Run stopped by user",
+                    "run_id": job.run_id,
+                }
+                try:
+                    queue.finalize_failure(job, error_payload=error_payload)
+                    stats.jobs_failed += 1
+                    stats.last_job_error_utc = _now_utc_iso()
+                except Exception:
+                    pass
+                # Skip normal finalization; continue to next job
+                continue
             except Exception as e:
                 # Should never happen; crash shield
                 log_exception("job_execute_uncaught", e, run_id=job.run_id, cycle=cycle)
@@ -7026,10 +7167,33 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             resume = _env_bool("WORKER_RESUME", default=True)
             watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
 
-            max_cycles_env = os.getenv("WORKER_MAX_CYCLES")
-            if max_cycles_env is not None:
+            # Determine the requested number of cycles for this single-agent run.  Prefer
+            # explicit values in the provided config over environment defaults.  When
+            # absent, fall back to ``WORKER_MAX_CYCLES`` environment variable.  A final
+            # fallback uses ``HARD_MAX_CYCLES``.
+            requested_cycles: int
+            raw_cycles_env = os.getenv("WORKER_MAX_CYCLES")
+            raw_cycles_cfg: Optional[Any] = None
+            try:
+                # The config dict may specify max_cycles/cycles/manual_cycles.  Honor
+                # these in order of preference before falling back to environment.
+                raw_cycles_cfg = config.get("max_cycles")
+                if raw_cycles_cfg is None:
+                    raw_cycles_cfg = config.get("cycles")
+                if raw_cycles_cfg is None:
+                    hints_cfg = config.get("runtime_hints") if isinstance(config, dict) else None
+                    if isinstance(hints_cfg, dict):
+                        raw_cycles_cfg = hints_cfg.get("manual_cycles")
+            except Exception:
+                raw_cycles_cfg = None
+            if raw_cycles_cfg is not None:
                 try:
-                    requested_cycles = int(max_cycles_env)
+                    requested_cycles = int(raw_cycles_cfg)
+                except Exception:
+                    requested_cycles = HARD_MAX_CYCLES
+            elif raw_cycles_env is not None:
+                try:
+                    requested_cycles = int(raw_cycles_env)
                 except Exception:
                     requested_cycles = HARD_MAX_CYCLES
             else:
@@ -7397,10 +7561,31 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
             resume = _env_bool("WORKER_RESUME", default=True)
             watchdog_minutes = _env_float("WORKER_WATCHDOG_MINUTES") or 5.0
 
-            max_rounds_env = os.getenv("WORKER_MAX_ROUNDS")
-            if max_rounds_env is not None:
+            # Determine requested rounds for this swarm run.  Use config values
+            # (max_rounds/rounds/manual_cycles) when available; otherwise fall back
+            # to the WORKER_MAX_ROUNDS environment variable.  If all are absent,
+            # use HARD_MAX_ROUNDS.
+            raw_rounds_cfg: Optional[Any] = None
+            try:
+                raw_rounds_cfg = config.get("max_rounds")
+                if raw_rounds_cfg is None:
+                    raw_rounds_cfg = config.get("rounds")
+                if raw_rounds_cfg is None:
+                    hints_cfg2 = config.get("runtime_hints") if isinstance(config, dict) else None
+                    if isinstance(hints_cfg2, dict):
+                        # For swarm, manual_cycles may map to rounds as well
+                        raw_rounds_cfg = hints_cfg2.get("manual_cycles")
+            except Exception:
+                raw_rounds_cfg = None
+            raw_rounds_env = os.getenv("WORKER_MAX_ROUNDS")
+            if raw_rounds_cfg is not None:
                 try:
-                    requested_rounds = int(max_rounds_env)
+                    requested_rounds = int(raw_rounds_cfg)
+                except Exception:
+                    requested_rounds = HARD_MAX_ROUNDS
+            elif raw_rounds_env is not None:
+                try:
+                    requested_rounds = int(raw_rounds_env)
                 except Exception:
                     requested_rounds = HARD_MAX_ROUNDS
             else:
