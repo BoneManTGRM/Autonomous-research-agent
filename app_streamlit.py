@@ -570,13 +570,12 @@ def _clamp_float(x: Optional[float], lo: float = 0.0, hi: float = 1.0) -> Option
 
 
 def _humanize_seconds(seconds: Optional[float]) -> str:
-    """Convert seconds to a humanâfriendly string. Return empty when missing."""
     if seconds is None:
-        return ""
+        return "n/a"
     try:
         s = float(seconds)
     except Exception:
-        return ""
+        return "n/a"
     if s < 0:
         s = 0.0
     if s < 60:
@@ -610,7 +609,7 @@ def _format_metric_value(v: Any, decimals: int = 3) -> str:
         except Exception:
             return str(num)
     if v is None:
-        return ""
+        return "n/a"
     return str(v)
 
 
@@ -625,31 +624,6 @@ def load_settings(config_path: str = CONFIG_PATH_DEFAULT) -> Dict[str, Any]:
         return {}
     with open(config_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f) or {}
-
-# ---------------------------------------------------------------------------
-# UI helper: normalize cycle numbers
-#
-# Many agent implementations or older runs produce cycle entries with
-# nonâsequential "cycle" fields (e.g. 66/133/199).  The Streamlit UI expects
-# a simple sequence 0,1,2,â¦ so that the cycle history table and charts
-# render correctly.  This helper returns the first available numeric field
-# among 'cycle', 'cycle_index', and 'index' (minus one), falling back to
-# the provided fallback index.
-def _norm_cycle_num(entry: Dict[str, Any], fallback: int) -> int:
-    try:
-        c = entry.get("cycle")
-        if isinstance(c, (int, float)):
-            return int(c)
-        ci = entry.get("cycle_index")
-        if isinstance(ci, (int, float)):
-            return int(ci)
-        idx = entry.get("index")
-        if isinstance(idx, (int, float)):
-            # index is one-based, convert to zeroâbased
-            return max(0, int(idx) - 1)
-    except Exception:
-        pass
-    return int(fallback)
 
 
 def get_runs_root() -> str:
@@ -2891,8 +2865,7 @@ def render_topbar(
 
     health_class, health_label = derive_health_class(worker_state, watchdog)
 
-    # Use a blank string instead of 'n/a' when the heartbeat time is unknown
-    beat_txt = _humanize_seconds(seconds_since) if seconds_since is not None else ""
+    beat_txt = _humanize_seconds(seconds_since) if seconds_since is not None else "n/a"
 
     # Compact run id for mobile while keeping full id on hover (desktop).
     run_id = (worker_state or {}).get("run_id")
@@ -3351,9 +3324,8 @@ def render_discovery_cards(discoveries: List[Dict[str, Any]]) -> None:
             if len(desc) > 160:
                 desc = desc[:160] + "..."
 
-            # When confidence or RYE gain is missing, leave the text empty
-            conf_txt = f"{conf:.2f}" if isinstance(conf, (int, float)) else ""
-            gain_txt = f"{gain_f:.3f}" if isinstance(gain_f, (int, float)) else ""
+            conf_txt = f"{conf:.2f}" if isinstance(conf, (int, float)) else "n/a"
+            gain_txt = f"{gain_f:.3f}" if isinstance(gain_f, (int, float)) else "n/a"
 
             # Render discovery candidate card with ASCII separators to avoid mojibake.
             st.markdown(
@@ -4324,20 +4296,7 @@ def main() -> None:
             }
             if run_active and run_id_feed:
                 # Refresh periodically to keep the console up to date.
-                if callable(st_autorefresh):
-                    st_autorefresh(interval=750, key=f"console_refresh_{run_id_feed}")  # type: ignore[misc]
-                else:
-                    # Fallback when streamlit_autorefresh isn't available: throttle reruns
-                    try:
-                        k = f"console_last_rerun__{run_id_feed}"
-                        last_ts = float(st.session_state.get(k, 0.0) or 0.0)
-                        now_ts = time.time()
-                        # Only rerun if at least 0.75 seconds have passed since last rerun
-                        if now_ts - last_ts >= 0.75:
-                            st.session_state[k] = now_ts
-                            st.rerun()
-                    except Exception:
-                        pass
+                st_autorefresh(interval=750, key=f"console_refresh_{run_id_feed}")  # type: ignore[misc]
 
         # Attempt to tail the events.jsonl log for this run and filter out unhelpful progress events.
         messages: List[str] = []
@@ -4396,38 +4355,6 @@ def main() -> None:
     discoveries_live = load_discovery_log()
     if not discoveries_live:
         discoveries_live = load_discoveries_from_finished_runs()
-    # Fallback: extract discoveries from the inâmemory cycle history when
-    # neither the shared discovery log nor finished runs produced entries.
-    if not discoveries_live:
-        try:
-            extracted: List[Dict[str, Any]] = []
-            # history_preview may not be defined if run has not started
-            try:
-                _hp = history_preview  # type: ignore[name-defined]
-            except Exception:
-                _hp = []
-            for _c in _hp or []:
-                if not isinstance(_c, dict):
-                    continue
-                _ds = _c.get("discoveries") or _c.get("discovery")
-                if isinstance(_ds, list):
-                    for d in _ds:
-                        if isinstance(d, dict):
-                            extracted.append(d)
-            if extracted:
-                # deduplicate by id/title/summary
-                seen_keys: Set[str] = set()
-                deduped: List[Dict[str, Any]] = []
-                for d in extracted:
-                    key = str(d.get("id") or d.get("title") or d.get("summary") or "").strip()
-                    if not key or key in seen_keys:
-                        continue
-                    seen_keys.add(key)
-                    deduped.append(d)
-                if deduped:
-                    discoveries_live = deduped
-        except Exception:
-            pass
     render_discovery_cards(discoveries_live)
 
     # -------------------------------------------------------------------
@@ -4461,6 +4388,8 @@ def main() -> None:
         selected_key = "default"
     else:
         preset_labels = list(PRESETS.keys())
+        # Only include the longevity preset; remove other presets such as general or math
+        preset_labels = [key for key in preset_labels if str(key).lower() == "longevity"]
         selected_label = st.sidebar.selectbox(
             "Select preset",
             options=preset_labels,
@@ -4478,7 +4407,8 @@ def main() -> None:
     domain_tag = preset.get("domain") or preset.get("domain_tag") or preset.get("domain_key") or "general"
     if isinstance(domain_tag, dict):
         domain_tag = domain_tag.get("tag") or domain_tag.get("name") or "general"
-
+    # Override domain_tag to longevity since other presets are disabled.
+    domain_tag = "longevity"
     st.sidebar.caption(f"Active domain: **{str(domain_tag).title()}**")
 
     # Runtime profile view (finite only, advisory)
@@ -4868,7 +4798,8 @@ def main() -> None:
 
             run_config: Dict[str, Any] = {
                 "goal": goal_clean,
-                "domain": domain_tag,
+                # Always set the domain to longevity
+                "domain": "longevity",
                 "mode": mode,
                 "total_cycles": total_cycles_requested,
                 "max_cycles": int(cycles) if mode != "swarm" else None,
@@ -4910,7 +4841,8 @@ def main() -> None:
                 "run_label": (run_label or "experiment").strip(),
                 "preset_key": selected_key,
                 "preset_label": preset.get("label", selected_label),
-                "domain": domain_tag,
+                # Always set the domain to longevity
+                "domain": "longevity",
                 "mode": mode,
                 "tavily_enabled": bool(status["has_key"]),
                 "tavily_key_tail": t_tail,
@@ -5232,7 +5164,7 @@ def main() -> None:
 
         with tab_history:
             rows: List[Dict[str, Any]] = []
-            for _i, entry in enumerate(history):
+            for entry in history:
                 goal_text = entry.get("goal", "") or ""
 
                 delta_val = entry.get("delta_R")
@@ -5249,7 +5181,7 @@ def main() -> None:
 
                 rows.append(
                     {
-                        "cycle": _norm_cycle_num(entry, _i),
+                        "cycle": entry.get("cycle"),
                         "role": entry.get("role", "agent"),
                         "domain": entry.get("domain", "general"),
                         "goal": goal_text[:60] + ("..." if len(goal_text) > 60 else ""),
