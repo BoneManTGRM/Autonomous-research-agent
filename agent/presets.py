@@ -1802,14 +1802,20 @@ PRESETS: Dict[str, Dict[str, Any]] = {
 # Aliases so the app can treat different user labels as the same preset
 # ---------------------------------------------------------------------
 PRESET_ALIASES: Dict[str, str] = {
+    # All preset aliases now map to the longevity preset.
+    # The math and general presets have been disabled and removed,
+    # so any alias that previously pointed to them will instead
+    # fall back to longevity. This ensures that older UI inputs or
+    # configuration files referencing aliases like "theory" or
+    # "general_research" still select the longevity preset.
     "antiaging": "longevity",
     "anti_aging": "longevity",
     "aging": "longevity",
     "anti_ageing": "longevity",
     "longevity_antiaging": "longevity",
-    "theory": "math",
-    "formal": "math",
-    "general_research": "general",
+    "theory": "longevity",
+    "formal": "longevity",
+    "general_research": "longevity",
 }
 
 
@@ -1817,20 +1823,27 @@ PRESET_ALIASES: Dict[str, str] = {
 # Accessors
 # ---------------------------------------------------------------------
 def get_preset(name: str) -> Dict[str, Any]:
-    """Return a preset config, falling back to general if unknown.
+    """Return the longevity preset regardless of the requested name.
 
-    Aliases such as 'antiaging' or 'theory' are mapped to core presets.
-
-    Returns a deep copy so callers can mutate safely without changing
-    the global presets for future runs.
+    This helper previously returned a preset based on the provided
+    `name`, with fallbacks to aliases and then to the "general"
+    preset. In this longevity-only build, the math and general
+    presets have been removed. To avoid KeyError exceptions and
+    guarantee consistent behavior, this function now always returns
+    a deep copy of the longevity preset. If the longevity preset
+    is missing entirely from ``PRESETS``, an empty dictionary is
+    returned instead.
     """
-    key = (name or "general").lower()
-    if key in PRESETS:
-        return copy.deepcopy(PRESETS[key])
-    alias_target = PRESET_ALIASES.get(key)
-    if alias_target and alias_target in PRESETS:
-        return copy.deepcopy(PRESETS[alias_target])
-    return copy.deepcopy(PRESETS["general"])
+    # Normalize the key but ignore it for lookups. The default when
+    # no name is provided is longevity instead of general.
+    key = (name or "longevity").lower()
+    # Always return the longevity preset if available. This prevents
+    # callers from accidentally selecting disabled presets.
+    if "longevity" in PRESETS:
+        return copy.deepcopy(PRESETS["longevity"])
+    # Fallback: if longevity has been removed, return a blank preset
+    # rather than raising an exception.
+    return {}
 
 
 def get_runtime_profile(name: str) -> Dict[str, Any]:
