@@ -4316,6 +4316,40 @@ def main() -> None:
                 st.code("\n".join(events_lines), language="text")
             except Exception:
                 st.write("\n".join(events_lines))
+        else:
+            # Fallback: if no events.jsonl exists, attempt to tail an event_log.json
+            # This fallback supports older worker versions that write narrative
+            # event logs only in JSON format.  We display raw lines so the user
+            # can still see some live console output.
+            events_fallback: List[str] = []
+            candidate_paths: List[Path] = []
+            if run_id_feed:
+                try:
+                    run_dir_path2 = Path(get_runs_root()) / str(run_id_feed)
+                    candidate_paths.append(run_dir_path2 / "events.json")
+                    candidate_paths.append(run_dir_path2 / "event_log.json")
+                except Exception:
+                    pass
+                try:
+                    logs_dir = Path(get_runs_root()) / "logs"
+                    candidate_paths.append(logs_dir / f"{run_id_feed}_events.json")
+                    candidate_paths.append(logs_dir / f"{run_id_feed}_event_log.json")
+                except Exception:
+                    pass
+            for cp in candidate_paths:
+                try:
+                    if cp.exists() and cp.is_file():
+                        events_fallback = tail_lines(cp, max_lines=250)
+                        if events_fallback:
+                            break
+                except Exception:
+                    continue
+            if events_fallback:
+                st.markdown("#### Live events")
+                try:
+                    st.code("\n".join(events_fallback), language="text")
+                except Exception:
+                    st.write("\n".join(events_fallback))
 
         # Narrative feed (synthesized from history if no event log exists)
         render_narrative_feed(narrative_events, source_label=event_src0 if event_src0 != "not found" else "synthesized")
@@ -4945,6 +4979,33 @@ def main() -> None:
                 with st.container():
                     render_job_summary(job)
                     st.caption("Engine worker is currently processing this run.")
+                    # Offer a stop button for each active job.  When clicked, create
+                    # a stop flag file within the run directory.  The engine
+                    # worker checks for this flag and aborts the run on the next
+                    # progress callback.  We scope the key to the run ID to
+                    # prevent cross-run clashes.
+                    try:
+                        jid_str = str(jid)
+                        # When the button is clicked, create a stop.flag file
+                        # inside <runs_root>/<run_id>.  The directory is
+                        # created if it doesn't already exist.  The presence
+                        # of this file signals to the worker that it should
+                        # gracefully stop the run.
+                        if st.button(
+                            "Stop this run", key=f"stop_run_{jid_str}", help="Gracefully stop this active run"
+                        ):
+                            try:
+                                run_dir = Path(get_runs_root()) / jid_str
+                                run_dir.mkdir(parents=True, exist_ok=True)
+                                flag_path = run_dir / "stop.flag"
+                                # Touch the stop flag file
+                                flag_path.touch(exist_ok=True)
+                                st.success(f"Stop signal sent to run {jid_str}. The run will halt shortly.")
+                            except Exception as e:
+                                st.error(f"Failed to signal stop for run {jid_str}: {e}")
+                    except Exception:
+                        # If run ID extraction fails, silently skip stop button
+                        pass
                     st.markdown("---")
 
         st.markdown("#### Queued runs")
@@ -4960,18 +5021,37 @@ def main() -> None:
                 except Exception:
                     return False
 
-            # Safer: clear only pending directories (canonical + legacy), and only job-like JSONs
+            # Safer: clear only job-like JSONs from pending queues and top-level queue dirs.
+            # Scan multiple candidate directories where pending jobs may live:
+            #   - The resolved pending_dir (based off RUNS_PENDING_DIR or queue_root)
+            #   - The ``pending`` subfolder under the queue root
+            #   - The ``pending`` subfolder under the runs root
+            #   - The queue root itself (jobs may be written there directly)
+            #   - The runs root itself (legacy job files)
+            #   - The explicit RUNS_PENDING_DIR if provided
             dirs_to_scan: List[Path] = []
             try:
                 dirs_to_scan.append(Path(pending_dir))
             except Exception:
                 pass
             try:
+                # Queue root/pending
                 dirs_to_scan.append(Path(get_queue_root()) / "pending")
             except Exception:
                 pass
             try:
+                # Runs root/pending
                 dirs_to_scan.append(Path(get_runs_root()) / "pending")
+            except Exception:
+                pass
+            try:
+                # Top-level queue root (some versions write jobs directly here)
+                dirs_to_scan.append(Path(get_queue_root()))
+            except Exception:
+                pass
+            try:
+                # Top-level runs root (legacy job submission)
+                dirs_to_scan.append(Path(get_runs_root()))
             except Exception:
                 pass
             if isinstance(RUNS_PENDING_DIR, Path):
