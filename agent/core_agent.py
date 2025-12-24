@@ -3248,8 +3248,15 @@ class CoreAgent:
             est_cycles = profile_cfg.get("estimated_cycles")
             profile_stop_rye = profile_cfg.get("rye_stop_threshold")
 
-            # Convert runtime_profile into bounded rounds or time
-            if isinstance(est_cycles, (int, float)) and max_rounds <= 50:
+            # Convert runtime_profile into bounded rounds or time.
+            # Only override the caller-supplied max_rounds when it is still set to
+            # the default value (50).  The previous logic used ``max_rounds <= 50``,
+            # which unintentionally replaced small user-specified budgets (e.g. 3 or 6)
+            # with much larger estimated round counts from the runtime profile.  By
+            # comparing against the exact default (50), we preserve explicit
+            # caller intent while still honoring runtime profiles when the caller
+            # leaves max_rounds at its default.
+            if isinstance(est_cycles, (int, float)) and max_rounds == 50:
                 try:
                     per_round = max(1, len(roles_list) or 1)
                     approx_rounds = max(1, int(est_cycles / per_round))
