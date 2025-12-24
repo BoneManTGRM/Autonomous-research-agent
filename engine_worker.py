@@ -2853,6 +2853,11 @@ def _normalize_cycles_for_ui(cycles_list: List[Any]) -> List[Dict[str, Any]]:
             c = dict(entry)
         else:
             c = {"raw": entry}
+        # Renumber the cycle for UI purposes.  Regardless of what the agent
+        # returned (e.g. micro cycle indices), we want the displayed cycle
+        # sequence to be 0, 1, 2, â¦ so that the cycle history table is
+        # intuitive.  Preserve other fields on the entry.
+        c["cycle"] = i
         c.setdefault("index", i + 1)
         c.setdefault("cycle_index", i)
         c.setdefault("citations", [])
