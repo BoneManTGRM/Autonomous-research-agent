@@ -5594,7 +5594,21 @@ def _process_single_job(
 
         max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "max_cycles")
         max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
-        macro_total = max_rounds if mode == "swarm" else max_cycles
+        # Compute the progress total.  For singleâagent runs use the number of cycles,
+        # but for swarm runs count microâcycles by multiplying the number of
+        # rounds by the number of roles.  This allows the UI cycle counter
+        # to reflect the total work performed across all agents rather than
+        # showing only the number of rounds (macro cycles).
+        if mode == "swarm":
+            # Determine how many roles (agents) are active.  When roles_list is
+            # unavailable, assume a single agent to avoid division by zero.
+            try:
+                role_count = len(roles_list) if roles_list else 1
+            except Exception:
+                role_count = 1
+            macro_total = max_rounds * role_count
+        else:
+            macro_total = max_cycles
 
         # Default to forever mode when no explicit config is provided.  This allows
         # jobs to run indefinitely unless a user or environment variable overrides it.
@@ -5823,21 +5837,40 @@ def _process_single_job(
                     # rounding up. Otherwise retain the reported current cycle.
                     eff_cur = cur_int
                     eff_tot = macro_total
+                    # In the default implementation the progress callback reports
+                    # granular microâstep counts (cur_int) and a total number of
+                    # microâsteps (tot_int).  For single agent runs the UI wants
+                    # to map these microâsteps back into macro cycles so that
+                    # âCycle X/Yâ advances one integer per cycle.  For swarm
+                    # runs, however, each agent contributes its own microâcycles
+                    # and the user expects to see the full microâcycle count.
+                    # The original remapping logic would divide the microâstep
+                    # progress by the ratio of total microâsteps to macro
+                    # cycles.  This resulted in swarm runs displaying only
+                    # macro cycles (e.g. 3/3) even when hundreds of microâsteps
+                    # occurred.  To fix this, when running in swarm mode we
+                    # bypass the remapping entirely and treat cur_int as the
+                    # effective cycle.  Otherwise we retain the original
+                    # behaviour.  If any error occurs during remapping we
+                    # conservatively fall back to using cur_int directly.
                     try:
-                        # Only remap when both current and total are valid and total exceeds
-                        # the macro_total. Otherwise treat the reported current as the cycle.
-                        if cur_int is not None and tot_int is not None and isinstance(macro_total, (int, float)) and macro_total:
-                            if tot_int > macro_total and tot_int > 0:
-                                import math as _math
-                                steps_per_cycle = float(tot_int) / float(macro_total)
-                                if steps_per_cycle > 0.0:
-                                    eff_cur = int(_math.ceil(float(cur_int) / steps_per_cycle))
+                        if mode == "swarm":
+                            eff_cur = cur_int
+                        else:
+                            # Only remap when both current and total are valid and total exceeds
+                            # the macro_total. Otherwise treat the reported current as the cycle.
+                            if cur_int is not None and tot_int is not None and isinstance(macro_total, (int, float)) and macro_total:
+                                if tot_int > macro_total and tot_int > 0:
+                                    import math as _math
+                                    steps_per_cycle = float(tot_int) / float(macro_total)
+                                    if steps_per_cycle > 0.0:
+                                        eff_cur = int(_math.ceil(float(cur_int) / steps_per_cycle))
+                                    else:
+                                        eff_cur = cur_int
                                 else:
                                     eff_cur = cur_int
                             else:
                                 eff_cur = cur_int
-                        else:
-                            eff_cur = cur_int
                     except Exception:
                         eff_cur = cur_int
                     # Update last progress values based on effective cycle progress
@@ -9015,6 +9048,4 @@ if __name__ == "__main__":
         except Exception as e:
             log_exception("main_crash_shield", e)
             sleep_s = crash_backoff.on_error()
-            log_kv("main_restart_sleep", level="WARNING", sleep_s=round(sleep_s, 3))
-            time.sleep(sleep_s)
-            continue
+            log_kv("main
