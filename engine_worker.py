@@ -3417,11 +3417,40 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         # summaries than max_cycles/max_rounds (e.g. 200 micro cycles for a 3
         # cycle request), this will sample the list down to the desired length.
         try:
+            # Collapse any microâcycle summaries down to a more meaningful total for UI display.
+            #
+            # In singleâagent mode we continue to downsample to the requested
+            # ``max_cycles``.  In swarm mode, however, collapsing to
+            # ``max_rounds`` alone throws away nearly all of the microâcycle
+            # summaries.  For example, a swarm of 32 agents running 3 rounds
+            # will produce roughly 96 micro cycles (3 rounds Ã 32 roles), but
+            # collapsing to ``max_rounds`` (3) results in only 3 entries in
+            # the cycle history table.  To preserve more of the swarm detail
+            # while still keeping the UI responsive, we scale the collapse
+            # target by the number of roles.  This yields one entry per
+            # round per role (e.g. 96 for a 32âagent swarm with 3 rounds).
             if mode == "single":
                 summaries = _collapse_cycles_for_ui(summaries, max_cycles)
             elif mode == "swarm":
-                summaries = _collapse_cycles_for_ui(summaries, max_rounds)
+                # Determine how many roles participated in the swarm.  When
+                # ``roles_list`` is not available, fall back to 1 to avoid
+                # division by zero.  ``roles_list`` may be missing if an
+                # exception occurred earlier, so guard against errors.
+                try:
+                    roles_count = len(roles_list) if roles_list else 1
+                except Exception:
+                    roles_count = 1
+                # Compute a target equal to max_rounds Ã number of roles.
+                collapse_target = None
+                try:
+                    if max_rounds is not None:
+                        collapse_target = int(max_rounds) * max(roles_count, 1)
+                except Exception:
+                    collapse_target = None
+                summaries = _collapse_cycles_for_ui(summaries, collapse_target)
         except Exception:
+            # Any failure during collapse should fall back to the original list
+            # so the UI still receives complete cycle data.
             pass
 
         diag: Dict[str, Any] = {}
