@@ -2590,14 +2590,27 @@ def compute_progress_view(
             mode_pd = pd.get("mode")
             mc = None
             if mode_pd == "swarm":
+                # In swarm mode a single round consists of one cycle per role.
+                # When only ``max_rounds`` is used, the UI remaps hundreds of
+                # microâsteps down to a 1..max_rounds scale (e.g. 1/3â2/3â3/3),
+                # obscuring the true progress through all agents.  To better
+                # reflect the swarmâs workload, scale the macro total by the
+                # number of roles.  For example, 3 rounds with 32 roles
+                # produces 96 logical cycles.  If roles is missing, assume 1.
                 mc = pd.get("max_rounds") or pd.get("max_cycles")
+                roles_list = pd.get("roles") if isinstance(pd.get("roles"), list) else None
+                roles_count = len(roles_list) if roles_list else 1
+                try:
+                    mc_int = _safe_int(mc, None)
+                    if mc_int is not None and roles_count > 0:
+                        macro_total_ui = mc_int * roles_count
+                    else:
+                        macro_total_ui = mc_int
+                except Exception:
+                    macro_total_ui = None
             else:
                 mc = pd.get("max_cycles") or pd.get("max_rounds")
-            macro_total_ui = _safe_int(mc, None)
-            # Compute the effective macro total if present.  In swarm mode use
-            # max_rounds, otherwise max_cycles.  When macro_total_ui is less
-            # than the underlying internal step count, progress will be
-            # remapped to the macro cycle count below.
+                macro_total_ui = _safe_int(mc, None)
         if (
             macro_total_ui is not None
             and t2 is not None
