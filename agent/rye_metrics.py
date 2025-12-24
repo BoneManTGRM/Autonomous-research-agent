@@ -38,7 +38,16 @@ import math
 # Tier configuration constants for tuning
 # ---------------------------------------------------------------------------
 
-MIN_CYCLES_FOR_TIERING: int = 4
+# In the original RYE metrics implementation a minimum of four cycles were
+# required before any tiering or advanced run diagnostics would be
+# computed.  This meant that short runs (e.g. three cycles) produced
+# ``n/a`` values in the learning dashboards and prevented the autonomy
+# view from showing higher tiers.  To make the diagnostics usable for
+# short, finite runs â which are common when exploring longevity
+# questions â the longevityâonly build lowers the minimum cycles
+# threshold to 3.  Runs with three or more cycles will now produce
+# full diagnostics instead of being flagged as insufficient.
+MIN_CYCLES_FOR_TIERING: int = 3
 
 # Run level Tier 2 thresholds
 TIER2_MIN_AVG_RYE: float = 0.2
@@ -1099,7 +1108,15 @@ def rye_volatility_signature(
 # If fewer than this number of RYE values are available in the history or
 # diagnostics bundle, the equilibrium detector will always return
 # ``in_equilibrium = False`` with ``reason = 'insufficient_data'``.
-MIN_EQUILIBRIUM_CYCLES: int = 10
+# In the original implementation at least ten RYE observations were
+# required before equilibrium detection could be performed.  For short
+# exploratory runs this prevented the equilibrium detector from ever
+# engaging, resulting in ``n/a`` and ``insufficient_data`` flags.  The
+# longevityâonly build reduces this requirement to three cycles so that
+# the equilibrium heuristics can produce a meaningful result on short
+# runs.  Users should treat these early equilibrium indicators as
+# provisional.
+MIN_EQUILIBRIUM_CYCLES: int = 3
 
 def detect_rye_equilibrium(
     history_or_diagnostics: Any,
