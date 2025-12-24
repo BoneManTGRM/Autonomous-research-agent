@@ -6392,11 +6392,19 @@ def _process_single_job(
         # many internal steps (e.g. 200 micro cycles) from appearing as hundreds
         # of cycles in the UI when the user asked for a handful.  Only collapse
         # when a finite max_cycles/max_rounds is defined.
+        # Collapse cycle summaries for singleâagent runs only. In swarm mode,
+        # we preserve the full microâcycle history so the UI can display
+        # every step executed by each agent. Previously the worker would
+        # collapse microâcycles down to ``max_rounds`` entries in swarm
+        # mode, which made the cycle count appear artificially low (e.g. a
+        # 32âagent, 3âround run would display as 3/3 cycles). To retain
+        # fidelity, we avoid collapsing summaries when ``mode == "swarm"``.
         try:
             if mode == "single":
                 summaries = _collapse_cycles_for_ui(summaries, max_cycles)
             elif mode == "swarm":
-                summaries = _collapse_cycles_for_ui(summaries, max_rounds)
+                # Preserve all microâcycles; no collapsing for swarms
+                summaries = summaries
         except Exception:
             pass
 
