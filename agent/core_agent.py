@@ -4327,3 +4327,5 @@ class CoreAgent:
             return []
 
     def get_live_worker_state(self) -> Dict[str, Any]:
+        """Read worker_state.json (as Streamlit sees it)."""
+        return _load_json_file(self.worker_state_path)
