@@ -47,7 +47,11 @@ import math
 # questions â the longevityâonly build lowers the minimum cycles
 # threshold to 3.  Runs with three or more cycles will now produce
 # full diagnostics instead of being flagged as insufficient.
-MIN_CYCLES_FOR_TIERING: int = 3
+# Reduce the cycle threshold to allow diagnostics to appear even for very short
+# runs.  When set to 1 the learning dashboards will compute tiering and other
+# runâlevel signals as soon as a single cycle is available.  This change
+# avoids "n/a" results when exploring quick, finite runs.
+MIN_CYCLES_FOR_TIERING: int = 1
 
 # Run level Tier 2 thresholds
 TIER2_MIN_AVG_RYE: float = 0.2
@@ -1116,7 +1120,12 @@ def rye_volatility_signature(
 # the equilibrium heuristics can produce a meaningful result on short
 # runs.  Users should treat these early equilibrium indicators as
 # provisional.
-MIN_EQUILIBRIUM_CYCLES: int = 3
+# Similarly lower the number of RYE observations required before equilibrium
+# detection engages.  By setting this to 1 the equilibrium detector will no
+# longer immediately return 'insufficient_data' on short runs.  It will
+# evaluate the available data and report nonâequilibrium reasons rather
+# than withholding diagnostics entirely.
+MIN_EQUILIBRIUM_CYCLES: int = 1
 
 def detect_rye_equilibrium(
     history_or_diagnostics: Any,
