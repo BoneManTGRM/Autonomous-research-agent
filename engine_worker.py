@@ -2858,8 +2858,8 @@ def _normalize_cycles_for_ui(cycles_list: List[Any]) -> List[Dict[str, Any]]:
         # sequence to be 0, 1, 2, â¦ so that the cycle history table is
         # intuitive.  Preserve other fields on the entry.
         c["cycle"] = i
-        c["cycle_index"] = i
-        c["index"] = i + 1
+        c.setdefault("index", i + 1)
+        c.setdefault("cycle_index", i)
         c.setdefault("citations", [])
         c.setdefault("discoveries", [])
         c.setdefault("sources", [])
@@ -2915,18 +2915,15 @@ def _collapse_cycles_for_ui(cycles_list: List[Any], total: Optional[int]) -> Lis
                     # Preserve a copy so we don't mutate the original list.
                     if isinstance(entry, dict):
                         new_entry = dict(entry)
+                        # Reset the cycle field to the current macro index (0âbased).
+                        # Some agent implementations use a 0âbased "cycle" index; the UI
+                        # will display this value. Renumbering here ensures that when
+                        # collapsing from e.g. 200 micro cycles to 3 macro cycles, the
+                        # resulting rows have cycle values 0, 1, 2 instead of 66, 133, 199.
+                        new_entry["cycle"] = i
+                        collapsed.append(new_entry)
                     else:
-                        # Wrap non-dict entries into a dict for consistent UI fields
-                        new_entry = {"raw": entry}
-                    # Reset the cycle, cycle_index and index fields to the current
-                    # macro index. This prevents propagating micro-cycle numbers
-                    # (e.g. 66, 133, 199) into the UI. We explicitly overwrite
-                    # these fields instead of using setdefault() to ensure they
-                    # reflect the collapsed index.
-                    new_entry["cycle"] = i
-                    new_entry["cycle_index"] = i
-                    new_entry["index"] = i + 1
-                    collapsed.append(new_entry)
+                        collapsed.append(entry)
                 except Exception:
                     # If anything goes wrong, fall back to using the raw entry.
                     collapsed.append(cycles_list[idx])
@@ -3122,7 +3119,15 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     base_goal, base_domain = build_goal_and_domain()
 
     goal = str(cfg.get("goal", base_goal))
-    domain = str(cfg.get("domain", base_domain))
+    # ------------------------------------------------------------------
+    # Domain restriction: enforce longevity-only mode
+    #
+    # In this longevity-only build, other presets such as general or
+    # math have been removed. To ensure the worker always operates in
+    # longevity mode regardless of what is passed in the job config,
+    # override the domain here. This prevents accidental use of
+    # unsupported presets when reading legacy job configurations.
+    domain = "longevity"
 
     preset_cfg = get_preset(domain)
     runtime_profile = cfg.get("runtime_profile", preset_cfg.get("default_runtime_profile"))
@@ -3426,11 +3431,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             if mode == "single":
                 summaries = _collapse_cycles_for_ui(summaries, max_cycles)
             elif mode == "swarm":
-                # For swarm runs, avoid collapsing cycle summaries.  Each round
-                # comprises multiple agents and collapsing can incorrectly
-                # discard per-agent cycles.  To collapse swarm cycles, define
-                # a separate grouping strategy based on agents/rounds.
-                pass
+                summaries = _collapse_cycles_for_ui(summaries, max_rounds)
         except Exception:
             pass
 
@@ -6395,19 +6396,11 @@ def _process_single_job(
         # of cycles in the UI when the user asked for a handful.  Only collapse
         # when a finite max_cycles/max_rounds is defined.
         try:
-            # Collapse microâcycle summaries down to the requested macro total for
-            # singleâagent runs only.  For swarm runs, we no longer collapse
-            # because each agent's cycles should be preserved; collapsing them
-            # discards perâagent history and leads to an incorrect cycle count in
-            # the UI.  Passing None to _collapse_cycles_for_ui will simply
-            # return the original list unmodified.
             if mode == "single":
                 summaries = _collapse_cycles_for_ui(summaries, max_cycles)
             elif mode == "swarm":
-                # Preserve all swarm cycles (do not collapse)
-                summaries = _collapse_cycles_for_ui(summaries, None)
+                summaries = _collapse_cycles_for_ui(summaries, max_rounds)
         except Exception:
-            # If collapsing fails, fall back to the original summaries
             pass
 
         diag: Dict[str, Any] = {}
