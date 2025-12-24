@@ -4308,14 +4308,22 @@ def main() -> None:
                 }
                 if run_active:
                     st_autorefresh(interval=750, key=f"console_refresh_{run_id_feed}")  # type: ignore[misc]
-            # Render the live events as a simple text block.  Do not apply
-            # syntax highlighting since events are freeform.  A small header
-            # distinguishes this feed from the narrative feed below.
+            # Render the live events.  Parse each JSON line and display the
+            # humanâreadable message (msg) when possible.  Fallback to the raw
+            # line when parsing fails.
             st.markdown("#### Live events")
-            try:
-                st.code("\n".join(events_lines), language="text")
-            except Exception:
-                st.write("\n".join(events_lines))
+            for _ev_line in events_lines:
+                try:
+                    _ev = json.loads(_ev_line)
+                    _msg = _ev.get("msg") or _ev.get("message")
+                    if not isinstance(_msg, str) or not _msg.strip():
+                        # Fallback to domain and level when no message exists
+                        dom = _ev.get("domain")
+                        lvl = _ev.get("level")
+                        _msg = f"{lvl or 'info'}: {dom}" if dom or lvl else str(_ev)
+                    st.write(str(_msg))
+                except Exception:
+                    st.write(_ev_line)
         else:
             # Fallback: if no events.jsonl exists, attempt to tail an event_log.json
             # This fallback supports older worker versions that write narrative
