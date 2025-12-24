@@ -2881,56 +2881,35 @@ def _collapse_cycles_for_ui(cycles_list: List[Any], total: Optional[int]) -> Lis
     """
     Reduce a list of cycle summaries to a desired total by sampling.
 
+    In the original implementation this helper sampled a large list of
+    microâcycle summaries down to a smaller list of macro cycles to
+    simplify the UI.  However, this behavior hides valuable detail in
+    swarm runs and can lead users to believe cycles are missing.  To
+    support transparency for microâcycle counts (e.g. when running a
+    swarm of many agents), the longevityâonly build disables this
+    collapsing.  The full list of cycle summaries is returned asâis so
+    that the UI can display every cycle produced by the agent.
+
     Args:
         cycles_list: The original list of cycle summaries (dictionaries or other).
-        total: Desired number of cycles to display.  When ``None`` or when
-            ``len(cycles_list) <= total``, the original list is returned.
+        total: Desired number of cycles to display.  This parameter is now
+            ignored; cycles are never collapsed in the longevityâonly build.
 
     Returns:
-        A list containing at most ``total`` entries sampled from ``cycles_list``.
+        The original ``cycles_list`` unchanged.
     """
     try:
         # Guard against nonâlist inputs
         if not isinstance(cycles_list, list):
             return cycles_list  # type: ignore[return-value]
-        n = len(cycles_list)
-        # Only collapse when we have more entries than the target
-        if isinstance(total, int) and total > 0 and n > total:
-            import math as _math
-            step = float(n) / float(total)
-            collapsed: List[Any] = []
-            for i in range(total):
-                # Compute the index of the representative entry for this cycle.
-                # We use ceil to bias toward later entries in each segment so that
-                # the collapsed list includes the most recent microâcycles.
-                idx = int(_math.ceil((i + 1) * step)) - 1
-                if idx < 0:
-                    idx = 0
-                if idx >= n:
-                    idx = n - 1
-                try:
-                    entry = cycles_list[idx]
-                    # When collapsing we want the cycle numbering to reflect the
-                    # macro cycle position rather than the original micro cycle index.
-                    # Preserve a copy so we don't mutate the original list.
-                    if isinstance(entry, dict):
-                        new_entry = dict(entry)
-                        # Reset the cycle field to the current macro index (0âbased).
-                        # Some agent implementations use a 0âbased "cycle" index; the UI
-                        # will display this value. Renumbering here ensures that when
-                        # collapsing from e.g. 200 micro cycles to 3 macro cycles, the
-                        # resulting rows have cycle values 0, 1, 2 instead of 66, 133, 199.
-                        new_entry["cycle"] = i
-                        collapsed.append(new_entry)
-                    else:
-                        collapsed.append(entry)
-                except Exception:
-                    # If anything goes wrong, fall back to using the raw entry.
-                    collapsed.append(cycles_list[idx])
-            return collapsed
+        # Always return the full list without sampling.  This preserves
+        # microâcycle counts and ensures that multiâagent runs show all
+        # cycles generated.  The ``total`` argument is deliberately
+        # ignored to avoid collapsing the history.
+        return cycles_list  # type: ignore[return-value]
     except Exception:
-        pass
-    return cycles_list  # type: ignore[return-value]
+        # If anything goes wrong, fall back to the original list.
+        return cycles_list  # type: ignore[return-value]
 
 
 def _aggregate_from_cycles(cycles: List[Dict[str, Any]], key: str) -> List[Any]:
