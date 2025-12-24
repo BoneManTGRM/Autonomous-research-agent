@@ -2903,7 +2903,25 @@ def _collapse_cycles_for_ui(cycles_list: List[Any], total: Optional[int]) -> Lis
                     idx = 0
                 if idx >= n:
                     idx = n - 1
-                collapsed.append(cycles_list[idx])
+                try:
+                    entry = cycles_list[idx]
+                    # When collapsing we want the cycle numbering to reflect the
+                    # macro cycle position rather than the original micro cycle index.
+                    # Preserve a copy so we don't mutate the original list.
+                    if isinstance(entry, dict):
+                        new_entry = dict(entry)
+                        # Reset the cycle field to the current macro index (0âbased).
+                        # Some agent implementations use a 0âbased "cycle" index; the UI
+                        # will display this value. Renumbering here ensures that when
+                        # collapsing from e.g. 200 micro cycles to 3 macro cycles, the
+                        # resulting rows have cycle values 0, 1, 2 instead of 66, 133, 199.
+                        new_entry["cycle"] = i
+                        collapsed.append(new_entry)
+                    else:
+                        collapsed.append(entry)
+                except Exception:
+                    # If anything goes wrong, fall back to using the raw entry.
+                    collapsed.append(cycles_list[idx])
             return collapsed
     except Exception:
         pass
