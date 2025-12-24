@@ -4271,17 +4271,13 @@ def main() -> None:
 
     with right_console:
 
-        # In the live console we display a humanâfriendly narrative feed rather than raw events.
-        # Determine whether the run is active to decide whether the console should auto refresh.
+        # Display a filtered live event feed in addition to a narrative summary.
+        # Determine whether the run is active to decide if the console should auto refresh.
         try:
             run_id_feed = active_run_id  # type: ignore[name-defined]
         except Exception:
             run_id_feed = None
 
-        # Auto refresh the console while the run is active.  Derive the running flag from
-        # the worker status if available.  When an engine worker is active this will
-        # periodically re-run the Streamlit script, allowing the narrative feed and progress
-        # indicators to update.
         run_active = False
         if st_autorefresh and ws0:
             try:
@@ -4299,11 +4295,47 @@ def main() -> None:
                 "processing",
             }
             if run_active and run_id_feed:
-                # Refresh every ~750ms to simulate a live console
+                # Refresh periodically to keep the console up to date.
                 st_autorefresh(interval=750, key=f"console_refresh_{run_id_feed}")  # type: ignore[misc]
 
-        # Render the narrative feed to show recent activity.  The narrative feed is
-        # synthesised from cycle history or event logs and provides a readable timeline.
+        # Attempt to tail the events.jsonl log for this run and filter out unhelpful progress events.
+        messages: List[str] = []
+        if run_id_feed:
+            try:
+                run_dir_path = Path(get_runs_root()) / str(run_id_feed)
+                events_path = run_dir_path / "events.jsonl"
+                lines = tail_lines(events_path, max_lines=250)
+            except Exception:
+                lines = []
+            # Parse and filter lines
+            for _ev_line in lines:
+                try:
+                    _ev = json.loads(_ev_line)
+                    # Skip progress events to reduce noise; show everything else.
+                    if str(_ev.get("domain")) == "progress":
+                        continue
+                    _msg = _ev.get("msg") or _ev.get("message")
+                    if isinstance(_msg, str) and _msg.strip():
+                        messages.append(str(_msg))
+                        continue
+                    # Fallback: build a message from domain and level.
+                    dom = _ev.get("domain")
+                    lvl = _ev.get("level")
+                    if dom or lvl:
+                        messages.append(f"{lvl or 'info'}: {dom}")
+                    else:
+                        messages.append(str(_ev))
+                except Exception:
+                    # Non-JSON lines are appended directly
+                    messages.append(_ev_line.strip())
+        # Render the filtered live events if any exist.
+        if messages:
+            st.markdown("#### Live events")
+            for m in messages:
+                st.write(m)
+
+        # Render the narrative feed summarizing recent cycles.  This provides context
+        # for the run even when the event log lacks detailed messages.
         render_narrative_feed(narrative_events, source_label=event_src0 if event_src0 != "not found" else "synthesized")
 
         # Provide access to the raw event log JSON if available.  Users can expand this
