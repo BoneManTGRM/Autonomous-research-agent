@@ -1818,6 +1818,18 @@ PRESET_ALIASES: Dict[str, str] = {
     "general_research": "longevity",
 }
 
+# ---------------------------------------------------------------------
+# Prune unsupported presets
+# ---------------------------------------------------------------------
+# Remove any presets that are not longevity.  While the UI and
+# get_preset helper override nonâlongevity selections, disabling the
+# unused presets here prevents them from appearing in any list of
+# presets or being accidentally referenced.  This loop iterates over
+# ``PRESETS`` keys and pops those that are not ``"longevity"``.
+for _preset_key in list(PRESETS.keys()):
+    if str(_preset_key).lower() != "longevity":
+        PRESETS.pop(_preset_key, None)
+
 
 # ---------------------------------------------------------------------
 # Accessors
