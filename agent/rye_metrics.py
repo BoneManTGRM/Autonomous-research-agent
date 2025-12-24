@@ -1271,8 +1271,11 @@ def detect_rye_equilibrium(
     # History mode: original series based implementation
     vals = _extract_rye_series(data if isinstance(data, list) else [])
     n = len(vals)
-    # Require at least the larger of MIN_EQUILIBRIUM_CYCLES or the requested window size
-    if n < max(MIN_EQUILIBRIUM_CYCLES, window):
+    # Require at least the minimal number of samples for equilibrium detection.  Unlike
+    # the original implementation, do not insist on a large fixed window; use
+    # whatever data is available beyond the minimum.  This allows the detector
+    # to operate on short runs instead of immediately returning insufficient_data.
+    if n < MIN_EQUILIBRIUM_CYCLES:
         return {
             "in_equilibrium": False,
             "reason": "insufficient_data",
@@ -1281,8 +1284,11 @@ def detect_rye_equilibrium(
             "local_volatility_score": None,
         }
 
-    # Only evaluate the most recent portion of the series
-    recent_window = max(window, MIN_EQUILIBRIUM_CYCLES)
+    # Only evaluate the most recent portion of the series.  Use the smaller
+    # of the requested window or the available data so that short runs still
+    # produce a meaningful equilibrium signal.  Always use at least
+    # MIN_EQUILIBRIUM_CYCLES observations.
+    recent_window = max(MIN_EQUILIBRIUM_CYCLES, min(window, n))
     recent_vals = vals[-recent_window:]
     slope = regression_rye_slope(recent_vals)
     vol_sig = rye_volatility_signature(recent_vals, window=recent_window)
