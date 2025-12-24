@@ -4271,97 +4271,44 @@ def main() -> None:
 
     with right_console:
 
-        # Display a live event feed when a runâscoped JSONL log is present.  The
-        # engine worker emits JSON lines into ``events.jsonl`` under the
-        # run directory.  Tail the last few lines and refresh periodically
-        # while the run is active.  Only attempt to load events when an
-        # active run ID is known.
+        # In the live console we display a humanâfriendly narrative feed rather than raw events.
+        # Determine whether the run is active to decide whether the console should auto refresh.
         try:
             run_id_feed = active_run_id  # type: ignore[name-defined]
         except Exception:
             run_id_feed = None
-        events_lines: List[str] = []
-        if run_id_feed:
-            try:
-                run_dir_path = Path(get_runs_root()) / str(run_id_feed)
-                events_path = run_dir_path / "events.jsonl"
-                events_lines = tail_lines(events_path, max_lines=250)
-            except Exception:
-                events_lines = []
-        if events_lines:
-            # Auto refresh the console while the run is active.  Derive the
-            # running flag from the worker status if available.
-            if st_autorefresh:
-                try:
-                    status0 = str((ws0.get("status") or "")).lower()  # type: ignore[name-defined]
-                except Exception:
-                    status0 = ""
-                run_active = status0 in {
-                    "running",
-                    "active",
-                    "in_progress",
-                    "working",
-                    "busy",
-                    "running_job",
-                    "running_cycle",
-                    "processing",
-                }
-                if run_active:
-                    st_autorefresh(interval=750, key=f"console_refresh_{run_id_feed}")  # type: ignore[misc]
-            # Render the live events.  Parse each JSON line and display the
-            # humanâreadable message (msg) when possible.  Fallback to the raw
-            # line when parsing fails.
-            st.markdown("#### Live events")
-            for _ev_line in events_lines:
-                try:
-                    _ev = json.loads(_ev_line)
-                    _msg = _ev.get("msg") or _ev.get("message")
-                    if not isinstance(_msg, str) or not _msg.strip():
-                        # Fallback to domain and level when no message exists
-                        dom = _ev.get("domain")
-                        lvl = _ev.get("level")
-                        _msg = f"{lvl or 'info'}: {dom}" if dom or lvl else str(_ev)
-                    st.write(str(_msg))
-                except Exception:
-                    st.write(_ev_line)
-        else:
-            # Fallback: if no events.jsonl exists, attempt to tail an event_log.json
-            # This fallback supports older worker versions that write narrative
-            # event logs only in JSON format.  We display raw lines so the user
-            # can still see some live console output.
-            events_fallback: List[str] = []
-            candidate_paths: List[Path] = []
-            if run_id_feed:
-                try:
-                    run_dir_path2 = Path(get_runs_root()) / str(run_id_feed)
-                    candidate_paths.append(run_dir_path2 / "events.json")
-                    candidate_paths.append(run_dir_path2 / "event_log.json")
-                except Exception:
-                    pass
-                try:
-                    logs_dir = Path(get_runs_root()) / "logs"
-                    candidate_paths.append(logs_dir / f"{run_id_feed}_events.json")
-                    candidate_paths.append(logs_dir / f"{run_id_feed}_event_log.json")
-                except Exception:
-                    pass
-            for cp in candidate_paths:
-                try:
-                    if cp.exists() and cp.is_file():
-                        events_fallback = tail_lines(cp, max_lines=250)
-                        if events_fallback:
-                            break
-                except Exception:
-                    continue
-            if events_fallback:
-                st.markdown("#### Live events")
-                try:
-                    st.code("\n".join(events_fallback), language="text")
-                except Exception:
-                    st.write("\n".join(events_fallback))
 
-        # Narrative feed (synthesized from history if no event log exists)
+        # Auto refresh the console while the run is active.  Derive the running flag from
+        # the worker status if available.  When an engine worker is active this will
+        # periodically re-run the Streamlit script, allowing the narrative feed and progress
+        # indicators to update.
+        run_active = False
+        if st_autorefresh and ws0:
+            try:
+                status0 = str((ws0.get("status") or "")).lower()  # type: ignore[name-defined]
+            except Exception:
+                status0 = ""
+            run_active = status0 in {
+                "running",
+                "active",
+                "in_progress",
+                "working",
+                "busy",
+                "running_job",
+                "running_cycle",
+                "processing",
+            }
+            if run_active and run_id_feed:
+                # Refresh every ~750ms to simulate a live console
+                st_autorefresh(interval=750, key=f"console_refresh_{run_id_feed}")  # type: ignore[misc]
+
+        # Render the narrative feed to show recent activity.  The narrative feed is
+        # synthesised from cycle history or event logs and provides a readable timeline.
         render_narrative_feed(narrative_events, source_label=event_src0 if event_src0 != "not found" else "synthesized")
 
+        # Provide access to the raw event log JSON if available.  Users can expand this
+        # section to inspect low-level event details.  When no event log file exists
+        # this view will synthesise events from cycle history.
         with st.expander("Raw event log JSON (if available)"):
             if event_log0:
                 preview, note = safe_json_preview(event_log0, max_items=120)
