@@ -3432,22 +3432,12 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             if mode == "single":
                 summaries = _collapse_cycles_for_ui(summaries, max_cycles)
             elif mode == "swarm":
-                # Determine how many roles participated in the swarm.  When
-                # ``roles_list`` is not available, fall back to 1 to avoid
-                # division by zero.  ``roles_list`` may be missing if an
-                # exception occurred earlier, so guard against errors.
-                try:
-                    roles_count = len(roles_list) if roles_list else 1
-                except Exception:
-                    roles_count = 1
-                # Compute a target equal to max_rounds Ã number of roles.
-                collapse_target = None
-                try:
-                    if max_rounds is not None:
-                        collapse_target = int(max_rounds) * max(roles_count, 1)
-                except Exception:
-                    collapse_target = None
-                summaries = _collapse_cycles_for_ui(summaries, collapse_target)
+                # Do not collapse swarm cycle summaries at all.  Sampling down
+                # to a small number of cycles hides the bulk of the microâcycle
+                # history for the swarm.  Returning the full list here lets
+                # the UI display every micro step and enables more accurate
+                # progress and diagnostic reporting.
+                summaries = summaries  # no collapse
         except Exception:
             # Any failure during collapse should fall back to the original list
             # so the UI still receives complete cycle data.
