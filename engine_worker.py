@@ -2858,8 +2858,8 @@ def _normalize_cycles_for_ui(cycles_list: List[Any]) -> List[Dict[str, Any]]:
         # sequence to be 0, 1, 2, â¦ so that the cycle history table is
         # intuitive.  Preserve other fields on the entry.
         c["cycle"] = i
-        c.setdefault("index", i + 1)
-        c.setdefault("cycle_index", i)
+        c["cycle_index"] = i
+        c["index"] = i + 1
         c.setdefault("citations", [])
         c.setdefault("discoveries", [])
         c.setdefault("sources", [])
@@ -2915,15 +2915,18 @@ def _collapse_cycles_for_ui(cycles_list: List[Any], total: Optional[int]) -> Lis
                     # Preserve a copy so we don't mutate the original list.
                     if isinstance(entry, dict):
                         new_entry = dict(entry)
-                        # Reset the cycle field to the current macro index (0âbased).
-                        # Some agent implementations use a 0âbased "cycle" index; the UI
-                        # will display this value. Renumbering here ensures that when
-                        # collapsing from e.g. 200 micro cycles to 3 macro cycles, the
-                        # resulting rows have cycle values 0, 1, 2 instead of 66, 133, 199.
-                        new_entry["cycle"] = i
-                        collapsed.append(new_entry)
                     else:
-                        collapsed.append(entry)
+                        # Wrap non-dict entries into a dict for consistent UI fields
+                        new_entry = {"raw": entry}
+                    # Reset the cycle, cycle_index and index fields to the current
+                    # macro index. This prevents propagating micro-cycle numbers
+                    # (e.g. 66, 133, 199) into the UI. We explicitly overwrite
+                    # these fields instead of using setdefault() to ensure they
+                    # reflect the collapsed index.
+                    new_entry["cycle"] = i
+                    new_entry["cycle_index"] = i
+                    new_entry["index"] = i + 1
+                    collapsed.append(new_entry)
                 except Exception:
                     # If anything goes wrong, fall back to using the raw entry.
                     collapsed.append(cycles_list[idx])
