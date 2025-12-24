@@ -2580,6 +2580,7 @@ def compute_progress_view(
     try:
         macro_total_ui: Optional[int] = None
         pd: Any = None
+        mode_pd: Optional[str] = None  # capture mode for use outside remapping block
         # prompt_details may exist in progress_state (ps) or worker_state (ws)
         if isinstance(ps, dict):
             pd = ps.get("prompt_details")  # type: ignore[attr-defined]
@@ -2611,8 +2612,12 @@ def compute_progress_view(
             else:
                 mc = pd.get("max_cycles") or pd.get("max_rounds")
                 macro_total_ui = _safe_int(mc, None)
+        # Only remap internal step counts to a smaller macro cycle total for nonâswarm runs.
+        # In swarm mode we want to preserve the full microâcycle progress (which may
+        # be hundreds of steps) instead of collapsing to the requested number of rounds.
         if (
-            macro_total_ui is not None
+            mode_pd != "swarm"
+            and macro_total_ui is not None
             and t2 is not None
             and c2 is not None
             and t2 > 0
