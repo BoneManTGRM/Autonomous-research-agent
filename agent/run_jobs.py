@@ -1445,6 +1445,24 @@ def create_job(
         except Exception:
             config = {}
 
+    # -----------------------------------------------------------------
+    # Domain restriction: enforce longevity-only jobs
+    #
+    # In this longevity-only build, the general and math presets have
+    # been disabled. To ensure queued jobs do not accidentally specify
+    # another domain, always set the domain key on the job config to
+    # "longevity". If the incoming config is not a dict or cannot
+    # accept assignment, this block simply has no effect.
+    #
+    # By setting the domain here, downstream components such as
+    # engine_worker and CoreAgent will operate in longevity mode
+    # without requiring additional checks.
+    if isinstance(config, dict):
+        try:
+            config["domain"] = "longevity"
+        except Exception:
+            pass
+
     requested_run_id: Optional[str] = None
     if run_id is None:
         run_id = str(uuid.uuid4())
