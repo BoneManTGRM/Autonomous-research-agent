@@ -2881,34 +2881,44 @@ def _collapse_cycles_for_ui(cycles_list: List[Any], total: Optional[int]) -> Lis
     """
     Reduce a list of cycle summaries to a desired total by sampling.
 
-    In the original implementation this helper sampled a large list of
-    microâcycle summaries down to a smaller list of macro cycles to
-    simplify the UI.  However, this behavior hides valuable detail in
-    swarm runs and can lead users to believe cycles are missing.  To
-    support transparency for microâcycle counts (e.g. when running a
-    swarm of many agents), the longevityâonly build disables this
-    collapsing.  The full list of cycle summaries is returned asâis so
-    that the UI can display every cycle produced by the agent.
+    This helper exists to keep the cycle history tables and graphs compact by
+    sampling a longer list of microâcycle summaries down to a smaller list of
+    macro cycles for display in the UI.  When ``total`` is None or larger than
+    the input length, the full list is returned.  Otherwise the list is
+    downsampled by taking approximately evenly spaced entries.
 
     Args:
         cycles_list: The original list of cycle summaries (dictionaries or other).
-        total: Desired number of cycles to display.  This parameter is now
-            ignored; cycles are never collapsed in the longevityâonly build.
+        total: Desired number of cycles to display.
 
     Returns:
-        The original ``cycles_list`` unchanged.
+        A possibly sampled list of cycle summaries suitable for display.
     """
     try:
-        # Guard against nonâlist inputs
+        # Guard against non-list inputs
         if not isinstance(cycles_list, list):
             return cycles_list  # type: ignore[return-value]
-        # Always return the full list without sampling.  This preserves
-        # microâcycle counts and ensures that multiâagent runs show all
-        # cycles generated.  The ``total`` argument is deliberately
-        # ignored to avoid collapsing the history.
-        return cycles_list  # type: ignore[return-value]
+        n = len(cycles_list)
+        # No total provided or total >= list length: return original list
+        if total is None:
+            return cycles_list  # type: ignore[return-value]
+        try:
+            t = int(total)
+        except Exception:
+            return cycles_list  # type: ignore[return-value]
+        if t <= 0 or n <= t:
+            return cycles_list  # type: ignore[return-value]
+        # Downsample by approximately uniform spacing
+        step = float(n) / float(t)
+        sampled: List[Any] = []
+        for i in range(t):
+            idx = int(round(i * step))
+            if idx >= n:
+                idx = n - 1
+            sampled.append(cycles_list[idx])
+        return sampled  # type: ignore[return-value]
     except Exception:
-        # If anything goes wrong, fall back to the original list.
+        # On error, fall back to returning the input unmodified
         return cycles_list  # type: ignore[return-value]
 
 
