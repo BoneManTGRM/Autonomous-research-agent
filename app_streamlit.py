@@ -4338,13 +4338,33 @@ def main() -> None:
                 # Refresh periodically to keep the console up to date.
                 st_autorefresh(interval=750, key=f"console_refresh_{run_id_feed}")  # type: ignore[misc]
 
+        # Live events feed controls
+        # Allow the user to adjust how many event messages are shown and which ones to exclude.
+        max_event_lines = st.slider(
+            "Number of live event messages to show",
+            min_value=10,
+            max_value=250,
+            value=30,
+            step=10,
+            help="Limit the number of recent log entries displayed in the live events feed.",
+        )
+        exclude_keywords_input = st.text_input(
+            "Exclude events containing keywords (comma-separated)",
+            value="cycle_progress,job_claimed,job_running",
+            help="Any events containing these keywords in their message will be hidden from the live feed. Keywords are case-insensitive.",
+        )
+        exclude_keywords: List[str] = []
+        if exclude_keywords_input:
+            exclude_keywords = [kw.strip().lower() for kw in exclude_keywords_input.split(",") if kw.strip()]
+
         # Attempt to tail the events.jsonl log for this run and filter out unhelpful progress events.
         messages: List[str] = []
         if run_id_feed:
             try:
                 run_dir_path = Path(get_runs_root()) / str(run_id_feed)
                 events_path = run_dir_path / "events.jsonl"
-                lines = tail_lines(events_path, max_lines=250)
+                # Use user-selected limit for the number of lines to tail
+                lines = tail_lines(events_path, max_lines=int(max_event_lines))
             except Exception:
                 lines = []
             # Parse and filter lines
@@ -4356,18 +4376,30 @@ def main() -> None:
                         continue
                     _msg = _ev.get("msg") or _ev.get("message")
                     if isinstance(_msg, str) and _msg.strip():
+                        # Apply keyword-based exclusions (case-insensitive) on the message.
+                        _msg_low = _msg.lower()
+                        if exclude_keywords and any(kw in _msg_low for kw in exclude_keywords):
+                            continue
                         messages.append(str(_msg))
                         continue
                     # Fallback: build a message from domain and level.
                     dom = _ev.get("domain")
                     lvl = _ev.get("level")
+                    msg_s = ""
                     if dom or lvl:
-                        messages.append(f"{lvl or 'info'}: {dom}")
+                        msg_s = f"{lvl or 'info'}: {dom}"
                     else:
-                        messages.append(str(_ev))
+                        msg_s = str(_ev)
+                    # Apply keyword-based exclusions on fallback message.
+                    if exclude_keywords and any(kw in msg_s.lower() for kw in exclude_keywords):
+                        continue
+                    messages.append(msg_s)
                 except Exception:
-                    # Non-JSON lines are appended directly
-                    messages.append(_ev_line.strip())
+                    # Non-JSON lines are appended directly if they pass exclusions.
+                    line_s = _ev_line.strip()
+                    if exclude_keywords and any(kw in line_s.lower() for kw in exclude_keywords):
+                        continue
+                    messages.append(line_s)
         # Render the filtered live events if any exist.
         if messages:
             st.markdown("#### Live events")
