@@ -1491,7 +1491,10 @@ def render_result_details(result: Dict[str, Any]) -> None:
         if show_sources_inline:
             st.markdown("#### Sources and citations")
 
-            # De-dupe sources (Tavily errors and repeated URLs are common)
+            # De-dupe and sanitize sources (Tavily and other sources sometimes return
+            # placeholder entries with templated fields like {{custom_sec.title}}).
+            # Skip any citation where the title or URL contains curly braces or
+            # obvious template markers, then de-duplicate on (url,title,provider).
             deduped_sources: List[Any] = []
             seen: Set[Any] = set()
             for s in sources:
@@ -1499,9 +1502,18 @@ def render_result_details(result: Dict[str, Any]) -> None:
                     url = str(s.get("url") or s.get("link") or "").strip()
                     title = str(s.get("title") or "Source").strip()
                     provider = str(s.get("source") or s.get("provider") or "").strip()
+                    # Skip templated or placeholder entries
+                    if not title or "{{" in title or "}}" in title or "custom_" in title:
+                        continue
+                    if url and ("{{" in url or "}}" in url):
+                        continue
                     key = (url or title, provider)
                 else:
-                    key = str(s).strip()
+                    txt = str(s).strip()
+                    # Skip templated or placeholder strings
+                    if not txt or "{{" in txt or "}}" in txt or "custom_" in txt:
+                        continue
+                    key = txt
                 if not key or key in seen:
                     continue
                 seen.add(key)
