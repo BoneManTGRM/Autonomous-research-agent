@@ -323,11 +323,18 @@ def _from_tavily_response(query: str, raw: Dict[str, Any]) -> WebSearchSummary:
 
 
 def _stub_summary(query: str, message: str) -> WebSearchSummary:
-    """Base stub summary (learning speed will be applied later)."""
+    """Base stub summary used when Tavily is unavailable or an error occurs.
+
+    Instead of propagating a Tavilyâspecific error string to callers (which
+    clutters the UI), this stub returns an empty result set with
+    ``error`` set to ``None``.  The summary is marked as stubbed and
+    includes neutral info_gain, energy, difficulty and diversity values.
+    Learning speed adjustments are applied later.
+    """
     return WebSearchSummary(
         query=query,
         results=[],
-        error=f"Tavily Search Error: {message}",
+        error=None,
         stubbed=True,
         response_time=None,
         request_id=None,
