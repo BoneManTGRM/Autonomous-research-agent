@@ -51,7 +51,12 @@ import math
 # runs.  When set to 1 the learning dashboards will compute tiering and other
 # runâlevel signals as soon as a single cycle is available.  This change
 # avoids "n/a" results when exploring quick, finite runs.
-MIN_CYCLES_FOR_TIERING: int = 1
+# To avoid prematurely classifying very short runs, require at least
+# three cycles before tiering heuristics are applied.  Previously this
+# threshold was lowered to 1 to show diagnostics even on tiny runs, but
+# this can produce noisy or misleading tiers.  A minimum of three cycles
+# strikes a balance between immediacy and reliability.
+MIN_CYCLES_FOR_TIERING: int = 3
 
 # Run level Tier 2 thresholds
 TIER2_MIN_AVG_RYE: float = 0.2
@@ -1525,11 +1530,14 @@ def autonomy_safety_envelope(
           "details": { ... },
         }
     """
+    # Basic metrics extracted from diagnostics
     stab = diagnostics.get("stability_index")
     slope = diagnostics.get("trend_slope")
     low_p = diagnostics.get("low_percentile")
     high_p = diagnostics.get("high_percentile")
+    count = diagnostics.get("count") or 0
 
+    # If any essential metrics are missing, report unknown state
     if stab is None or slope is None or low_p is None or high_p is None:
         return {
             "state": "unknown",
@@ -1538,8 +1546,25 @@ def autonomy_safety_envelope(
             },
         }
 
+    # For very short histories we cannot confidently classify the safety envelope.
+    # Require at least 5 cycles of data before making a directional judgment.
+    if count < 5:
+        spread = high_p - low_p if (high_p is not None and low_p is not None) else None
+        return {
+            "state": "neutral",
+            "details": {
+                "stability_index": stab,
+                "trend_slope": slope,
+                "low_percentile": low_p,
+                "high_percentile": high_p,
+                "spread": spread,
+                "reason": "insufficient_history",
+            },
+        }
+
     spread = high_p - low_p
 
+    # Classify envelope based on stability, trend, and percentile spread
     if stab >= 0.7 and abs(slope) < 0.02:
         state = "stable"
         reason = "high_stability_flat_trend"
@@ -1696,12 +1721,27 @@ def early_failure_warning_score(
     avg = diagnostics.get("rye_avg")
     low_p = diagnostics.get("low_percentile")
     last = diagnostics.get("rye_last")
+    count = diagnostics.get("count") or 0
 
+    # If any required metrics are missing, return an unknown score.
     if stab is None or trend is None or avg is None or low_p is None or last is None:
         return {
             "score": None,
             "factors": {
                 "reason": "insufficient_metrics",
+            },
+        }
+
+    # For very short runs (< 5 cycles), treat failure risk as neutral.
+    if count < 5:
+        return {
+            "score": 0.0,
+            "factors": {
+                "inv_stability": None,
+                "downward": None,
+                "avg_risk": None,
+                "last_risk": None,
+                "reason": "insufficient_history",
             },
         }
 
