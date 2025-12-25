@@ -470,7 +470,6 @@ SWARM_ROLES: List[Tuple[str, str]] = [
 
 # Safe upper bound for swarm size on typical Render or Streamlit setups.
 # All swarm agents are still run sequentially in a single process by the worker.
-# Increased from 32 to 64 to support larger swarms by default.
 MAX_SWARM_AGENTS: int = 64
 
 # Limit points in charts so the frontend does not hit RangeError on very long runs.
