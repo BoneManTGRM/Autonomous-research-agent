@@ -1491,29 +1491,27 @@ def render_result_details(result: Dict[str, Any]) -> None:
         if show_sources_inline:
             st.markdown("#### Sources and citations")
 
-            # De-dupe and sanitize sources (Tavily and other sources sometimes return
-            # placeholder entries with templated fields like {{custom_sec.title}}).
-            # Skip any citation where the title or URL contains curly braces or
-            # obvious template markers, then de-duplicate on (url,title,provider).
+            # De-dupe sources (Tavily errors and repeated URLs are common)
             deduped_sources: List[Any] = []
             seen: Set[Any] = set()
             for s in sources:
+                # Skip any sources that clearly represent an error entry (e.g. Tavily errors)
                 if isinstance(s, dict):
+                    provider_val = str(s.get("source") or s.get("provider") or "").strip().lower()
+                    title_val = str(s.get("title") or "").strip().lower()
+                    # Filter out entries where provider is "error" or title contains "error"
+                    if provider_val == "error" or "error" in title_val:
+                        continue
                     url = str(s.get("url") or s.get("link") or "").strip()
                     title = str(s.get("title") or "Source").strip()
                     provider = str(s.get("source") or s.get("provider") or "").strip()
-                    # Skip templated or placeholder entries
-                    if not title or "{{" in title or "}}" in title or "custom_" in title:
-                        continue
-                    if url and ("{{" in url or "}}" in url):
-                        continue
                     key = (url or title, provider)
                 else:
-                    txt = str(s).strip()
-                    # Skip templated or placeholder strings
-                    if not txt or "{{" in txt or "}}" in txt or "custom_" in txt:
+                    # Skip simple strings that are error messages
+                    simple_val = str(s).strip()
+                    if "error" in simple_val.lower():
                         continue
-                    key = txt
+                    key = simple_val
                 if not key or key in seen:
                     continue
                 seen.add(key)
