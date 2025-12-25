@@ -4338,8 +4338,19 @@ def main() -> None:
                 # Refresh periodically to keep the console up to date.
                 st_autorefresh(interval=750, key=f"console_refresh_{run_id_feed}")  # type: ignore[misc]
 
-        # Live events feed controls removed per user request.  Use default values instead.
-        max_event_lines = 30
+        # Live events feed controls: allow the user to adjust how many events are displayed,
+        # but remove the exclude keywords input. A slider controls the number of messages to show.
+        max_event_lines = st.slider(
+            "Number of live event messages to show",
+            min_value=10,
+            max_value=250,
+            value=30,
+            key="max_event_lines_slider",
+            help="Adjust how many recent live messages to display in the console."
+        )
+        # Use a fixed list of noisy keywords to exclude from the live event feed.  The
+        # keyword input box has been removed per user request, but these defaults
+        # help filter out internal progress messages.
         exclude_keywords: List[str] = ["cycle_progress", "job_claimed", "job_running"]
 
         # Attempt to tail the events.jsonl log for this run and filter out unhelpful progress events.
