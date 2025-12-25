@@ -579,11 +579,8 @@ class BrowserTool:
         Build a standard stub result list used in explicit stub mode
         and when falling back after a PubStub error.
         """
-        snippet = (
-            "[stub] Stubbed search. Configure TAVILY_API_KEY and set "
-            "TAVILY_STUB_MODE=0, DISABLE_WEB_SEARCH=0, ENABLE_TAVILY=1 "
-            "to enable real web search."
-        )
+        # Provide a neutral stub snippet without exposing configuration or error details.
+        snippet = "[stub] Stubbed search."
         if reason:
             snippet = f"{reason} {snippet}"
 
@@ -677,8 +674,10 @@ class BrowserTool:
         elapsed = time.time() - start
 
         if "error" in data:
+            # On any Tavily error (including PubStub), log the details but do not
+            # force subsequent calls into stub mode. Returning a neutral stubbed
+            # response maintains RYE accounting without surfacing error strings.
             pubstub_flag = bool(data.get("pubstub"))
-            # Always log the error for diagnostics
             self._log_event(
                 {
                     "event": "search_error",
@@ -692,32 +691,16 @@ class BrowserTool:
                     "pubstub": pubstub_flag,
                 }
             )
-
-            # Determine if we should switch to stub mode based on env or default
-            force_stub_env = os.getenv("TAVILY_FORCE_STUB_ON_ERROR")
-            force_stub_on_error = True
-            if force_stub_env is not None:
-                # Interpret '0', 'false', 'no', 'off' as false, otherwise true
-                force_stub_on_error = force_stub_env.strip().lower() not in ("0", "false", "no", "off")
-
-            if force_stub_on_error:
-                # Persist stub mode so subsequent calls avoid hitting Tavily again
-                self.force_stub = True
-
-            # Use stub results for any Tavily error rather than surfacing an error entry
-            reason_msg = (
-                "Tavily PubStub error encountered; using stub results."
-                if pubstub_flag
-                else "Tavily error encountered; using stub results."
-            )
+            # Do not cache stub results or persist stub mode; simply return
+            # a stubbed result list with no reason text. A non-cached
+            # response avoids poisoning the cache and allows future queries
+            # to retry Tavily when it becomes available.
             stub_results = self._make_stub_results(
                 query=q,
                 max_results=max_results,
                 truncated=truncated,
-                reason=reason_msg,
+                reason=None,
             )
-            # Cache and return stub results
-            self._cache_set(cache_key, {"results": stub_results})
             return stub_results
 
         results = self._normalize_results(data.get("results", data))
@@ -788,8 +771,8 @@ class BrowserTool:
         elapsed = time.time() - start
 
         if "error" in data:
+            # Log any Tavily error for diagnostics but do not enable stub mode
             pubstub_flag = bool(data.get("pubstub"))
-            # Log the error
             self._log_event(
                 {
                     "event": "search_with_answer_error",
@@ -803,26 +786,13 @@ class BrowserTool:
                     "pubstub": pubstub_flag,
                 }
             )
-
-            # Determine whether to persist stub mode
-            force_stub_env = os.getenv("TAVILY_FORCE_STUB_ON_ERROR")
-            force_stub_on_error = True
-            if force_stub_env is not None:
-                force_stub_on_error = force_stub_env.strip().lower() not in ("0", "false", "no", "off")
-
-            if force_stub_on_error:
-                self.force_stub = True
-
-            reason_msg = (
-                "Tavily PubStub error encountered; using stub results."
-                if pubstub_flag
-                else "Tavily error encountered; using stub results."
-            )
+            # Return a neutral stub result list without a reason string. Avoid
+            # caching to allow future calls to retry Tavily when available.
             stub_results = self._make_stub_results(
                 query=q,
                 max_results=max_results,
                 truncated=truncated,
-                reason=reason_msg,
+                reason=None,
             )
             return {"answer": None, "results": stub_results}
 
