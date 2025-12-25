@@ -280,7 +280,6 @@ class SwarmManager:
         if not agents:
             raise ValueError("attach_agents called with empty agent list.")
 
-        # Respect the global swarm safety ceiling; fall back to 64 if unspecified.
         max_safe = int(self._swarm_global_hints.get("max_agents_safe", 64))
         if len(agents) > max_safe:
             raise ValueError(
