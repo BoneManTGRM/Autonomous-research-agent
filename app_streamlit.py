@@ -1499,7 +1499,7 @@ def render_result_details(result: Dict[str, Any]) -> None:
                 if isinstance(s, dict):
                     provider_val = str(s.get("source") or s.get("provider") or "").strip().lower()
                     title_val = str(s.get("title") or "").strip().lower()
-                    # Filter out entries where provider is "error" or title contains "error"
+                    # Filter out entries where provider or title indicates an error; allow stub entries to be shown
                     if provider_val == "error" or "error" in title_val:
                         continue
                     url = str(s.get("url") or s.get("link") or "").strip()
