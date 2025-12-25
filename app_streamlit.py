@@ -5621,8 +5621,8 @@ def main() -> None:
             #     preview, note = safe_json_preview(history, max_items=MAX_POINTS_FOR_CHARTS)
             #     if preview is not None:
             #         st.code(preview, language="json")
-                    if note:
-                        st.caption(note)
+            #         if note:
+            #             st.caption(note)
 
         with tab_citations:
             st.markdown("### Source citation viewer")
