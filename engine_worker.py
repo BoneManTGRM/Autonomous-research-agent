@@ -3221,7 +3221,21 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
 
     max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "max_cycles")
     max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
-    macro_total = max_rounds if mode == "swarm" else max_cycles
+    # When running in swarm mode compute the macro_total as the total number
+    # of microâcycles across all roles.  Each round contributes one cycle per
+    # active role.  Derive the role count from the config if available; if
+    # roles are missing or invalid, fall back to a single role to avoid
+    # division by zero.  For single agent runs macro_total is simply
+    # max_cycles (the number of cycles requested).
+    if mode == "swarm":
+        try:
+            roles_list = cfg.get("roles") if isinstance(cfg.get("roles"), list) else None
+            role_count = len(roles_list) if roles_list else 1
+        except Exception:
+            role_count = 1
+        macro_total = max_rounds * role_count
+    else:
+        macro_total = max_cycles
 
     # Default to forever mode when no explicit config is provided.  This allows
     # jobs to run indefinitely unless a user or environment variable overrides it.
@@ -5748,7 +5762,11 @@ def _process_single_job(
         summaries: List[Dict[str, Any]] = []
         full_result: Optional[Dict[str, Any]] = None
 
-        last_progress_current: Optional[int] = None
+        # Initialize progress counters.  Use 0 for the current cycle so the UI
+        # starts at the beginning (e.g. 0/96) instead of incorrectly
+        # reporting that all cycles have completed.  total is set to
+        # macro_total for both single and swarm runs.
+        last_progress_current: Optional[int] = 0
         last_progress_total: Optional[int] = macro_total
         last_progress_note: str = ""
         progress_lock = threading.Lock()
