@@ -1622,7 +1622,8 @@ def web_search(
     return {
         "query": query,
         "stubbed": True,
-        "error": fallback_error,
+        # Do not surface provider error messages to the UI when in fallback mode.
+        "error": None,
         "results": [
             {
                 "title": page.title or "",
