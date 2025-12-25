@@ -1529,7 +1529,8 @@ def render_result_details(result: Dict[str, Any]) -> None:
                     line += f"  \n  {snippet}"
                 st.markdown(f"- {line}")
         else:
-            st.caption(f"Sources and citations hidden ({len(sources)} items). Toggle on to view.")
+            # When citations are hidden, do not render the section or caption at all.
+            pass
 
     debug = base.get("debug") or base.get("diagnostics") or result.get("debug") or result.get("diagnostics")
     if debug:
@@ -4594,6 +4595,74 @@ def main() -> None:
         index=0,
         help="This build uses finite mode only.",
     )
+
+    # ------------------------------------------------------------------
+    # Longevity biomarkers summary
+    #
+    # When Biomarker / Longevity mode is enabled in the sidebar, display a
+    # concise overview of fifteen key blood-based biomarkers associated with
+    # healthy aging.  Provide a toggle so users can optionally view the
+    # underlying citation details.  The toggle remembers its state via
+    # session_state and defaults to hidden to avoid cluttering the UI.
+    # ------------------------------------------------------------------
+    if use_biomarkers:
+        st.markdown("## Longevity Biomarker Summary")
+        st.write(
+            "This summary outlines fifteen important biomarkers used in longevity blood tests and why they matter for healthy aging."
+        )
+
+        # Toggle to show/hide citation details.  Off by default.
+        show_biomarker_citations = st.toggle(
+            "Show citation details",
+            value=False,
+            key="show_biomarker_citations",
+            help="Toggle to display or hide detailed source and citation information."
+        )
+
+        # Define biomarker names and descriptions.
+        biomarker_items = [
+            ("Albumin", "Produced by the liver, albumin maintains blood volume and transports hormones. Low levels can indicate chronic inflammation or malnutrition and are linked with frailty and slower recovery. Maintaining normal albumin may signal strong liver function and protein repair capacity."),
+            ("ALP & ALT", "These liver enzymes reveal liver and bone health. Elevated alkaline phosphatase (ALP) can signal bone disorders or bile duct problems, while high alanine aminotransferase (ALT) typically indicates liver inflammation. Monitoring both helps detect issues early."),
+            ("Creatinine (CRE)", "A waste product filtered by the kidneys. Low creatinine levels suggest efficient kidney filtration and preserved muscle mass. Levels usually rise with age, but very low levels in older adults may reflect healthy kidney function."),
+            ("Creatine Kinase (CK)", "High CK can indicate muscle damage or metabolic stress from intense activity or inflammation. Because muscle mass and strength support mobility and independence, monitoring CK helps ensure optimal muscle health."),
+            ("Reactive Oxygen Metabolite (ROM)", "Reflects oxidative stress burden. High ROM accelerates DNA damage and cellular aging, while antioxidants such as vitaminÂ E can help reduce ROM and protect cells from oxidative damage."),
+            ("Total Antioxidant Capacity (TAC)", "Measures how well the body counters oxidative stress. Low TAC suggests weak defenses and greater risk of chronic disease. High TAC indicates better protection from free radical damage."),
+            ("DNA Damage (8âOHdG)", "Indicates oxidative damage to DNA. Elevated 8âOHdG suggests slowing DNA repair and accelerated aging; interventions with nutrients like zinc and vitaminÂ E may lower levels."),
+            ("Intracellular NAD+", "NADâº supports mitochondrial function and sirtuin activation but declines with age, contributing to fatigue and metabolic dysfunction. Testing cellular NADâº helps identify opportunities for targeted supplementation."),
+            ("VitaminÂ D", "Regulates immune and bone health. Deficiency increases risk for chronic disease and frailty; maintaining optimal levels supports immunity and strong bones."),
+            ("Glycated Serum Protein (GSP)", "Reflects short-term blood sugar control and, alongside HbA1c, helps assess diabetes risk. Stable glucose levels protect vascular and neurological health."),
+            ("Blood Lipids (HDL, LDL, triglycerides)", "Balance between high-density lipoprotein (HDL) and lower levels of low-density lipoprotein (LDL) and triglycerides is crucial for heart health. Centenarians often have healthier lipid profiles, underscoring the importance of monitoring lipids."),
+            ("Uric Acid", "Excess uric acid can cause gout or kidney stones, but in small amounts it acts as an antioxidant. Centenarians maintain balanced levels, benefiting from protection without the risks of high uric acid."),
+            ("Klotho", "An anti-aging protein that supports kidney function, mineral balance and brain health. Levels decline with age; higher klotho is associated with slower aging and better health outcomes."),
+            ("Inflammation markers (hs-CRP, IL-1Î², IL-6, IL-8, TNF-Î±)", "Chronic low-grade inflammation (\"inflammaging\") damages tissues and increases risks for heart disease, diabetes and cognitive decline. Regular exercise, omega-3 fats and stress management can help control these markers."),
+            ("Senescence-Associated Î²-Galactosidase (SABG or Î²-gal)", "Identifies senescent cells that accumulate with age. These âzombieâ cells release inflammatory factors and contribute to chronic disease; emerging senolytic therapies aim to clear them."),
+        ]
+        # Render each biomarker item as a bullet point.
+        for name, desc in biomarker_items:
+            st.markdown(f"* **{name}:** {desc}")
+
+        # Only render citations when the toggle is on.
+        if show_biomarker_citations:
+            st.markdown("#### Sources and citations")
+            citation_lines = [
+                "Information on albuminâs role and its association with chronic inflammation, malnutrition and frailty is summarised from Jinfinitiâs description of albumin and centenarian studiesã203931968364787â L234-L246ã.",
+                "The functions of alkaline phosphatase (ALP) and alanine aminotransferase (ALT) and what elevated levels indicate are based on Jinfinitiâs discussion of these enzymesã203931968364787â L248-L262ã.",
+                "The explanation of creatinineâs role as a kidney function marker and how its levels change with age comes from Jinfinitiâs articleã203931968364787â L264-L278ã.",
+                "Details about creatine kinase (CK) as a marker of muscle damage and its importance for mobility are drawn from Jinfinitiâs overviewã203931968364787â L280-L290ã.",
+                "The description of reactive oxygen metabolites (ROM) and the protective effects of antioxidants like vitaminÂ E reflects Jinfinitiâs discussionã203931968364787â L292-L303ã.",
+                "The summary of total antioxidant capacity (TAC) and its significance for disease risk is based on Jinfinitiâs explanationã203931968364787â L305-L317ã.",
+                "Information on DNA damage (8âOHdG) as a marker of oxidative stress and how nutrition may reduce it comes from Jinfinitiã203931968364787â L320-L327ã.",
+                "The role of intracellular NADâº in mitochondrial function, its decline with age and potential interventions are summarised from the Jinfiniti guideã203931968364787â L329-L341ã.",
+                "Insights about vitaminÂ Dâs effect on immune function, bone health and frailty are drawn from Jinfinitiâs articleã203931968364787â L342-L349ã.",
+                "The description of glycated serum protein (GSP) as a blood sugar indicator and its link to diabetes risk is based on Jinfinitiâs textã203931968364787â L352-L359ã.",
+                "Information about blood lipids (HDL, LDL, triglycerides) and their relationship to cardiovascular health and longevity derives from the Jinfiniti discussionã203931968364787â L364-L375ã.",
+                "The dual role of uric acid as both a risk factor and an antioxidant, and observations from centenarians, comes from Jinfinitiâs explanationã203931968364787â L377-L389ã.",
+                "The significance of klotho as an anti-aging protein and its association with slower aging is summarised from Jinfinitiâs descriptionã203931968364787â L392-L404ã.",
+                "The section on inflammation markers and the concept of inflammaging draws from Jinfinitiâs overviewã203931968364787â L406-L419ã.",
+                "Information on senescence-associated Î²-galactosidase identifying senescent cells and the potential of senolytic therapies is taken from Jinfinitiâs articleã203931968364787â L421-L430ã.",
+            ]
+            for cl in citation_lines:
+                st.markdown(f"- {cl}")
 
     # ------------------------------------------------------------------
     # Sidebar: Reports & exports (quick access)
