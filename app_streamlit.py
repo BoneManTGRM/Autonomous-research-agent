@@ -4637,7 +4637,10 @@ def main() -> None:
     # underlying citation details.  The toggle remembers its state via
     # session_state and defaults to hidden to avoid cluttering the UI.
     # ------------------------------------------------------------------
-    if use_biomarkers:
+    # Biomarker section removed: disable the display of the Longevity Biomarker Summary
+    # by forcing the condition to false.  Previously this section displayed a detailed
+    # summary of fifteen biomarkers and their citations when the sidebar toggle was enabled.
+    if False and use_biomarkers:
         st.markdown("## Longevity Biomarker Summary")
         st.write(
             "This summary outlines fifteen important biomarkers used in longevity blood tests and why they matter for healthy aging."
