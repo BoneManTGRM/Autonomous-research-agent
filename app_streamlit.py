@@ -5511,118 +5511,116 @@ def main() -> None:
             else:
                 st.info("MSIL module not detected or no MSIL profile available. This panel stays optional.")
 
-            st.markdown("#### 10x learning dashboard (Option C signals)")
+            # st.markdown("#### 10x learning dashboard (Option C signals)")
 
-            # Option C signals are derived from the RYE time series for the active run.
-            # Some deployments previously passed a diagnostics dict directly; to keep
-            # compatibility we try the preferred "series" signature first.
-            domain_for_signals = None
-            if isinstance(diagnostics, dict):
-                dom0 = diagnostics.get("domain")
-                if isinstance(dom0, str) and dom0:
-                    domain_for_signals = dom0
+            # Option C signals have been disabled due to persistent 'n/a' readings.
+            # domain_for_signals = None
+            # if isinstance(diagnostics, dict):
+            #     dom0 = diagnostics.get("domain")
+            #     if isinstance(dom0, str) and dom0:
+            #         domain_for_signals = dom0
 
-            rye_series_for_option_c: List[float] = []
-            try:
-                if isinstance(history, list):
-                    for c in history:
-                        if not isinstance(c, dict):
-                            continue
-                        if domain_for_signals and str(c.get("domain") or "") != domain_for_signals:
-                            continue
-                        v = _maybe_float(c.get("rye"))
-                        if v is not None:
-                            rye_series_for_option_c.append(float(v))
-            except Exception:
-                rye_series_for_option_c = []
+            # rye_series_for_option_c: List[float] = []
+            # try:
+            #     if isinstance(history, list):
+            #         for c in history:
+            #             if not isinstance(c, dict):
+            #                 continue
+            #             if domain_for_signals and str(c.get("domain") or "") != domain_for_signals:
+            #                 continue
+            #             v = _maybe_float(c.get("rye"))
+            #             if v is not None:
+            #                 rye_series_for_option_c.append(float(v))
+            # except Exception:
+            #     rye_series_for_option_c = []
 
-            volatility_info: Dict[str, Any] = {}
-            try:
-                volatility_info = rye_volatility_signature(rye_series_for_option_c, window=10)  # type: ignore[arg-type]
-            except TypeError:
-                try:
-                    # Back-compat: older signature may accept history/domain/window
-                    volatility_info = rye_volatility_signature(history=history, domain=domain_for_signals, window=10)  # type: ignore[call-arg]
-                except Exception:
-                    volatility_info = {}
-            except Exception:
-                volatility_info = {}
+            # volatility_info: Dict[str, Any] = {}
+            # try:
+            #     volatility_info = rye_volatility_signature(rye_series_for_option_c, window=10)  # type: ignore[arg-type]
+            # except TypeError:
+            #     try:
+            #         # Back-compat: older signature may accept history/domain/window
+            #         volatility_info = rye_volatility_signature(history=history, domain=domain_for_signals, window=10)  # type: ignore[call-arg]
+            #     except Exception:
+            #         volatility_info = {}
+            # except Exception:
+            #     volatility_info = {}
 
-            equilibrium_info: Dict[str, Any] = {}
-            try:
-                equilibrium_info = detect_rye_equilibrium(rye_series_for_option_c)  # type: ignore[arg-type]
-            except TypeError:
-                try:
-                    equilibrium_info = detect_rye_equilibrium(history=history, domain=domain_for_signals, window=10)  # type: ignore[call-arg]
-                except Exception:
-                    equilibrium_info = {}
-            except Exception:
-                equilibrium_info = {}
+            # equilibrium_info: Dict[str, Any] = {}
+            # try:
+            #     equilibrium_info = detect_rye_equilibrium(rye_series_for_option_c)  # type: ignore[arg-type]
+            # except TypeError:
+            #     try:
+            #         equilibrium_info = detect_rye_equilibrium(history=history, domain=domain_for_signals, window=10)  # type: ignore[call-arg]
+            #     except Exception:
+            #         equilibrium_info = {}
+            # except Exception:
+            #     equilibrium_info = {}
 
-            harmonic_val: Optional[float] = None
-            try:
-                if isinstance(diagnostics, dict):
-                    harmonic_val = tgrm_harmonic_index(diagnostics.get("stability_index"), diagnostics.get("recovery_momentum"))  # type: ignore[arg-type]
-                else:
-                    harmonic_val = tgrm_harmonic_index(None, None)  # type: ignore[arg-type]
-            except TypeError:
-                try:
-                    harmonic_val = tgrm_harmonic_index(history=history, domain=domain_for_signals, window=10)  # type: ignore[call-arg]
-                except Exception:
-                    harmonic_val = None
-            except Exception:
-                harmonic_val = None
+            # harmonic_val: Optional[float] = None
+            # try:
+            #     if isinstance(diagnostics, dict):
+            #         harmonic_val = tgrm_harmonic_index(diagnostics.get("stability_index"), diagnostics.get("recovery_momentum"))  # type: ignore[arg-type]
+            #     else:
+            #         harmonic_val = tgrm_harmonic_index(None, None)  # type: ignore[arg-type]
+            # except TypeError:
+            #     try:
+            #         harmonic_val = tgrm_harmonic_index(history=history, domain=domain_for_signals, window=10)  # type: ignore[call-arg]
+            #     except Exception:
+            #         harmonic_val = None
+            # except Exception:
+            #     harmonic_val = None
 
-            vol_score = volatility_info.get("volatility_score")
-            vol_regime = volatility_info.get("regime") or volatility_info.get("label")
-            eq_flag = equilibrium_info.get("equilibrium")
-            if eq_flag is None:
-                eq_flag = equilibrium_info.get("in_equilibrium")
-            eq_reason = equilibrium_info.get("reason")
-            eq_state_text = "yes" if eq_flag is True else ("no" if eq_flag is False else "unknown")
-            if str(eq_reason).lower() in {"not_enough_data", "insufficient_data", "no_data"}:
-                eq_state_text = "n/a"
+            # vol_score = volatility_info.get("volatility_score")
+            # vol_regime = volatility_info.get("regime") or volatility_info.get("label")
+            # eq_flag = equilibrium_info.get("equilibrium")
+            # if eq_flag is None:
+            #     eq_flag = equilibrium_info.get("in_equilibrium")
+            # eq_reason = equilibrium_info.get("reason")
+            # eq_state_text = "yes" if eq_flag is True else ("no" if eq_flag is False else "unknown")
+            # if str(eq_reason).lower() in {"not_enough_data", "insufficient_data", "no_data"}:
+            #     eq_state_text = "n/a"
 
-            oc_cols = st.columns(3)
-            with oc_cols[0]:
-                st.metric("Equilibrium detected", eq_state_text)
-            with oc_cols[1]:
-                st.metric("Volatility score", f"{vol_score:.3f}" if isinstance(vol_score, (int, float)) else "n/a")
-            with oc_cols[2]:
-                st.metric("TGRM harmonic index", f"{harmonic_val:.3f}" if isinstance(harmonic_val, (int, float)) else "n/a")
+            # oc_cols = st.columns(3)
+            # with oc_cols[0]:
+            #     st.metric("Equilibrium detected", eq_state_text)
+            # with oc_cols[1]:
+            #     st.metric("Volatility score", f"{vol_score:.3f}" if isinstance(vol_score, (int, float)) else "n/a")
+            # with oc_cols[2]:
+            #     st.metric("TGRM harmonic index", f"{harmonic_val:.3f}" if isinstance(harmonic_val, (int, float)) else "n/a")
 
-            if vol_regime:
-                st.caption(f"Volatility regime: {vol_regime}")
-            if eq_reason:
-                st.caption(f"Equilibrium reasoning: {eq_reason}")
+            # if vol_regime:
+            #     st.caption(f"Volatility regime: {vol_regime}")
+            # if eq_reason:
+            #     st.caption(f"Equilibrium reasoning: {eq_reason}")
 
-            with st.expander("Autonomy safety and failure envelope"):
-                st.write("Autonomy safety envelope:")
-                st.json(env)
-                st.write("Early failure warning score:")
-                st.json(fail)
+            # with st.expander("Autonomy safety and failure envelope"):
+            #     st.write("Autonomy safety envelope:")
+            #     st.json(env)
+            #     st.write("Early failure warning score:")
+            #     st.json(fail)
 
-            with st.expander("Raw Option C style signals"):
-                raw_signals = {
-                    "diagnostics": diagnostics,
-                    "volatility": volatility_info,
-                    "equilibrium": equilibrium_info,
-                    "harmonic_index": harmonic_val,
-                    "breakthrough_near_term": bp_short,
-                    "breakthrough_90d": bp90,
-                    "run_tier": tier_info,
-                    "msil_profile": msil_profile_full,
-                }
-                preview, note = safe_json_preview(raw_signals)
-                if preview is not None:
-                    st.code(preview, language="json")
-                    if note:
-                        st.caption(note)
+            # with st.expander("Raw Option C style signals"):
+            #     raw_signals = {
+            #         "diagnostics": diagnostics,
+            #         "volatility": volatility_info,
+            #         "equilibrium": equilibrium_info,
+            #         "harmonic_index": harmonic_val,
+            #         "breakthrough_near_term": bp_short,
+            #         "breakthrough_90d": bp90,
+            #         "run_tier": tier_info,
+            #         "msil_profile": msil_profile_full,
+            #     }
+            #     preview, note = safe_json_preview(raw_signals)
+            #     if preview is not None:
+            #         st.code(preview, language="json")
+            #         if note:
+            #             st.caption(note)
 
-            with st.expander("Raw history JSON"):
-                preview, note = safe_json_preview(history, max_items=MAX_POINTS_FOR_CHARTS)
-                if preview is not None:
-                    st.code(preview, language="json")
+            # with st.expander("Raw history JSON"):
+            #     preview, note = safe_json_preview(history, max_items=MAX_POINTS_FOR_CHARTS)
+            #     if preview is not None:
+            #         st.code(preview, language="json")
                     if note:
                         st.caption(note)
 
