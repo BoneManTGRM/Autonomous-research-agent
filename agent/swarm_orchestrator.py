@@ -317,7 +317,8 @@ class SwarmOrchestrator:
     """
 
     agent_fn: Optional[AgentFn] = None
-    max_workers: int = 32
+    # Increase default worker concurrency to support larger swarms. Previously capped at 32.
+    max_workers: int = 64
     max_swarm_size: int = 64
     default_mode: str = "burst"
     default_domain: str = "general"
