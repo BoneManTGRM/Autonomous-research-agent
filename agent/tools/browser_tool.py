@@ -678,6 +678,7 @@ class BrowserTool:
 
         if "error" in data:
             pubstub_flag = bool(data.get("pubstub"))
+            # Always log the error for diagnostics
             self._log_event(
                 {
                     "event": "search_error",
@@ -692,39 +693,32 @@ class BrowserTool:
                 }
             )
 
-            # On PubStub, flip into stub mode for the rest of the run
-            if pubstub_flag:
-                self.force_stub = True
-                stub_results = self._make_stub_results(
-                    query=q,
-                    max_results=max_results,
-                    truncated=truncated,
-                    reason="Tavily PubStub error encountered; switched to stub mode mid-run.",
-                )
-                # Append original error text to the first stub snippet for debugging
-                if stub_results:
-                    orig_err = str(data.get("error") or "unknown_error")
-                    stub_results[0]["snippet"] += f" Original Tavily error: {orig_err}"
-                self._cache_set(cache_key, {"results": stub_results})
-                return stub_results
+            # Determine if we should switch to stub mode based on env or default
+            force_stub_env = os.getenv("TAVILY_FORCE_STUB_ON_ERROR")
+            force_stub_on_error = True
+            if force_stub_env is not None:
+                # Interpret '0', 'false', 'no', 'off' as false, otherwise true
+                force_stub_on_error = force_stub_env.strip().lower() not in ("0", "false", "no", "off")
 
-            # Non-PubStub error: keep previous behavior
-            error_result = [
-                {
-                    "source": "error",
-                    "title": "Tavily Search Error",
-                    "url": "",
-                    "snippet": str(data.get("error") or "unknown_error"),
-                    "score": None,
-                    "error": str(data.get("error") or "unknown_error"),
-                    "status_code": data.get("status_code"),
-                    "response_snippet": data.get("response_snippet"),
-                    "client_error": data.get("client_error"),
-                    "pubstub": data.get("pubstub", False),
-                }
-            ]
-            self._cache_set(cache_key, {"results": error_result})
-            return error_result
+            if force_stub_on_error:
+                # Persist stub mode so subsequent calls avoid hitting Tavily again
+                self.force_stub = True
+
+            # Use stub results for any Tavily error rather than surfacing an error entry
+            reason_msg = (
+                "Tavily PubStub error encountered; using stub results."
+                if pubstub_flag
+                else "Tavily error encountered; using stub results."
+            )
+            stub_results = self._make_stub_results(
+                query=q,
+                max_results=max_results,
+                truncated=truncated,
+                reason=reason_msg,
+            )
+            # Cache and return stub results
+            self._cache_set(cache_key, {"results": stub_results})
+            return stub_results
 
         results = self._normalize_results(data.get("results", data))
         if len(results) > max_results:
@@ -795,6 +789,7 @@ class BrowserTool:
 
         if "error" in data:
             pubstub_flag = bool(data.get("pubstub"))
+            # Log the error
             self._log_event(
                 {
                     "event": "search_with_answer_error",
@@ -809,37 +804,27 @@ class BrowserTool:
                 }
             )
 
-            if pubstub_flag:
-                # Switch to stub mode for future calls
-                self.force_stub = True
-                stub_results = self._make_stub_results(
-                    query=q,
-                    max_results=max_results,
-                    truncated=truncated,
-                    reason="Tavily PubStub error encountered; switched to stub mode mid-run.",
-                )
-                if stub_results:
-                    orig_err = str(data.get("error") or "unknown_error")
-                    stub_results[0]["snippet"] += f" Original Tavily error: {orig_err}"
-                return {"answer": None, "results": stub_results}
+            # Determine whether to persist stub mode
+            force_stub_env = os.getenv("TAVILY_FORCE_STUB_ON_ERROR")
+            force_stub_on_error = True
+            if force_stub_env is not None:
+                force_stub_on_error = force_stub_env.strip().lower() not in ("0", "false", "no", "off")
 
-            return {
-                "answer": None,
-                "results": [
-                    {
-                        "source": "error",
-                        "title": "Tavily Search Error",
-                        "url": "",
-                        "snippet": str(data.get("error") or "unknown_error"),
-                        "score": None,
-                        "error": str(data.get("error") or "unknown_error"),
-                        "status_code": data.get("status_code"),
-                        "response_snippet": data.get("response_snippet"),
-                        "client_error": data.get("client_error"),
-                        "pubstub": data.get("pubstub", False),
-                    }
-                ],
-            }
+            if force_stub_on_error:
+                self.force_stub = True
+
+            reason_msg = (
+                "Tavily PubStub error encountered; using stub results."
+                if pubstub_flag
+                else "Tavily error encountered; using stub results."
+            )
+            stub_results = self._make_stub_results(
+                query=q,
+                max_results=max_results,
+                truncated=truncated,
+                reason=reason_msg,
+            )
+            return {"answer": None, "results": stub_results}
 
         answer = data.get("answer") if isinstance(data, dict) else None
         results = self._normalize_results(data.get("results", data))
