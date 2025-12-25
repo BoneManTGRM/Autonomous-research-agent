@@ -3285,6 +3285,17 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     except Exception:
         requested_rounds = requested_cycles
 
+    # Ensure that at least a small number of rounds are run.  Without this guard,
+    # jobs configured for very few rounds (e.g. 0 or 1) may complete almost
+    # instantly and produce empty or trivial results.  Default to at least 3
+    # rounds to give the agents enough opportunity to gather information and
+    # generate hypotheses before evaluating stop conditions.
+    try:
+        if requested_rounds < 3:
+            requested_rounds = 3
+    except Exception:
+        pass
+
     max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "max_cycles")
     max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
     # When running in swarm mode compute the macro_total as the total number
@@ -7870,6 +7881,17 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     requested_rounds = HARD_MAX_ROUNDS
             else:
                 requested_rounds = HARD_MAX_ROUNDS
+
+            # Enforce a minimum of 3 rounds so that very short swarm runs do not
+            # terminate immediately.  Small round counts (e.g. 0 or 1) can cause the
+            # worker to exit without giving agents enough time to produce
+            # meaningful hypotheses or perform research.  Adjust upward to 3 if
+            # necessary.
+            try:
+                if requested_rounds < 3:
+                    requested_rounds = 3
+            except Exception:
+                pass
 
             max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "swarm.max_rounds")
 
