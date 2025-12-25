@@ -441,15 +441,33 @@ def stability_index(history: List[Dict[str, Any]]) -> Optional[float]:
     """
     Measures variance normalized stability of RYE values.
 
-    1.0 = perfectly stable improvements
-    0.0 = chaotic swings
+    A value of 1.0 indicates perfectly stable improvements and 0.0
+    corresponds to chaotic swings.  Originally this metric required at
+    least four RYE observations to compute a meaningful variance; runs
+    shorter than that returned ``None``.  To support short finite
+    experiments (e.g. two or three cycles) we relax this requirement and
+    compute a stability score whenever at least one RYE value exists.
+    When only a single value is available the variance is zero and the
+    stability is interpreted as fully stable (1.0 if the value is
+    nonânegative, otherwise 0.0).  For two or three values the sample
+    variance provides a coarse estimate of volatility.
 
-    Compatible with both full history and bare RYE lists.
+    Args:
+        history: List of cycle history dicts or raw RYE values.
+
+    Returns:
+        A float in [0, 1] indicating stability, or ``None`` when no RYE
+        data is available.
     """
     vals = _extract_rye_series(history)
-    if len(vals) < 4:
+    if not vals:
         return None
 
+    # With a single value there is no variance; treat as stable.
+    if len(vals) == 1:
+        return 1.0 if vals[0] >= 0 else 0.0
+
+    # Use population variance for consistency with original implementation.
     mean = sum(vals) / len(vals)
     var = statistics.pvariance(vals)
 
@@ -473,10 +491,16 @@ def recovery_momentum(history: List[Dict[str, Any]]) -> Optional[float]:
     if the system is picking up momentum or stalling.
 
     Works with either full history or bare RYE lists.
+
+    The original implementation returned ``None`` when there were not
+    enough data points to compute a regression slope.  To allow early
+    diagnostics on short runs, treat a missing slope as zero momentum.
     """
     slope = regression_rye_slope(history)
     if slope is None:
-        return None
+        # With insufficient data the acceleration is unknown; assume no
+        # momentum rather than omitting the metric entirely.
+        return 0.0
     return max(slope * 10.0, 0.0)
 
 
@@ -1073,12 +1097,16 @@ def rye_volatility_signature(
         }
 
     recent = vals[-window:]
+    # When fewer than two observations are available treat the series as
+    # perfectly stable (zero variance).  This produces std=0, range=0,
+    # cv=None and a maximum volatility score of 1.0, avoiding ``None``
+    # signals that propagate as n/a in the UI.
     if len(recent) < 2:
         return {
-            "std": None,
-            "range": None,
+            "std": 0.0,
+            "range": 0.0,
             "cv": None,
-            "volatility_score": None,
+            "volatility_score": 1.0,
         }
 
     mean = sum(recent) / len(recent)
@@ -1093,7 +1121,10 @@ def rye_volatility_signature(
         cv = abs(std / mean)
 
     if cv is None:
-        volatility_score = None
+        # When the coefficient of variation is undefined (mean==0), treat
+        # volatility as maximum (1.0) to indicate neutrality.  Setting
+        # cv=None here would propagate None and result in n/a signals.
+        volatility_score = 1.0
     else:
         raw = 1.0 / (1.0 + cv)
         volatility_score = max(0.0, min(raw, 1.0))
