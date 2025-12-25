@@ -2934,10 +2934,76 @@ def _collapse_cycles_for_ui(cycles_list: List[Any], total: Optional[int]) -> Lis
 
 
 def _aggregate_from_cycles(cycles: List[Dict[str, Any]], key: str) -> List[Any]:
+    """
+    Aggregate list-valued fields from a list of cycle dictionaries.
+
+    Historically this helper simply concatenated all lists under a given key
+    across all cycles.  However, certain keys such as ``"citations"`` or
+    ``"sources"`` may contain entries that are not valid (for example
+    placeholder objects created when a web search fails or returns an error).
+    These invalid records can pollute the topâlevel result and inflate
+    metrics like ``sources_used``.  In particular, Tavily search errors may
+    produce citation stubs with empty URLs and generic error titles.
+
+    To address this, when aggregating citations we skip any entry that
+    lacks a nonâempty URL.  This filters out search error stubs while
+    preserving legitimate citations.  All other keys are aggregated
+    unchanged.
+
+    Args:
+        cycles: list of perâcycle dictionaries
+        key: the key to aggregate
+
+    Returns:
+        Concatenated list of all values for ``key`` across cycles, with
+        invalid citation stubs filtered out when ``key`` is ``"citations"``.
+    """
     out: List[Any] = []
     for c in cycles:
         val = c.get(key)
-        if isinstance(val, list):
+        if not isinstance(val, list):
+            continue
+        # For citation lists, filter out entries without a valid URL to avoid
+        # including search error placeholders.  A valid citation should
+        # typically include a nonâempty "url" field.  If the structure of
+        # citation objects changes in the future, this check can be
+        # tightened or relaxed accordingly.
+        if key == "citations":
+            for entry in val:
+                try:
+                    url = None
+                    if isinstance(entry, dict):
+                        url = entry.get("url")
+                    if url:
+                        out.append(entry)
+                except Exception:
+                    continue
+        elif key == "hypotheses":
+            # Deduplicate hypotheses by title and description to avoid
+            # repeated autoâgenerated placeholders polluting the run summary.
+            seen: set = set()
+            for entry in val:
+                if not isinstance(entry, dict):
+                    # Unknown structure; include asâis
+                    out.append(entry)
+                    continue
+                title = entry.get("title")
+                description = entry.get("description")
+                # Create a hashable signature; fall back to repr if needed
+                sig = None
+                if isinstance(title, str) and isinstance(description, str):
+                    sig = (title.strip(), description.strip())
+                else:
+                    try:
+                        sig = repr(entry)
+                    except Exception:
+                        sig = None
+                if sig is not None and sig in seen:
+                    continue  # Skip duplicate hypothesis
+                if sig is not None:
+                    seen.add(sig)
+                out.append(entry)
+        else:
             out.extend(val)
     return out
 
