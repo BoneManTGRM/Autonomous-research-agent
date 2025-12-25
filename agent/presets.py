@@ -530,7 +530,6 @@ SWARM_ROLES: List[Dict[str, Any]] = [
 
 SWARM_GLOBAL_HINTS: Dict[str, Any] = {
     # Hard safety ceiling for platform resources.
-    # Increased from 32 to 64 to allow larger swarms.
     "max_agents_safe": 64,
     # Good default for most presets when user clicks swarm.
     "default_agents": 5,
