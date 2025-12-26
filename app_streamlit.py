@@ -2595,8 +2595,20 @@ def compute_progress_view(
         # prompt_details may exist in progress_state (ps) or worker_state (ws)
         if isinstance(ps, dict):
             pd = ps.get("prompt_details")  # type: ignore[attr-defined]
+            # If prompt_details is nested under extra, retrieve it as a fallback
+            if not pd and isinstance(ps.get("extra"), dict):
+                try:
+                    pd = ps.get("extra", {}).get("prompt_details")  # type: ignore[call-arg]
+                except Exception:
+                    pd = None
         if not pd and isinstance(ws, dict):
             pd = ws.get("prompt_details")  # type: ignore[attr-defined]
+            # Fallback: look inside extra when direct prompt_details is absent
+            if not pd and isinstance(ws.get("extra"), dict):
+                try:
+                    pd = ws.get("extra", {}).get("prompt_details")  # type: ignore[call-arg]
+                except Exception:
+                    pd = None
         if isinstance(pd, dict):
             # Determine macro_total based on mode; use max_rounds for swarm modes
             mode_pd = pd.get("mode")
