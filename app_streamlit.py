@@ -2493,7 +2493,21 @@ def compute_progress_view(
         if run_id_val is not None:
             run_id = str(run_id_val)
 
-    finished_like = status_s in {"finished", "done", "completed", "complete", "success"}
+    # Consider additional final statuses as finished-like.  Some job engines
+    # reset the worker status to "idle" or "stopped" after completing a
+    # run.  Without including these in the finished set, the UI may
+    # display a partially filled progress bar even though no further
+    # cycles will run.  Include "idle" and "stopped" to treat
+    # those states as terminal.
+    finished_like = status_s in {
+        "finished",
+        "done",
+        "completed",
+        "complete",
+        "success",
+        "idle",
+        "stopped",
+    }
 
     # Signals that the worker has started doing real work (status running OR fresh-ish heartbeat)
     hb_count = _safe_int((watchdog or {}).get("count"), 0) or 0
