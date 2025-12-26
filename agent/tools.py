@@ -93,13 +93,13 @@ _WEB_RESEARCH_INSTANCE: Optional[Any] = None
 
 # When only a single web search service is available for all agents, the
 # default concurrency limit should be low to avoid saturating that shared
-# endpoint. Historically this was set to 1, which limited throughput and
-# caused large swarms to make very few Tavily calls. By raising the default
-# concurrency to the maximum plausible swarm size (e.g. 64) we allow each
-# agent in a large swarm to perform its own search without waiting on a
-# global semaphore. This value can still be overridden via the
-# TAVILY_MAX_CONCURRENCY environment variable. Adjust up or down based on
-# your Tavily quota and traffic patterns.
+# endpoint. Historically this was set to 1, which severely throttled
+# parallelism for large swarms and resulted in very few Tavily calls being
+# executed during a run. To allow each agent in a swarm to perform its own
+# search without waiting on a global semaphore, we raise the default
+# concurrency to the maximum expected swarm size (64).  Deployments that
+# require a lower or higher limit can still override this via the
+# `TAVILY_MAX_CONCURRENCY` environment variable.
 _DEFAULT_TAVILY_MAX_CONCURRENCY = 64
 _DEFAULT_TAVILY_MAX_RETRIES = 3
 
