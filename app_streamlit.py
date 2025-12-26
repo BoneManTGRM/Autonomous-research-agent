@@ -3141,11 +3141,25 @@ def _infer_agents_from_job_config(job_payload: Optional[Dict[str, Any]]) -> List
         cfg = {}
     mode = str(cfg.get("mode") or "").lower()
 
+    # Extract swarm configuration (may be under swarm_config or swarm)
     swarm_cfg = cfg.get("swarm_config") or cfg.get("swarm") or {}
     if not isinstance(swarm_cfg, dict):
         swarm_cfg = {}
 
     swarm_size = _safe_int(swarm_cfg.get("swarm_size"), 1) or 1
+
+    # Prefer a topâlevel roles list when present.  Some job creators
+    # (including the patched Streamlit UI) set roles on the top level of
+    # the run configuration to include every mini agent in the swarm.  If
+    # provided, use this list as the authoritative set of agents so that
+    # all agents are rendered in the UI.  Fall back to swarm_config roles
+    # only when the topâlevel list is absent.
+    roles_top = cfg.get("roles")
+    if isinstance(roles_top, list) and roles_top:
+        role_names = [str(r) for r in roles_top if str(r).strip()]
+        if role_names:
+            return role_names
+
     roles = swarm_cfg.get("roles")
     if isinstance(roles, list) and roles:
         role_names = [str(r) for r in roles if str(r).strip()]
@@ -5011,8 +5025,23 @@ def main() -> None:
             if enable_swarm:
                 try:
                     # Flatten the role names into a simple list for the worker.
-                    role_names = [name for name, _desc in swarm_roles] if swarm_roles else ["agent"]
-                    run_config["roles"] = role_names
+                    base_roles = [name for name, _desc in swarm_roles] if swarm_roles else ["agent"]
+                    # Expand or truncate the roles list to match the requested swarm size.
+                    try:
+                        target_size = int(swarm_size)
+                    except Exception:
+                        target_size = len(base_roles)
+                    if target_size <= 0:
+                        target_size = len(base_roles)
+                    # If fewer base roles than agents, repeat them until reaching the target size.
+                    if len(base_roles) < target_size:
+                        extended: List[str] = []
+                        while len(extended) < target_size:
+                            extended.extend(base_roles)
+                        role_names_extended = extended[:target_size]
+                    else:
+                        role_names_extended = base_roles[:target_size]
+                    run_config["roles"] = role_names_extended
                 except Exception:
                     run_config["roles"] = ["agent"]
                 # Propagate swarm_size and per tick agent cap to the top level
