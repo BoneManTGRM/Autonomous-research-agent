@@ -470,7 +470,7 @@ SWARM_ROLES: List[Tuple[str, str]] = [
 
 # Safe upper bound for swarm size on typical Render or Streamlit setups.
 # All swarm agents are still run sequentially in a single process by the worker.
-MAX_SWARM_AGENTS: int = 32
+MAX_SWARM_AGENTS: int = 64
 
 # Limit points in charts so the frontend does not hit RangeError on very long runs.
 MAX_POINTS_FOR_CHARTS: int = 1000
@@ -2610,14 +2610,37 @@ def compute_progress_view(
                 # number of roles.  For example, 3 rounds with 32 roles
                 # produces 96 logical cycles.  If roles is missing, assume 1.
                 mc = pd.get("max_rounds") or pd.get("max_cycles")
+                # When rendering the swarm progress bar, prefer to multiply
+                # the number of requested rounds by the total number of agents
+                # (swarm_size) if available.  If swarm_size is not present,
+                # fall back to the length of the roles list.  This avoids
+                # miscounting cycles when the prompt details only include a
+                # subset of roles (e.g. unique role names) rather than one entry
+                # per agent.
+                swarm_sz: Optional[int] = None
+                try:
+                    swarm_sz_val = pd.get("swarm_size")
+                    if swarm_sz_val is not None:
+                        # Coerce to int when possible
+                        swarm_sz = _safe_int(swarm_sz_val, None)
+                except Exception:
+                    swarm_sz = None
+
                 roles_list = pd.get("roles") if isinstance(pd.get("roles"), list) else None
                 roles_count = len(roles_list) if roles_list else 1
                 try:
                     mc_int = _safe_int(mc, None)
-                    if mc_int is not None and roles_count > 0:
-                        macro_total_ui = mc_int * roles_count
+                    if mc_int is not None:
+                        if isinstance(swarm_sz, int) and swarm_sz > 0:
+                            # Use swarm size (number of agents) when available
+                            macro_total_ui = mc_int * swarm_sz
+                        elif roles_count > 0:
+                            # Otherwise use the count of roles entries
+                            macro_total_ui = mc_int * roles_count
+                        else:
+                            macro_total_ui = mc_int
                     else:
-                        macro_total_ui = mc_int
+                        macro_total_ui = None
                 except Exception:
                     macro_total_ui = None
             else:
@@ -4920,8 +4943,10 @@ def main() -> None:
                     "roles": [name for name, _ in swarm_roles] if swarm_roles else ["agent"],
                     "max_cycles_per_agent": 1,
                     "stagger_start": False,
-                    # Some worker builds treat 0 as "use a default cap" (often 32).
-                    # To ensure a true 64-agent round, explicitly set this to the swarm size.
+                    # Explicitly set the perâtick agent cap to the swarm size so
+                    # all agents can run each round.  Some backends interpret
+                    # zero as a default limit (often 32), which would reduce
+                    # a 64âagent swarm to 32 agents per tick.
                     "max_agents_per_tick": int(swarm_size),
                     "role_goals": {name: role_specific_goal(goal_clean, name) for name, _ in swarm_roles} if swarm_roles else {},
                 }
@@ -4931,6 +4956,7 @@ def main() -> None:
                     "roles": ["agent"],
                     "max_cycles_per_agent": int(cycles),
                     "stagger_start": False,
+                    # For singleâagent or non-swarm runs, allow one agent per tick.
                     "max_agents_per_tick": 1,
                 }
 
