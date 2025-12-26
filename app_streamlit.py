@@ -5001,6 +5001,29 @@ def main() -> None:
                 "monitoring": monitoring_config,
             }
 
+            # In swarm mode include explicit top-level roles and swarm sizing hints.
+            # The engine worker uses the top-level "roles" list to determine the
+            # number of agents when computing progress.  Without this, it falls back
+            # to the number of unique role names which may be fewer than the total
+            # number of mini agents.  Additionally propagate swarm_size and
+            # max_agents_per_tick so worker defaults (e.g. 32) do not override the
+            # requested swarm size.
+            if enable_swarm:
+                try:
+                    # Flatten the role names into a simple list for the worker.
+                    role_names = [name for name, _desc in swarm_roles] if swarm_roles else ["agent"]
+                    run_config["roles"] = role_names
+                except Exception:
+                    run_config["roles"] = ["agent"]
+                # Propagate swarm_size and per tick agent cap to the top level
+                run_config["swarm_size"] = int(swarm_size)
+                run_config["max_agents_per_tick"] = int(swarm_size)
+                # Also include max_cycles_per_agent at the top level for clarity
+                run_config["max_cycles_per_agent"] = int(cycles)
+            else:
+                # For non-swarm runs, define a single agent role if not already present.
+                run_config.setdefault("roles", ["agent"])
+
             # Back-compat: some engine/agent versions use `cycles`/`rounds` keys.
             # We keep these consistent with max_cycles/max_rounds when present.
             if mode != "swarm":
