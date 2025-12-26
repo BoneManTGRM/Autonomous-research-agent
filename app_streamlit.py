@@ -2580,6 +2580,20 @@ def compute_progress_view(
     # Otherwise show cycle progress
     c2 = _safe_int(cur, None)
     t2 = _safe_int(tot, None)
+
+    # If the job is finished but the reported cycle progress has not
+    # reached the total, treat it as complete.  This prevents the
+    # progress bar from appearing partially filled when the run
+    # terminated early (e.g. in swarm mode where early stopping
+    # conditions may result in fewer microâcycles than the
+    # configured maximum).  By promoting the current value to
+    # equal the total for finished runs, the UI more clearly
+    # communicates that no more cycles remain.
+    try:
+        if finished_like and c2 is not None and t2 is not None and t2 > 0 and c2 < t2:
+            c2 = t2
+    except Exception:
+        pass
     # Remap internal step-based progress to user cycles when a macro cycle count
     # is available from the prompt details.  Agents sometimes report progress in
     # terms of a large internal step count (e.g. 18) instead of the user requested
@@ -2595,20 +2609,8 @@ def compute_progress_view(
         # prompt_details may exist in progress_state (ps) or worker_state (ws)
         if isinstance(ps, dict):
             pd = ps.get("prompt_details")  # type: ignore[attr-defined]
-            # If prompt_details is nested under extra, retrieve it as a fallback
-            if not pd and isinstance(ps.get("extra"), dict):
-                try:
-                    pd = ps.get("extra", {}).get("prompt_details")  # type: ignore[call-arg]
-                except Exception:
-                    pd = None
         if not pd and isinstance(ws, dict):
             pd = ws.get("prompt_details")  # type: ignore[attr-defined]
-            # Fallback: look inside extra when direct prompt_details is absent
-            if not pd and isinstance(ws.get("extra"), dict):
-                try:
-                    pd = ws.get("extra", {}).get("prompt_details")  # type: ignore[call-arg]
-                except Exception:
-                    pd = None
         if isinstance(pd, dict):
             # Determine macro_total based on mode; use max_rounds for swarm modes
             mode_pd = pd.get("mode")
