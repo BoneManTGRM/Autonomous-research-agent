@@ -8036,6 +8036,34 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 env_keys=env_keys_for_fingerprint,
             )
 
+            # Build prompt details for UI.  Include ``swarm_size`` equal to the
+            # total number of miniâagents (not just unique role archetypes).
+            # This ensures the frontend progress bar scales correctly for
+            # swarm runs when multiple agents share the same role name.  The
+            # swarm_size is sourced from the configuration when provided and
+            # otherwise falls back to the length of ``roles_list``.
+            swarm_size_val: int = 1
+            try:
+                cfg_swarm_size: Optional[int] = None
+                # Prefer nested ``swarm`` configuration if present
+                if isinstance(config, dict):
+                    swarm_cfg_local = config.get("swarm")
+                    if isinstance(swarm_cfg_local, dict):
+                        val = swarm_cfg_local.get("swarm_size") or swarm_cfg_local.get("max_agents_per_tick")
+                        if isinstance(val, (int, float)) and val:
+                            cfg_swarm_size = int(val)
+                    if cfg_swarm_size is None:
+                        # Fallback to topâlevel keys
+                        val = config.get("swarm_size") or config.get("max_agents_per_tick")
+                        if isinstance(val, (int, float)) and val:
+                            cfg_swarm_size = int(val)
+                if cfg_swarm_size is not None and cfg_swarm_size > 0:
+                    swarm_size_val = int(cfg_swarm_size)
+                else:
+                    swarm_size_val = len(roles_list) if roles_list else 1
+            except Exception:
+                swarm_size_val = len(roles_list) if roles_list else 1
+
             prompt_details: Dict[str, Any] = {
                 "goal": goal,
                 "domain": domain,
@@ -8055,6 +8083,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 "forever": forever,
                 "snapshot_enabled": snapshot_enabled,
                 "snapshot": snapshot_cfg,
+                "swarm_size": swarm_size_val,
             }
 
             log_kv(
@@ -8712,6 +8741,39 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     roles_for_swarm = ["agent"]
             else:
                 roles_for_swarm = roles_env
+
+            # Compute swarm_size for meta runs based on configuration or roles list.
+            # The UI uses swarm_size to scale cycle progress when the number
+            # of agents exceeds the unique role names.  Without this value
+            # progress bars may incorrectly cap at len(roles_for_swarm) instead
+            # of the actual agent count.
+            swarm_size_meta: int = 1
+            try:
+                cfg_swarm_size_meta: Optional[int] = None
+                if isinstance(config, dict):
+                    swarm_cfg_local = config.get("swarm")
+                    if isinstance(swarm_cfg_local, dict):
+                        val = swarm_cfg_local.get("swarm_size") or swarm_cfg_local.get("max_agents_per_tick")
+                        if isinstance(val, (int, float)) and val:
+                            cfg_swarm_size_meta = int(val)
+                    if cfg_swarm_size_meta is None:
+                        val = config.get("swarm_size") or config.get("max_agents_per_tick")
+                        if isinstance(val, (int, float)) and val:
+                            cfg_swarm_size_meta = int(val)
+                if cfg_swarm_size_meta is not None and cfg_swarm_size_meta > 0:
+                    swarm_size_meta = int(cfg_swarm_size_meta)
+                else:
+                    swarm_size_meta = len(roles_for_swarm) if roles_for_swarm else 1
+            except Exception:
+                swarm_size_meta = len(roles_for_swarm) if roles_for_swarm else 1
+
+            # Update prompt_details with roles and swarm_size to assist the UI
+            try:
+                if isinstance(prompt_details, dict):
+                    prompt_details["roles"] = list(roles_for_swarm)
+                    prompt_details["swarm_size"] = swarm_size_meta
+            except Exception:
+                pass
 
             hb_stop: Optional[threading.Event] = None
             hb_thread: Optional[threading.Thread] = None
