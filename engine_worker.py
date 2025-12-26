@@ -3229,6 +3229,18 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             except Exception:
                 roles_list = ["agent"]
 
+        # Ensure the agent adopts the job-defined roles list. Many agents
+        # initialize with a default set of roles (~32), which can cause a
+        # 64âagent swarm to fall back to 32 if the worker uses the agent's
+        # internal roles. If the agent provides a set_agent_roles method,
+        # invoke it with the roles for this run.  Wrap in try/except to
+        # avoid crashing the worker if the method is absent or fails.
+        try:
+            if roles_list and hasattr(agent, "set_agent_roles"):
+                agent.set_agent_roles(list(roles_list))
+        except Exception:
+            pass
+
     max_cycles_explicit = (
         ("max_cycles" in cfg and cfg.get("max_cycles") is not None)
         or ("cycles" in cfg and cfg.get("cycles") is not None)
@@ -3327,12 +3339,14 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 val = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
                 if isinstance(val, (int, float)) and val:
                     override_count = int(val)
-            # If override_count is still None, use the number of roles
+            # Also consider the length of the roles list if provided
+            roles_list_local = cfg.get("roles") if isinstance(cfg.get("roles"), list) else None
+            roles_len = len(roles_list_local) if roles_list_local else 0
+            # Choose the larger of override_count and roles_len when override_count is present
             if override_count is not None and override_count > 0:
-                role_count = override_count
+                role_count = max(int(override_count), roles_len)
             else:
-                roles_list_local = cfg.get("roles") if isinstance(cfg.get("roles"), list) else None
-                role_count = len(roles_list_local) if roles_list_local else 1
+                role_count = roles_len if roles_len > 0 else 1
         except Exception:
             # Fallback to 1 when unable to determine count
             role_count = 1
@@ -5667,6 +5681,16 @@ def _process_single_job(
                     roles_list = agent.get_agent_roles()
                 except Exception:
                     roles_list = ["agent"]
+            # Ensure the agent adopts the job-defined roles list. Many agents
+            # initialize with a default set of roles (~32), which can cause
+            # a 64âagent swarm to fall back to a smaller size if the worker
+            # uses the agent's internal roles. If the agent provides a
+            # set_agent_roles method, invoke it with the roles for this run.
+            try:
+                if roles_list and hasattr(agent, "set_agent_roles"):
+                    agent.set_agent_roles(list(roles_list))
+            except Exception:
+                pass
 
         max_cycles_explicit = (
             ("max_cycles" in cfg and cfg.get("max_cycles") is not None)
@@ -5726,13 +5750,12 @@ def _process_single_job(
         # to reflect the total work performed across all agents rather than
         # showing only the number of rounds (macro cycles).
         if mode == "swarm":
-            # For swarm mode, compute the total number of microâcycles by
-            # multiplying the number of rounds by the number of active agents.  The
-            # number of agents may be greater than the number of unique roles when
-            # the swarm uses multiple instances of each role.  When an explicit
-            # swarm_size or max_agents_per_tick is provided, prefer that over
-            # the length of the roles list.  Fall back to the roles list length
-            # when no override is specified to avoid division by zero.
+            # Compute the total microâcycles for swarm runs based on the
+            # configured number of agents. Prefer explicit swarm_size or
+            # max_agents_per_tick overrides, but never let the count be
+            # smaller than the length of the provided roles list.  This
+            # prevents large swarms (e.g. 64 agents) from being counted as
+            # 32 when a 32-role default is baked into the agent.
             try:
                 override_count: Optional[int] = None
                 swarm_cfg = cfg.get("swarm") if isinstance(cfg.get("swarm"), dict) else {}
@@ -5744,14 +5767,18 @@ def _process_single_job(
                     val = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
                     if isinstance(val, (int, float)) and val:
                         override_count = int(val)
+                # Determine the length of the roles list, if available
+                roles_len = 0
+                try:
+                    if isinstance(roles_list, (list, tuple)):
+                        roles_len = len(roles_list)
+                except Exception:
+                    roles_len = 0
+                # Use the maximum of the override or roles_len when override is present
                 if override_count is not None and override_count > 0:
-                    role_count = override_count
+                    role_count = max(int(override_count), roles_len)
                 else:
-                    # If roles_list is defined, use its length; otherwise default to one role.
-                    try:
-                        role_count = len(roles_list) if roles_list else 1
-                    except Exception:
-                        role_count = 1
+                    role_count = roles_len if roles_len > 0 else 1
             except Exception:
                 role_count = 1
             macro_total = max_rounds * role_count
@@ -6559,6 +6586,17 @@ def _process_single_job(
             # complete at the macro_total for both current and total.
             final_current = macro_total
             final_total = macro_total
+
+        # For swarm runs, report the actual last progress cycle rather than
+        # always forcing completion when progress is less than the macro_total.
+        # The macro_total still reflects the total microâcycle count for the run.
+        if mode == "swarm":
+            try:
+                if last_progress_current is not None:
+                    final_current = last_progress_current
+                final_total = macro_total
+            except Exception:
+                pass
 
         _write_job_progress(
             run_id,
