@@ -3,19 +3,34 @@
 """
 Tooling layer for the Autonomous Research Agent.
 
-Includes:
-- Headless browser wrapper (navigation, scraping, simple actions)
-- Multi step browser automation for forms, clicks, scrolling, downloads
-- Code execution sandbox for safe Python snippets (in process and subprocess)
-- Lightweight math safe_eval
-- Data pipeline helpers for CSV / Excel / Parquet / JSON / NDJSON / basic SQL
-- HTML table loaders and simple URL based loaders
-- Simple cost accounting hooks so tool usage can be reflected in Energy E
+This module exposes a collection of helper utilities that wrap external
+services (such as headless browsers, Python sandboxes, SQL clients and
+search providers) behind safe, concurrency‑aware interfaces. Key features
+include:
+
+* Headless browser wrapper (navigation, scraping, simple actions)
+* Multi‑step browser automation for forms, clicks, scrolling, and downloads
+* Code execution sandbox for safe Python snippets (in‑process and via
+  subprocess)
+* Lightweight math `safe_eval` function
+* Data pipeline helpers for CSV/Excel/Parquet/JSON/NDJSON/basic SQL
+* HTML table loaders and simple URL‑based loaders
+* Cost accounting hooks so tool usage can be reflected in Energy E
 
 All tools are designed to be:
-- Optional (if a dependency is missing, they degrade gracefully)
-- Side effect aware (log what happened for RYE and MemoryStore)
-- Usable by a swarm of agents without breaking isolation
+
+* **Optional** – if a dependency is missing, they degrade gracefully
+* **Side‑effect aware** – log what happened for RYE and MemoryStore
+* **Swarm friendly** – usable by many agents concurrently without breaking
+  isolation
+
+The Tavily web search integration is implemented here as well. It
+maintains a global semaphore and retry logic to protect shared Tavily
+quota. You can tune the default concurrency and timeouts by setting
+environment variables such as `TAVILY_MAX_CONCURRENCY` and
+`TAVILY_TIMEOUT_SECONDS`. See the definitions of
+`_DEFAULT_TAVILY_MAX_CONCURRENCY` and `_DEFAULT_TAVILY_TIMEOUT_SECONDS` for
+defaults and guidance.
 """
 
 from __future__ import annotations
@@ -92,16 +107,23 @@ _WEB_RESEARCH_INSTANCE: Optional[Any] = None
 # backoff includes jitter to avoid synchronized retries across agents.
 
 # When only a single web search service is available for all agents, the
-# default concurrency limit should be low to avoid saturating that shared
-# endpoint. Historically this was set to 1, which severely throttled
+# default concurrency limit should be low enough to avoid saturating that
+# shared endpoint. Historically this was set to 1, which severely throttled
 # parallelism for large swarms and resulted in very few Tavily calls being
-# executed during a run. To allow each agent in a swarm to perform its own
-# search without waiting on a global semaphore, we raise the default
-# concurrency to the maximum expected swarm size (64).  Deployments that
-# require a lower or higher limit can still override this via the
-# `TAVILY_MAX_CONCURRENCY` environment variable.
-_DEFAULT_TAVILY_MAX_CONCURRENCY = 64
-_DEFAULT_TAVILY_MAX_RETRIES = 3
+# executed during a run. Previous versions raised this limit to the maximum
+# expected swarm size (64), but that proved too aggressive on shared
+# infrastructure. To strike a balance between throughput and stability, we
+# now default to 8 concurrent Tavily calls. This value can be tuned via
+# the `TAVILY_MAX_CONCURRENCY` environment variable; set a higher value if
+# you have ample Tavily quota and want to maximize parallelism, or lower it
+# if you encounter rate limiting.
+_DEFAULT_TAVILY_MAX_CONCURRENCY = 8
+
+# The number of retries to attempt when Tavily calls fail due to transient
+# network errors or timeouts. Reduce this from 3 to 2 to avoid very long
+# stall periods when multiple agents backoff simultaneously. The retry
+# behaviour is still governed by exponential backoff and jitter.
+_DEFAULT_TAVILY_MAX_RETRIES = 2
 
 # Read concurrency and retry settings from environment variables. Fall back to
 # defaults if not set or invalid. Keep the values within reasonable bounds
@@ -138,7 +160,12 @@ _TAVILY_CIRCUIT_OPEN_UNTIL: float = 0.0
 _TAVILY_CONSECUTIVE_FAILURES: int = 0
 
 # Default timeouts and circuit settings (override via Render env vars)
-_DEFAULT_TAVILY_TIMEOUT_SECONDS = 20.0
+# Default hard timeout for Tavily web search calls. This caps the amount
+# of time any single agent will wait for a response before failing fast.
+# A value of 30 seconds has been found to balance responsiveness with
+# typical network latencies. Override via the `TAVILY_TIMEOUT_SECONDS`
+# environment variable.
+_DEFAULT_TAVILY_TIMEOUT_SECONDS = 30.0
 _DEFAULT_TAVILY_CONNECT_TIMEOUT_SECONDS = 10.0
 _DEFAULT_TAVILY_READ_TIMEOUT_SECONDS = 20.0
 _DEFAULT_TAVILY_CIRCUIT_FAIL_THRESHOLD = 2
@@ -146,7 +173,7 @@ _DEFAULT_TAVILY_CIRCUIT_OPEN_SECONDS = 120.0
 # Lower the default quota cooldown window.  If Tavily returns a
 # billing/quota error we only open the circuit briefly (e.g. five minutes)
 # instead of an hour.  This allows future calls to try again sooner and
-# avoids a 3600 second lockout in payâasâyouâgo plans.
+# avoids a 3600 second lockout in pay‑as‑you‑go plans.
 _DEFAULT_TAVILY_QUOTA_OPEN_SECONDS = 300.0
 
 
