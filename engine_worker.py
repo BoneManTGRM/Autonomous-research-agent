@@ -5650,7 +5650,16 @@ def _process_single_job(
         role = str(cfg.get("role", "agent"))
         roles_list: Optional[List[str]] = None
         if mode == "swarm":
+            # Prefer top-level roles list if provided.  Some job creators set
+            # roles on the top level for ease of counting.  If absent, fall
+            # back to roles specified in nested swarm_config or swarm keys.
             raw_roles = cfg.get("roles")
+            if not raw_roles:
+                # Check nested swarm configuration for roles when top level
+                # roles is missing.  Support both "swarm" and "swarm_config" keys.
+                swarm_cfg_local = cfg.get("swarm") or cfg.get("swarm_config")
+                if isinstance(swarm_cfg_local, dict):
+                    raw_roles = swarm_cfg_local.get("roles")
             if isinstance(raw_roles, (list, tuple)):
                 roles_list = [str(r) for r in raw_roles]
             else:
