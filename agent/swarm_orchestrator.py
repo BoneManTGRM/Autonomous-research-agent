@@ -317,7 +317,7 @@ class SwarmOrchestrator:
     """
 
     agent_fn: Optional[AgentFn] = None
-    max_workers: int = 32
+    max_workers: int = 64
     max_swarm_size: int = 64
     default_mode: str = "burst"
     default_domain: str = "general"
@@ -774,9 +774,11 @@ class SwarmOrchestrator:
             return []
 
         # Determine worker count based on mode
-        # NOTE: To avoid silently running only half of a requested swarm
-        # (e.g. 64 agents showing as 32-per-round), "pulse" uses the same
-        # worker cap as "burst".
+        # Historically "pulse" ran with half of ``max_workers`` to reduce
+        # simultaneous agent load.  However, this halves the number of
+        # agents that can run at once (e.g. 64 â 32), which in turn makes
+        # multiâcycle runs appear to drop agents.  To avoid hidden limits,
+        # we use the full ``max_workers`` for all parallel modes.
         workers = min(len(payloads), self.max_workers)
 
         results: List[Optional[Dict[str, Any]]] = [None] * len(payloads)
