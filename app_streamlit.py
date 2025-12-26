@@ -470,7 +470,7 @@ SWARM_ROLES: List[Tuple[str, str]] = [
 
 # Safe upper bound for swarm size on typical Render or Streamlit setups.
 # All swarm agents are still run sequentially in a single process by the worker.
-MAX_SWARM_AGENTS: int = 64
+MAX_SWARM_AGENTS: int = 32
 
 # Limit points in charts so the frontend does not hit RangeError on very long runs.
 MAX_POINTS_FOR_CHARTS: int = 1000
@@ -4920,7 +4920,9 @@ def main() -> None:
                     "roles": [name for name, _ in swarm_roles] if swarm_roles else ["agent"],
                     "max_cycles_per_agent": 1,
                     "stagger_start": False,
-                    "max_agents_per_tick": 0,
+                    # Some worker builds treat 0 as "use a default cap" (often 32).
+                    # To ensure a true 64-agent round, explicitly set this to the swarm size.
+                    "max_agents_per_tick": int(swarm_size),
                     "role_goals": {name: role_specific_goal(goal_clean, name) for name, _ in swarm_roles} if swarm_roles else {},
                 }
             else:
@@ -4929,7 +4931,7 @@ def main() -> None:
                     "roles": ["agent"],
                     "max_cycles_per_agent": int(cycles),
                     "stagger_start": False,
-                    "max_agents_per_tick": 0,
+                    "max_agents_per_tick": 1,
                 }
 
             longevity_config: Dict[str, Any] = {}
