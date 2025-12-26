@@ -3305,33 +3305,37 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     # division by zero.  For single agent runs macro_total is simply
     # max_cycles (the number of cycles requested).
     if mode == "swarm":
+        # For swarm mode, compute the total number of microâcycles by
+        # multiplying the number of rounds by the number of active agents.
+        # The number of agents may be greater than the number of unique roles
+        # when the swarm uses multiple instances of each role.  When an
+        # explicit swarm_size or max_agents_per_tick is provided, prefer
+        # that over the length of the roles list.  Fall back to the roles
+        # list length when no override is specified to avoid division by
+        # zero.
         try:
-            # Determine role_count based on roles_list when present
-            roles_list = cfg.get("roles") if isinstance(cfg.get("roles"), list) else None
-            role_count = len(roles_list) if roles_list else 1
-        except Exception:
-            role_count = 1
-        # If a swarm_size is explicitly provided in the config, prefer that
-        try:
-            swarm_size_override: Optional[int] = None
-            # Check nested swarm configs first (both keys are supported by UI)
-            swarm_cfg = cfg.get("swarm") or cfg.get("swarm_config") or {}
+            override_count: Optional[int] = None
+            # Check nested swarm config first
+            swarm_cfg = cfg.get("swarm") if isinstance(cfg.get("swarm"), dict) else {}
             if isinstance(swarm_cfg, dict):
-                swarm_size_override = swarm_cfg.get("swarm_size")
-            # Fall back to a top-level swarm_size if present
-            if swarm_size_override is None:
-                swarm_size_override = cfg.get("swarm_size")
-            # Use the override when it is a positive integer
-            if swarm_size_override is not None:
-                # Convert to int with safe fallback
-                try:
-                    override_int = int(swarm_size_override)
-                    if override_int > 0:
-                        role_count = override_int
-                except Exception:
-                    pass
+                # Prefer swarm_size if provided
+                val = swarm_cfg.get("swarm_size") or swarm_cfg.get("max_agents_per_tick")
+                if isinstance(val, (int, float)) and val:
+                    override_count = int(val)
+            # Fall back to top level swarm_size or max_agents_per_tick
+            if override_count is None:
+                val = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
+                if isinstance(val, (int, float)) and val:
+                    override_count = int(val)
+            # If override_count is still None, use the number of roles
+            if override_count is not None and override_count > 0:
+                role_count = override_count
+            else:
+                roles_list_local = cfg.get("roles") if isinstance(cfg.get("roles"), list) else None
+                role_count = len(roles_list_local) if roles_list_local else 1
         except Exception:
-            pass
+            # Fallback to 1 when unable to determine count
+            role_count = 1
         macro_total = max_rounds * role_count
     else:
         macro_total = max_cycles
@@ -5713,29 +5717,34 @@ def _process_single_job(
         # to reflect the total work performed across all agents rather than
         # showing only the number of rounds (macro cycles).
         if mode == "swarm":
-            # Determine how many roles (agents) are active. When roles_list is
-            # unavailable, assume a single agent to avoid division by zero.
+            # For swarm mode, compute the total number of microâcycles by
+            # multiplying the number of rounds by the number of active agents.  The
+            # number of agents may be greater than the number of unique roles when
+            # the swarm uses multiple instances of each role.  When an explicit
+            # swarm_size or max_agents_per_tick is provided, prefer that over
+            # the length of the roles list.  Fall back to the roles list length
+            # when no override is specified to avoid division by zero.
             try:
-                role_count = len(roles_list) if roles_list else 1
+                override_count: Optional[int] = None
+                swarm_cfg = cfg.get("swarm") if isinstance(cfg.get("swarm"), dict) else {}
+                if isinstance(swarm_cfg, dict):
+                    val = swarm_cfg.get("swarm_size") or swarm_cfg.get("max_agents_per_tick")
+                    if isinstance(val, (int, float)) and val:
+                        override_count = int(val)
+                if override_count is None:
+                    val = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
+                    if isinstance(val, (int, float)) and val:
+                        override_count = int(val)
+                if override_count is not None and override_count > 0:
+                    role_count = override_count
+                else:
+                    # If roles_list is defined, use its length; otherwise default to one role.
+                    try:
+                        role_count = len(roles_list) if roles_list else 1
+                    except Exception:
+                        role_count = 1
             except Exception:
                 role_count = 1
-            # Prefer an explicit swarm_size if provided on the config
-            try:
-                swarm_size_override: Optional[int] = None
-                swarm_cfg2 = cfg.get("swarm") or cfg.get("swarm_config") or {}
-                if isinstance(swarm_cfg2, dict):
-                    swarm_size_override = swarm_cfg2.get("swarm_size")
-                if swarm_size_override is None:
-                    swarm_size_override = cfg.get("swarm_size")
-                if swarm_size_override is not None:
-                    try:
-                        ov_int = int(swarm_size_override)
-                        if ov_int > 0:
-                            role_count = ov_int
-                    except Exception:
-                        pass
-            except Exception:
-                pass
             macro_total = max_rounds * role_count
         else:
             macro_total = max_cycles
