@@ -774,8 +774,21 @@ class SwarmOrchestrator:
             return []
 
         # Determine worker count based on mode
+        #
+        # Historically the "pulse" mode used half of ``max_workers`` to create
+        # smaller bursts of activity.  However, this had the unintended side
+        # effect of clamping swarms to half the requested concurrency when
+        # running large swarms with multiple cycles.  For example, a 64âagent
+        # swarm using three cycles would only execute 96 miniâcycles rather
+        # than the expected 192 because only 32 agents were allowed to run in
+        # parallel.  To address this the worker calculation for ``pulse`` now
+        # mirrors that of ``burst``: it will attempt to use the full
+        # ``max_workers`` value, capped by the number of payloads.  This change
+        # ensures that pulse and hybrid modes no longer silently reduce the
+        # total number of agent executions.
         if mode == "pulse":
-            workers = min(len(payloads), max(1, self.max_workers // 2))
+            # Use the full max_workers instead of halving it for pulse mode
+            workers = min(len(payloads), self.max_workers)
         else:
             workers = min(len(payloads), self.max_workers)
 
