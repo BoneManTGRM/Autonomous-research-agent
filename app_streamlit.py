@@ -2694,6 +2694,26 @@ def compute_progress_view(
                     t2 = macro_total_ui
             except Exception:
                 pass
+
+        # In swarm mode some older backends may report total cycles based on the
+        # number of unique roles (e.g. 32) rather than the requested swarm size
+        # (e.g. 64).  When prompt_details provides a larger macro_total_ui for
+        # swarm mode, prefer that over the reported total to ensure the cycle
+        # progress bar reflects the full microâcycle budget.  Do not adjust the
+        # current value here; leave c2 untouched so it still reflects the
+        # actual number of steps executed so far.
+        try:
+            if (
+                mode_pd == "swarm"
+                and macro_total_ui is not None
+                and t2 is not None
+                and isinstance(t2, (int, float))
+                and isinstance(macro_total_ui, (int, float))
+                and macro_total_ui > t2
+            ):
+                t2 = int(macro_total_ui)
+        except Exception:
+            pass
     except Exception:
         pass
     if c2 is None or t2 is None or t2 <= 0:
