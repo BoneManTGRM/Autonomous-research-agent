@@ -3681,11 +3681,17 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             # not accept these parameters it will raise TypeError and fall back
             # to calling without them.
             _extra_swarm_kwargs: Dict[str, Any] = {}
+            # When running a swarm with more agents than the default cap (often 32),
+            # pass multiple concurrency hint names.  Different versions of
+            # run_swarm_continuous accept different parameter names (e.g.
+            # max_agents_per_tick, swarm_size, max_parallel, max_workers).  By
+            # populating all of these with the number of roles, we allow the
+            # underlying implementation to pick whichever hint it understands.
             try:
                 _conc = len(roles_list) if roles_list else None
                 if _conc:
-                    _extra_swarm_kwargs["max_agents_per_tick"] = _conc
-                    _extra_swarm_kwargs["swarm_size"] = _conc
+                    for _kw in ("max_agents_per_tick", "swarm_size", "max_parallel", "max_workers"):
+                        _extra_swarm_kwargs[_kw] = _conc
             except Exception:
                 pass
             try:
@@ -6637,11 +6643,16 @@ def _process_single_job(
                             # round.  Unsupported keywords will be ignored via
                             # fallback.
                             _extra_swarm_kwargs2: Dict[str, Any] = {}
+                            # Build a set of concurrency hints for swarm runs.  When a
+                            # swarm contains more agents than the default concurrency
+                            # limit, passing these hints allows all agents to be
+                            # scheduled per round.  Include several synonym keys so
+                            # various agent implementations can pick up the value.
                             try:
                                 _conc2 = len(roles_list) if roles_list else None
                                 if _conc2:
-                                    _extra_swarm_kwargs2["max_agents_per_tick"] = _conc2
-                                    _extra_swarm_kwargs2["swarm_size"] = _conc2
+                                    for _kw in ("max_agents_per_tick", "swarm_size", "max_parallel", "max_workers"):
+                                        _extra_swarm_kwargs2[_kw] = _conc2
                             except Exception:
                                 pass
                             summaries = agent.run_swarm_continuous(
@@ -8374,11 +8385,14 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     # drop agents when the swarm is larger.  Compute the cap
                     # from roles_list and include as optional kwargs.
                     _extra_swarm_kwargs3: Dict[str, Any] = {}
+                    # Construct concurrency hints for full swarm runs.  Provide
+                    # multiple hint names so whichever parameter is supported
+                    # by the run_swarm_continuous implementation will be used.
                     try:
                         _conc3 = len(roles_list) if roles_list else None
                         if _conc3:
-                            _extra_swarm_kwargs3["max_agents_per_tick"] = _conc3
-                            _extra_swarm_kwargs3["swarm_size"] = _conc3
+                            for _kw in ("max_agents_per_tick", "swarm_size", "max_parallel", "max_workers"):
+                                _extra_swarm_kwargs3[_kw] = _conc3
                     except Exception:
                         pass
                     try:
@@ -8430,11 +8444,14 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
                         # Similarly, include concurrency hints for each shift.
                         _extra_swarm_kwargs4: Dict[str, Any] = {}
+                        # Build concurrency hints for each timed shift.  Use
+                        # several potential parameter names so the underlying
+                        # runner can pick up whichever one it supports.
                         try:
                             _conc4 = len(roles_list) if roles_list else None
                             if _conc4:
-                                _extra_swarm_kwargs4["max_agents_per_tick"] = _conc4
-                                _extra_swarm_kwargs4["swarm_size"] = _conc4
+                                for _kw in ("max_agents_per_tick", "swarm_size", "max_parallel", "max_workers"):
+                                    _extra_swarm_kwargs4[_kw] = _conc4
                         except Exception:
                             pass
                         try:
@@ -9130,11 +9147,15 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                         # the cap from the number of roles in roles_for_swarm and
                         # attempt to pass as max_agents_per_tick and swarm_size.
                         _extra_swarm_kwargs5: Dict[str, Any] = {}
+                        # Concurrency hints for segmentation phases.  Pass several
+                        # synonym keys to maximize compatibility with different
+                        # swarm runner implementations.  Without these hints,
+                        # large swarms (>32 agents) may silently drop agents.
                         try:
                             _conc5 = len(roles_for_swarm) if roles_for_swarm else None
                             if _conc5:
-                                _extra_swarm_kwargs5["max_agents_per_tick"] = _conc5
-                                _extra_swarm_kwargs5["swarm_size"] = _conc5
+                                for _kw in ("max_agents_per_tick", "swarm_size", "max_parallel", "max_workers"):
+                                    _extra_swarm_kwargs5[_kw] = _conc5
                         except Exception:
                             pass
                         try:
