@@ -5027,9 +5027,15 @@ def main() -> None:
                         "curriculum_profile": longevity_defaults.get("curriculum_profile"),
                     }
 
+            # In swarm mode interpret the cycles slider as the number of rounds
+            # rather than total microâcycles.  Do not multiply by the swarm size
+            # here; the worker will compute the effective microâcycle count by
+            # multiplying the number of rounds by the number of participating
+            # agents.  This change avoids a mismatch where the UI requests
+            # cycles * swarm_size microâcycles but the swarm coordinator
+            # interprets it as global cycles, leading to runs that end early or
+            # overshoot the intended budget.
             total_cycles_requested = int(cycles)
-            if mode == "swarm":
-                total_cycles_requested = int(cycles) * int(swarm_size)
 
             run_config: Dict[str, Any] = {
                 "goal": goal_clean,
