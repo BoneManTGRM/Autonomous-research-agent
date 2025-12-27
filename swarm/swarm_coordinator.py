@@ -64,7 +64,10 @@ class SwarmRunConfig:
     """Top level configuration for a swarm run."""
     goal: str
     total_cycles: int
-    max_parallel: int = 4
+    # Maximum number of agents to run per global cycle.
+    # For typical swarm "rounds" semantics you usually want this to equal the
+    # total number of agents in the swarm.
+    max_parallel: int = 64
     min_cycles_per_agent: int = 1
     curriculum_profile: Optional[str] = None
     hallmark_targets: Optional[List[str]] = None
@@ -183,7 +186,27 @@ class SwarmCoordinator:
         """
         goal = run_config.goal
         total_cycles = max(1, int(run_config.total_cycles))
+        # max_parallel controls how many agents run per global cycle.
+        # If this is set lower than the total number of configured agents,
+        # you effectively run only a subset each round. For "rounds" style
+        # swarms (e.g., 64 agents Ã 3 rounds), we want all agents to run each
+        # global cycle by default.
         max_parallel = max(1, int(run_config.max_parallel))
+
+        # Heuristic safety: if caller supplied a small total_cycles (typical
+        # swarm rounds) and min_cycles_per_agent is 1, but max_parallel is
+        # smaller than the swarm size, upgrade to run all agents each cycle.
+        try:
+            n_agents = len(self.agent_configs) if isinstance(self.agent_configs, dict) else 0
+            if (
+                n_agents > 0
+                and total_cycles <= 10
+                and int(run_config.min_cycles_per_agent) <= 1
+                and max_parallel < n_agents
+            ):
+                max_parallel = n_agents
+        except Exception:
+            pass
         idea_fraction = min(1.0, max(0.0, run_config.idea_fraction))
 
         cycle_logs: List[Dict[str, Any]] = []
