@@ -3671,21 +3671,58 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                     roles_list = agent.get_agent_roles()
                 except Exception:
                     roles_list = ["agent"]
-            summaries = agent.run_swarm_continuous(
-                goal=goal,
-                max_rounds=max_rounds,
-                stop_rye=stop_rye,
-                roles=roles_list,
-                source_controls=source_controls,
-                pdf_bytes=None,
-                biomarker_snapshot=None,
-                domain=domain,
-                max_minutes=max_minutes,
-                forever=forever,
-                resume_from_checkpoint=resume,
-                watchdog_interval_minutes=watchdog_minutes,
-                runtime_profile=runtime_profile,
-            )
+            # Compute a perâtick concurrency hint based on the size of the roles list.
+            # Many agents default to a fixed perâtick cap (often 32) unless
+            # explicitly instructed otherwise.  When running swarms larger than the
+            # default cap (e.g. 64 agents), the engine needs to pass a hint to
+            # allow all agents to run each round.  Derive the cap from the
+            # expanded roles list so that the concurrency matches the number of
+            # agents.  If the underlying run_swarm_continuous implementation does
+            # not accept these parameters it will raise TypeError and fall back
+            # to calling without them.
+            _extra_swarm_kwargs: Dict[str, Any] = {}
+            try:
+                _conc = len(roles_list) if roles_list else None
+                if _conc:
+                    _extra_swarm_kwargs["max_agents_per_tick"] = _conc
+                    _extra_swarm_kwargs["swarm_size"] = _conc
+            except Exception:
+                pass
+            try:
+                summaries = agent.run_swarm_continuous(
+                    goal=goal,
+                    max_rounds=max_rounds,
+                    stop_rye=stop_rye,
+                    roles=roles_list,
+                    source_controls=source_controls,
+                    pdf_bytes=None,
+                    biomarker_snapshot=None,
+                    domain=domain,
+                    max_minutes=max_minutes,
+                    forever=forever,
+                    resume_from_checkpoint=resume,
+                    watchdog_interval_minutes=watchdog_minutes,
+                    runtime_profile=runtime_profile,
+                    **_extra_swarm_kwargs,
+                )
+            except TypeError:
+                # Fall back to a call without the concurrency hints if they are
+                # unsupported by this agent version.
+                summaries = agent.run_swarm_continuous(
+                    goal=goal,
+                    max_rounds=max_rounds,
+                    stop_rye=stop_rye,
+                    roles=roles_list,
+                    source_controls=source_controls,
+                    pdf_bytes=None,
+                    biomarker_snapshot=None,
+                    domain=domain,
+                    max_minutes=max_minutes,
+                    forever=forever,
+                    resume_from_checkpoint=resume,
+                    watchdog_interval_minutes=watchdog_minutes,
+                    runtime_profile=runtime_profile,
+                )
         else:
             summaries = agent.run_continuous(
                 goal=goal,
@@ -6592,6 +6629,21 @@ def _process_single_job(
                                 roles_list = ["agent"]
 
                         try:
+                            # Derive concurrency hints from the roles list.  Many
+                            # run_swarm_continuous implementations default to a
+                            # perâtick cap (commonly 32) unless a higher cap is
+                            # explicitly passed.  Use the length of roles_list as
+                            # the desired cap so that all agents can run each
+                            # round.  Unsupported keywords will be ignored via
+                            # fallback.
+                            _extra_swarm_kwargs2: Dict[str, Any] = {}
+                            try:
+                                _conc2 = len(roles_list) if roles_list else None
+                                if _conc2:
+                                    _extra_swarm_kwargs2["max_agents_per_tick"] = _conc2
+                                    _extra_swarm_kwargs2["swarm_size"] = _conc2
+                            except Exception:
+                                pass
                             summaries = agent.run_swarm_continuous(
                                 goal=goal,
                                 max_rounds=max_rounds,
@@ -6607,6 +6659,7 @@ def _process_single_job(
                                 watchdog_interval_minutes=watchdog_minutes,
                                 runtime_profile=runtime_profile,
                                 progress_callback=_progress_cb,
+                                **_extra_swarm_kwargs2,
                             )
                         except TypeError:
                             try:
@@ -8315,21 +8368,52 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 summaries_all: List[Dict[str, Any]] = []
 
                 if not repeat_shifts or shift_minutes is None or shift_minutes <= 0:
-                    summaries_all = agent.run_swarm_continuous(
-                        goal=goal,
-                        max_rounds=max_rounds,
-                        stop_rye=stop_rye,
-                        roles=roles_list,
-                        source_controls=source_controls,
-                        pdf_bytes=None,
-                        biomarker_snapshot=None,
-                        domain=domain,
-                        max_minutes=max_minutes,
-                        forever=forever,
-                        resume_from_checkpoint=resume,
-                        watchdog_interval_minutes=watchdog_minutes,
-                        runtime_profile=runtime_profile,
-                    )
+                    # Pass perâtick concurrency hints when running swarms so
+                    # that all agents are scheduled each round.  Without this,
+                    # implementations with a default cap (e.g. 32 agents) will
+                    # drop agents when the swarm is larger.  Compute the cap
+                    # from roles_list and include as optional kwargs.
+                    _extra_swarm_kwargs3: Dict[str, Any] = {}
+                    try:
+                        _conc3 = len(roles_list) if roles_list else None
+                        if _conc3:
+                            _extra_swarm_kwargs3["max_agents_per_tick"] = _conc3
+                            _extra_swarm_kwargs3["swarm_size"] = _conc3
+                    except Exception:
+                        pass
+                    try:
+                        summaries_all = agent.run_swarm_continuous(
+                            goal=goal,
+                            max_rounds=max_rounds,
+                            stop_rye=stop_rye,
+                            roles=roles_list,
+                            source_controls=source_controls,
+                            pdf_bytes=None,
+                            biomarker_snapshot=None,
+                            domain=domain,
+                            max_minutes=max_minutes,
+                            forever=forever,
+                            resume_from_checkpoint=resume,
+                            watchdog_interval_minutes=watchdog_minutes,
+                            runtime_profile=runtime_profile,
+                            **_extra_swarm_kwargs3,
+                        )
+                    except TypeError:
+                        summaries_all = agent.run_swarm_continuous(
+                            goal=goal,
+                            max_rounds=max_rounds,
+                            stop_rye=stop_rye,
+                            roles=roles_list,
+                            source_controls=source_controls,
+                            pdf_bytes=None,
+                            biomarker_snapshot=None,
+                            domain=domain,
+                            max_minutes=max_minutes,
+                            forever=forever,
+                            resume_from_checkpoint=resume,
+                            watchdog_interval_minutes=watchdog_minutes,
+                            runtime_profile=runtime_profile,
+                        )
                 else:
                     total_elapsed = 0.0
                     shift_index = 0
@@ -8344,21 +8428,48 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
 
                         shift_index += 1
 
-                        summaries_for_shift = agent.run_swarm_continuous(
-                            goal=goal,
-                            max_rounds=max_rounds,
-                            stop_rye=stop_rye,
-                            roles=roles_list,
-                            source_controls=source_controls,
-                            pdf_bytes=None,
-                            biomarker_snapshot=None,
-                            domain=domain,
-                            max_minutes=this_shift_minutes,
-                            forever=False,
-                            resume_from_checkpoint=resume,
-                            watchdog_interval_minutes=watchdog_minutes,
-                            runtime_profile=runtime_profile,
-                        )
+                        # Similarly, include concurrency hints for each shift.
+                        _extra_swarm_kwargs4: Dict[str, Any] = {}
+                        try:
+                            _conc4 = len(roles_list) if roles_list else None
+                            if _conc4:
+                                _extra_swarm_kwargs4["max_agents_per_tick"] = _conc4
+                                _extra_swarm_kwargs4["swarm_size"] = _conc4
+                        except Exception:
+                            pass
+                        try:
+                            summaries_for_shift = agent.run_swarm_continuous(
+                                goal=goal,
+                                max_rounds=max_rounds,
+                                stop_rye=stop_rye,
+                                roles=roles_list,
+                                source_controls=source_controls,
+                                pdf_bytes=None,
+                                biomarker_snapshot=None,
+                                domain=domain,
+                                max_minutes=this_shift_minutes,
+                                forever=False,
+                                resume_from_checkpoint=resume,
+                                watchdog_interval_minutes=watchdog_minutes,
+                                runtime_profile=runtime_profile,
+                                **_extra_swarm_kwargs4,
+                            )
+                        except TypeError:
+                            summaries_for_shift = agent.run_swarm_continuous(
+                                goal=goal,
+                                max_rounds=max_rounds,
+                                stop_rye=stop_rye,
+                                roles=roles_list,
+                                source_controls=source_controls,
+                                pdf_bytes=None,
+                                biomarker_snapshot=None,
+                                domain=domain,
+                                max_minutes=this_shift_minutes,
+                                forever=False,
+                                resume_from_checkpoint=resume,
+                                watchdog_interval_minutes=watchdog_minutes,
+                                runtime_profile=runtime_profile,
+                            )
 
                         if not summaries_for_shift:
                             used = this_shift_minutes
@@ -9014,21 +9125,51 @@ def run_meta_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     )
 
                     if phase_mode == "swarm":
-                        segment_summaries = agent.run_swarm_continuous(
-                            goal=goal,
-                            max_rounds=HARD_MAX_ROUNDS,
-                            stop_rye=effective_stop_rye,
-                            roles=roles_for_swarm,
-                            source_controls=source_controls,
-                            pdf_bytes=None,
-                            biomarker_snapshot=None,
-                            domain=domain,
-                            max_minutes=effective_minutes,
-                            forever=False,
-                            resume_from_checkpoint=resume,
-                            watchdog_interval_minutes=watchdog_minutes,
-                            runtime_profile=phase_profile,
-                        )
+                        # Include concurrency hints when running swarm phases to
+                        # ensure all agents are scheduled each round.  Derive
+                        # the cap from the number of roles in roles_for_swarm and
+                        # attempt to pass as max_agents_per_tick and swarm_size.
+                        _extra_swarm_kwargs5: Dict[str, Any] = {}
+                        try:
+                            _conc5 = len(roles_for_swarm) if roles_for_swarm else None
+                            if _conc5:
+                                _extra_swarm_kwargs5["max_agents_per_tick"] = _conc5
+                                _extra_swarm_kwargs5["swarm_size"] = _conc5
+                        except Exception:
+                            pass
+                        try:
+                            segment_summaries = agent.run_swarm_continuous(
+                                goal=goal,
+                                max_rounds=HARD_MAX_ROUNDS,
+                                stop_rye=effective_stop_rye,
+                                roles=roles_for_swarm,
+                                source_controls=source_controls,
+                                pdf_bytes=None,
+                                biomarker_snapshot=None,
+                                domain=domain,
+                                max_minutes=effective_minutes,
+                                forever=False,
+                                resume_from_checkpoint=resume,
+                                watchdog_interval_minutes=watchdog_minutes,
+                                runtime_profile=phase_profile,
+                                **_extra_swarm_kwargs5,
+                            )
+                        except TypeError:
+                            segment_summaries = agent.run_swarm_continuous(
+                                goal=goal,
+                                max_rounds=HARD_MAX_ROUNDS,
+                                stop_rye=effective_stop_rye,
+                                roles=roles_for_swarm,
+                                source_controls=source_controls,
+                                pdf_bytes=None,
+                                biomarker_snapshot=None,
+                                domain=domain,
+                                max_minutes=effective_minutes,
+                                forever=False,
+                                resume_from_checkpoint=resume,
+                                watchdog_interval_minutes=watchdog_minutes,
+                                runtime_profile=phase_profile,
+                            )
                     else:
                         segment_summaries = agent.run_continuous(
                             goal=goal,
