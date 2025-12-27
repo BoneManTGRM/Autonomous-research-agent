@@ -193,6 +193,40 @@ def _env_float_value(name: str, default: float) -> float:
         return default
 
 
+def _intish(value: Any) -> Optional[int]:
+    """Best-effort coercion for values that may be int, float, or numeric strings.
+
+    Returns None if value cannot be interpreted as an integer or is boolean/None.
+    """
+    try:
+        # Reject None and booleans
+        if value is None or isinstance(value, bool):
+            return None
+        # Numeric types are cast directly
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            # Reject NaN
+            if value != value:
+                return None
+            return int(value)
+        if isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return None
+            # If it's digits or +digits, cast directly
+            if s.isdigit() or (s.startswith('+') and s[1:].isdigit()):
+                return int(s)
+            # If it's numeric with decimal, cast via float
+            try:
+                return int(float(s))
+            except Exception:
+                return None
+    except Exception:
+        return None
+    return None
+
+
 def _role_base_name(role_name: str) -> str:
     """Return the base role name without a trailing numeric suffix."""
     try:
@@ -3278,12 +3312,14 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             swarm_cfg_local = cfg.get("swarm") if isinstance(cfg.get("swarm"), dict) else {}
             if isinstance(swarm_cfg_local, dict):
                 v = swarm_cfg_local.get("swarm_size") or swarm_cfg_local.get("max_agents_per_tick")
-                if isinstance(v, (int, float)) and v:
-                    desired_count = int(v)
+                iv = _intish(v)
+                if iv is not None and iv:
+                    desired_count = int(iv)
             if desired_count is None:
                 v2 = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
-                if isinstance(v2, (int, float)) and v2:
-                    desired_count = int(v2)
+                iv2 = _intish(v2)
+                if iv2 is not None and iv2:
+                    desired_count = int(iv2)
             if desired_count is not None and desired_count > 0 and roles_list is not None:
                 if len(roles_list) < desired_count:
                     roles_list = _expand_roles_to_count(list(roles_list), desired_count)
@@ -3393,13 +3429,15 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             if isinstance(swarm_cfg, dict):
                 # Prefer swarm_size if provided
                 val = swarm_cfg.get("swarm_size") or swarm_cfg.get("max_agents_per_tick")
-                if isinstance(val, (int, float)) and val:
-                    override_count = int(val)
+                iv = _intish(val)
+                if iv is not None and iv:
+                    override_count = int(iv)
             # Fall back to top level swarm_size or max_agents_per_tick
             if override_count is None:
                 val = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
-                if isinstance(val, (int, float)) and val:
-                    override_count = int(val)
+                iv = _intish(val)
+                if iv is not None and iv:
+                    override_count = int(iv)
             # Also consider the length of the roles list if provided
             roles_list_local = cfg.get("roles") if isinstance(cfg.get("roles"), list) else None
             roles_len = len(roles_list_local) if roles_list_local else 0
@@ -3501,12 +3539,14 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 swarm_cfg_local = cfg.get("swarm")
                 if isinstance(swarm_cfg_local, dict):
                     val = swarm_cfg_local.get("swarm_size") or swarm_cfg_local.get("max_agents_per_tick")
-                    if isinstance(val, (int, float)) and val:
-                        override_count = int(val)
+                    iv = _intish(val)
+                    if iv is not None and iv:
+                        override_count = int(iv)
                 if override_count is None:
                     val = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
-                    if isinstance(val, (int, float)) and val:
-                        override_count = int(val)
+                    iv = _intish(val)
+                    if iv is not None and iv:
+                        override_count = int(iv)
             roles_len = len(roles_list) if roles_list else 1
             if override_count is not None and override_count > 0:
                 swarm_size_val = max(int(override_count), roles_len)
@@ -5786,12 +5826,14 @@ def _process_single_job(
                 swarm_cfg_local2 = cfg.get("swarm") if isinstance(cfg.get("swarm"), dict) else {}
                 if isinstance(swarm_cfg_local2, dict):
                     v = swarm_cfg_local2.get("swarm_size") or swarm_cfg_local2.get("max_agents_per_tick")
-                    if isinstance(v, (int, float)) and v:
-                        desired_count = int(v)
+                    iv = _intish(v)
+                    if iv is not None and iv:
+                        desired_count = int(iv)
                 if desired_count is None:
                     v2 = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
-                    if isinstance(v2, (int, float)) and v2:
-                        desired_count = int(v2)
+                    iv2 = _intish(v2)
+                    if iv2 is not None and iv2:
+                        desired_count = int(iv2)
                 if desired_count is not None and desired_count > 0 and roles_list is not None:
                     if len(roles_list) < desired_count:
                         roles_list = _expand_roles_to_count(list(roles_list), desired_count)
@@ -5877,12 +5919,14 @@ def _process_single_job(
                 swarm_cfg = cfg.get("swarm") if isinstance(cfg.get("swarm"), dict) else {}
                 if isinstance(swarm_cfg, dict):
                     val = swarm_cfg.get("swarm_size") or swarm_cfg.get("max_agents_per_tick")
-                    if isinstance(val, (int, float)) and val:
-                        override_count = int(val)
+                    iv = _intish(val)
+                    if iv is not None and iv:
+                        override_count = int(iv)
                 if override_count is None:
                     val = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
-                    if isinstance(val, (int, float)) and val:
-                        override_count = int(val)
+                    iv = _intish(val)
+                    if iv is not None and iv:
+                        override_count = int(iv)
                 # Determine the length of the roles list, if available
                 roles_len = 0
                 try:
