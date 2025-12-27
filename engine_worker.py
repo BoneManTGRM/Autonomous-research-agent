@@ -199,13 +199,14 @@ def _role_base_name(role_name: str) -> str:
         s = str(role_name)
         parts = s.split("_")
         if len(parts) >= 2 and parts[-1].isdigit():
-            return "_".join(parts[:-1]) or s
+            base = "_".join(parts[:-1]) or s
+            return base
         return s
     except Exception:
         return str(role_name)
 
 
-def _expand_roles_to_count(roles: List[str], desired_count: int) -> List[str]:
+def _expand_roles_to_count(roles: list[str], desired_count: int) -> list[str]:
     """Expand roles to desired_count by cycling base names and enumerating."""
     try:
         desired = int(desired_count)
@@ -213,14 +214,17 @@ def _expand_roles_to_count(roles: List[str], desired_count: int) -> List[str]:
         return roles
     if desired <= 0:
         return roles
-    base = []
-    for r in roles or []:
-        rr = str(r).strip()
-        if rr:
-            base.append(_role_base_name(rr))
+    base: list[str] = []
+    try:
+        for r in roles or []:
+            rr = str(r).strip()
+            if rr:
+                base.append(_role_base_name(rr))
+    except Exception:
+        base = []
     if not base:
         base = ["agent"]
-    out: List[str] = []
+    out: list[str] = []
     # If we are asking for more than the number of base archetypes, enumerate
     # like researcher_1, critic_2, ... to keep names unique.
     if desired > len(base):
