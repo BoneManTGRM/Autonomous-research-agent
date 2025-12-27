@@ -106,13 +106,16 @@ Integrated trading mode:
 Multi agent extension:
     CoreAgent can orchestrate multiple logical agent roles
     (researcher, critic, planner, synthesizer, explorer, plus up to
-    a total of 32 agents) over the same MemoryStore. This makes it
+    a total of 64 agents by default) over the same MemoryStore. This makes it
     possible to run:
         - one cycle per role (multi agent round), or
         - long continuous runs where each "round" consists of many roles.
 
-    The maximum number of logical agents is capped at 32 for safety,
-    and can be configured via config["max_agents"] (1 to 32).
+    The maximum number of logical agents is capped at 64 by default,
+    and can be configured via config["max_agents"] (1 to 64).  When
+    running larger swarms you can raise this limit further, but be
+    aware that higher values increase parallelism and may require
+    additional compute and memory resources.
 
 Toolbelt and tool registry:
     CoreAgent owns a tools layer that can be:
@@ -618,7 +621,8 @@ class CoreAgent:
             try:
                 self.swarm_orchestrator = SwarmOrchestrator(
                     agent_fn=self._run_swarm_agent_payload,
-                    max_workers=int(self.config.get("swarm_max_workers", 32)),
+                    # By default allow up to 64 worker threads for swarm orchestrator.
+                    max_workers=int(self.config.get("swarm_max_workers", 64)),
                     max_swarm_size=int(self.config.get("swarm_max_size", 64)),
                     default_mode=str(self.config.get("swarm_default_mode", "burst")),
                     default_domain=str(self.config.get("default_domain", "general")),
@@ -692,13 +696,21 @@ class CoreAgent:
         self.auto_resume_enabled: bool = bool(self.config.get("auto_resume_enabled", True))
 
         # ------------------------------------------------------------------
-        # Multi agent configuration (up to 32 logical agents)
+        # Multi agent configuration (up to a configurable number of logical agents)
         # ------------------------------------------------------------------
-        self.max_agents: int = int(self.config.get("max_agents", 32))
+        # Historically this was capped at 32.  However, some use cases require
+        # larger swarms (e.g. 64 agents).  Allow callers to set max_agents up
+        # to 64 via config["max_agents"].  Additional values beyond 64 will be
+        # clamped for safety.  Set a sensible default of 64 if no config is
+        # provided.
+        self.max_agents: int = int(self.config.get("max_agents", 64))
         if self.max_agents < 1:
             self.max_agents = 1
-        if self.max_agents > 32:
-            self.max_agents = 32
+        # Clamp the agent count to 64 by default.  Larger swarms may be
+        # supported by increasing this limit, but be cautious of resource
+        # consumption.
+        if self.max_agents > 64:
+            self.max_agents = 64
 
         base_roles: List[str] = [
             "researcher",
