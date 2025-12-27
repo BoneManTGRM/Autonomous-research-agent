@@ -68,6 +68,7 @@ import sys
 import json
 import time
 import hashlib
+import re
 import traceback
 import threading
 import platform as _platform
@@ -191,6 +192,43 @@ def _env_float_value(name: str, default: float) -> float:
         return float(raw.strip())
     except Exception:
         return default
+
+
+def _expand_swarm_roles_to_size(roles: List[str], desired_count: int) -> List[str]:
+    """Ensure the swarm roles list length matches desired_count.
+
+    Some job creators only pass unique role archetypes (for example, 5 base
+    roles) while requesting a larger swarm_size (for example, 64).  Some agent
+    implementations also ship with a baked-in default roles list (~32) and will
+    fall back to that when the worker passes fewer roles than requested.
+
+    This helper expands (or truncates) the roles list to match the requested
+    swarm size, generating stable unique role names using an underscore suffix.
+    """
+    try:
+        desired = int(desired_count)
+    except Exception:
+        return roles
+    if desired <= 0:
+        return roles
+    if not roles:
+        roles = ["agent"]
+
+    # If the list is already the right size, return as-is.
+    if len(roles) == desired:
+        return roles
+
+    # Truncate when too large.
+    if len(roles) > desired:
+        return list(roles[:desired])
+
+    # Expand by cycling base archetypes.
+    base = [re.sub(r"_\d+$", "", str(r)) for r in roles]
+    out: List[str] = []
+    for i in range(desired):
+        archetype = base[i % len(base)] if base else "agent"
+        out.append(f"{archetype}_{i+1}")
+    return out
 
 
 def _now_utc_iso() -> str:
@@ -3229,6 +3267,22 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             except Exception:
                 roles_list = ["agent"]
 
+        # Ensure the roles list length matches the requested swarm size.
+        # This prevents 64-agent requests from silently running 32 roles when
+        # the job only supplied a smaller archetype list.
+        try:
+            desired_n = None
+            swarm_cfg = cfg.get("swarm") if isinstance(cfg.get("swarm"), dict) else None
+            if isinstance(swarm_cfg, dict):
+                desired_n = swarm_cfg.get("swarm_size") or swarm_cfg.get("max_agents_per_tick")
+            if desired_n is None:
+                desired_n = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
+            desired_int = int(desired_n) if desired_n is not None else None
+        except Exception:
+            desired_int = None
+        if isinstance(desired_int, int) and desired_int > 0 and roles_list is not None:
+            roles_list = _expand_swarm_roles_to_size(list(roles_list), desired_int)
+
         # Ensure the agent adopts the job-defined roles list. Many agents
         # initialize with a default set of roles (~32), which can cause a
         # 64âagent swarm to fall back to 32 if the worker uses the agent's
@@ -5717,6 +5771,22 @@ def _process_single_job(
                     roles_list = agent.get_agent_roles()
                 except Exception:
                     roles_list = ["agent"]
+
+            # Ensure the roles list length matches the requested swarm size.
+            # This prevents 64-agent requests from silently running 32 roles when
+            # the job only supplied a smaller archetype list.
+            try:
+                desired_n = None
+                swarm_cfg2 = cfg.get("swarm") or cfg.get("swarm_config")
+                if isinstance(swarm_cfg2, dict):
+                    desired_n = swarm_cfg2.get("swarm_size") or swarm_cfg2.get("max_agents_per_tick")
+                if desired_n is None:
+                    desired_n = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
+                desired_int = int(desired_n) if desired_n is not None else None
+            except Exception:
+                desired_int = None
+            if isinstance(desired_int, int) and desired_int > 0 and roles_list is not None:
+                roles_list = _expand_swarm_roles_to_size(list(roles_list), desired_int)
             # Ensure the agent adopts the job-defined roles list. Many agents
             # initialize with a default set of roles (~32), which can cause
             # a 64âagent swarm to fall back to a smaller size if the worker
