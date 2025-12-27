@@ -3780,6 +3780,64 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 runtime_profile=runtime_profile,
             )
 
+        # If the swarm appears to have stopped early, attempt a batch fallback.  Some
+        # run_swarm_continuous implementations silently cap the number of agents
+        # (commonly to 32), which results in fewer microâcycles than expected.
+        try:
+            if mode == "swarm" and roles_list is not None and summaries is not None:
+                # Compute the expected number of microâcycles given the requested rounds
+                # and the number of roles.  If max_rounds is None or invalid, skip.
+                try:
+                    _exp_rounds = int(max_rounds) if max_rounds is not None else None
+                except Exception:
+                    _exp_rounds = None
+                if _exp_rounds and _exp_rounds > 0:
+                    expected_count = _exp_rounds * len(roles_list)
+                    actual_count = len(summaries)
+                    if actual_count < expected_count:
+                        # Derive the inferred perâtick agent count from the actual
+                        # history length.  This is how many agents appear to have
+                        # been scheduled per round.  Use this as the batch size.
+                        inferred_cap = actual_count // _exp_rounds
+                        if inferred_cap <= 0 or inferred_cap > len(roles_list):
+                            inferred_cap = len(roles_list)
+                        combined_fallback: List[Dict[str, Any]] = []
+                        # Build concurrency hints for the fallback using the same
+                        # keys we attempted previously.  Reuse the number of roles
+                        # for each subâbatch to maximize agent execution.
+                        for start_idx in range(0, len(roles_list), inferred_cap):
+                            sub_roles = roles_list[start_idx : start_idx + inferred_cap]
+                            # Build kwargs for this batch.  Always pass the concurrency
+                            # hints so the implementation does not reduce further.
+                            _batch_kwargs: Dict[str, Any] = {}
+                            _batch_count = len(sub_roles)
+                            for _k in ("max_agents_per_tick", "swarm_size", "max_parallel", "max_workers"):
+                                _batch_kwargs[_k] = _batch_count
+                            part = agent.run_swarm_continuous(
+                                goal=goal,
+                                max_rounds=_exp_rounds,
+                                stop_rye=stop_rye,
+                                roles=sub_roles,
+                                source_controls=source_controls,
+                                pdf_bytes=None,
+                                biomarker_snapshot=None,
+                                domain=domain,
+                                max_minutes=max_minutes,
+                                forever=forever,
+                                resume_from_checkpoint=resume,
+                                watchdog_interval_minutes=watchdog_minutes,
+                                runtime_profile=runtime_profile,
+                                **_batch_kwargs,
+                            )
+                            if part:
+                                combined_fallback.extend(part)
+                        # Replace the summaries with the combined history if it is longer.
+                        if combined_fallback and len(combined_fallback) >= actual_count:
+                            summaries = combined_fallback
+        except Exception:
+            # Silently ignore any fallback failure and keep original summaries
+            pass
+
         _heartbeat(agent, label="direct_job_finished", run_id=run_id)
 
         # Collapse any microâcycle summaries down to the requested macro total before
