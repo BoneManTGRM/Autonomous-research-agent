@@ -64,7 +64,11 @@ class SwarmRunConfig:
     """Top level configuration for a swarm run."""
     goal: str
     total_cycles: int
-    max_parallel: int = 4
+    # ``max_parallel`` controls how many agents run concurrently.  A value of
+    # 0 or a negative number means "unlimited": all agents run in each
+    # scheduler tick.  The engine will then derive an appropriate parallelism
+    # based on the swarm size.  See run_swarm() for details.
+    max_parallel: int = 0
     min_cycles_per_agent: int = 1
     curriculum_profile: Optional[str] = None
     hallmark_targets: Optional[List[str]] = None
@@ -187,8 +191,20 @@ class SwarmCoordinator:
         # To produce the expected number of microâcycles (rounds Ã agents),
         # compute how many batches are needed per round based on max_parallel.
         total_rounds = max(1, int(run_config.total_cycles))
-        max_parallel = max(1, int(run_config.max_parallel))
         agent_count = len(self.agent_configs) if self.agent_configs else 0
+        # Determine the parallel cap.  A value of <= 0 means "no cap"
+        # (i.e. run all agents concurrently).  Otherwise use the provided
+        # positive integer.  Always clamp to at least 1 to avoid a divide by
+        # zero when computing group counts.
+        try:
+            requested_parallel = int(run_config.max_parallel)
+        except Exception:
+            requested_parallel = 0
+        if requested_parallel and requested_parallel > 0:
+            max_parallel = requested_parallel
+        else:
+            # Unlimited parallelism: run all agents per tick
+            max_parallel = agent_count if agent_count > 0 else 1
         # Number of groups required to run all agents once given the parallel cap.
         groups_per_round = 1
         if agent_count > 0 and max_parallel > 0:
