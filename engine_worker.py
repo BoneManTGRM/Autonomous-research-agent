@@ -2578,6 +2578,7 @@ def _write_cycles_and_run_state(
     domain: str,
     cycles: List[Dict[str, Any]],
     diagnostics: Optional[Dict[str, Any]] = None,
+    expected_total: Optional[int] = None,
 ) -> None:
     ms = _get_memory_store(agent)
     if ms is None:
@@ -2635,12 +2636,33 @@ def _write_cycles_and_run_state(
         log_exception("cycle_history_write_failed", e, run_id=run_id)
 
     try:
+        # Determine the expected total number of cycles.  When provided,
+        # prefer the explicit expected_total over the observed cycle count.
+        # This allows callers to record both the planned cycle budget and
+        # the actual cycles executed.  If expected_total is not supplied,
+        # fall back to the number of cycles observed so legacy behavior
+        # remains unchanged.
+        total_expected: int
+        try:
+            if expected_total is not None and isinstance(expected_total, (int, float)):
+                total_expected = int(expected_total)
+            else:
+                total_expected = len(cycles)
+        except Exception:
+            total_expected = len(cycles)
+
         state: Dict[str, Any] = {
             "run_id": run_id,
             "mode": mode,
             "goal": goal,
             "domain": domain,
-            "total_cycles": len(cycles),
+            # Preserve backwards compatibility: expose the planned cycle budget
+            # via the existing total_cycles field.  Downstream consumers can
+            # additionally inspect expected_total_cycles and actual_total_cycles
+            # for more detailed tracking.
+            "total_cycles": total_expected,
+            "expected_total_cycles": total_expected,
+            "actual_total_cycles": len(cycles),
             "diagnostics": diag_local,
             "summary": summary_text,
             "last_update_utc": _now_utc_iso(),
@@ -3717,6 +3739,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             domain=domain,
             cycles=normalized_cycles,
             diagnostics=diag,
+            expected_total=macro_total,
         )
 
         if snapshot_enabled:
@@ -6807,6 +6830,7 @@ def _process_single_job(
             domain=domain,
             cycles=normalized_cycles,
             diagnostics=diag,
+            expected_total=final_total,
         )
 
         if snapshot_enabled:
@@ -7901,6 +7925,7 @@ def run_single_agent_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                     domain=domain,
                     cycles=normalized_cycles,
                     diagnostics=diag,
+                    expected_total=max_cycles,
                 )
 
                 if snapshot_enabled:
