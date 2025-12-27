@@ -3540,6 +3540,16 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         except Exception:
             stop_rye = None
 
+    # Disable early stop for large swarms.  Some swarm runs terminate
+    # prematurely when RYE falls below a dynamic threshold.  For swarms
+    # with more than 32 roles, ignore any configured stop_rye so that
+    # all agents have a chance to complete their requested rounds.
+    try:
+        if mode == "swarm" and roles_list is not None and len(roles_list) > 32:
+            stop_rye = None
+    except Exception:
+        pass
+
     # Default resume to False for direct jobs unless explicitly set in the
     # configuration.  This prevents automatic resumption of prior run
     # checkpoints.  To enable resume, set cfg["resume"] to True.
