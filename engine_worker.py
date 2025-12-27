@@ -68,7 +68,6 @@ import sys
 import json
 import time
 import hashlib
-import re
 import traceback
 import threading
 import platform as _platform
@@ -194,40 +193,41 @@ def _env_float_value(name: str, default: float) -> float:
         return default
 
 
-def _expand_swarm_roles_to_size(roles: List[str], desired_count: int) -> List[str]:
-    """Ensure the swarm roles list length matches desired_count.
+def _role_base_name(role_name: str) -> str:
+    """Return the base role name without a trailing numeric suffix."""
+    try:
+        s = str(role_name)
+        parts = s.split("_")
+        if len(parts) >= 2 and parts[-1].isdigit():
+            return "_".join(parts[:-1]) or s
+        return s
+    except Exception:
+        return str(role_name)
 
-    Some job creators only pass unique role archetypes (for example, 5 base
-    roles) while requesting a larger swarm_size (for example, 64).  Some agent
-    implementations also ship with a baked-in default roles list (~32) and will
-    fall back to that when the worker passes fewer roles than requested.
 
-    This helper expands (or truncates) the roles list to match the requested
-    swarm size, generating stable unique role names using an underscore suffix.
-    """
+def _expand_roles_to_count(roles: List[str], desired_count: int) -> List[str]:
+    """Expand roles to desired_count by cycling base names and enumerating."""
     try:
         desired = int(desired_count)
     except Exception:
         return roles
     if desired <= 0:
         return roles
-    if not roles:
-        roles = ["agent"]
-
-    # If the list is already the right size, return as-is.
-    if len(roles) == desired:
-        return roles
-
-    # Truncate when too large.
-    if len(roles) > desired:
-        return list(roles[:desired])
-
-    # Expand by cycling base archetypes.
-    base = [re.sub(r"_\d+$", "", str(r)) for r in roles]
+    base = []
+    for r in roles or []:
+        rr = str(r).strip()
+        if rr:
+            base.append(_role_base_name(rr))
+    if not base:
+        base = ["agent"]
     out: List[str] = []
-    for i in range(desired):
-        archetype = base[i % len(base)] if base else "agent"
-        out.append(f"{archetype}_{i+1}")
+    # If we are asking for more than the number of base archetypes, enumerate
+    # like researcher_1, critic_2, ... to keep names unique.
+    if desired > len(base):
+        for i in range(desired):
+            out.append(f"{base[i % len(base)]}_{i + 1}")
+    else:
+        out = base[:desired]
     return out
 
 
@@ -3267,21 +3267,24 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
             except Exception:
                 roles_list = ["agent"]
 
-        # Ensure the roles list length matches the requested swarm size.
-        # This prevents 64-agent requests from silently running 32 roles when
-        # the job only supplied a smaller archetype list.
+        # If the job asked for more agents than the provided roles list,
+        # expand roles_list so the agent actually runs the requested count.
         try:
-            desired_n = None
-            swarm_cfg = cfg.get("swarm") if isinstance(cfg.get("swarm"), dict) else None
-            if isinstance(swarm_cfg, dict):
-                desired_n = swarm_cfg.get("swarm_size") or swarm_cfg.get("max_agents_per_tick")
-            if desired_n is None:
-                desired_n = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
-            desired_int = int(desired_n) if desired_n is not None else None
+            desired_count = None
+            swarm_cfg_local = cfg.get("swarm") if isinstance(cfg.get("swarm"), dict) else {}
+            if isinstance(swarm_cfg_local, dict):
+                v = swarm_cfg_local.get("swarm_size") or swarm_cfg_local.get("max_agents_per_tick")
+                if isinstance(v, (int, float)) and v:
+                    desired_count = int(v)
+            if desired_count is None:
+                v2 = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
+                if isinstance(v2, (int, float)) and v2:
+                    desired_count = int(v2)
+            if desired_count is not None and desired_count > 0 and roles_list is not None:
+                if len(roles_list) < desired_count:
+                    roles_list = _expand_roles_to_count(list(roles_list), desired_count)
         except Exception:
-            desired_int = None
-        if isinstance(desired_int, int) and desired_int > 0 and roles_list is not None:
-            roles_list = _expand_swarm_roles_to_size(list(roles_list), desired_int)
+            pass
 
         # Ensure the agent adopts the job-defined roles list. Many agents
         # initialize with a default set of roles (~32), which can cause a
@@ -5772,21 +5775,24 @@ def _process_single_job(
                 except Exception:
                     roles_list = ["agent"]
 
-            # Ensure the roles list length matches the requested swarm size.
-            # This prevents 64-agent requests from silently running 32 roles when
-            # the job only supplied a smaller archetype list.
+            # If the job asked for more agents than the provided roles list,
+            # expand roles_list so the agent actually runs the requested count.
             try:
-                desired_n = None
-                swarm_cfg2 = cfg.get("swarm") or cfg.get("swarm_config")
-                if isinstance(swarm_cfg2, dict):
-                    desired_n = swarm_cfg2.get("swarm_size") or swarm_cfg2.get("max_agents_per_tick")
-                if desired_n is None:
-                    desired_n = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
-                desired_int = int(desired_n) if desired_n is not None else None
+                desired_count = None
+                swarm_cfg_local2 = cfg.get("swarm") if isinstance(cfg.get("swarm"), dict) else {}
+                if isinstance(swarm_cfg_local2, dict):
+                    v = swarm_cfg_local2.get("swarm_size") or swarm_cfg_local2.get("max_agents_per_tick")
+                    if isinstance(v, (int, float)) and v:
+                        desired_count = int(v)
+                if desired_count is None:
+                    v2 = cfg.get("swarm_size") or cfg.get("max_agents_per_tick")
+                    if isinstance(v2, (int, float)) and v2:
+                        desired_count = int(v2)
+                if desired_count is not None and desired_count > 0 and roles_list is not None:
+                    if len(roles_list) < desired_count:
+                        roles_list = _expand_roles_to_count(list(roles_list), desired_count)
             except Exception:
-                desired_int = None
-            if isinstance(desired_int, int) and desired_int > 0 and roles_list is not None:
-                roles_list = _expand_swarm_roles_to_size(list(roles_list), desired_int)
+                pass
             # Ensure the agent adopts the job-defined roles list. Many agents
             # initialize with a default set of roles (~32), which can cause
             # a 64âagent swarm to fall back to a smaller size if the worker
