@@ -3360,6 +3360,40 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         except Exception:
             pass
 
+        # Synchronize swarm configuration with the resolved roles list.  Some swarm
+        # runners default to a maximum of 32 agents unless a higher cap is
+        # explicitly provided.  To prevent a 64âagent swarm from silently
+        # falling back to a smaller size, ensure that any nested swarm config
+        # and topâlevel hints reflect the number of roles.  This does not
+        # override explicit settings if they already exceed the role count.
+        try:
+            if roles_list:
+                _role_count = len(roles_list)
+                # nested swarm config
+                swarm_cfg_ref = None
+                if isinstance(cfg.get("swarm"), dict):
+                    swarm_cfg_ref = cfg.get("swarm")
+                elif isinstance(cfg.get("swarm_config"), dict):
+                    swarm_cfg_ref = cfg.get("swarm_config")
+                if swarm_cfg_ref is not None:
+                    # max_agents is an explicit cap on swarm size in some implementations
+                    ma = swarm_cfg_ref.get("max_agents")
+                    if ma is None or (isinstance(ma, int) and ma < _role_count):
+                        swarm_cfg_ref["max_agents"] = _role_count
+                    # swarm_size may also be used to cap the number of agents
+                    ss = swarm_cfg_ref.get("swarm_size")
+                    if ss is not None and isinstance(ss, int) and ss < _role_count:
+                        swarm_cfg_ref["swarm_size"] = _role_count
+                # top level hints
+                ss_top = cfg.get("swarm_size")
+                if ss_top is not None and isinstance(ss_top, int) and ss_top < _role_count:
+                    cfg["swarm_size"] = _role_count
+                ma_top = cfg.get("max_agents")
+                if ma_top is not None and isinstance(ma_top, int) and ma_top < _role_count:
+                    cfg["max_agents"] = _role_count
+        except Exception:
+            pass
+
     max_cycles_explicit = (
         ("max_cycles" in cfg and cfg.get("max_cycles") is not None)
         or ("cycles" in cfg and cfg.get("cycles") is not None)
@@ -5913,6 +5947,38 @@ def _process_single_job(
             try:
                 if roles_list and hasattr(agent, "set_agent_roles"):
                     agent.set_agent_roles(list(roles_list))
+            except Exception:
+                pass
+
+            # Synchronize swarm configuration with the resolved roles list.  Some swarm
+            # runners default to a maximum of 32 agents unless a higher cap is
+            # explicitly provided.  To prevent a 64âagent swarm from silently
+            # falling back to a smaller size, ensure that any nested swarm config
+            # and topâlevel hints reflect the number of roles.  This does not
+            # override explicit settings if they already exceed the role count.
+            try:
+                if roles_list:
+                    _role_count = len(roles_list)
+                    # nested swarm config
+                    swarm_cfg_ref = None
+                    if isinstance(cfg.get("swarm"), dict):
+                        swarm_cfg_ref = cfg.get("swarm")
+                    elif isinstance(cfg.get("swarm_config"), dict):
+                        swarm_cfg_ref = cfg.get("swarm_config")
+                    if swarm_cfg_ref is not None:
+                        ma = swarm_cfg_ref.get("max_agents")
+                        if ma is None or (isinstance(ma, int) and ma < _role_count):
+                            swarm_cfg_ref["max_agents"] = _role_count
+                        ss = swarm_cfg_ref.get("swarm_size")
+                        if ss is not None and isinstance(ss, int) and ss < _role_count:
+                            swarm_cfg_ref["swarm_size"] = _role_count
+                    # top level hints
+                    ss_top = cfg.get("swarm_size")
+                    if ss_top is not None and isinstance(ss_top, int) and ss_top < _role_count:
+                        cfg["swarm_size"] = _role_count
+                    ma_top = cfg.get("max_agents")
+                    if ma_top is not None and isinstance(ma_top, int) and ma_top < _role_count:
+                        cfg["max_agents"] = _role_count
             except Exception:
                 pass
 
