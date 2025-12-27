@@ -64,10 +64,7 @@ class SwarmRunConfig:
     """Top level configuration for a swarm run."""
     goal: str
     total_cycles: int
-    # Maximum number of agents to run per global cycle.
-    # For typical swarm "rounds" semantics you usually want this to equal the
-    # total number of agents in the swarm.
-    max_parallel: int = 64
+    max_parallel: int = 4
     min_cycles_per_agent: int = 1
     curriculum_profile: Optional[str] = None
     hallmark_targets: Optional[List[str]] = None
@@ -185,28 +182,20 @@ class SwarmCoordinator:
             }
         """
         goal = run_config.goal
-        total_cycles = max(1, int(run_config.total_cycles))
-        # max_parallel controls how many agents run per global cycle.
-        # If this is set lower than the total number of configured agents,
-        # you effectively run only a subset each round. For "rounds" style
-        # swarms (e.g., 64 agents Ã 3 rounds), we want all agents to run each
-        # global cycle by default.
+        # Interpret run_config.total_cycles as the number of rounds each agent
+        # should complete rather than the number of global scheduler ticks.
+        # To produce the expected number of microâcycles (rounds Ã agents),
+        # compute how many batches are needed per round based on max_parallel.
+        total_rounds = max(1, int(run_config.total_cycles))
         max_parallel = max(1, int(run_config.max_parallel))
-
-        # Heuristic safety: if caller supplied a small total_cycles (typical
-        # swarm rounds) and min_cycles_per_agent is 1, but max_parallel is
-        # smaller than the swarm size, upgrade to run all agents each cycle.
-        try:
-            n_agents = len(self.agent_configs) if isinstance(self.agent_configs, dict) else 0
-            if (
-                n_agents > 0
-                and total_cycles <= 10
-                and int(run_config.min_cycles_per_agent) <= 1
-                and max_parallel < n_agents
-            ):
-                max_parallel = n_agents
-        except Exception:
-            pass
+        agent_count = len(self.agent_configs) if self.agent_configs else 0
+        # Number of groups required to run all agents once given the parallel cap.
+        groups_per_round = 1
+        if agent_count > 0 and max_parallel > 0:
+            # Ceiling division
+            groups_per_round = (agent_count + max_parallel - 1) // max_parallel
+        # Effective number of scheduler ticks to run the requested rounds across all agents.
+        total_cycles = total_rounds * groups_per_round
         idea_fraction = min(1.0, max(0.0, run_config.idea_fraction))
 
         cycle_logs: List[Dict[str, Any]] = []
