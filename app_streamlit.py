@@ -4996,10 +4996,13 @@ def main() -> None:
                 swarm_config: Dict[str, Any] = {
                     "swarm_size": int(swarm_size),
                     "roles": [name for name, _ in swarm_roles] if swarm_roles else ["agent"],
-                    # Respect userârequested cycles in swarm mode.  Using 1 here
-                    # would force a single miniâcycle per agent regardless of
-                    # the cycles slider.  Set to the requested cycles value.
-                    "max_cycles_per_agent": int(cycles),
+                    # In swarm mode, the UI "cycles" slider represents the number of swarm rounds.
+                    # Each round is one mini-cycle per agent. Some backends also support an
+                    # additional per-agent inner loop (max_cycles_per_agent). If that inner loop
+                    # is set >1 while also running multiple rounds, total work multiplies (e.g.,
+                    # 3 rounds * 3 inner cycles = 9 cycles/agent). Keep the inner loop at 1 so
+                    # the rounds slider controls total work.
+                    "max_cycles_per_agent": 1,
                     "stagger_start": False,
                     # Explicitly set the perâtick agent cap to the swarm size so
                     # all agents can run each round.  Some backends interpret
@@ -5095,7 +5098,7 @@ def main() -> None:
                 run_config["swarm_size"] = int(swarm_size)
                 run_config["max_agents_per_tick"] = int(swarm_size)
                 # Also include max_cycles_per_agent at the top level for clarity
-                run_config["max_cycles_per_agent"] = int(cycles)
+                run_config["max_cycles_per_agent"] = 1
             else:
                 # For non-swarm runs, define a single agent role if not already present.
                 run_config.setdefault("roles", ["agent"])
