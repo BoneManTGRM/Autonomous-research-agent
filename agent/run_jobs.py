@@ -768,8 +768,51 @@ def _sanitize_limits_in_config(config: Dict[str, Any]) -> Dict[str, Any]:
     try:
         mode = str(cfg.get("mode") or cfg.get("engine_mode") or "").lower()
 
-        # Cycles (non-swarm)
-        if mode != "swarm":
+        if mode == "swarm":
+            # -------------------------------------------------------------
+            # Swarm mode: "rounds" / "max_rounds" are the controlling budget.
+            #
+            # Back-compat: some callers accidentally send cycles/total_cycles
+            # even in swarm mode. If explicit round keys are missing, treat
+            # those cycle keys as rounds to avoid falling back to large defaults.
+            # -------------------------------------------------------------
+            mr = cfg.get("max_rounds")
+            if mr is None:
+                mr2 = _coerce_positive_int(cfg.get("total_rounds") or cfg.get("rounds"))
+                if mr2 is None:
+                    mr2 = _coerce_positive_int(
+                        cfg.get("total_cycles") or cfg.get("cycles") or cfg.get("max_cycles")
+                    )
+                if mr2 is not None:
+                    cfg["max_rounds"] = mr2
+                    mr = mr2
+
+            if mr is not None:
+                cfg.setdefault("rounds", int(mr))
+                cfg.setdefault("total_rounds", int(mr))
+
+            # Some swarm backends support an additional per-agent inner loop.
+            # If unspecified, default to 1 so rounds remain the primary budget.
+            mca = _coerce_positive_int(cfg.get("max_cycles_per_agent"))
+            if mca is None:
+                for sk in ("swarm", "swarm_config"):
+                    sub = cfg.get(sk)
+                    if isinstance(sub, dict):
+                        mca = _coerce_positive_int(sub.get("max_cycles_per_agent"))
+                        if mca is not None:
+                            break
+            if mca is None:
+                mca = 1
+
+            cfg.setdefault("max_cycles_per_agent", int(mca))
+            for sk in ("swarm", "swarm_config"):
+                sub = cfg.get(sk)
+                if isinstance(sub, dict):
+                    sub.setdefault("max_cycles_per_agent", int(mca))
+                    cfg[sk] = sub
+
+        else:
+            # Cycles (non-swarm)
             mc = cfg.get("max_cycles")
             if mc is None:
                 mc2 = _coerce_positive_int(cfg.get("total_cycles") or cfg.get("cycles"))
@@ -781,19 +824,6 @@ def _sanitize_limits_in_config(config: Dict[str, Any]) -> Dict[str, Any]:
                     cfg["cycles"] = int(mc)
                 if cfg.get("total_cycles") is None:
                     cfg["total_cycles"] = int(mc)
-
-        # Rounds (swarm)
-        mr = cfg.get("max_rounds")
-        if mr is None:
-            mr2 = _coerce_positive_int(cfg.get("total_rounds") or cfg.get("rounds"))
-            if mr2 is not None:
-                cfg["max_rounds"] = mr2
-                mr = mr2
-        if mr is not None:
-            if cfg.get("rounds") is None:
-                cfg["rounds"] = int(mr)
-            if cfg.get("total_rounds") is None:
-                cfg["total_rounds"] = int(mr)
     except Exception:
         # Never fail sanitization on these helpers.
         pass
