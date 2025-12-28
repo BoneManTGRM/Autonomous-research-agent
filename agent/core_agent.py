@@ -195,7 +195,7 @@ Citation tracking:
 Live UI state + event log (Render shared disk friendly):
     CoreAgent can emit:
         - a merged "worker_state.json" snapshot for always-visible UI status bars
-        - an append-only "event_log.jsonl" narrative timeline feed
+        - a per-run JSONL event stream at <runs_root>/<run_id>/events.jsonl (timeline feed)
 
     These are optional, backward compatible, and designed to be safe
     even when other components (engine_worker) also write phase fields
@@ -241,10 +241,12 @@ try:
 except Exception:
     _state_emitter_mod = None  # type: ignore
 
+# Optional JSONL events emitter (repo root).
+# Used when standardizing on per-run <runs_root>/<run_id>/events.jsonl.
 try:
-    from . import event_log as _event_log_mod  # type: ignore
+    from events import emit_event as _emit_event_jsonl  # type: ignore[import]
 except Exception:
-    _event_log_mod = None  # type: ignore
+    _emit_event_jsonl = None  # type: ignore[assignment]
 
 try:
     from . import autonomy_levels as _autonomy_levels_mod  # type: ignore
@@ -525,6 +527,9 @@ class CoreAgent:
         shared_dir_raw = self.config.get("shared_dir") or self.config.get("runs_dir") or self.config.get("shared_disk_dir")
         shared_base = Path(str(shared_dir_raw)) if shared_dir_raw else Path(".")
 
+        # Runs root (used to locate per-run events.jsonl under <runs_root>/<run_id>/)
+        self.runs_root: Path = shared_base
+
         worker_state_file = self.config.get("worker_state_file") or self.config.get("shared_state_file") or "logs/worker_state.json"
         event_log_file = self.config.get("event_log_file") or "logs/event_log.jsonl"
 
@@ -544,9 +549,8 @@ class CoreAgent:
             "started_at_ts": None,
         }
 
-        # External emitters (optional). We keep this extremely defensive:
-        # if your repo has StateEmitter / EventLogger, we use them; otherwise
-        # we use file-based helpers above.
+        # External state emitter (optional). Kept defensive for older repos.
+        # Event emission is standardized via events.emit_event when available.
         self._external_state_emitter: Optional[Any] = None
         self._external_event_logger: Optional[Any] = None
 
@@ -562,23 +566,6 @@ class CoreAgent:
                 ):
                     try:
                         self._external_state_emitter = candidate(**kwargs)  # type: ignore[misc]
-                        break
-                    except TypeError:
-                        continue
-                    except Exception:
-                        continue
-
-        if _event_log_mod is not None:
-            candidate = getattr(_event_log_mod, "EventLogger", None) or getattr(_event_log_mod, "EventLog", None)
-            if candidate is not None:
-                for kwargs in (
-                    {"path": self.event_log_path, "config": self.config},
-                    {"path": self.event_log_path},
-                    {"config": self.config},
-                    {},
-                ):
-                    try:
-                        self._external_event_logger = candidate(**kwargs)  # type: ignore[misc]
                         break
                     except TypeError:
                         continue
@@ -1038,24 +1025,40 @@ class CoreAgent:
         if isinstance(extra, dict) and extra:
             evt["extra"] = extra
 
-        # Prefer external logger if present
-        if self._external_event_logger is not None:
+        # Preferred path: write to per-run <runs_root>/<run_id>/events.jsonl when available.
+        if rid and _emit_event_jsonl is not None:
             try:
-                fn = (
-                    getattr(self._external_event_logger, "append", None)
-                    or getattr(self._external_event_logger, "log", None)
-                    or getattr(self._external_event_logger, "emit", None)
+                run_dir = Path(self.runs_root) / str(rid)
+            except Exception:
+                run_dir = Path(str(rid))
+
+            # Keep additional metadata (mode, cycle_index, etc.) in extra so callers can
+            # add fields without changing the top-level schema.
+            extra_payload: Dict[str, Any] = {}
+            if isinstance(extra, dict) and extra:
+                extra_payload.update(extra)
+            if md is not None:
+                extra_payload.setdefault("mode", md)
+            if cycle_index is not None:
+                extra_payload.setdefault("cycle_index", int(cycle_index))
+
+            try:
+                _emit_event_jsonl(
+                    run_dir,
+                    level=str(level or "info"),
+                    domain=str(domain) if isinstance(domain, str) and domain.strip() else "general",
+                    msg=str(message),
+                    kind=str(kind),
+                    extra=extra_payload,
+                    run_id=str(rid),
+                    role=str(role) if isinstance(role, str) and role.strip() else None,
+                    cycle=cycle_index,
                 )
-                if callable(fn):
-                    try:
-                        fn(evt)  # type: ignore[misc]
-                        return
-                    except TypeError:
-                        fn(**evt)  # type: ignore[misc]
-                        return
+                return
             except Exception:
                 pass
 
+        # Fallback path: append to a shared JSONL (legacy behavior).
         _append_jsonl(self.event_log_path, evt)
 
     def _set_presence(self, role: str, status: str, *, detail: Optional[str] = None) -> None:
@@ -4319,11 +4322,24 @@ class CoreAgent:
             limit = 200
 
         try:
-            if not self.event_log_path.exists():
+            rid = run_id or self._active_run_context.get("run_id")
+
+            # Prefer per-run events.jsonl when we have a run id.
+            candidate_path = None
+            if rid:
+                try:
+                    candidate_path = Path(self.runs_root) / str(rid) / "events.jsonl"
+                except Exception:
+                    candidate_path = Path(str(rid)) / "events.jsonl"
+
+            path_to_read = candidate_path if candidate_path is not None else self.event_log_path
+
+            if not path_to_read.exists():
                 return []
+
             # Read tail-ish by loading all; acceptable for small logs.
             # If you expect huge logs, rotate on the worker side.
-            lines = self.event_log_path.read_text(encoding="utf-8").splitlines()
+            lines = path_to_read.read_text(encoding="utf-8").splitlines()
             out: List[Dict[str, Any]] = []
             for line in lines[-limit:]:
                 try:
