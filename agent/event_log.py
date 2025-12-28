@@ -73,6 +73,26 @@ DEFAULT_MIRROR_GLOBAL: bool = (
 )
 
 
+# ---------------------------------------------------------------------------
+# DEPRECATION NOTICE
+# ---------------------------------------------------------------------------
+# This module historically wrote JSON-array event logs (event_log.json and
+# <run_id>_event_log.json). New code should prefer the JSONL event stream
+# written by events.emit_event to <runs_root>/<run_id>/events.jsonl.
+#
+# For migration safety, log_event() can also emit JSONL events. Legacy JSON
+# writes are disabled by default and can be re-enabled with:
+#   ARA_EVENT_LOG_WRITE_LEGACY_JSON=1
+
+try:  # pragma: no cover
+    from events import emit_event as _emit_event_jsonl  # type: ignore[import]
+except Exception:  # pragma: no cover
+    _emit_event_jsonl = None  # type: ignore[assignment]
+
+WRITE_LEGACY_JSON: bool = os.getenv("ARA_EVENT_LOG_WRITE_LEGACY_JSON", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -271,7 +291,7 @@ def make_event(
 ) -> JsonObj:
     """Create a normalized event dict.
 
-    This must be "never crash" — logging should not bring down the worker.
+    This must be "never crash" â logging should not bring down the worker.
     """
     ev: JsonObj = {
         "id": uuid.uuid4().hex,
@@ -357,6 +377,70 @@ def log_event(
         phase_name=phase_name,
         cycle=cycle,
     )
+
+    # Preferred: also emit JSONL events for the Streamlit UI (per-run events.jsonl).
+    try:
+        if _emit_event_jsonl is not None:
+            runs_root = resolve_runs_root()
+            # Per-run
+            if run_id:
+                run_dir = Path(runs_root) / str(run_id)
+                _emit_event_jsonl(
+                    run_dir,
+                    level=str(level or 'info'),
+                    domain=str(domain) if isinstance(domain, str) and domain.strip() else 'general',
+                    msg=str(message),
+                    kind=str(kind),
+                    extra=data if isinstance(data, dict) else {},
+                    run_id=str(run_id),
+                    role=str(role) if isinstance(role, str) and role.strip() else None,
+                    cycle=cycle,
+                    phase_index=phase_index,
+                    phase_total=phase_total,
+                    phase_name=phase_name,
+                )
+
+                # Optional global mirror (JSONL)
+                if mirror_global:
+                    global_dir = resolve_logs_dir(runs_root)
+                    _emit_event_jsonl(
+                        global_dir,
+                        level=str(level or 'info'),
+                        domain=str(domain) if isinstance(domain, str) and domain.strip() else 'general',
+                        msg=str(message),
+                        kind=str(kind),
+                        extra=data if isinstance(data, dict) else {},
+                        run_id=str(run_id),
+                        role=str(role) if isinstance(role, str) and role.strip() else None,
+                        cycle=cycle,
+                        phase_index=phase_index,
+                        phase_total=phase_total,
+                        phase_name=phase_name,
+                        file_name='events_global.jsonl',
+                    )
+            else:
+                # No run_id: write to a global stream only
+                global_dir = resolve_logs_dir(runs_root)
+                _emit_event_jsonl(
+                    global_dir,
+                    level=str(level or 'info'),
+                    domain=str(domain) if isinstance(domain, str) and domain.strip() else 'general',
+                    msg=str(message),
+                    kind=str(kind),
+                    extra=data if isinstance(data, dict) else {},
+                    role=str(role) if isinstance(role, str) and role.strip() else None,
+                    cycle=cycle,
+                    phase_index=phase_index,
+                    phase_total=phase_total,
+                    phase_name=phase_name,
+                    file_name='events_global.jsonl',
+                )
+    except Exception:
+        pass
+
+    # If legacy JSON-array logs are disabled, stop here.
+    if not WRITE_LEGACY_JSON:
+        return event
 
     # Per-run file
     if run_id:
