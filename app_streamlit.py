@@ -3302,10 +3302,42 @@ def load_discovery_log() -> List[Dict[str, Any]]:
 
 
 def load_event_log_unified(run_id: Optional[str]) -> Tuple[List[Dict[str, Any]], str]:
-    """Load event log from common paths.
+    """Load narrative events for the UI.
 
-    If your worker doesn't emit an event log yet, this will be empty (and we synthesize from history).
+    Preferred source (new):
+      - <runs_root>/<run_id>/events.jsonl  (JSONL; one event per line)
+
+    Legacy fallbacks (old):
+      - <runs_root>/logs/event_log.json
+      - <runs_root>/logs/<run_id>_event_log.json
+      - other historical JSON containers discovered via _candidate_state_paths
+
+    If nothing is found, return an empty list and the UI will synthesize a
+    lightweight feed from cycle history.
     """
+
+    # 1) JSONL-first: per-run events stream
+    try:
+        if run_id:
+            p_jsonl = Path(get_runs_root()) / str(run_id) / "events.jsonl"
+            if p_jsonl.exists():
+                # Read a tail window; files can grow over time.
+                lines = tail_lines(p_jsonl, max_lines=1000)
+                out: List[Dict[str, Any]] = []
+                for line in lines:
+                    try:
+                        obj = json.loads(line)
+                        if isinstance(obj, dict):
+                            out.append(obj)
+                    except Exception:
+                        continue
+                # Hide high-frequency progress pings from the narrative timeline
+                out = [e for e in out if (e.get('domain') != 'progress')]
+                return out, str(p_jsonl)
+    except Exception:
+        pass
+
+    # 2) Legacy JSON containers
     paths = _candidate_state_paths(run_id=run_id)["events"]
     raw, p = _first_existing_json(paths)
 
@@ -3403,8 +3435,8 @@ def render_narrative_feed(events: List[Dict[str, Any]], source_label: str = "") 
     rows = []
     for ev in tail:
         ts = _event_ts_to_str(ev.get("ts") or ev.get("timestamp") or "")
-        kind = str(ev.get("kind") or ev.get("type") or "event")
-        msg = str(ev.get("message") or ev.get("text") or ev.get("summary") or "")
+        kind = str(ev.get("kind") or ev.get("type") or ev.get("domain") or "event")
+        msg = str(ev.get("message") or ev.get("msg") or ev.get("text") or ev.get("summary") or "")
         if not msg:
             continue
         # Use a simple pipe separator in place of a misencoded bullet
@@ -4996,13 +5028,10 @@ def main() -> None:
                 swarm_config: Dict[str, Any] = {
                     "swarm_size": int(swarm_size),
                     "roles": [name for name, _ in swarm_roles] if swarm_roles else ["agent"],
-                    # In swarm mode, the UI "cycles" slider represents the number of swarm rounds.
-                    # Each round is one mini-cycle per agent. Some backends also support an
-                    # additional per-agent inner loop (max_cycles_per_agent). If that inner loop
-                    # is set >1 while also running multiple rounds, total work multiplies (e.g.,
-                    # 3 rounds * 3 inner cycles = 9 cycles/agent). Keep the inner loop at 1 so
-                    # the rounds slider controls total work.
-                    "max_cycles_per_agent": 1,
+                    # Respect userârequested cycles in swarm mode.  Using 1 here
+                    # would force a single miniâcycle per agent regardless of
+                    # the cycles slider.  Set to the requested cycles value.
+                    "max_cycles_per_agent": int(cycles),
                     "stagger_start": False,
                     # Explicitly set the perâtick agent cap to the swarm size so
                     # all agents can run each round.  Some backends interpret
@@ -5098,7 +5127,7 @@ def main() -> None:
                 run_config["swarm_size"] = int(swarm_size)
                 run_config["max_agents_per_tick"] = int(swarm_size)
                 # Also include max_cycles_per_agent at the top level for clarity
-                run_config["max_cycles_per_agent"] = 1
+                run_config["max_cycles_per_agent"] = int(cycles)
             else:
                 # For non-swarm runs, define a single agent role if not already present.
                 run_config.setdefault("roles", ["agent"])
