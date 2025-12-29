@@ -1849,15 +1849,16 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
 
     logs = runs_root / "logs"
 
-    # Some deployments override the logs directory (the engine worker uses these env vars).
-    extra_logs_dirs: List[Path] = []
+    # Some deployments (e.g., Render) can override where logs are written.
+    # Keep Streamlit in sync with the worker by checking the same env overrides.
+    logs_dirs: List[Path] = [logs]
     for _k in ("ARA_RUNS_LOGS_DIR", "ARA_RUNS_LOG_DIR", "ARA_LOGS_DIR"):
         _v = os.getenv(_k)
         if _v:
             try:
-                _p = Path(_v)
-                if _p != logs and _p not in extra_logs_dirs:
-                    extra_logs_dirs.append(_p)
+                _p = Path(_v).expanduser()
+                if _p not in logs_dirs:
+                    logs_dirs.append(_p)
             except Exception:
                 pass
     q_pending = queue_root / "pending"
@@ -1901,22 +1902,30 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
         queue_root / "event_log.json",
     ]
 
-    for _ld in extra_logs_dirs:
-        events.extend(
-            [
+    # Include the same filenames under any env-overridden log directories.
+    if len(logs_dirs) > 1:
+        for _ld in logs_dirs[1:]:
+            worker_state.extend([
+                _ld / "worker_state.json",
+                _ld / "engine_worker_state.json",
+                _ld / "worker_status.json",
+            ])
+            run_state.extend([
+                _ld / "run_state.json",
+                _ld / "last_run_state.json",
+            ])
+            heartbeat.extend([
+                _ld / "watchdog_heartbeat.json",
+                _ld / "heartbeat.json",
+                _ld / "worker_heartbeat.json",
+                _ld / "watchdog.json",
+                _ld / "watchdog_state.json",
+            ])
+            events.extend([
                 _ld / "event_log.json",
                 _ld / "events.json",
                 _ld / "timeline.json",
-            ]
-        )
-
-        for _ld in extra_logs_dirs:
-            events.extend(
-                [
-                    _ld / f"{run_id}_events.json",
-                    _ld / f"{run_id}_event_log.json",
-                ]
-            )
+            ])
 
     # Per-run filenames (if emitted)
     if run_id:
@@ -1952,6 +1961,25 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
             ]
         )
 
+        # Also consider per-run files under env-overridden log dirs.
+        if len(logs_dirs) > 1:
+            for _ld in logs_dirs[1:]:
+                worker_state.extend([
+                    _ld / f"{run_id}_worker_state.json",
+                    _ld / f"{run_id}_state.json",
+                ])
+                run_state.extend([
+                    _ld / f"{run_id}_run_state.json",
+                    _ld / f"{run_id}_runstate.json",
+                ])
+                heartbeat.extend([
+                    _ld / f"{run_id}_heartbeat.json",
+                ])
+                events.extend([
+                    _ld / f"{run_id}_events.json",
+                    _ld / f"{run_id}_event_log.json",
+                ])
+
     progress = []
     if run_id:
         progress = [
@@ -1962,6 +1990,10 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
             runs_root / run_id / "progress.json",
         ]
 
+        if len(logs_dirs) > 1:
+            for _ld in logs_dirs[1:]:
+                progress.append(_ld / f"{run_id}_progress.json")
+
     return {
         "worker_state": worker_state,
         "run_state": run_state,
@@ -1971,7 +2003,7 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
         "queue_pending": [q_pending],
         "queue_active": [q_active],
         "queue_finished": [q_finished],
-        "runs_logs": [logs],
+        "runs_logs": logs_dirs,
     }
 
 
@@ -4272,8 +4304,8 @@ def main() -> None:
     ws_run_id = str(ws_run_id) if ws_run_id is not None else None
 
     active_run_id = (
-        active_run_from_run_state
-        or (ws_run_id if running_like else None)
+        (ws_run_id if running_like else None)
+        or active_run_from_run_state
         or active_run_hint
         or _derive_active_run_id_from_queue()
     )
