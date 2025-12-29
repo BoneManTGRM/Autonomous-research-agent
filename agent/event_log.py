@@ -137,8 +137,8 @@ def resolve_logs_dir(runs_root: Optional[Path] = None) -> Path:
     """Resolve logs dir. Allows override via ARA_RUNS_LOGS_DIR / ARA_RUNS_LOG_DIR / ARA_LOGS_DIR."""
     for key in ("ARA_RUNS_LOGS_DIR", "ARA_RUNS_LOG_DIR", "ARA_LOGS_DIR"):
         env = os.getenv(key)
-        if env:
-            return Path(env)
+        if isinstance(env, str) and env.strip():
+            return Path(env.strip())
     rr = runs_root if isinstance(runs_root, Path) else resolve_runs_root()
     return rr / "logs"
 
@@ -292,7 +292,7 @@ def make_event(
 ) -> JsonObj:
     """Create a normalized event dict.
 
-    This must be "never crash" Ã¢ÂÂ logging should not bring down the worker.
+    This must be "never crash" ÃÂ¢ÃÂÃÂ logging should not bring down the worker.
     """
     ev: JsonObj = {
         "id": uuid.uuid4().hex,
