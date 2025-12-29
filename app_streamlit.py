@@ -2518,9 +2518,9 @@ def compute_progress_view(
     started_like = bool(running_like or hb_count > 0 or (hb_last and heartbeat_fresh))
 
     # Preferred: phase progress (3-phase pipeline etc.) (preserve 0 values)
-    phase_cur = _coalesce(ps.get("phase_index"), ws.get("phase_index"), ps.get("phase_current"))
-    phase_tot = _coalesce(ps.get("phase_total"), ws.get("phase_total"), ps.get("phase_count"))
-    phase_name = _coalesce(ps.get("phase_name"), ws.get("phase_name"), "") or ""
+    phase_cur = _coalesce(ws.get("phase_index"), ps.get("phase_index"), ps.get("phase_current"))
+    phase_tot = _coalesce(ws.get("phase_total"), ps.get("phase_total"), ps.get("phase_count"))
+    phase_name = _coalesce(ws.get("phase_name"), ps.get("phase_name"), "") or ""
 
     # Cycle progress (preserve 0 values)
     cur = _coalesce(
@@ -3322,94 +3322,6 @@ def load_event_log_unified(run_id: Optional[str]) -> Tuple[List[Dict[str, Any]],
     return [], "not found"
 
 
-def progress_state_from_event_log(events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """Derive a progress snapshot from the legacy JSON event_log.
-
-    The engine worker emits periodic events via ``event_log.py`` that include
-    phase_index/phase_total/phase_name (when available) and a cycle counter in
-    ``data`` (e.g. current_cycle/total_cycles). This helper extracts the most
-    recent values so the top bar can rely on *event_log.json* as the single
-    source of truth (no events.jsonl dependency).
-    """
-    if not events:
-        return None
-
-    phase_index: Optional[Any] = None
-    phase_total: Optional[Any] = None
-    phase_name: Optional[Any] = None
-    cur: Optional[Any] = None
-    tot: Optional[Any] = None
-
-    # Walk newest->oldest and capture the first usable value for each field.
-    for ev in reversed(events):
-        if not isinstance(ev, dict):
-            continue
-
-        data = ev.get("data")
-        if not isinstance(data, dict):
-            data = {}
-
-        if phase_index is None:
-            phase_index = _coalesce(ev.get("phase_index"), data.get("phase_index"), data.get("phase_current"))
-        if phase_total is None:
-            phase_total = _coalesce(ev.get("phase_total"), data.get("phase_total"), data.get("phase_count"))
-        if phase_name is None:
-            phase_name = _coalesce(ev.get("phase_name"), data.get("phase_name"), data.get("phase"))
-
-        if cur is None:
-            cur = _coalesce(
-                data.get("current_cycle"),
-                data.get("current"),
-                data.get("cycle"),
-                ev.get("cycle"),
-                data.get("cycle_index"),
-            )
-        if tot is None:
-            tot = _coalesce(
-                data.get("total_cycles"),
-                data.get("total"),
-                data.get("max_cycles"),
-                data.get("effective_total"),
-            )
-
-        # Last-resort parse: "Cycle X/Y" from the message text.
-        if cur is None or tot is None:
-            msg = _coalesce(ev.get("message"), ev.get("msg"), "")
-            if isinstance(msg, str) and msg:
-                m = re.search(r"cycle\s+(\d+)\s*/\s*(\d+)", msg, flags=re.IGNORECASE)
-                if m:
-                    if cur is None:
-                        cur = m.group(1)
-                    if tot is None:
-                        tot = m.group(2)
-
-        # Stop once we have cycle progress and at least some phase context.
-        if cur is not None and tot is not None and (
-            phase_index is not None or phase_total is not None or phase_name is not None
-        ):
-            break
-
-    out: Dict[str, Any] = {}
-    if phase_index is not None:
-        out["phase_index"] = phase_index
-    if phase_total is not None:
-        out["phase_total"] = phase_total
-    if phase_name is not None:
-        out["phase_name"] = phase_name
-
-    if cur is not None:
-        out["current_cycle"] = cur
-        out["current"] = cur
-        out["cycle"] = cur
-    if tot is not None:
-        out["total_cycles"] = tot
-        out["total"] = tot
-        out["max_cycles"] = tot
-
-    return out if out else None
-
-
-
 def _event_ts_to_str(ts_val: Any) -> str:
     if isinstance(ts_val, (int, float)):
         try:
@@ -3447,8 +3359,8 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
         if isinstance(rye, (int, float)):
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
-            # Delta symbol: use Unicode escape to avoid source-file encoding issues
-            parts.append(f"\u0394R {float(d_r):.3f}")
+            # Use a readable delta symbol instead of a misencoded character
+            parts.append(f"ÎR {float(d_r):.3f}")
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
@@ -4316,10 +4228,7 @@ def main() -> None:
             watchdog0 = synth_wd
             watchdog_src0 = synth_src
 
-    # Event log (legacy JSON) is the single source of truth for progress in this UI.
-    # Derive phase/cycle counters from it so the top bar stays consistent with the timeline.
-    event_log0, event_src0 = load_event_log_unified(active_run_id)
-    progress0_raw = progress_state_from_event_log(event_log0) if active_run_id else None
+    progress0_raw, progress_src0 = load_progress_unified(active_run_id)
     progress_view0 = compute_progress_view(
         ws0 if active_run_id else None,
         progress0_raw if active_run_id else None,
@@ -4341,7 +4250,8 @@ def main() -> None:
     autonomy_view0 = compute_autonomy_view(job_payload0, ws0, diagnostics_preview)
     agents0 = _infer_agents_from_job_config(job_payload0)
 
-    # Event log (or synthesized)  (already loaded above for topbar progress)
+    # Event log (or synthesized)
+    event_log0, event_src0 = load_event_log_unified(active_run_id)
     narrative_events = (
         event_log0 if event_log0 else build_narrative_events_from_history(history_preview, limit=LIVE_EVENTS_LIMIT)
     )
@@ -4522,9 +4432,6 @@ def main() -> None:
             if run_active and run_id_feed:
                 # Refresh periodically to keep the console up to date.
                 st_autorefresh(interval=750, key=f"console_refresh_{run_id_feed}")  # type: ignore[misc]
-
-        # Live events (events.jsonl) panel disabled; UI uses event_log.json only.
-
         render_narrative_feed(narrative_events, source_label=event_src0 if event_src0 != "not found" else "synthesized")
 
         # Provide access to the raw event log JSON if available.  Users can expand this
@@ -6213,16 +6120,6 @@ def main() -> None:
     watchdog, watchdog_src = load_watchdog_info_unified(memory, run_id=run_id)
     run_state, run_state_src = load_run_state_unified(memory, run_id_hint=run_id)
     progress_raw, progress_src = load_progress_unified(run_id)
-
-    # Prefer progress derived from event_log.json when available (single source of truth)
-    try:
-        _elog_diag, _elog_src = load_event_log_unified(run_id)
-        _progress_from_elog = progress_state_from_event_log(_elog_diag) if _elog_diag else None
-        if _progress_from_elog:
-            progress_raw = _progress_from_elog
-            progress_src = f"event_log:{_elog_src}"
-    except Exception:
-        pass
 
     # If watchdog is missing/empty, synthesize from last activity so the UI doesn't show "None recorded"
     if not _is_meaningful_watchdog(watchdog):
