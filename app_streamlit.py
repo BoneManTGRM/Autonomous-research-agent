@@ -3360,7 +3360,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
             # Use a readable delta symbol instead of a misencoded character
-            parts.append(f"ÎR {float(d_r):.3f}")
+            parts.append(f"ÃÂR {float(d_r):.3f}")
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
@@ -4432,6 +4432,68 @@ def main() -> None:
             if run_active and run_id_feed:
                 # Refresh periodically to keep the console up to date.
                 st_autorefresh(interval=750, key=f"console_refresh_{run_id_feed}")  # type: ignore[misc]
+
+        # Live events feed controls: fixed number of messages to show.
+        # This keeps the UI clean and avoids an extra slider on mobile.
+        max_event_lines = 30
+        # Use a fixed list of noisy keywords to exclude from the live event feed.  The
+        # keyword input box has been removed per user request, but these defaults
+        # help filter out internal progress messages.
+        exclude_keywords: List[str] = ["cycle_progress", "job_claimed", "job_running"]
+
+        # Attempt to tail the events.jsonl log for this run and filter out unhelpful progress events.
+        messages: List[str] = []
+        if run_id_feed:
+            try:
+                run_dir_path = Path(get_runs_root()) / str(run_id_feed)
+                events_path = run_dir_path / "events.jsonl"
+                # Use user-selected limit for the number of lines to tail
+                lines = tail_lines(events_path, max_lines=int(max_event_lines))
+            except Exception:
+                lines = []
+            # Parse and filter lines
+            for _ev_line in lines:
+                try:
+                    _ev = json.loads(_ev_line)
+                    # Skip progress events to reduce noise; show everything else.
+                    if str(_ev.get("domain")) == "progress":
+                        continue
+                    _msg = _ev.get("msg") or _ev.get("message")
+                    if isinstance(_msg, str) and _msg.strip():
+                        # Apply keyword-based exclusions (case-insensitive) on the message.
+                        _msg_low = _msg.lower()
+                        if exclude_keywords and any(kw in _msg_low for kw in exclude_keywords):
+                            continue
+                        messages.append(str(_msg))
+                        continue
+                    # Fallback: build a message from domain and level.
+                    dom = _ev.get("domain")
+                    lvl = _ev.get("level")
+                    msg_s = ""
+                    if dom or lvl:
+                        msg_s = f"{lvl or 'info'}: {dom}"
+                    else:
+                        msg_s = str(_ev)
+                    # Apply keyword-based exclusions on fallback message.
+                    if exclude_keywords and any(kw in msg_s.lower() for kw in exclude_keywords):
+                        continue
+                    messages.append(msg_s)
+                except Exception:
+                    # Non-JSON lines are appended directly if they pass exclusions.
+                    line_s = _ev_line.strip()
+                    if exclude_keywords and any(kw in line_s.lower() for kw in exclude_keywords):
+                        continue
+                    messages.append(line_s)
+        # Render the filtered live events if any exist.
+        # Live events panel is hidden by default. Set ARA_SHOW_LIVE_EVENTS=1 to re-enable.
+        show_live_events = os.environ.get("ARA_SHOW_LIVE_EVENTS", "0").strip().lower() in {"1", "true", "yes"}
+        if show_live_events and messages:
+            st.markdown("#### Live events")
+            for m in messages:
+                st.write(m)
+
+        # Render the narrative feed summarizing recent cycles.  This provides context
+        # for the run even when the event log lacks detailed messages.
         render_narrative_feed(narrative_events, source_label=event_src0 if event_src0 != "not found" else "synthesized")
 
         # Provide access to the raw event log JSON if available.  Users can expand this
@@ -6448,5 +6510,3 @@ def main() -> None:
 
 
 # Streamlit entry point
-if __name__ == "__main__":
-    main()
