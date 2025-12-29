@@ -3360,7 +3360,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
             # Use a readable delta symbol instead of a misencoded character
-            parts.append(f"ÃÂR {float(d_r):.3f}")
+            parts.append(f"\u0394R {float(d_r):.3f}")  # ÎR
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
