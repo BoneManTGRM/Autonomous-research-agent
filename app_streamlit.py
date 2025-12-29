@@ -114,9 +114,9 @@ def tail_lines(path: Path, max_lines: int = 200) -> List[str]:
 
 # IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
-# Replace the misÃÂ¢ÃÂÃÂencoded page icon with a valid emoji to prevent mojibake
-# Use a valid Unicode emoji for the page icon instead of a doubleÃ¢ÂÂdecoded byte sequence
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="Ã°ÂÂÂ¬", layout="wide")
+# Replace the misÃÂÃÂ¢ÃÂÃÂÃÂÃÂencoded page icon with a valid emoji to prevent mojibake
+# Use a valid Unicode emoji for the page icon instead of a doubleÃÂ¢ÃÂÃÂdecoded byte sequence
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂ°ÃÂÃÂÃÂ¬", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -1848,6 +1848,18 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
     queue_root = Path(get_queue_root())
 
     logs = runs_root / "logs"
+
+    # Some deployments override the logs directory (the engine worker uses these env vars).
+    extra_logs_dirs: List[Path] = []
+    for _k in ("ARA_RUNS_LOGS_DIR", "ARA_RUNS_LOG_DIR", "ARA_LOGS_DIR"):
+        _v = os.getenv(_k)
+        if _v:
+            try:
+                _p = Path(_v)
+                if _p != logs and _p not in extra_logs_dirs:
+                    extra_logs_dirs.append(_p)
+            except Exception:
+                pass
     q_pending = queue_root / "pending"
     q_active = queue_root / "active"
     q_finished = queue_root / "finished"
@@ -1888,6 +1900,23 @@ def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]
         logs / "timeline.json",
         queue_root / "event_log.json",
     ]
+
+    for _ld in extra_logs_dirs:
+        events.extend(
+            [
+                _ld / "event_log.json",
+                _ld / "events.json",
+                _ld / "timeline.json",
+            ]
+        )
+
+        for _ld in extra_logs_dirs:
+            events.extend(
+                [
+                    _ld / f"{run_id}_events.json",
+                    _ld / f"{run_id}_event_log.json",
+                ]
+            )
 
     # Per-run filenames (if emitted)
     if run_id:
@@ -2542,11 +2571,11 @@ def compute_progress_view(
     )
 
     # Select which progress track to display
-    # Only use phase progress when there is a multiÃÂ¢ÃÂÃÂphase pipeline (phase_total > 1).
+    # Only use phase progress when there is a multiÃÂÃÂ¢ÃÂÃÂÃÂÃÂphase pipeline (phase_total > 1).
     phase_total_int = _safe_int(phase_tot, None)
     use_phase = phase_total_int
     # When phase_total is 1 or less, fall back to cycle progress instead of using phase progress.  This
-    # prevents singleÃÂ¢ÃÂÃÂphase runs from displaying as "1 run" when multiple cycles are present.
+    # prevents singleÃÂÃÂ¢ÃÂÃÂÃÂÃÂphase runs from displaying as "1 run" when multiple cycles are present.
     if phase_total_int is not None and phase_total_int > 1:
         phase_cur_raw = phase_cur
         c = _safe_int(phase_cur_raw, 0) or 0
@@ -2599,7 +2628,7 @@ def compute_progress_view(
     # reached the total, treat it as complete.  This prevents the
     # progress bar from appearing partially filled when the run
     # terminated early (e.g. in swarm mode where early stopping
-    # conditions may result in fewer microÃ¢ÂÂcycles than the
+    # conditions may result in fewer microÃÂ¢ÃÂÃÂcycles than the
     # configured maximum).  By promoting the current value to
     # equal the total for finished runs, the UI more clearly
     # communicates that no more cycles remain.
@@ -2632,9 +2661,9 @@ def compute_progress_view(
             if mode_pd == "swarm":
                 # In swarm mode a single round consists of one cycle per role.
                 # When only ``max_rounds`` is used, the UI remaps hundreds of
-                # microÃ¢ÂÂsteps down to a 1..max_rounds scale (e.g. 1/3Ã¢ÂÂ2/3Ã¢ÂÂ3/3),
+                # microÃÂ¢ÃÂÃÂsteps down to a 1..max_rounds scale (e.g. 1/3ÃÂ¢ÃÂÃÂ2/3ÃÂ¢ÃÂÃÂ3/3),
                 # obscuring the true progress through all agents.  To better
-                # reflect the swarmÃ¢ÂÂs workload, scale the macro total by the
+                # reflect the swarmÃÂ¢ÃÂÃÂs workload, scale the macro total by the
                 # number of roles.  For example, 3 rounds with 32 roles
                 # produces 96 logical cycles.  If roles is missing, assume 1.
                 mc = pd.get("max_rounds") or pd.get("max_cycles")
@@ -2674,8 +2703,8 @@ def compute_progress_view(
             else:
                 mc = pd.get("max_cycles") or pd.get("max_rounds")
                 macro_total_ui = _safe_int(mc, None)
-        # Only remap internal step counts to a smaller macro cycle total for nonÃ¢ÂÂswarm runs.
-        # In swarm mode we want to preserve the full microÃ¢ÂÂcycle progress (which may
+        # Only remap internal step counts to a smaller macro cycle total for nonÃÂ¢ÃÂÃÂswarm runs.
+        # In swarm mode we want to preserve the full microÃÂ¢ÃÂÃÂcycle progress (which may
         # be hundreds of steps) instead of collapsing to the requested number of rounds.
         if (
             mode_pd != "swarm"
@@ -2699,7 +2728,7 @@ def compute_progress_view(
         # number of unique roles (e.g. 32) rather than the requested swarm size
         # (e.g. 64).  When prompt_details provides a larger macro_total_ui for
         # swarm mode, prefer that over the reported total to ensure the cycle
-        # progress bar reflects the full microÃ¢ÂÂcycle budget.  Do not adjust the
+        # progress bar reflects the full microÃÂ¢ÃÂÃÂcycle budget.  Do not adjust the
         # current value here; leave c2 untouched so it still reflects the
         # actual number of steps executed so far.
         try:
@@ -3196,12 +3225,12 @@ def _infer_agents_from_job_config(job_payload: Optional[Dict[str, Any]]) -> List
 
     swarm_size = _safe_int(swarm_cfg.get("swarm_size"), 1) or 1
 
-    # Prefer a topÃ¢ÂÂlevel roles list when present.  Some job creators
+    # Prefer a topÃÂ¢ÃÂÃÂlevel roles list when present.  Some job creators
     # (including the patched Streamlit UI) set roles on the top level of
     # the run configuration to include every mini agent in the swarm.  If
     # provided, use this list as the authoritative set of agents so that
     # all agents are rendered in the UI.  Fall back to swarm_config roles
-    # only when the topÃ¢ÂÂlevel list is absent.
+    # only when the topÃÂ¢ÃÂÃÂlevel list is absent.
     roles_top = cfg.get("roles")
     if isinstance(roles_top, list) and roles_top:
         role_names = [str(r) for r in roles_top if str(r).strip()]
@@ -3413,7 +3442,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
             # Use a readable delta symbol instead of a misencoded character
-            parts.append(f"\u0394R {float(d_r):.3f}")  # ÃÂR
+            parts.append(f"\u0394R {float(d_r):.3f}")  # ÃÂÃÂR
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
@@ -4807,17 +4836,17 @@ def main() -> None:
             ("ALP & ALT", "These liver enzymes reveal liver and bone health. Elevated alkaline phosphatase (ALP) can signal bone disorders or bile duct problems, while high alanine aminotransferase (ALT) typically indicates liver inflammation. Monitoring both helps detect issues early."),
             ("Creatinine (CRE)", "A waste product filtered by the kidneys. Low creatinine levels suggest efficient kidney filtration and preserved muscle mass. Levels usually rise with age, but very low levels in older adults may reflect healthy kidney function."),
             ("Creatine Kinase (CK)", "High CK can indicate muscle damage or metabolic stress from intense activity or inflammation. Because muscle mass and strength support mobility and independence, monitoring CK helps ensure optimal muscle health."),
-            ("Reactive Oxygen Metabolite (ROM)", "Reflects oxidative stress burden. High ROM accelerates DNA damage and cellular aging, while antioxidants such as vitaminÃÂ E can help reduce ROM and protect cells from oxidative damage."),
+            ("Reactive Oxygen Metabolite (ROM)", "Reflects oxidative stress burden. High ROM accelerates DNA damage and cellular aging, while antioxidants such as vitaminÃÂÃÂ E can help reduce ROM and protect cells from oxidative damage."),
             ("Total Antioxidant Capacity (TAC)", "Measures how well the body counters oxidative stress. Low TAC suggests weak defenses and greater risk of chronic disease. High TAC indicates better protection from free radical damage."),
-            ("DNA Damage (8Ã¢ÂÂOHdG)", "Indicates oxidative damage to DNA. Elevated 8Ã¢ÂÂOHdG suggests slowing DNA repair and accelerated aging; interventions with nutrients like zinc and vitaminÃÂ E may lower levels."),
-            ("Intracellular NAD+", "NADÃ¢ÂÂº supports mitochondrial function and sirtuin activation but declines with age, contributing to fatigue and metabolic dysfunction. Testing cellular NADÃ¢ÂÂº helps identify opportunities for targeted supplementation."),
-            ("VitaminÃÂ D", "Regulates immune and bone health. Deficiency increases risk for chronic disease and frailty; maintaining optimal levels supports immunity and strong bones."),
+            ("DNA Damage (8ÃÂ¢ÃÂÃÂOHdG)", "Indicates oxidative damage to DNA. Elevated 8ÃÂ¢ÃÂÃÂOHdG suggests slowing DNA repair and accelerated aging; interventions with nutrients like zinc and vitaminÃÂÃÂ E may lower levels."),
+            ("Intracellular NAD+", "NADÃÂ¢ÃÂÃÂº supports mitochondrial function and sirtuin activation but declines with age, contributing to fatigue and metabolic dysfunction. Testing cellular NADÃÂ¢ÃÂÃÂº helps identify opportunities for targeted supplementation."),
+            ("VitaminÃÂÃÂ D", "Regulates immune and bone health. Deficiency increases risk for chronic disease and frailty; maintaining optimal levels supports immunity and strong bones."),
             ("Glycated Serum Protein (GSP)", "Reflects short-term blood sugar control and, alongside HbA1c, helps assess diabetes risk. Stable glucose levels protect vascular and neurological health."),
             ("Blood Lipids (HDL, LDL, triglycerides)", "Balance between high-density lipoprotein (HDL) and lower levels of low-density lipoprotein (LDL) and triglycerides is crucial for heart health. Centenarians often have healthier lipid profiles, underscoring the importance of monitoring lipids."),
             ("Uric Acid", "Excess uric acid can cause gout or kidney stones, but in small amounts it acts as an antioxidant. Centenarians maintain balanced levels, benefiting from protection without the risks of high uric acid."),
             ("Klotho", "An anti-aging protein that supports kidney function, mineral balance and brain health. Levels decline with age; higher klotho is associated with slower aging and better health outcomes."),
-            ("Inflammation markers (hs-CRP, IL-1ÃÂ², IL-6, IL-8, TNF-ÃÂ±)", "Chronic low-grade inflammation (\"inflammaging\") damages tissues and increases risks for heart disease, diabetes and cognitive decline. Regular exercise, omega-3 fats and stress management can help control these markers."),
-            ("Senescence-Associated ÃÂ²-Galactosidase (SABG or ÃÂ²-gal)", "Identifies senescent cells that accumulate with age. These Ã¢ÂÂzombieÃ¢ÂÂ cells release inflammatory factors and contribute to chronic disease; emerging senolytic therapies aim to clear them."),
+            ("Inflammation markers (hs-CRP, IL-1ÃÂÃÂ², IL-6, IL-8, TNF-ÃÂÃÂ±)", "Chronic low-grade inflammation (\"inflammaging\") damages tissues and increases risks for heart disease, diabetes and cognitive decline. Regular exercise, omega-3 fats and stress management can help control these markers."),
+            ("Senescence-Associated ÃÂÃÂ²-Galactosidase (SABG or ÃÂÃÂ²-gal)", "Identifies senescent cells that accumulate with age. These ÃÂ¢ÃÂÃÂzombieÃÂ¢ÃÂÃÂ cells release inflammatory factors and contribute to chronic disease; emerging senolytic therapies aim to clear them."),
         ]
         # Render each biomarker item as a bullet point.
         for name, desc in biomarker_items:
@@ -4827,21 +4856,21 @@ def main() -> None:
         if show_biomarker_citations:
             st.markdown("#### Sources and citations")
             citation_lines = [
-                "Information on albuminÃ¢ÂÂs role and its association with chronic inflammation, malnutrition and frailty is summarised from JinfinitiÃ¢ÂÂs description of albumin and centenarian studiesÃ£ÂÂ203931968364787Ã¢ÂÂ L234-L246Ã£ÂÂ.",
-                "The functions of alkaline phosphatase (ALP) and alanine aminotransferase (ALT) and what elevated levels indicate are based on JinfinitiÃ¢ÂÂs discussion of these enzymesÃ£ÂÂ203931968364787Ã¢ÂÂ L248-L262Ã£ÂÂ.",
-                "The explanation of creatinineÃ¢ÂÂs role as a kidney function marker and how its levels change with age comes from JinfinitiÃ¢ÂÂs articleÃ£ÂÂ203931968364787Ã¢ÂÂ L264-L278Ã£ÂÂ.",
-                "Details about creatine kinase (CK) as a marker of muscle damage and its importance for mobility are drawn from JinfinitiÃ¢ÂÂs overviewÃ£ÂÂ203931968364787Ã¢ÂÂ L280-L290Ã£ÂÂ.",
-                "The description of reactive oxygen metabolites (ROM) and the protective effects of antioxidants like vitaminÃÂ E reflects JinfinitiÃ¢ÂÂs discussionÃ£ÂÂ203931968364787Ã¢ÂÂ L292-L303Ã£ÂÂ.",
-                "The summary of total antioxidant capacity (TAC) and its significance for disease risk is based on JinfinitiÃ¢ÂÂs explanationÃ£ÂÂ203931968364787Ã¢ÂÂ L305-L317Ã£ÂÂ.",
-                "Information on DNA damage (8Ã¢ÂÂOHdG) as a marker of oxidative stress and how nutrition may reduce it comes from JinfinitiÃ£ÂÂ203931968364787Ã¢ÂÂ L320-L327Ã£ÂÂ.",
-                "The role of intracellular NADÃ¢ÂÂº in mitochondrial function, its decline with age and potential interventions are summarised from the Jinfiniti guideÃ£ÂÂ203931968364787Ã¢ÂÂ L329-L341Ã£ÂÂ.",
-                "Insights about vitaminÃÂ DÃ¢ÂÂs effect on immune function, bone health and frailty are drawn from JinfinitiÃ¢ÂÂs articleÃ£ÂÂ203931968364787Ã¢ÂÂ L342-L349Ã£ÂÂ.",
-                "The description of glycated serum protein (GSP) as a blood sugar indicator and its link to diabetes risk is based on JinfinitiÃ¢ÂÂs textÃ£ÂÂ203931968364787Ã¢ÂÂ L352-L359Ã£ÂÂ.",
-                "Information about blood lipids (HDL, LDL, triglycerides) and their relationship to cardiovascular health and longevity derives from the Jinfiniti discussionÃ£ÂÂ203931968364787Ã¢ÂÂ L364-L375Ã£ÂÂ.",
-                "The dual role of uric acid as both a risk factor and an antioxidant, and observations from centenarians, comes from JinfinitiÃ¢ÂÂs explanationÃ£ÂÂ203931968364787Ã¢ÂÂ L377-L389Ã£ÂÂ.",
-                "The significance of klotho as an anti-aging protein and its association with slower aging is summarised from JinfinitiÃ¢ÂÂs descriptionÃ£ÂÂ203931968364787Ã¢ÂÂ L392-L404Ã£ÂÂ.",
-                "The section on inflammation markers and the concept of inflammaging draws from JinfinitiÃ¢ÂÂs overviewÃ£ÂÂ203931968364787Ã¢ÂÂ L406-L419Ã£ÂÂ.",
-                "Information on senescence-associated ÃÂ²-galactosidase identifying senescent cells and the potential of senolytic therapies is taken from JinfinitiÃ¢ÂÂs articleÃ£ÂÂ203931968364787Ã¢ÂÂ L421-L430Ã£ÂÂ.",
+                "Information on albuminÃÂ¢ÃÂÃÂs role and its association with chronic inflammation, malnutrition and frailty is summarised from JinfinitiÃÂ¢ÃÂÃÂs description of albumin and centenarian studiesÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L234-L246ÃÂ£ÃÂÃÂ.",
+                "The functions of alkaline phosphatase (ALP) and alanine aminotransferase (ALT) and what elevated levels indicate are based on JinfinitiÃÂ¢ÃÂÃÂs discussion of these enzymesÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L248-L262ÃÂ£ÃÂÃÂ.",
+                "The explanation of creatinineÃÂ¢ÃÂÃÂs role as a kidney function marker and how its levels change with age comes from JinfinitiÃÂ¢ÃÂÃÂs articleÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L264-L278ÃÂ£ÃÂÃÂ.",
+                "Details about creatine kinase (CK) as a marker of muscle damage and its importance for mobility are drawn from JinfinitiÃÂ¢ÃÂÃÂs overviewÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L280-L290ÃÂ£ÃÂÃÂ.",
+                "The description of reactive oxygen metabolites (ROM) and the protective effects of antioxidants like vitaminÃÂÃÂ E reflects JinfinitiÃÂ¢ÃÂÃÂs discussionÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L292-L303ÃÂ£ÃÂÃÂ.",
+                "The summary of total antioxidant capacity (TAC) and its significance for disease risk is based on JinfinitiÃÂ¢ÃÂÃÂs explanationÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L305-L317ÃÂ£ÃÂÃÂ.",
+                "Information on DNA damage (8ÃÂ¢ÃÂÃÂOHdG) as a marker of oxidative stress and how nutrition may reduce it comes from JinfinitiÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L320-L327ÃÂ£ÃÂÃÂ.",
+                "The role of intracellular NADÃÂ¢ÃÂÃÂº in mitochondrial function, its decline with age and potential interventions are summarised from the Jinfiniti guideÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L329-L341ÃÂ£ÃÂÃÂ.",
+                "Insights about vitaminÃÂÃÂ DÃÂ¢ÃÂÃÂs effect on immune function, bone health and frailty are drawn from JinfinitiÃÂ¢ÃÂÃÂs articleÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L342-L349ÃÂ£ÃÂÃÂ.",
+                "The description of glycated serum protein (GSP) as a blood sugar indicator and its link to diabetes risk is based on JinfinitiÃÂ¢ÃÂÃÂs textÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L352-L359ÃÂ£ÃÂÃÂ.",
+                "Information about blood lipids (HDL, LDL, triglycerides) and their relationship to cardiovascular health and longevity derives from the Jinfiniti discussionÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L364-L375ÃÂ£ÃÂÃÂ.",
+                "The dual role of uric acid as both a risk factor and an antioxidant, and observations from centenarians, comes from JinfinitiÃÂ¢ÃÂÃÂs explanationÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L377-L389ÃÂ£ÃÂÃÂ.",
+                "The significance of klotho as an anti-aging protein and its association with slower aging is summarised from JinfinitiÃÂ¢ÃÂÃÂs descriptionÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L392-L404ÃÂ£ÃÂÃÂ.",
+                "The section on inflammation markers and the concept of inflammaging draws from JinfinitiÃÂ¢ÃÂÃÂs overviewÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L406-L419ÃÂ£ÃÂÃÂ.",
+                "Information on senescence-associated ÃÂÃÂ²-galactosidase identifying senescent cells and the potential of senolytic therapies is taken from JinfinitiÃÂ¢ÃÂÃÂs articleÃÂ£ÃÂÃÂ203931968364787ÃÂ¢ÃÂÃÂ L421-L430ÃÂ£ÃÂÃÂ.",
             ]
             for cl in citation_lines:
                 st.markdown(f"- {cl}")
@@ -5059,15 +5088,15 @@ def main() -> None:
                 swarm_config: Dict[str, Any] = {
                     "swarm_size": int(swarm_size),
                     "roles": [name for name, _ in swarm_roles] if swarm_roles else ["agent"],
-                    # Respect userÃ¢ÂÂrequested cycles in swarm mode.  Using 1 here
-                    # would force a single miniÃ¢ÂÂcycle per agent regardless of
+                    # Respect userÃÂ¢ÃÂÃÂrequested cycles in swarm mode.  Using 1 here
+                    # would force a single miniÃÂ¢ÃÂÃÂcycle per agent regardless of
                     # the cycles slider.  Set to the requested cycles value.
                     "max_cycles_per_agent": int(cycles),
                     "stagger_start": False,
-                    # Explicitly set the perÃ¢ÂÂtick agent cap to the swarm size so
+                    # Explicitly set the perÃÂ¢ÃÂÃÂtick agent cap to the swarm size so
                     # all agents can run each round.  Some backends interpret
                     # zero as a default limit (often 32), which would reduce
-                    # a 64Ã¢ÂÂagent swarm to 32 agents per tick.
+                    # a 64ÃÂ¢ÃÂÃÂagent swarm to 32 agents per tick.
                     "max_agents_per_tick": int(swarm_size),
                     "role_goals": {name: role_specific_goal(goal_clean, name) for name, _ in swarm_roles} if swarm_roles else {},
                 }
@@ -5077,7 +5106,7 @@ def main() -> None:
                     "roles": ["agent"],
                     "max_cycles_per_agent": int(cycles),
                     "stagger_start": False,
-                    # For singleÃ¢ÂÂagent or non-swarm runs, allow one agent per tick.
+                    # For singleÃÂ¢ÃÂÃÂagent or non-swarm runs, allow one agent per tick.
                     "max_agents_per_tick": 1,
                 }
 
@@ -5091,11 +5120,11 @@ def main() -> None:
                     }
 
             # In swarm mode interpret the cycles slider as the number of rounds
-            # rather than total microÃ¢ÂÂcycles.  Do not multiply by the swarm size
-            # here; the worker will compute the effective microÃ¢ÂÂcycle count by
+            # rather than total microÃÂ¢ÃÂÃÂcycles.  Do not multiply by the swarm size
+            # here; the worker will compute the effective microÃÂ¢ÃÂÃÂcycle count by
             # multiplying the number of rounds by the number of participating
             # agents.  This change avoids a mismatch where the UI requests
-            # cycles * swarm_size microÃ¢ÂÂcycles but the swarm coordinator
+            # cycles * swarm_size microÃÂ¢ÃÂÃÂcycles but the swarm coordinator
             # interprets it as global cycles, leading to runs that end early or
             # overshoot the intended budget.
             total_cycles_requested = int(cycles)
