@@ -98,8 +98,11 @@ def _utc_now_iso() -> str:
 
 
 def _resolve_repo_root() -> Path:
-    # agent/ is one level below repo root in typical layout
-    return Path(__file__).resolve().parents[1]
+    p = Path(__file__).resolve()
+    # If this module lives under agent/, the repo root is the parent of that folder.
+    if p.parent.name == "agent":
+        return p.parent.parent
+    return p.parent
 
 
 def resolve_runs_root() -> Path:
@@ -124,6 +127,27 @@ def resolve_runs_root() -> Path:
     except Exception:
         pass
 
+    # 1b) Flat-layout import fallbacks (some deployments place run_jobs at repo root).
+    try:
+        from agent.run_jobs import BASE_DIR as _BASE_DIR2  # type: ignore
+
+        if isinstance(_BASE_DIR2, Path):
+            return _BASE_DIR2
+        if isinstance(_BASE_DIR2, str) and _BASE_DIR2:
+            return Path(_BASE_DIR2)
+    except Exception:
+        pass
+
+    try:
+        from run_jobs import BASE_DIR as _BASE_DIR3  # type: ignore
+
+        if isinstance(_BASE_DIR3, Path):
+            return _BASE_DIR3
+        if isinstance(_BASE_DIR3, str) and _BASE_DIR3:
+            return Path(_BASE_DIR3)
+    except Exception:
+        pass
+
     # 2) Env fallback
     env = os.getenv("ARA_RUNS_DIR")
     if env:
@@ -134,10 +158,16 @@ def resolve_runs_root() -> Path:
 
 
 def resolve_logs_dir(runs_root: Optional[Path] = None) -> Path:
-    """Resolve logs dir. Allows override via ARA_LOGS_DIR."""
-    env = os.getenv("ARA_LOGS_DIR")
-    if env:
-        return Path(env)
+    """Resolve logs dir.
+
+    Matches engine_worker precedence:
+      - ARA_RUNS_LOGS_DIR / ARA_RUNS_LOG_DIR / ARA_LOGS_DIR
+      - <runs_root>/logs
+    """
+    for _k in ("ARA_RUNS_LOGS_DIR", "ARA_RUNS_LOG_DIR", "ARA_LOGS_DIR"):
+        env = os.getenv(_k)
+        if env:
+            return Path(env)
     rr = runs_root if isinstance(runs_root, Path) else resolve_runs_root()
     return rr / "logs"
 
@@ -291,7 +321,7 @@ def make_event(
 ) -> JsonObj:
     """Create a normalized event dict.
 
-    This must be "never crash" Ã¢ÂÂ logging should not bring down the worker.
+    This must be "never crash" ÃÂ¢ÃÂÃÂ logging should not bring down the worker.
     """
     ev: JsonObj = {
         "id": uuid.uuid4().hex,
