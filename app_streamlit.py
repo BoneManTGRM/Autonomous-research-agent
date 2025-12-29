@@ -4485,9 +4485,7 @@ def main() -> None:
                         continue
                     messages.append(line_s)
         # Render the filtered live events if any exist.
-        # Live events panel is hidden by default. Set ARA_SHOW_LIVE_EVENTS=1 to re-enable.
-        show_live_events = os.environ.get("ARA_SHOW_LIVE_EVENTS", "0").strip().lower() in {"1", "true", "yes"}
-        if show_live_events and messages:
+        if False and messages:
             st.markdown("#### Live events")
             for m in messages:
                 st.write(m)
@@ -6510,3 +6508,5 @@ def main() -> None:
 
 
 # Streamlit entry point
+if __name__ == "__main__":
+    main()
