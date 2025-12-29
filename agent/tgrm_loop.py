@@ -100,6 +100,7 @@ from __future__ import annotations
 import inspect
 import os
 import time
+import random
 from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any, Dict, List, Optional, Tuple, Sequence
@@ -2304,6 +2305,66 @@ class TGRMLoop:
 
         return params
 
+
+def _call_with_backoff(
+    self,
+    fn,
+    *,
+    purpose: str,
+    max_retries: Optional[int] = None,
+    base_delay_s: float = 1.0,
+    max_delay_s: float = 20.0,
+):
+    """Call a function with retry/backoff for 429 rate limits.
+
+    Designed for external search providers (Semantic Scholar, Tavily wrappers, etc.).
+    Retries only when the exception clearly indicates a 429 / Too Many Requests.
+    """
+    if max_retries is None:
+        try:
+            max_retries = int(os.getenv("WORKER_RATE_LIMIT_MAX_RETRIES", "5"))
+        except Exception:
+            max_retries = 5
+
+    attempt = 0
+    while True:
+        try:
+            return fn()
+        except Exception as e:
+            # Detect 429 rate limit from common exception shapes
+            status = None
+            retry_after = None
+            resp = getattr(e, "response", None)
+            if resp is not None:
+                try:
+                    status = getattr(resp, "status_code", None)
+                except Exception:
+                    status = None
+                try:
+                    headers = getattr(resp, "headers", None) or {}
+                    ra = headers.get("Retry-After") or headers.get("retry-after")
+                    if ra is not None:
+                        retry_after = float(str(ra).strip())
+                except Exception:
+                    retry_after = None
+
+            msg = str(e) or ""
+            is_429 = (status == 429) or (" 429 " in f" {msg} ") or ("429" in msg and "Client Error" in msg) or ("Too Many Requests" in msg)
+
+            attempt += 1
+            if (not is_429) or attempt > int(max_retries or 0):
+                raise
+
+            # Respect Retry-After when present, otherwise exponential backoff + jitter
+            if retry_after is not None and retry_after > 0:
+                sleep_s = min(max_delay_s, retry_after)
+            else:
+                sleep_s = min(max_delay_s, base_delay_s * (2 ** (attempt - 1)) + random.uniform(0.0, 0.7))
+            try:
+                time.sleep(sleep_s)
+            except Exception:
+                pass
+
     def _web_search(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Perform a web search with resilience to Tavily limits and failures.
 
@@ -2564,7 +2625,7 @@ class TGRMLoop:
 
         if source_controls.get("semantic", False) and not self._deadline_hit(deadline_ts):
             try:
-                sem_results = self.semantic_tool.search(goal, max_results=5)
+                sem_results = self._call_with_backoff(lambda: self.semantic_tool.search(goal, max_results=5), purpose="semantic_scholar")
             except Exception:
                 sem_results = []
                 note_lines.append(
@@ -2794,7 +2855,7 @@ class TGRMLoop:
 
             if source_controls.get("semantic", False):
                 try:
-                    sem_results = self.semantic_tool.search(q, max_results=5)
+                    sem_results = self._call_with_backoff(lambda: self.semantic_tool.search(q, max_results=5), purpose="semantic_scholar")
                 except Exception:
                     sem_results = []
                     note_lines.append(
@@ -2940,7 +3001,7 @@ class TGRMLoop:
 
         if source_controls.get("semantic", False):
             try:
-                sem_results = self.semantic_tool.search(query, max_results=10)
+                sem_results = self._call_with_backoff(lambda: self.semantic_tool.search(query, max_results=10), purpose="semantic_scholar")
             except Exception:
                 sem_results = []
                 note_lines.append(
@@ -3106,7 +3167,7 @@ class TGRMLoop:
 
         if source_controls.get("semantic", False):
             try:
-                sem_results = self.semantic_tool.search(query, max_results=10)
+                sem_results = self._call_with_backoff(lambda: self.semantic_tool.search(query, max_results=10), purpose="semantic_scholar")
             except Exception:
                 sem_results = []
                 note_lines.append(
