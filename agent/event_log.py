@@ -89,7 +89,7 @@ try:  # pragma: no cover
 except Exception:  # pragma: no cover
     _emit_event_jsonl = None  # type: ignore[assignment]
 
-WRITE_LEGACY_JSON: bool = os.getenv("ARA_EVENT_LOG_WRITE_LEGACY_JSON", "0").strip().lower() in {"1", "true", "yes", "on"}
+WRITE_LEGACY_JSON: bool = os.getenv("ARA_EVENT_LOG_WRITE_LEGACY_JSON", "1").strip().lower() in {"1", "true", "yes", "on"}
 
 
 
@@ -291,7 +291,7 @@ def make_event(
 ) -> JsonObj:
     """Create a normalized event dict.
 
-    This must be "never crash" â logging should not bring down the worker.
+    This must be "never crash" Ã¢ÂÂ logging should not bring down the worker.
     """
     ev: JsonObj = {
         "id": uuid.uuid4().hex,
