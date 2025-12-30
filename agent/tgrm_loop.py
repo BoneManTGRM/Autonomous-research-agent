@@ -2315,25 +2315,43 @@ def _call_with_backoff(
     base_delay_s: float = 1.0,
     max_delay_s: float = 20.0,
 ):
-    """Call a function with retry/backoff for 429 rate limits.
+    """Call fn() with retry/backoff for 429 / Too Many Requests.
 
-    Designed for external search providers (Semantic Scholar, Tavily wrappers, etc.).
-    Retries only when the exception clearly indicates a 429 / Too Many Requests.
+    Retries are only attempted when the exception clearly indicates a 429
+    rate-limit condition. If a Retry-After header is available, it is
+    respected (capped by max_delay_s). Otherwise exponential backoff with
+    small jitter is used.
+
+    This is intentionally conservative: non-429 exceptions are raised
+    immediately so existing try/except blocks handle them as before.
     """
+    # Allow optional overrides via config/env
     if max_retries is None:
         try:
-            max_retries = int(os.getenv("WORKER_RATE_LIMIT_MAX_RETRIES", "5"))
+            max_retries = int(
+                self.config.get("rate_limit_max_retries")
+                or os.getenv("WORKER_RATE_LIMIT_MAX_RETRIES", "5")
+            )
         except Exception:
             max_retries = 5
+
+    try:
+        base_delay_s = float(self.config.get("rate_limit_base_delay_s", base_delay_s))
+    except Exception:
+        pass
+    try:
+        max_delay_s = float(self.config.get("rate_limit_max_delay_s", max_delay_s))
+    except Exception:
+        pass
 
     attempt = 0
     while True:
         try:
             return fn()
         except Exception as e:
-            # Detect 429 rate limit from common exception shapes
             status = None
             retry_after = None
+
             resp = getattr(e, "response", None)
             if resp is not None:
                 try:
@@ -2342,26 +2360,39 @@ def _call_with_backoff(
                     status = None
                 try:
                     headers = getattr(resp, "headers", None) or {}
-                    ra = headers.get("Retry-After") or headers.get("retry-after")
+                    ra = None
+                    if hasattr(headers, "get"):
+                        ra = headers.get("Retry-After") or headers.get("retry-after")
                     if ra is not None:
                         retry_after = float(str(ra).strip())
                 except Exception:
                     retry_after = None
 
             msg = str(e) or ""
-            is_429 = (status == 429) or (" 429 " in f" {msg} ") or ("429" in msg and "Client Error" in msg) or ("Too Many Requests" in msg)
+            msg_l = msg.lower()
+            is_429 = (
+                status == 429
+                or "too many requests" in msg_l
+                or ("429" in msg and "client error" in msg_l)
+                or ("rate limit" in msg_l and "429" in msg_l)
+            )
 
             attempt += 1
             if (not is_429) or attempt > int(max_retries or 0):
                 raise
 
-            # Respect Retry-After when present, otherwise exponential backoff + jitter
             if retry_after is not None and retry_after > 0:
-                sleep_s = min(max_delay_s, retry_after)
+                sleep_s = min(float(max_delay_s), float(retry_after))
             else:
-                sleep_s = min(max_delay_s, base_delay_s * (2 ** (attempt - 1)) + random.uniform(0.0, 0.7))
+                sleep_s = min(
+                    float(max_delay_s),
+                    float(base_delay_s) * (2 ** (attempt - 1)) + random.uniform(0.0, 0.7),
+                )
+
             try:
-                time.sleep(sleep_s)
+                # Purpose is currently unused but kept for future diagnostics.
+                _ = purpose
+                time.sleep(max(0.0, float(sleep_s)))
             except Exception:
                 pass
 
@@ -2415,24 +2446,33 @@ def _call_with_backoff(
 
             try:
                 # Try the most complete signature first; degrade gracefully
-                res = core_web_search(
-                    query=query,
-                    max_results=max_results,
-                    search_depth=search_depth,
-                    topic=topic,
-                )
-            except TypeError:
-                try:
-                    res = core_web_search(
+                res = self._call_with_backoff(
+                    lambda: core_web_search(
                         query=query,
                         max_results=max_results,
                         search_depth=search_depth,
+                        topic=topic,
+                    ),
+                    purpose="web_search",
+                )
+            except TypeError:
+                try:
+                    res = self._call_with_backoff(
+                        lambda: core_web_search(
+                            query=query,
+                            max_results=max_results,
+                            search_depth=search_depth,
+                        ),
+                        purpose="web_search",
                     )
                 except TypeError:
                     try:
-                        res = core_web_search(
-                            query=query,
-                            max_results=max_results,
+                        res = self._call_with_backoff(
+                            lambda: core_web_search(
+                                query=query,
+                                max_results=max_results,
+                            ),
+                            purpose="web_search",
                         )
                     except Exception:
                         res = None
@@ -2475,11 +2515,11 @@ def _call_with_backoff(
             filtered = params
 
         try:
-            return self.web_tool.search(query, **filtered)  # type: ignore[misc]
+            return self._call_with_backoff(lambda: self.web_tool.search(query, **filtered), purpose="web_search")  # type: ignore[misc]
         except TypeError:
             # Last resort: try a no-kwargs call
             try:
-                return self.web_tool.search(query)  # type: ignore[misc]
+                return self._call_with_backoff(lambda: self.web_tool.search(query), purpose="web_search")  # type: ignore[misc]
             except Exception:
                 return []
         except Exception:
