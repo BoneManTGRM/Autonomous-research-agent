@@ -98,6 +98,7 @@ are missing or misconfigured.
 from __future__ import annotations
 
 import inspect
+import re
 import os
 import time
 from datetime import datetime
@@ -534,6 +535,10 @@ class TGRMLoop:
         self._seen_questions: Dict[str, Dict[str, float]] = {}
         # Cache: derive tool-friendly search queries from long prompts
         self._goal_query_cache: Dict[str, str] = {}
+
+        # Run / agent identifiers (populated by run_cycle)
+        self.run_id: Optional[str] = None
+        self.agent_id: Optional[str] = None
         self._goal_query_bank_cache: Dict[str, List[str]] = {}
         self._goal_citation_target_cache: Dict[str, int] = {}
         try:
@@ -996,6 +1001,15 @@ class TGRMLoop:
         # 3. Citation richness
         unique_sources = set()
         for c in citations:
+            # Normalize web citations so they are clearly attributable to the Tavily/web tool
+            # (the UI can still infer the destination domain from the URL)
+            if channel == "web":
+                c.setdefault("provider", "tavily")
+                src = c.get("source")
+                # If a prior stage stored the host/domain in `source`, preserve it as `site`
+                if isinstance(src, str) and src and src not in {"tavily", "web"} and "." in src:
+                    c.setdefault("site", src)
+                    c["source"] = "tavily"
             if not isinstance(c, dict):
                 continue
             key = (c.get("source"), c.get("url"))
@@ -1104,6 +1118,10 @@ class TGRMLoop:
         """Run one TGRM cycle for a given research goal."""
         cycle_started_ts = time.time()
         cycle_started_iso = datetime.utcfromtimestamp(cycle_started_ts).isoformat() + "Z"
+
+        # Persist identifiers for downstream loggers / memory store
+        self.run_id = run_id
+        self.agent_id = agent_id
 
         src_ctrl = self._normalise_source_controls(source_controls)
         domain_tag = domain or "general"
@@ -2601,7 +2619,8 @@ class TGRMLoop:
 
         if source_controls.get("pubmed", False) and not self._deadline_hit(deadline_ts):
             try:
-                pubmed_results = self.pubmed_tool.search(goal, max_results=5)
+                pm_query = self._goal_to_search_query(goal, domain=domain)
+                pubmed_results = self.pubmed_tool.search(pm_query, max_results=5)
             except Exception:
                 pubmed_results = []
                 note_lines.append("PubMed search failed for initial research; continuing without PubMed results.")
@@ -2611,7 +2630,7 @@ class TGRMLoop:
                 pubmed_cites = self._tag_citations(
                     pubmed_results,
                     goal=goal,
-                    query=goal,
+                    query=pm_query,
                     channel="pubmed",
                     phase="initial",
                 )
@@ -2628,7 +2647,8 @@ class TGRMLoop:
 
         if source_controls.get("semantic", False) and not self._deadline_hit(deadline_ts):
             try:
-                sem_results = self.semantic_tool.search(goal, max_results=5)
+                sem_query = self._goal_to_search_query(goal, domain=domain)
+                sem_results = self.semantic_tool.search(sem_query, max_results=5)
             except Exception:
                 sem_results = []
                 note_lines.append(
@@ -2640,7 +2660,7 @@ class TGRMLoop:
                 sem_cites = self._tag_citations(
                     sem_results,
                     goal=goal,
-                    query=goal,
+                    query=sem_query,
                     channel="semantic",
                     phase="initial",
                 )
@@ -3102,7 +3122,7 @@ class TGRMLoop:
                     pubmed_cites = self._tag_citations(
                         pubmed_results,
                         goal=goal,
-                        query=q,
+                        query=pm_query,
                         channel="pubmed",
                         phase="targeted",
                     )
@@ -3131,7 +3151,7 @@ class TGRMLoop:
                     sem_cites = self._tag_citations(
                         sem_results,
                         goal=goal,
-                        query=q,
+                        query=sem_query,
                         channel="semantic",
                         phase="targeted",
                     )
