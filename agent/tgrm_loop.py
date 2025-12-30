@@ -98,6 +98,7 @@ are missing or misconfigured.
 from __future__ import annotations
 
 import inspect
+import re
 import os
 import time
 from datetime import datetime
@@ -1957,7 +1958,7 @@ class TGRMLoop:
             base_max_issues += 2
 
         role_lower = (role or "agent").lower()
-        if role_lower.startswith("researcher") or role_lower.startswith("explorer"):
+        if role_lower in {"researcher", "explorer"}:
             max_issues = base_max_issues + 2
         elif role_lower in {"critic", "planner"}:
             max_issues = max(1, base_max_issues - 2)
@@ -2315,10 +2316,10 @@ class TGRMLoop:
             level = base_level - 1
 
         if purpose in {"initial", "gap_repair", "strengthen"}:
-            if (not maintenance_mode and base_level == 3 and (role_lower.startswith("researcher") or role_lower.startswith("explorer"))):
+            if (not maintenance_mode and base_level == 3 and role_lower in {"researcher", "explorer"}):
                 level = 3
         elif purpose == "targeted":
-            if (not maintenance_mode and base_level >= 2 and (role_lower.startswith("researcher") or role_lower.startswith("explorer"))):
+            if (not maintenance_mode and base_level >= 2 and role_lower in {"researcher", "explorer"}):
                 level = min(3, base_level)
             elif role_lower in {"critic", "planner", "synthesizer", "integrator"}:
                 level = max(1, min(base_level, 2))
@@ -2601,7 +2602,7 @@ class TGRMLoop:
 
         if source_controls.get("pubmed", False) and not self._deadline_hit(deadline_ts):
             try:
-                pubmed_results = self.pubmed_tool.search(search_query, max_results=5)
+                pubmed_results = self.pubmed_tool.search(self._goal_to_search_query(goal, domain=domain), max_results=5)
             except Exception:
                 pubmed_results = []
                 note_lines.append("PubMed search failed for initial research; continuing without PubMed results.")
@@ -2611,7 +2612,7 @@ class TGRMLoop:
                 pubmed_cites = self._tag_citations(
                     pubmed_results,
                     goal=goal,
-                    query=search_query,
+                    query=goal,
                     channel="pubmed",
                     phase="initial",
                 )
@@ -2628,7 +2629,7 @@ class TGRMLoop:
 
         if source_controls.get("semantic", False) and not self._deadline_hit(deadline_ts):
             try:
-                sem_results = self.semantic_tool.search(search_query, max_results=5)
+                sem_results = self.semantic_tool.search(self._goal_to_search_query(goal, domain=domain), max_results=5)
             except Exception:
                 sem_results = []
                 note_lines.append(
@@ -2640,7 +2641,7 @@ class TGRMLoop:
                 sem_cites = self._tag_citations(
                     sem_results,
                     goal=goal,
-                    query=search_query,
+                    query=goal,
                     channel="semantic",
                     phase="initial",
                 )
@@ -3003,24 +3004,8 @@ class TGRMLoop:
 
         # If we don't have explicit question seeds, fall back to a compact query derived from the goal.
         # (We only keep an empty question list in true maintenance mode.)
-        if issue == "citation_expansion":
-            base_query = self._goal_to_search_query(goal, domain=domain)
-            bank = self._build_evidence_query_bank(goal, domain)
-            if bank:
-                # Pick a deterministic slice so different roles/providers explore different subtopics.
-                if source_controls.get("pubmed", False):
-                    provider_key = "pubmed"
-                elif source_controls.get("semantic", False):
-                    provider_key = "semantic"
-                else:
-                    provider_key = "web"
-                seed = self._stable_role_offset(f"{(role or '')}|{provider_key}|{domain}")
-                take = 1 if maintenance_mode else 2
-                questions = [bank[(seed + i) % len(bank)] for i in range(min(take, len(bank)))]
-            elif issue_description:
-                questions = [f"{base_query} - focus on: {issue_description}"]
-            else:
-                questions = [base_query]
+        if issue == "citation_expansion" and issue_description:
+            questions = [str(issue_description).strip()]
         elif questions is None or (len(questions) == 0 and not maintenance_mode):
             base_query = self._goal_to_search_query(goal, domain=domain)
             questions = [f"{base_query} - focus on: {issue_description}"]
