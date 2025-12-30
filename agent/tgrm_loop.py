@@ -98,7 +98,6 @@ are missing or misconfigured.
 from __future__ import annotations
 
 import inspect
-import re
 import os
 import time
 from datetime import datetime
@@ -535,10 +534,6 @@ class TGRMLoop:
         self._seen_questions: Dict[str, Dict[str, float]] = {}
         # Cache: derive tool-friendly search queries from long prompts
         self._goal_query_cache: Dict[str, str] = {}
-
-        # Run / agent identifiers (populated by run_cycle)
-        self.run_id: Optional[str] = None
-        self.agent_id: Optional[str] = None
         self._goal_query_bank_cache: Dict[str, List[str]] = {}
         self._goal_citation_target_cache: Dict[str, int] = {}
         try:
@@ -1001,15 +996,6 @@ class TGRMLoop:
         # 3. Citation richness
         unique_sources = set()
         for c in citations:
-            # Normalize web citations so they are clearly attributable to the Tavily/web tool
-            # (the UI can still infer the destination domain from the URL)
-            if channel == "web":
-                c.setdefault("provider", "tavily")
-                src = c.get("source")
-                # If a prior stage stored the host/domain in `source`, preserve it as `site`
-                if isinstance(src, str) and src and src not in {"tavily", "web"} and "." in src:
-                    c.setdefault("site", src)
-                    c["source"] = "tavily"
             if not isinstance(c, dict):
                 continue
             key = (c.get("source"), c.get("url"))
@@ -1118,10 +1104,6 @@ class TGRMLoop:
         """Run one TGRM cycle for a given research goal."""
         cycle_started_ts = time.time()
         cycle_started_iso = datetime.utcfromtimestamp(cycle_started_ts).isoformat() + "Z"
-
-        # Persist identifiers for downstream loggers / memory store
-        self.run_id = run_id
-        self.agent_id = agent_id
 
         src_ctrl = self._normalise_source_controls(source_controls)
         domain_tag = domain or "general"
@@ -1975,7 +1957,7 @@ class TGRMLoop:
             base_max_issues += 2
 
         role_lower = (role or "agent").lower()
-        if role_lower in {"researcher", "explorer"}:
+        if role_lower.startswith("researcher") or role_lower.startswith("explorer"):
             max_issues = base_max_issues + 2
         elif role_lower in {"critic", "planner"}:
             max_issues = max(1, base_max_issues - 2)
@@ -2333,10 +2315,10 @@ class TGRMLoop:
             level = base_level - 1
 
         if purpose in {"initial", "gap_repair", "strengthen"}:
-            if (not maintenance_mode and base_level == 3 and role_lower in {"researcher", "explorer"}):
+            if (not maintenance_mode and base_level == 3 and (role_lower.startswith("researcher") or role_lower.startswith("explorer"))):
                 level = 3
         elif purpose == "targeted":
-            if (not maintenance_mode and base_level >= 2 and role_lower in {"researcher", "explorer"}):
+            if (not maintenance_mode and base_level >= 2 and (role_lower.startswith("researcher") or role_lower.startswith("explorer"))):
                 level = min(3, base_level)
             elif role_lower in {"critic", "planner", "synthesizer", "integrator"}:
                 level = max(1, min(base_level, 2))
@@ -2619,8 +2601,7 @@ class TGRMLoop:
 
         if source_controls.get("pubmed", False) and not self._deadline_hit(deadline_ts):
             try:
-                pm_query = self._goal_to_search_query(goal, domain=domain)
-                pubmed_results = self.pubmed_tool.search(pm_query, max_results=5)
+                pubmed_results = self.pubmed_tool.search(search_query, max_results=5)
             except Exception:
                 pubmed_results = []
                 note_lines.append("PubMed search failed for initial research; continuing without PubMed results.")
@@ -2630,7 +2611,7 @@ class TGRMLoop:
                 pubmed_cites = self._tag_citations(
                     pubmed_results,
                     goal=goal,
-                    query=pm_query,
+                    query=search_query,
                     channel="pubmed",
                     phase="initial",
                 )
@@ -2647,8 +2628,7 @@ class TGRMLoop:
 
         if source_controls.get("semantic", False) and not self._deadline_hit(deadline_ts):
             try:
-                sem_query = self._goal_to_search_query(goal, domain=domain)
-                sem_results = self.semantic_tool.search(sem_query, max_results=5)
+                sem_results = self.semantic_tool.search(search_query, max_results=5)
             except Exception:
                 sem_results = []
                 note_lines.append(
@@ -2660,7 +2640,7 @@ class TGRMLoop:
                 sem_cites = self._tag_citations(
                     sem_results,
                     goal=goal,
-                    query=sem_query,
+                    query=search_query,
                     channel="semantic",
                     phase="initial",
                 )
@@ -3023,8 +3003,24 @@ class TGRMLoop:
 
         # If we don't have explicit question seeds, fall back to a compact query derived from the goal.
         # (We only keep an empty question list in true maintenance mode.)
-        if issue == "citation_expansion" and issue_description:
-            questions = [str(issue_description).strip()]
+        if issue == "citation_expansion":
+            base_query = self._goal_to_search_query(goal, domain=domain)
+            bank = self._build_evidence_query_bank(goal, domain)
+            if bank:
+                # Pick a deterministic slice so different roles/providers explore different subtopics.
+                if source_controls.get("pubmed", False):
+                    provider_key = "pubmed"
+                elif source_controls.get("semantic", False):
+                    provider_key = "semantic"
+                else:
+                    provider_key = "web"
+                seed = self._stable_role_offset(f"{(role or '')}|{provider_key}|{domain}")
+                take = 1 if maintenance_mode else 2
+                questions = [bank[(seed + i) % len(bank)] for i in range(min(take, len(bank)))]
+            elif issue_description:
+                questions = [f"{base_query} - focus on: {issue_description}"]
+            else:
+                questions = [base_query]
         elif questions is None or (len(questions) == 0 and not maintenance_mode):
             base_query = self._goal_to_search_query(goal, domain=domain)
             questions = [f"{base_query} - focus on: {issue_description}"]
@@ -3122,7 +3118,7 @@ class TGRMLoop:
                     pubmed_cites = self._tag_citations(
                         pubmed_results,
                         goal=goal,
-                        query=pm_query,
+                        query=q,
                         channel="pubmed",
                         phase="targeted",
                     )
@@ -3151,7 +3147,7 @@ class TGRMLoop:
                     sem_cites = self._tag_citations(
                         sem_results,
                         goal=goal,
-                        query=sem_query,
+                        query=q,
                         channel="semantic",
                         phase="targeted",
                     )
