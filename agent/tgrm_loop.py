@@ -145,13 +145,13 @@ def _first_numeric(d: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[float]:
 # Optional stability kernel integration
 try:
     from .stability_kernel import StabilityKernel  # type: ignore[import]
-except (Exception, SystemExit):  # pragma: no cover
+except Exception:  # pragma: no cover
     StabilityKernel = None  # type: ignore[assignment]
 
 # Optional discovery manager integration
 try:
     from .discovery_manager import DiscoveryManager  # type: ignore[import]
-except (Exception, SystemExit):  # pragma: no cover
+except Exception:  # pragma: no cover
     DiscoveryManager = None  # type: ignore[assignment]
 
 # Optional imports for external tools and hypothesis engine.
@@ -161,36 +161,36 @@ except (Exception, SystemExit):  # pragma: no cover
 # Web research
 try:
     from .tools_web import WebResearchTool  # type: ignore[import]
-except (Exception, SystemExit):  # pragma: no cover
+except Exception:  # pragma: no cover
     WebResearchTool = None  # type: ignore[assignment]
 
 # Paper and PDF tools
 try:
     from .tools_papers import PaperTool  # type: ignore[import]
-except (Exception, SystemExit):  # pragma: no cover
+except Exception:  # pragma: no cover
     PaperTool = None  # type: ignore[assignment]
 
 # File tools (currently lightly used but optional)
 try:
     from .tools_files import FileTool  # type: ignore[import]
-except (Exception, SystemExit):  # pragma: no cover
+except Exception:  # pragma: no cover
     FileTool = None  # type: ignore[assignment]
 
 # PubMed and Semantic Scholar
 try:
     from .tools_pubmed import PubMedTool  # type: ignore[import]
-except (Exception, SystemExit):  # pragma: no cover
+except Exception:  # pragma: no cover
     PubMedTool = None  # type: ignore[assignment]
 
 try:
     from .tools_semantic_scholar import SemanticScholarTool  # type: ignore[import]
-except (Exception, SystemExit):  # pragma: no cover
+except Exception:  # pragma: no cover
     SemanticScholarTool = None  # type: ignore[assignment]
 
 # Hypothesis engine
 try:
     from .hypothesis_engine import generate_hypotheses  # type: ignore[import]
-except (Exception, SystemExit):  # pragma: no cover
+except Exception:  # pragma: no cover
 
     def generate_hypotheses(
         goal: str,
@@ -210,7 +210,7 @@ except (Exception, SystemExit):  # pragma: no cover
 # is missing, we can still run real Tavily backed search via tools.py.
 try:
     from .tools import Toolbelt, ToolUsage, web_search as core_web_search  # type: ignore[attr-defined]
-except (Exception, SystemExit):  # pragma: no cover
+except Exception:  # pragma: no cover
     Toolbelt = None  # type: ignore[assignment]
     core_web_search = None  # type: ignore[assignment]
 
@@ -478,7 +478,7 @@ class TGRMLoop:
                 self.web_tool = WebResearchTool()  # type: ignore[call-arg]
             else:
                 self.web_tool = _NullWebTool()
-        except (Exception, SystemExit):
+        except Exception:
             self.web_tool = _NullWebTool()
 
         try:
@@ -486,7 +486,7 @@ class TGRMLoop:
                 self.paper_tool = PaperTool()  # type: ignore[call-arg]
             else:
                 self.paper_tool = _NullPaperTool()
-        except (Exception, SystemExit):
+        except Exception:
             self.paper_tool = _NullPaperTool()
 
         try:
@@ -494,7 +494,7 @@ class TGRMLoop:
                 self.file_tool = FileTool()  # type: ignore[call-arg]
             else:
                 self.file_tool = _NullFileTool()
-        except (Exception, SystemExit):
+        except Exception:
             self.file_tool = _NullFileTool()
 
         try:
@@ -502,7 +502,7 @@ class TGRMLoop:
                 self.pubmed_tool = PubMedTool()  # type: ignore[call-arg]
             else:
                 self.pubmed_tool = _NullPubMedTool()
-        except (Exception, SystemExit):
+        except Exception:
             self.pubmed_tool = _NullPubMedTool()
 
         try:
@@ -510,7 +510,7 @@ class TGRMLoop:
                 self.semantic_tool = SemanticScholarTool()  # type: ignore[call-arg]
             else:
                 self.semantic_tool = _NullSemanticScholarTool()
-        except (Exception, SystemExit):
+        except Exception:
             self.semantic_tool = _NullSemanticScholarTool()
 
         # Optional stability kernel and discovery manager
@@ -520,18 +520,22 @@ class TGRMLoop:
         if StabilityKernel is not None and self.config.get("enable_stability_kernel", True):
             try:
                 self.stability_kernel = StabilityKernel()
-            except (Exception, SystemExit):
+            except Exception:
                 self.stability_kernel = None
 
         if DiscoveryManager is not None and self.config.get("enable_discovery_manager", True):
             try:
                 self.discovery_manager = DiscoveryManager()
-            except (Exception, SystemExit):
+            except Exception:
                 self.discovery_manager = None
 
         # Long run optimization: track which questions have already been researched.
         # IMPORTANT: This is scoped PER GOAL and uses a TTL so that failures can retry later.
         self._seen_questions: Dict[str, Dict[str, float]] = {}
+        # Cache: derive tool-friendly search queries from long prompts
+        self._goal_query_cache: Dict[str, str] = {}
+        self._goal_query_bank_cache: Dict[str, List[str]] = {}
+        self._goal_citation_target_cache: Dict[str, int] = {}
         try:
             self._seen_question_ttl_s = float(self.config.get("seen_question_ttl_s", 6 * 3600))
         except Exception:
@@ -1280,6 +1284,7 @@ class TGRMLoop:
                 domain=domain_tag,
                 tool_usage=tool_usage,
                 deadline_ts=deadline_ts,
+                cycle_index=cycle_index,
             )
 
             if stats.get("interrupted"):
@@ -1884,6 +1889,7 @@ class TGRMLoop:
         domain: Optional[str] = None,
         tool_usage: Optional[ToolUsage] = None,
         deadline_ts: Optional[float] = None,
+        cycle_index: Optional[int] = None,
     ) -> Tuple[
         List[Dict[str, str]],
         List[str],
@@ -1962,12 +1968,59 @@ class TGRMLoop:
 
         issues_to_handle = issues[:max_issues]
         descriptions_to_handle = descriptions[:max_issues]
+        # Evidence expansion: keep accumulating citations even when explicit question markers are sparse.
+        citation_target = self._infer_citation_target(goal, default=30)
+        citation_count_before = self._count_real_citations(goal)
+        can_expand = any(bool(source_controls.get(k)) for k in ("web", "pubmed", "semantic"))
+        is_research_role = role_lower.startswith("explorer") or role_lower.startswith("researcher")
+        needs_more_citations = citation_count_before < citation_target
+
+        if can_expand and is_research_role and needs_more_citations and not maintenance_mode:
+            if "citation_expansion" not in issues_to_handle:
+                expansion_query = self._pick_evidence_query(goal, domain, role, cycle_index)
+                if len(issues_to_handle) == 0:
+                    issues_to_handle = ["citation_expansion"]
+                    descriptions_to_handle = [expansion_query]
+                elif len(issues_to_handle) < max_issues:
+                    issues_to_handle = list(issues_to_handle) + ["citation_expansion"]
+                    descriptions_to_handle = list(descriptions_to_handle) + [expansion_query]
+
+        # Keep counts available for downstream logging/telemetry.
+        # (Do not embed counts into the search query itself.)
+        stats["citation_target"] = citation_target
+        stats["citation_count_before"] = citation_count_before
+
 
         def _log_citations(cites: List[Dict[str, Any]]) -> None:
             for c in cites:
+                if not isinstance(c, dict):
+                    continue
+                # Drop stub/error placeholders so they don't count toward evidence targets.
+                title = str(c.get("title") or "").strip()
+                url = str(c.get("url") or c.get("link") or "").strip()
+                if (not url) or title.lower().startswith("[stub]"):
+                    continue
+
+                # Attach minimal provenance for easier debugging/UX.
+                c.setdefault("role", role)
+                if domain is not None:
+                    c.setdefault("domain", domain)
+                if cycle_index is not None:
+                    c.setdefault("cycle", cycle_index)
+
+                tool_name = c.get("tool_name") or c.get("tool") or c.get("source")
                 try:
-                    self.memory_store.add_citation(goal, c)
+                    self.memory_store.add_citation(
+                        goal,
+                        c,
+                        run_id=self.run_id,
+                        role=role,
+                        domain=domain,
+                        cycle_index=cycle_index,
+                        tool_name=tool_name,
+                    )
                 except Exception:
+                    # Avoid failing the cycle if citation logging fails.
                     pass
 
         for issue, desc in zip(issues_to_handle, descriptions_to_handle):
@@ -2009,15 +2062,26 @@ class TGRMLoop:
                 if issue_stats.get("interrupted"):
                     break
 
-            elif issue in {"question_mark", "todo_item"}:
+            elif is_research_role and issue != "under_cited":
                 questions = self._extract_questions(goal, issue_type=issue)
+
+                sc_for_issue = source_controls
+                provider: Optional[str] = None
+                if issue == "citation_expansion":
+                    provider = self._select_expansion_provider(source_controls, role, cycle_index)
+                elif self.tgrm_level >= 3 and sum(1 for k in ("web", "pubmed", "semantic") if source_controls.get(k)) > 1:
+                    # In swarm/high-evidence mode, rotate providers per issue to reduce rate limits.
+                    provider = self._select_expansion_provider(source_controls, f"{role}:{issue}", cycle_index)
+                if provider:
+                    sc_for_issue = self._only_source_controls(source_controls, provider)
+                    stats.setdefault("provider_rotation", []).append({"issue": issue, "provider": provider})
 
                 note_text, new_cites, issue_stats = self._targeted_research(
                     goal=goal,
                     role=role,
                     issue=issue,
                     issue_description=desc,
-                    source_controls=source_controls,
+                    source_controls=sc_for_issue,
                     questions=questions,
                     maintenance_mode=maintenance_mode,
                     domain=domain,
@@ -2471,7 +2535,7 @@ class TGRMLoop:
                 domain=domain,
                 purpose="initial",
             )
-            search_query = _clamp_query(goal)
+            search_query = self._goal_to_search_query(goal, domain=domain)
             try:
                 web_results = self._web_search(search_query, web_params)
             except Exception:
@@ -2653,6 +2717,261 @@ class TGRMLoop:
         max_q = 3 if self.tgrm_level == 1 else 5
         return fresh_questions[:max_q]
 
+    # ---- Evidence expansion helpers -------------------------------------------------
+
+    def _stable_role_offset(self, role: str) -> int:
+        """Stable small integer derived from role string (avoids Python's salted hash)."""
+        if not role:
+            return 0
+        acc = 0
+        for ch in role:
+            acc = (acc * 31 + ord(ch)) & 0xFFFFFFFF
+        return acc
+
+    def _infer_citation_target(self, goal: str, default: int = 30) -> int:
+        """Infer a citation target from the prompt (e.g., 'Minimum 50 unique citations')."""
+        if not goal:
+            return default
+        cache = getattr(self, "_goal_citation_target_cache", None)
+        if isinstance(cache, dict) and goal in cache:
+            try:
+                return int(cache[goal])
+            except Exception:
+                pass
+
+        # Try to parse "Minimum 50 unique citations" or similar.
+        m = re.search(r"(?i)\bminimum\s+(\d{1,4})\s+unique\s+citations\b", goal)
+        if not m:
+            m = re.search(r"(?i)\bcitation\s+target\b[\s\S]{0,250}?\bminimum\s+(\d{1,4})\b", goal)
+        target = default
+        if m:
+            try:
+                target = int(m.group(1))
+            except Exception:
+                target = default
+
+        # Boundaries: keep sane defaults even for malformed prompts.
+        if target < 5:
+            target = 5
+        if target > 300:
+            target = 300
+
+        if isinstance(cache, dict):
+            cache[goal] = target
+        return target
+
+    def _goal_to_search_query(self, goal: str, domain: Optional[str] = None, max_chars: int = 160) -> str:
+        """Convert a long run prompt into a compact, tool-friendly search query."""
+        goal = (goal or "").strip()
+        domain = (domain or "").strip()
+
+        cache = getattr(self, "_goal_query_cache", None)
+        cache_key = f"{goal}\n||{domain}"
+        if isinstance(cache, dict) and cache_key in cache:
+            return cache[cache_key]
+
+        topic: Optional[str] = None
+        domain_line: Optional[str] = None
+
+        if goal:
+            m = re.search(r"(?im)^\s*TOPIC\s*:\s*(.+)\s*$", goal)
+            if m:
+                topic = m.group(1).strip()
+
+            m2 = re.search(r"(?im)^\s*DOMAIN\s*:\s*(.+)\s*$", goal)
+            if m2:
+                domain_line = m2.group(1).strip()
+
+        # Fallback: first non-empty non-heading line.
+        if not topic:
+            for raw in goal.splitlines():
+                s = raw.strip()
+                if not s:
+                    continue
+                # Skip obvious section headers (all caps / very short).
+                if re.fullmatch(r"[A-Z0-9\s\-/|]{4,}", s) and s.isupper():
+                    continue
+                s = re.sub(r"^[-*\d.\s]+", "", s).strip()
+                if len(s) < 4:
+                    continue
+                topic = s
+                break
+
+        parts: List[str] = []
+        if topic:
+            parts.append(topic)
+
+        # Add domain hints if helpful.
+        if domain_line:
+            dom = domain_line.replace("|", " ")
+            dom = dom.replace(",", " ")
+            dom = re.sub(r"\s+", " ", dom).strip()
+            if dom and (not topic or dom.lower() not in topic.lower()):
+                parts.append(dom)
+
+        if domain and domain.lower() not in " ".join(parts).lower():
+            parts.append(domain)
+
+        q = " ".join([p for p in parts if p]).strip()
+
+        # Strip common orchestration tokens that pollute searches.
+        if q:
+            q = re.sub(r"(?i)\b(?:MODE|swarm|agents?|cycles?|run\s+config|hard\s+requirements|begin)\b", " ", q)
+            q = re.sub(r"\s+", " ", q).strip()
+
+        if not q:
+            q = domain or "research"
+
+        if len(q) > max_chars:
+            q = q[:max_chars].rstrip(" -|,:;")
+
+        if isinstance(cache, dict):
+            cache[cache_key] = q
+        return q
+
+    def _build_evidence_query_bank(self, goal: str, domain: Optional[str] = None) -> List[str]:
+        """Build a rotating set of search queries to avoid repeatedly retrieving the same top-N results."""
+        goal = (goal or "").strip()
+        domain = (domain or "").strip()
+
+        cache = getattr(self, "_goal_query_bank_cache", None)
+        cache_key = f"{goal}\n||{domain}"
+        if isinstance(cache, dict) and cache_key in cache:
+            return list(cache[cache_key])
+
+        base = self._goal_to_search_query(goal, domain=domain)
+        base_l = base.lower()
+
+        queries: List[str] = []
+
+        # If this looks like aging/longevity, use a strong geroscience query set.
+        is_aging = ("aging" in base_l) or ("ageing" in base_l) or ("longevity" in base_l) or (domain.lower() in {"longevity", "aging", "ageing", "geroscience"})
+        if is_aging:
+            queries.extend(
+                [
+                    "hallmarks of aging review",
+                    "cellular senescence senolytics review",
+                    "inflammaging chronic inflammation aging review",
+                    "mitochondrial dysfunction mitophagy aging review",
+                    "autophagy proteostasis aging review",
+                    "epigenetic clocks biomarkers of aging review",
+                    "caloric restriction humans randomized trial systematic review",
+                    "intermittent fasting time restricted eating meta-analysis",
+                    "exercise mortality meta-analysis cohort study",
+                    "rapamycin mTOR inhibition lifespan mammal review",
+                    "metformin aging trial TAME review",
+                    "NAD+ precursors nicotinamide riboside NMN randomized trial",
+                    "spermidine autophagy human study systematic review",
+                    "senomorphics SASP inhibitors aging review",
+                    "geroscience consensus statement aging interventions",
+                ]
+            )
+
+        # Pull bullet-list items from the prompt as additional subtopics.
+        bullets: List[str] = []
+        for raw in goal.splitlines():
+            s = raw.strip()
+            if s.startswith("-"):
+                s = s.lstrip("-").strip()
+                # Keep short-ish phrases (avoid full sentences).
+                if 3 <= len(s) <= 70 and re.search(r"[A-Za-z]", s):
+                    bullets.append(s)
+        # De-duplicate while preserving order.
+        seen = set()
+        bullets_unique: List[str] = []
+        for b in bullets:
+            bl = b.lower()
+            if bl in seen:
+                continue
+            seen.add(bl)
+            bullets_unique.append(b)
+
+        for b in bullets_unique[:20]:
+            # Generic templates that work across tools.
+            if is_aging:
+                queries.append(f"{b} aging review")
+            else:
+                queries.append(f"{base} {b} review")
+
+        # Always include some broad templates.
+        queries.extend(
+            [
+                f"{base} systematic review",
+                f"{base} meta-analysis",
+                f"{base} randomized controlled trial",
+                f"{base} consensus statement guideline",
+            ]
+        )
+
+        # Final de-dupe, drop empty / too-long.
+        out: List[str] = []
+        seen2 = set()
+        for q in queries:
+            qq = re.sub(r"\s+", " ", (q or "")).strip()
+            if not qq:
+                continue
+            if len(qq) > 220:
+                qq = qq[:220].rstrip()
+            key = qq.lower()
+            if key in seen2:
+                continue
+            seen2.add(key)
+            out.append(qq)
+
+        if not out:
+            out = [base]
+
+        if isinstance(cache, dict):
+            cache[cache_key] = list(out)
+        return out
+
+    def _pick_evidence_query(self, goal: str, domain: Optional[str], role: str, cycle_index: Optional[int]) -> str:
+        bank = self._build_evidence_query_bank(goal, domain=domain)
+        if not bank:
+            return self._goal_to_search_query(goal, domain=domain)
+
+        offset = self._stable_role_offset(role)
+        idx = ((cycle_index or 0) + offset) % len(bank)
+        return bank[idx]
+
+    def _count_real_citations(self, goal: str) -> int:
+        """Count unique, non-stub citations already stored for this goal."""
+        try:
+            entries = self.memory_store.get_citations(goal)
+        except Exception:
+            return 0
+
+        seen = set()
+        n = 0
+        for e in entries or []:
+            c = (e or {}).get("citation") or {}
+            title = str(c.get("title") or "").strip()
+            url = str(c.get("url") or c.get("link") or "").strip()
+            if not url:
+                continue
+            if title.lower().startswith("[stub]"):
+                continue
+            fp = self._citation_fingerprint(c)
+            if fp in seen:
+                continue
+            seen.add(fp)
+            n += 1
+        return n
+
+    def _only_source_controls(self, source_controls: Dict[str, bool], provider: str) -> Dict[str, bool]:
+        sc = dict(source_controls or {})
+        # keep any unknown keys but disable the main providers except the one selected
+        for k in ("web", "pubmed", "semantic"):
+            sc[k] = bool(k == provider and sc.get(k, False))
+        return sc
+
+    def _select_expansion_provider(self, source_controls: Dict[str, bool], role: str, cycle_index: Optional[int]) -> str:
+        providers: List[str] = [p for p in ("web", "pubmed", "semantic") if source_controls.get(p)]
+        if not providers:
+            return "web"
+        offset = self._stable_role_offset(role)
+        idx = ((cycle_index or 0) + offset) % len(providers)
+        return providers[idx]
     def _targeted_research(
         self,
         goal: str,
@@ -2682,9 +3001,15 @@ class TGRMLoop:
             "stop_reason": None,
         }
 
-        if questions is None:
-            questions = [f"{goal} - focus on: {issue_description}"]
-        elif len(questions) == 0:
+        # If we don't have explicit question seeds, fall back to a compact query derived from the goal.
+        # (We only keep an empty question list in true maintenance mode.)
+        if issue == "citation_expansion" and issue_description:
+            questions = [str(issue_description).strip()]
+        elif questions is None or (len(questions) == 0 and not maintenance_mode):
+            base_query = self._goal_to_search_query(goal, domain=domain)
+            questions = [f"{base_query} - focus on: {issue_description}"]
+
+        if len(questions) == 0:
             note_lines: List[str] = []
             note_lines.append(f"[{role}] Maintenance pass on open items ({issue}) for goal:")
             note_lines.append(goal)
