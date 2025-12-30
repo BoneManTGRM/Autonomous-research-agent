@@ -3539,7 +3539,8 @@ def render_narrative_feed(events: List[Dict[str, Any]], source_label: str = "") 
         return
 
     # Keep only last N and reverse so newest at top
-    tail = events[-LIVE_EVENTS_LIMIT:]
+    show_all = st.checkbox("Show all events", value=False, key="ara_recent_activity_show_all")
+    tail = events if show_all else events[-LIVE_EVENTS_LIMIT:]
     tail = list(reversed(tail))
 
     rows = []
