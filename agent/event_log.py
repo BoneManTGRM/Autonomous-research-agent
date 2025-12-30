@@ -73,6 +73,26 @@ DEFAULT_MIRROR_GLOBAL: bool = (
 )
 
 
+# ---------------------------------------------------------------------------
+# DEPRECATION NOTICE
+# ---------------------------------------------------------------------------
+# This module historically wrote JSON-array event logs (event_log.json and
+# <run_id>_event_log.json). New code should prefer the JSONL event stream
+# written by events.emit_event to <runs_root>/<run_id>/events.jsonl.
+#
+# For migration safety, log_event() can also emit JSONL events. Legacy JSON
+# writes are disabled by default and can be re-enabled with:
+#   ARA_EVENT_LOG_WRITE_LEGACY_JSON=1
+
+try:  # pragma: no cover
+    from events import emit_event as _emit_event_jsonl  # type: ignore[import]
+except Exception:  # pragma: no cover
+    _emit_event_jsonl = None  # type: ignore[assignment]
+
+WRITE_LEGACY_JSON: bool = os.getenv("ARA_EVENT_LOG_WRITE_LEGACY_JSON", "1").strip().lower() in {"1", "true", "yes", "on"}
+
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
@@ -114,10 +134,11 @@ def resolve_runs_root() -> Path:
 
 
 def resolve_logs_dir(runs_root: Optional[Path] = None) -> Path:
-    """Resolve logs dir. Allows override via ARA_LOGS_DIR."""
-    env = os.getenv("ARA_LOGS_DIR")
-    if env:
-        return Path(env)
+    """Resolve logs dir. Allows override via ARA_RUNS_LOGS_DIR / ARA_RUNS_LOG_DIR / ARA_LOGS_DIR."""
+    for key in ("ARA_RUNS_LOGS_DIR", "ARA_RUNS_LOG_DIR", "ARA_LOGS_DIR"):
+        env = os.getenv(key)
+        if isinstance(env, str) and env.strip():
+            return Path(env.strip())
     rr = runs_root if isinstance(runs_root, Path) else resolve_runs_root()
     return rr / "logs"
 
@@ -271,7 +292,7 @@ def make_event(
 ) -> JsonObj:
     """Create a normalized event dict.
 
-    This must be "never crash" â logging should not bring down the worker.
+    This must be "never crash" ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ logging should not bring down the worker.
     """
     ev: JsonObj = {
         "id": uuid.uuid4().hex,
@@ -358,6 +379,70 @@ def log_event(
         cycle=cycle,
     )
 
+    # Preferred: also emit JSONL events for the Streamlit UI (per-run events.jsonl).
+    try:
+        if _emit_event_jsonl is not None:
+            runs_root = resolve_runs_root()
+            # Per-run
+            if run_id:
+                run_dir = Path(runs_root) / str(run_id)
+                _emit_event_jsonl(
+                    run_dir,
+                    level=str(level or 'info'),
+                    domain=str(domain) if isinstance(domain, str) and domain.strip() else 'general',
+                    msg=str(message),
+                    kind=str(kind),
+                    extra=data if isinstance(data, dict) else {},
+                    run_id=str(run_id),
+                    role=str(role) if isinstance(role, str) and role.strip() else None,
+                    cycle=cycle,
+                    phase_index=phase_index,
+                    phase_total=phase_total,
+                    phase_name=phase_name,
+                )
+
+                # Optional global mirror (JSONL)
+                if mirror_global:
+                    global_dir = resolve_logs_dir(runs_root)
+                    _emit_event_jsonl(
+                        global_dir,
+                        level=str(level or 'info'),
+                        domain=str(domain) if isinstance(domain, str) and domain.strip() else 'general',
+                        msg=str(message),
+                        kind=str(kind),
+                        extra=data if isinstance(data, dict) else {},
+                        run_id=str(run_id),
+                        role=str(role) if isinstance(role, str) and role.strip() else None,
+                        cycle=cycle,
+                        phase_index=phase_index,
+                        phase_total=phase_total,
+                        phase_name=phase_name,
+                        file_name='events_global.jsonl',
+                    )
+            else:
+                # No run_id: write to a global stream only
+                global_dir = resolve_logs_dir(runs_root)
+                _emit_event_jsonl(
+                    global_dir,
+                    level=str(level or 'info'),
+                    domain=str(domain) if isinstance(domain, str) and domain.strip() else 'general',
+                    msg=str(message),
+                    kind=str(kind),
+                    extra=data if isinstance(data, dict) else {},
+                    role=str(role) if isinstance(role, str) and role.strip() else None,
+                    cycle=cycle,
+                    phase_index=phase_index,
+                    phase_total=phase_total,
+                    phase_name=phase_name,
+                    file_name='events_global.jsonl',
+                )
+    except Exception:
+        pass
+
+    # If legacy JSON-array logs are disabled, stop here.
+    if not WRITE_LEGACY_JSON:
+        return event
+
     # Per-run file
     if run_id:
         per_run_path = get_event_log_path(run_id=run_id, logs_dir=ld)
@@ -419,76 +504,6 @@ class EventLogger:
     logs_dir: Path = field(default_factory=resolve_logs_dir)
     mirror_global: bool = DEFAULT_MIRROR_GLOBAL
     max_events: int = DEFAULT_MAX_EVENTS
-
-
-    # Compatibility with CoreAgent (which may pass `path=...` / `config=...` and expects .append/.log)
-    path: Optional[Path] = None
-    config: Optional[Dict[str, Any]] = None
-
-    def __post_init__(self) -> None:
-        """Best-effort compatibility shim.
-
-        - If `path` is provided (often ".../logs/event_log.jsonl"), treat its parent as logs_dir.
-        - Leave existing behavior unchanged otherwise.
-        """
-        try:
-            if self.path is not None:
-                p = Path(self.path)
-                # If path looks like a file, use parent dir; if it's already a dir, use it directly.
-                self.logs_dir = p.parent if p.suffix else p
-        except Exception:
-            # Never allow init-time logging config to break the app.
-            pass
-
-    def append(self, evt: Any = None, **kwargs: Any) -> Optional[JsonObj]:
-        """Append an event provided as a dict (or kwargs) into the legacy JSON log.
-
-        CoreAgent calls logger.append(evt_dict). We normalize the dict into the legacy
-        log_event(...) signature to keep event_log.json and <run_id>_event_log.json populated.
-        """
-        try:
-            payload: Dict[str, Any] = {}
-            if isinstance(evt, dict):
-                payload.update(evt)
-            if kwargs:
-                payload.update(kwargs)
-
-            kind = payload.get("kind") or payload.get("type") or payload.get("domain") or "event"
-            message = payload.get("message") or payload.get("msg") or payload.get("text") or ""
-            level = payload.get("level") or "info"
-
-            run_id = payload.get("run_id") or self.run_id
-            role = payload.get("role")
-            domain = payload.get("domain")
-
-            cycle = payload.get("cycle") if payload.get("cycle") is not None else payload.get("cycle_index")
-
-            data = payload.get("data")
-            if data is None and isinstance(payload.get("extra"), dict):
-                data = payload.get("extra")
-
-            if not isinstance(data, dict):
-                data = None
-
-            return log_event(
-                run_id=str(run_id) if run_id is not None else None,
-                kind=str(kind),
-                message=str(message),
-                level=str(level),
-                data=data,
-                role=str(role) if role is not None else None,
-                domain=str(domain) if domain is not None else None,
-                cycle=int(cycle) if isinstance(cycle, int) or (isinstance(cycle, str) and cycle.isdigit()) else None,
-                logs_dir=self.logs_dir,
-                mirror_global=self.mirror_global,
-                max_events=self.max_events,
-            )
-        except Exception:
-            return None
-
-    def log(self, evt: Any = None, **kwargs: Any) -> Optional[JsonObj]:
-        """Alias for append (some code prefers `.log(...)`)."""
-        return self.append(evt, **kwargs)
 
     def emit(
         self,
