@@ -100,7 +100,6 @@ from __future__ import annotations
 import inspect
 import os
 import time
-import random
 from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any, Dict, List, Optional, Tuple, Sequence
@@ -146,13 +145,13 @@ def _first_numeric(d: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[float]:
 # Optional stability kernel integration
 try:
     from .stability_kernel import StabilityKernel  # type: ignore[import]
-except Exception:  # pragma: no cover
+except (Exception, SystemExit):  # pragma: no cover
     StabilityKernel = None  # type: ignore[assignment]
 
 # Optional discovery manager integration
 try:
     from .discovery_manager import DiscoveryManager  # type: ignore[import]
-except Exception:  # pragma: no cover
+except (Exception, SystemExit):  # pragma: no cover
     DiscoveryManager = None  # type: ignore[assignment]
 
 # Optional imports for external tools and hypothesis engine.
@@ -162,36 +161,36 @@ except Exception:  # pragma: no cover
 # Web research
 try:
     from .tools_web import WebResearchTool  # type: ignore[import]
-except Exception:  # pragma: no cover
+except (Exception, SystemExit):  # pragma: no cover
     WebResearchTool = None  # type: ignore[assignment]
 
 # Paper and PDF tools
 try:
     from .tools_papers import PaperTool  # type: ignore[import]
-except Exception:  # pragma: no cover
+except (Exception, SystemExit):  # pragma: no cover
     PaperTool = None  # type: ignore[assignment]
 
 # File tools (currently lightly used but optional)
 try:
     from .tools_files import FileTool  # type: ignore[import]
-except Exception:  # pragma: no cover
+except (Exception, SystemExit):  # pragma: no cover
     FileTool = None  # type: ignore[assignment]
 
 # PubMed and Semantic Scholar
 try:
     from .tools_pubmed import PubMedTool  # type: ignore[import]
-except Exception:  # pragma: no cover
+except (Exception, SystemExit):  # pragma: no cover
     PubMedTool = None  # type: ignore[assignment]
 
 try:
     from .tools_semantic_scholar import SemanticScholarTool  # type: ignore[import]
-except Exception:  # pragma: no cover
+except (Exception, SystemExit):  # pragma: no cover
     SemanticScholarTool = None  # type: ignore[assignment]
 
 # Hypothesis engine
 try:
     from .hypothesis_engine import generate_hypotheses  # type: ignore[import]
-except Exception:  # pragma: no cover
+except (Exception, SystemExit):  # pragma: no cover
 
     def generate_hypotheses(
         goal: str,
@@ -211,7 +210,7 @@ except Exception:  # pragma: no cover
 # is missing, we can still run real Tavily backed search via tools.py.
 try:
     from .tools import Toolbelt, ToolUsage, web_search as core_web_search  # type: ignore[attr-defined]
-except Exception:  # pragma: no cover
+except (Exception, SystemExit):  # pragma: no cover
     Toolbelt = None  # type: ignore[assignment]
     core_web_search = None  # type: ignore[assignment]
 
@@ -479,7 +478,7 @@ class TGRMLoop:
                 self.web_tool = WebResearchTool()  # type: ignore[call-arg]
             else:
                 self.web_tool = _NullWebTool()
-        except Exception:
+        except (Exception, SystemExit):
             self.web_tool = _NullWebTool()
 
         try:
@@ -487,7 +486,7 @@ class TGRMLoop:
                 self.paper_tool = PaperTool()  # type: ignore[call-arg]
             else:
                 self.paper_tool = _NullPaperTool()
-        except Exception:
+        except (Exception, SystemExit):
             self.paper_tool = _NullPaperTool()
 
         try:
@@ -495,7 +494,7 @@ class TGRMLoop:
                 self.file_tool = FileTool()  # type: ignore[call-arg]
             else:
                 self.file_tool = _NullFileTool()
-        except Exception:
+        except (Exception, SystemExit):
             self.file_tool = _NullFileTool()
 
         try:
@@ -503,7 +502,7 @@ class TGRMLoop:
                 self.pubmed_tool = PubMedTool()  # type: ignore[call-arg]
             else:
                 self.pubmed_tool = _NullPubMedTool()
-        except Exception:
+        except (Exception, SystemExit):
             self.pubmed_tool = _NullPubMedTool()
 
         try:
@@ -511,7 +510,7 @@ class TGRMLoop:
                 self.semantic_tool = SemanticScholarTool()  # type: ignore[call-arg]
             else:
                 self.semantic_tool = _NullSemanticScholarTool()
-        except Exception:
+        except (Exception, SystemExit):
             self.semantic_tool = _NullSemanticScholarTool()
 
         # Optional stability kernel and discovery manager
@@ -521,13 +520,13 @@ class TGRMLoop:
         if StabilityKernel is not None and self.config.get("enable_stability_kernel", True):
             try:
                 self.stability_kernel = StabilityKernel()
-            except Exception:
+            except (Exception, SystemExit):
                 self.stability_kernel = None
 
         if DiscoveryManager is not None and self.config.get("enable_discovery_manager", True):
             try:
                 self.discovery_manager = DiscoveryManager()
-            except Exception:
+            except (Exception, SystemExit):
                 self.discovery_manager = None
 
         # Long run optimization: track which questions have already been researched.
@@ -2305,97 +2304,6 @@ class TGRMLoop:
 
         return params
 
-
-def _call_with_backoff(
-    self,
-    fn,
-    *,
-    purpose: str,
-    max_retries: Optional[int] = None,
-    base_delay_s: float = 1.0,
-    max_delay_s: float = 20.0,
-):
-    """Call fn() with retry/backoff for 429 / Too Many Requests.
-
-    Retries are only attempted when the exception clearly indicates a 429
-    rate-limit condition. If a Retry-After header is available, it is
-    respected (capped by max_delay_s). Otherwise exponential backoff with
-    small jitter is used.
-
-    This is intentionally conservative: non-429 exceptions are raised
-    immediately so existing try/except blocks handle them as before.
-    """
-    # Allow optional overrides via config/env
-    if max_retries is None:
-        try:
-            max_retries = int(
-                self.config.get("rate_limit_max_retries")
-                or os.getenv("WORKER_RATE_LIMIT_MAX_RETRIES", "5")
-            )
-        except Exception:
-            max_retries = 5
-
-    try:
-        base_delay_s = float(self.config.get("rate_limit_base_delay_s", base_delay_s))
-    except Exception:
-        pass
-    try:
-        max_delay_s = float(self.config.get("rate_limit_max_delay_s", max_delay_s))
-    except Exception:
-        pass
-
-    attempt = 0
-    while True:
-        try:
-            return fn()
-        except Exception as e:
-            status = None
-            retry_after = None
-
-            resp = getattr(e, "response", None)
-            if resp is not None:
-                try:
-                    status = getattr(resp, "status_code", None)
-                except Exception:
-                    status = None
-                try:
-                    headers = getattr(resp, "headers", None) or {}
-                    ra = None
-                    if hasattr(headers, "get"):
-                        ra = headers.get("Retry-After") or headers.get("retry-after")
-                    if ra is not None:
-                        retry_after = float(str(ra).strip())
-                except Exception:
-                    retry_after = None
-
-            msg = str(e) or ""
-            msg_l = msg.lower()
-            is_429 = (
-                status == 429
-                or "too many requests" in msg_l
-                or ("429" in msg and "client error" in msg_l)
-                or ("rate limit" in msg_l and "429" in msg_l)
-            )
-
-            attempt += 1
-            if (not is_429) or attempt > int(max_retries or 0):
-                raise
-
-            if retry_after is not None and retry_after > 0:
-                sleep_s = min(float(max_delay_s), float(retry_after))
-            else:
-                sleep_s = min(
-                    float(max_delay_s),
-                    float(base_delay_s) * (2 ** (attempt - 1)) + random.uniform(0.0, 0.7),
-                )
-
-            try:
-                # Purpose is currently unused but kept for future diagnostics.
-                _ = purpose
-                time.sleep(max(0.0, float(sleep_s)))
-            except Exception:
-                pass
-
     def _web_search(self, query: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Perform a web search with resilience to Tavily limits and failures.
 
@@ -2446,33 +2354,24 @@ def _call_with_backoff(
 
             try:
                 # Try the most complete signature first; degrade gracefully
-                res = self._call_with_backoff(
-                    lambda: core_web_search(
-                        query=query,
-                        max_results=max_results,
-                        search_depth=search_depth,
-                        topic=topic,
-                    ),
-                    purpose="web_search",
+                res = core_web_search(
+                    query=query,
+                    max_results=max_results,
+                    search_depth=search_depth,
+                    topic=topic,
                 )
             except TypeError:
                 try:
-                    res = self._call_with_backoff(
-                        lambda: core_web_search(
-                            query=query,
-                            max_results=max_results,
-                            search_depth=search_depth,
-                        ),
-                        purpose="web_search",
+                    res = core_web_search(
+                        query=query,
+                        max_results=max_results,
+                        search_depth=search_depth,
                     )
                 except TypeError:
                     try:
-                        res = self._call_with_backoff(
-                            lambda: core_web_search(
-                                query=query,
-                                max_results=max_results,
-                            ),
-                            purpose="web_search",
+                        res = core_web_search(
+                            query=query,
+                            max_results=max_results,
                         )
                     except Exception:
                         res = None
@@ -2515,11 +2414,11 @@ def _call_with_backoff(
             filtered = params
 
         try:
-            return self._call_with_backoff(lambda: self.web_tool.search(query, **filtered), purpose="web_search")  # type: ignore[misc]
+            return self.web_tool.search(query, **filtered)  # type: ignore[misc]
         except TypeError:
             # Last resort: try a no-kwargs call
             try:
-                return self._call_with_backoff(lambda: self.web_tool.search(query), purpose="web_search")  # type: ignore[misc]
+                return self.web_tool.search(query)  # type: ignore[misc]
             except Exception:
                 return []
         except Exception:
@@ -2665,7 +2564,7 @@ def _call_with_backoff(
 
         if source_controls.get("semantic", False) and not self._deadline_hit(deadline_ts):
             try:
-                sem_results = self._call_with_backoff(lambda: self.semantic_tool.search(goal, max_results=5), purpose="semantic_scholar")
+                sem_results = self.semantic_tool.search(goal, max_results=5)
             except Exception:
                 sem_results = []
                 note_lines.append(
@@ -2895,7 +2794,7 @@ def _call_with_backoff(
 
             if source_controls.get("semantic", False):
                 try:
-                    sem_results = self._call_with_backoff(lambda: self.semantic_tool.search(q, max_results=5), purpose="semantic_scholar")
+                    sem_results = self.semantic_tool.search(q, max_results=5)
                 except Exception:
                     sem_results = []
                     note_lines.append(
@@ -3041,7 +2940,7 @@ def _call_with_backoff(
 
         if source_controls.get("semantic", False):
             try:
-                sem_results = self._call_with_backoff(lambda: self.semantic_tool.search(query, max_results=10), purpose="semantic_scholar")
+                sem_results = self.semantic_tool.search(query, max_results=10)
             except Exception:
                 sem_results = []
                 note_lines.append(
@@ -3207,7 +3106,7 @@ def _call_with_backoff(
 
         if source_controls.get("semantic", False):
             try:
-                sem_results = self._call_with_backoff(lambda: self.semantic_tool.search(query, max_results=10), purpose="semantic_scholar")
+                sem_results = self.semantic_tool.search(query, max_results=10)
             except Exception:
                 sem_results = []
                 note_lines.append(
