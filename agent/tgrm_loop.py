@@ -98,7 +98,6 @@ are missing or misconfigured.
 from __future__ import annotations
 
 import inspect
-import re
 import os
 import time
 from datetime import datetime
@@ -2602,7 +2601,7 @@ class TGRMLoop:
 
         if source_controls.get("pubmed", False) and not self._deadline_hit(deadline_ts):
             try:
-                pubmed_results = self.pubmed_tool.search(self._goal_to_search_query(goal, domain=domain), max_results=5)
+                pubmed_results = self.pubmed_tool.search(search_query, max_results=5)
             except Exception:
                 pubmed_results = []
                 note_lines.append("PubMed search failed for initial research; continuing without PubMed results.")
@@ -2612,7 +2611,7 @@ class TGRMLoop:
                 pubmed_cites = self._tag_citations(
                     pubmed_results,
                     goal=goal,
-                    query=goal,
+                    query=search_query,
                     channel="pubmed",
                     phase="initial",
                 )
@@ -2629,7 +2628,7 @@ class TGRMLoop:
 
         if source_controls.get("semantic", False) and not self._deadline_hit(deadline_ts):
             try:
-                sem_results = self.semantic_tool.search(self._goal_to_search_query(goal, domain=domain), max_results=5)
+                sem_results = self.semantic_tool.search(search_query, max_results=5)
             except Exception:
                 sem_results = []
                 note_lines.append(
@@ -2641,7 +2640,7 @@ class TGRMLoop:
                 sem_cites = self._tag_citations(
                     sem_results,
                     goal=goal,
-                    query=goal,
+                    query=search_query,
                     channel="semantic",
                     phase="initial",
                 )
