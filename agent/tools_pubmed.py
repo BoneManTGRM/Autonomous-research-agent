@@ -1,164 +1,200 @@
-"""PubMed ingestion tool.
+"""tools_pubmed.py
 
-This module provides a thin wrapper around NCBI PubMed E-utilities using
-the `requests` library. It is purposely simple and defensive:
+PubMed (NCBI E-utilities) search helper.
 
-- On network or API failure, it returns stubbed results instead of crashing.
-- It exposes a unified interface:
-      search(query) -> list of {title, snippet, url, source, pmid}
+Goals:
+- Avoid accidentally sending large prompts as queries (normalize + truncate).
+- Be polite to NCBI (rate limiting + retries for 429/5xx).
+- Return small citation-friendly records: title / url / snippet.
 
-TGRM can call this during the Repair phase when:
-- source_controls["pubmed"] is True
-- the goal or notes suggest biomedical or aging topics
-
-Design goals:
-- Safe: never crash the agent on network or API errors.
-- Normalized: return a citation friendly structure consistent with other tools.
-- Configurable: allow an optional NCBI API key and email for better rate limits.
+Environment variables (optional):
+- NCBI_API_KEY (or ENTREZ_API_KEY)
+- NCBI_EMAIL
+- PUBMED_REQUEST_INTERVAL
+- PUBMED_MAX_RETRIES
+- PUBMED_TIMEOUT
 """
 
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional
+import random
+import re
+import threading
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
+_EUTILS_BASE = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils"
+_ESEARCH = f"{_EUTILS_BASE}/esearch.fcgi"
+_ESUMMARY = f"{_EUTILS_BASE}/esummary.fcgi"
+
+
+def _normalize_query(query: str, max_chars: int = 280) -> str:
+    q = (query or "").strip()
+    if not q:
+        return ""
+    # Remove code blocks and collapse whitespace
+    q = re.sub(r"```.*?```", " ", q, flags=re.S)
+    q = re.sub(r"\s+", " ", q).strip()
+    if len(q) > max_chars:
+        q = q[:max_chars]
+        if " " in q:
+            q = q.rsplit(" ", 1)[0].strip() or q.strip()
+    return q
+
 
 class PubMedTool:
-    """Minimal PubMed client using NCBI E-utilities."""
-
-    ESEARCH_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esearch.fcgi"
-    ESUMMARY_URL = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi"
-    DB = "pubmed"
-
     def __init__(
         self,
-        email: str = "example@example.com",
         api_key: Optional[str] = None,
-    ) -> None:
-        """Create a PubMedTool.
+        email: Optional[str] = None,
+        tool: str = "tgrm",
+        request_interval: Optional[float] = None,
+        max_retries: Optional[int] = None,
+        timeout: Optional[float] = None,
+    ):
+        self.api_key = (api_key or os.environ.get("NCBI_API_KEY") or os.environ.get("ENTREZ_API_KEY") or "").strip()
+        self.email = (email or os.environ.get("NCBI_EMAIL") or "").strip()
+        self.tool = tool
 
-        Args:
-            email:
-                Contact email string. NCBI recommends including one.
-            api_key:
-                Optional NCBI API key. If not provided, the tool will look
-                for NCBI_API_KEY in the environment. This can improve rate
-                limits on heavy autonomous runs.
-        """
-        self.email = email
-        if api_key:
-            self.api_key = api_key
-        else:
-            self.api_key = os.getenv("NCBI_API_KEY", None)
+        # NCBI guidance: ~3 req/sec without key, up to ~10 req/sec with key.
+        default_interval = 0.12 if self.api_key else 0.4
+        self.request_interval = float(
+            request_interval
+            if request_interval is not None
+            else os.environ.get("PUBMED_REQUEST_INTERVAL", default_interval)
+        )
+        self.max_retries = int(
+            max_retries if max_retries is not None else os.environ.get("PUBMED_MAX_RETRIES", 4)
+        )
+        self.timeout = float(timeout if timeout is not None else os.environ.get("PUBMED_TIMEOUT", 15))
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
-    def _request_json(self, url: str, params: Dict[str, Any], timeout: int = 10) -> Dict[str, Any]:
-        """Perform a GET request and return JSON, with defensive error handling."""
-        # Always include email and optional api_key
-        params = dict(params)
-        params.setdefault("email", self.email)
-        if self.api_key:
-            params.setdefault("api_key", self.api_key)
+        self._lock = threading.Lock()
+        self._last_request_time = 0.0
+        self._session = requests.Session()
 
-        resp = requests.get(url, params=params, timeout=timeout)
-        resp.raise_for_status()
-        return resp.json()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=10, pool_maxsize=10)
+        self._session.mount("https://", adapter)
+        self._session.mount("http://", adapter)
 
-    # ------------------------------------------------------------------
-    # Public search API
-    # ------------------------------------------------------------------
-    def search(self, query: str, max_results: int = 5) -> List[Dict[str, str]]:
-        """Search PubMed and return a list of structured results.
+    def _respect_rate_limit(self) -> None:
+        if self.request_interval <= 0:
+            return
+        with self._lock:
+            now = time.time()
+            elapsed = now - self._last_request_time
+            if elapsed < self.request_interval:
+                time.sleep(self.request_interval - elapsed)
+            self._last_request_time = time.time()
 
-        This method sanitizes the incoming query to avoid overly long or malformed
-        search terms being sent to the NCBI API. It also guards against network
-        errors by returning a stubbed result instead of raising exceptions.
+    def _request_with_retries(self, url: str, params: Dict[str, Any]) -> requests.Response:
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                self._respect_rate_limit()
+                resp = self._session.get(url, params=params, timeout=self.timeout)
 
-        Each result is a dict with the following keys:
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After", "").strip()
+                    try:
+                        wait_s = float(retry_after) if retry_after else 0.0
+                    except Exception:
+                        wait_s = 0.0
+                    if wait_s <= 0:
+                        wait_s = min(60.0, (2 ** attempt) * 2.0)
+                    wait_s *= 0.7 + 0.6 * random.random()
+                    time.sleep(wait_s)
+                    continue
 
-            - ``title``: Title of the PubMed article (``"No title"`` if missing).
-            - ``snippet``: A short snippet derived from the first author or source journal.
-            - ``url``: Direct link to the PubMed abstract.
-            - ``source``: Constant string ``"pubmed"``.
-            - ``pmid``: PubMed identifier for the article.
+                # Retry transient server errors
+                if resp.status_code in (500, 502, 503, 504):
+                    wait_s = min(60.0, (2 ** attempt) * 1.0)
+                    wait_s *= 0.7 + 0.6 * random.random()
+                    time.sleep(wait_s)
+                    continue
 
-        Args:
-            query: User supplied query string. Newlines and excessive whitespace
-                will be collapsed and the string will be truncated to 200 characters.
-            max_results: Maximum number of PubMed records to return.
+                resp.raise_for_status()
+                return resp
+            except Exception as e:
+                last_exc = e
+                wait_s = min(60.0, (2 ** attempt) * 1.0)
+                wait_s *= 0.7 + 0.6 * random.random()
+                time.sleep(wait_s)
 
-        Returns:
-            A list of result dictionaries. If the search fails, a single stub
-            record will be returned containing error details.
-        """
-        # Defensive: return empty list on falsy query
-        if not query:
-            return []
+        if last_exc:
+            raise last_exc
+        raise RuntimeError("PubMed request failed")
 
-        # ------------------------------------------------------------------
-        # Sanitize the query
-        # ------------------------------------------------------------------
-        # Collapse newlines and excessive whitespace
-        sanitized = " ".join(str(query).strip().split())
-        # Truncate to a reasonable length to avoid hitting URL limits or
-        # triggering PubMed errors (200 chars is often sufficient)
-        sanitized = sanitized[:200]
-
-        try:
-            # Step 1: esearch to get PMIDs
-            params = {
-                "db": self.DB,
-                "term": sanitized,
-                "retmax": max_results,
-                "retmode": "json",
-            }
-            data = self._request_json(self.ESEARCH_URL, params=params, timeout=10)
-            id_list = data.get("esearchresult", {}).get("idlist", [])
-            if not id_list:
-                return []
-
-            # Step 2: esummary to get titles and snippets
-            params2 = {
-                "db": self.DB,
-                "id": ",".join(id_list),
-                "retmode": "json",
-            }
-            data2 = self._request_json(self.ESUMMARY_URL, params=params2, timeout=10)
-            result_dict = data2.get("result", {})
-
-            results: List[Dict[str, str]] = []
-            for pmid in id_list:
-                rec: Dict[str, Any] = result_dict.get(pmid, {})
-                title = rec.get("title", "") or "No title"
-
-                # Use a compact snippet field: first author or source journal
-                snippet = rec.get("sortfirstauthor", "") or rec.get("source", "") or ""
-                url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
-
-                results.append(
-                    {
-                        "title": str(title),
-                        "snippet": str(snippet),
-                        "url": str(url),
-                        "source": "pubmed",
-                        "pmid": str(pmid),
-                    }
-                )
-
-            return results
-
-        except Exception as e:
-            # Safe fallback: stubbed result so TGRM does not break
+    def search(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        q = _normalize_query(query)
+        if not q:
             return [
                 {
-                    "title": f"[STUB] PubMed error for query='{sanitized}'",
-                    "snippet": f"PubMed request failed: {e}",
+                    "title": "[STUB] PubMed error for query='(empty)'",
                     "url": "",
-                    "source": "pubmed",
-                    "pmid": "",
+                    "snippet": "Empty query",
                 }
             ]
+
+        common: Dict[str, Any] = {
+            "tool": self.tool,
+            "retmode": "json",
+        }
+        if self.api_key:
+            common["api_key"] = self.api_key
+        if self.email:
+            common["email"] = self.email
+
+        # 1) ESearch to get PubMed IDs
+        esearch_params: Dict[str, Any] = {
+            **common,
+            "db": "pubmed",
+            "term": q,
+            "retmax": max_results,
+            "sort": "relevance",
+        }
+        esearch = self._request_with_retries(_ESEARCH, esearch_params).json()
+        ids = (
+            esearch.get("esearchresult", {}).get("idlist", [])
+            if isinstance(esearch, dict)
+            else []
+        )
+        if not ids:
+            return []
+
+        # 2) ESummary to get titles + metadata
+        esummary_params: Dict[str, Any] = {
+            **common,
+            "db": "pubmed",
+            "id": ",".join(ids),
+        }
+        esummary = self._request_with_retries(_ESUMMARY, esummary_params).json()
+        result = esummary.get("result", {}) if isinstance(esummary, dict) else {}
+        uids = result.get("uids", []) if isinstance(result, dict) else []
+
+        out: List[Dict[str, Any]] = []
+        for pmid in uids:
+            item = result.get(pmid, {}) if isinstance(result, dict) else {}
+            title = (item.get("title") or "").strip()
+            if not title:
+                continue
+
+            authors = item.get("authors") or []
+            author_str = ", ".join([a.get("name", "") for a in authors if a.get("name")][:3])
+            pubdate = (item.get("pubdate") or "").strip()
+            journal = (item.get("fulljournalname") or item.get("source") or "").strip()
+
+            snippet_parts = [p for p in [author_str, journal, pubdate] if p]
+            snippet = " â¢ ".join(snippet_parts)[:800]
+
+            out.append(
+                {
+                    "title": title,
+                    "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
+                    "snippet": snippet,
+                }
+            )
+
+        return out
