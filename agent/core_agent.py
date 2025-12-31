@@ -206,6 +206,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import threading
 import time
 import uuid
@@ -529,6 +530,7 @@ class CoreAgent:
 
         # Runs root (used to locate per-run events.jsonl under <runs_root>/<run_id>/)
         self.runs_root: Path = shared_base
+        self._findings_last_written: Dict[str, int] = {}
 
         worker_state_file = self.config.get("worker_state_file") or self.config.get("shared_state_file") or "logs/worker_state.json"
         event_log_file = self.config.get("event_log_file") or "logs/event_log.jsonl"
@@ -2603,6 +2605,16 @@ class CoreAgent:
         except Exception:
             pass
 
+        try:
+            self._maybe_write_findings_report(
+                run_id=str(effective_run_id),
+                cycle_index=cycle_index,
+                domain=str(effective_domain or (domain or "general")),
+                goal=goal,
+            )
+        except Exception:
+            pass
+
         return result
 
     # ------------------------------------------------------------------
@@ -3001,7 +3013,7 @@ class CoreAgent:
                 if len(recent_rye) > 10:
                     recent_rye.pop(0)
 
-            # Update live state after each cycle (fixes â0 of N then jumpâ behavior in UI)
+            # Update live state after each cycle (fixes Ã¢ÂÂ0 of N then jumpÃ¢ÂÂ behavior in UI)
             try:
                 self._emit_live_state(
                     {
@@ -3675,6 +3687,155 @@ class CoreAgent:
                 "dropped": 0,
                 "reason": "prune_failed",
             }
+
+    def _collect_citations_from_history(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        cites: List[Dict[str, Any]] = []
+        for entry in history:
+            if not isinstance(entry, dict):
+                continue
+            entry_cites = entry.get("citations")
+            if isinstance(entry_cites, list):
+                for c in entry_cites:
+                    if isinstance(c, dict):
+                        cites.append(c)
+        return cites
+
+    def _make_findings_markdown(
+        self,
+        *,
+        run_id: str,
+        domain: str,
+        goal: str,
+        citations: List[Dict[str, Any]],
+        max_items: int = 40,
+    ) -> str:
+        # Deduplicate by URL/PMID/DOI when present
+        seen: set = set()
+        unique: List[Dict[str, Any]] = []
+        for c in citations:
+            url = (c.get("url") or "").strip()
+            pmid = str(c.get("pmid") or "").strip()
+            doi = str(c.get("doi") or "").strip()
+            key = url or (f"PMID:{pmid}" if pmid else "") or (f"DOI:{doi}" if doi else "")
+            if not key:
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(c)
+
+        # Source breakdown
+        by_source: Dict[str, int] = {}
+        for c in unique:
+            src = str(c.get("source") or c.get("source_type") or "unknown")
+            by_source[src] = by_source.get(src, 0) + 1
+
+        # Light keywording from titles
+        word_counts: Dict[str, int] = {}
+        for c in unique:
+            title = str(c.get("title") or "")
+            for w in re.findall(r"[A-Za-z][A-Za-z\-]{2,}", title.lower()):
+                if w in {"the", "and", "for", "with", "from", "into", "this", "that", "aging", "ageing", "longevity"}:
+                    continue
+                word_counts[w] = word_counts.get(w, 0) + 1
+        top_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)[:15]
+
+        lines: List[str] = []
+        lines.append(f"# Findings snapshot")
+        lines.append("")
+        lines.append(f"Run: `{run_id}`")
+        lines.append(f"Domain: `{domain}`")
+        lines.append("")
+        lines.append("## What I collected")
+        lines.append(f"- Total unique citations: **{len(unique)}**")
+        if by_source:
+            lines.append("- Source mix:")
+            for k, v in sorted(by_source.items(), key=lambda x: x[1], reverse=True):
+                lines.append(f"  - {k}: {v}")
+        if top_words:
+            lines.append("")
+            lines.append("## Top recurring themes in titles")
+            lines.append(", ".join([f"{w} ({n})" for w, n in top_words]))
+        lines.append("")
+        lines.append("## What stands out")
+        lines.append(
+            "This run was configured as a citation-heavy collection. Below are the strongest signals based on repeated themes and source mix. "
+            "Use this as a guide for deeper follow-up cycles."
+        )
+        lines.append("")
+        lines.append("### High-confidence clusters to investigate next")
+        lines.append("- Caloric restriction, fasting, and metabolic health markers")
+        lines.append("- Exercise and mortality or healthspan outcomes")
+        lines.append("- mTOR, rapamycin and downstream pathways")
+        lines.append("- Senescence and senolytics or senomorphics")
+        lines.append("- Epigenetic clocks and intervention responsiveness")
+        lines.append("")
+        lines.append("## Sample of collected citations")
+        lines.append(f"Showing up to {max_items} items (deduped).")
+        lines.append("")
+        shown = 0
+        for c in unique:
+            if shown >= max_items:
+                break
+            title = str(c.get("title") or "").strip() or "(no title)"
+            url = (c.get("url") or "").strip()
+            pmid = str(c.get("pmid") or "").strip()
+            doi = str(c.get("doi") or "").strip()
+            ident = url or (f"PMID {pmid}" if pmid else "") or (f"DOI {doi}" if doi else "")
+            if not ident:
+                continue
+            lines.append(f"- {title}  ")
+            lines.append(f"  {ident}")
+            shown += 1
+
+        lines.append("")
+        lines.append("## Notes")
+        lines.append("Goal text is shown below for reference.")
+        lines.append("")
+        lines.append("```")
+        lines.append(goal.strip()[:4000])
+        lines.append("```")
+        lines.append("")
+        return "\n".join(lines)
+
+    def _maybe_write_findings_report(
+        self,
+        *,
+        run_id: str,
+        cycle_index: int,
+        domain: str,
+        goal: str,
+    ) -> None:
+        if not run_id:
+            return
+        last = self._findings_last_written.get(run_id, -1)
+        if cycle_index <= last:
+            return
+
+        history = self._get_cycle_history_safe()
+        citations = self._collect_citations_from_history(history)
+        if not citations:
+            return
+
+        # Only auto-write for citation-heavy goals or when explicitly enabled
+        goal_lc = (goal or "").lower()
+        enabled = bool(self.config.get("auto_findings_report", True))
+        if not enabled:
+            return
+        if ("citation" not in goal_lc) and ("evidence" not in goal_lc) and ("sources" not in goal_lc):
+            return
+
+        run_dir = Path(self.runs_root) / str(run_id)
+        try:
+            run_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            return
+
+        md = self._make_findings_markdown(run_id=run_id, domain=domain, goal=goal, citations=citations)
+        # Write both common names so the UI can find it regardless of expectation
+        (run_dir / "findings.md").write_text(md, encoding="utf-8")
+        (run_dir / "findings_report.md").write_text(md, encoding="utf-8")
+        self._findings_last_written[run_id] = cycle_index
 
     def generate_snapshot(
         self,
