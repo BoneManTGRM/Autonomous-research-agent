@@ -2316,6 +2316,11 @@ class TGRMLoop:
                     break
 
             else:
+                goal_lc = (goal or "").lower()
+                if issue == "question_mark" and ("citation hunt" in goal_lc or "citation" in goal_lc):
+                    # In citation-hunt runs, do not create TODO issues for question marks.
+                    continue
+
                 note = (
                     f"[{role}] Encountered issue '{issue}' with description: {desc}. "
                     "This issue type is not yet fully handled; marking as TODO for future cycles."
