@@ -555,12 +555,16 @@ class WebResearchTool:
     # ------------------------------------------------------------------
     @staticmethod
     def _infer_source_label(url: str) -> str:
-        """Infer a short source label from a URL domain."""
+        """Infer a short source label from a URL domain.
+
+        For general web domains, we prefix with 'tavily:' so the UI can
+        distinguish citations gathered via Tavily from other channels.
+        """
         if not url:
-            return "web"
+            return "tavily"
         try:
             parsed = urlparse(url)
-            host = parsed.netloc.lower()
+            host = (parsed.netloc or "").lower().lstrip("www.")
             if "pubmed" in host or "ncbi.nlm.nih.gov" in host:
                 return "pubmed"
             if "semanticscholar.org" in host:
@@ -569,10 +573,10 @@ class WebResearchTool:
                 return "arxiv"
             if "doi.org" in host:
                 return "doi"
-            # Fallback: use the hostname
-            return host or "web"
+            # Fallback: use the hostname, prefixed to preserve provenance
+            return f"tavily:{host}" if host else "tavily"
         except Exception:
-            return "web"
+            return "tavily"
 
     @staticmethod
     def normalize_result(result: Dict[str, Any]) -> Dict[str, str]:
