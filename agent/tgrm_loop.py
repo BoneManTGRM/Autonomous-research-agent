@@ -98,27 +98,27 @@ are missing or misconfigured.
 from __future__ import annotations
 
 import inspect
+import re
 import os
 import time
+import traceback
 from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any, Dict, List, Optional, Tuple, Sequence
 
+# ---- Metrics import (package-safe) ----
 try:
-    # Support both package imports (when running as part of the src package)
-    # and direct script execution (when the file is executed by the engine worker).
-    from .rye_metrics import compute_delta_r, compute_rye  # type: ignore[import]
+    from .rye_metrics import compute_delta_r, compute_rye
 except Exception:  # pragma: no cover
     try:
-        from rye_metrics import compute_delta_r, compute_rye  # type: ignore[import]
+        from rye_metrics import compute_delta_r, compute_rye  # type: ignore
     except Exception:  # pragma: no cover
-
-        def compute_delta_r(*_args: Any, **_kwargs: Any) -> float:
+        # Fallback stubs (keeps the loop running in minimal environments)
+        def compute_delta_r(*args, **kwargs) -> float:
             return 0.0
 
-        def compute_rye(*_args: Any, **_kwargs: Any) -> float:
+        def compute_rye(*args, **kwargs) -> float:
             return 0.0
-
 # ---------------------------------------------------------------------------
 # Global limits and helpers
 # ---------------------------------------------------------------------------
@@ -159,19 +159,13 @@ def _first_numeric(d: Dict[str, Any], keys: Tuple[str, ...]) -> Optional[float]:
 try:
     from .stability_kernel import StabilityKernel  # type: ignore[import]
 except Exception:  # pragma: no cover
-    try:
-        from stability_kernel import StabilityKernel  # type: ignore[import]
-    except Exception:
-        StabilityKernel = None  # type: ignore[assignment]
+    StabilityKernel = None  # type: ignore[assignment]
 
 # Optional discovery manager integration
 try:
     from .discovery_manager import DiscoveryManager  # type: ignore[import]
 except Exception:  # pragma: no cover
-    try:
-        from discovery_manager import DiscoveryManager  # type: ignore[import]
-    except Exception:
-        DiscoveryManager = None  # type: ignore[assignment]
+    DiscoveryManager = None  # type: ignore[assignment]
 
 # Optional imports for external tools and hypothesis engine.
 # Each has a safe fallback so the loop still runs if the modules
@@ -181,65 +175,47 @@ except Exception:  # pragma: no cover
 try:
     from .tools_web import WebResearchTool  # type: ignore[import]
 except Exception:  # pragma: no cover
-    try:
-        from tools_web import WebResearchTool  # type: ignore[import]
-    except Exception:
-        WebResearchTool = None  # type: ignore[assignment]
+    WebResearchTool = None  # type: ignore[assignment]
 
 # Paper and PDF tools
 try:
     from .tools_papers import PaperTool  # type: ignore[import]
 except Exception:  # pragma: no cover
-    try:
-        from tools_papers import PaperTool  # type: ignore[import]
-    except Exception:
-        PaperTool = None  # type: ignore[assignment]
+    PaperTool = None  # type: ignore[assignment]
 
 # File tools (currently lightly used but optional)
 try:
     from .tools_files import FileTool  # type: ignore[import]
 except Exception:  # pragma: no cover
-    try:
-        from tools_files import FileTool  # type: ignore[import]
-    except Exception:
-        FileTool = None  # type: ignore[assignment]
+    FileTool = None  # type: ignore[assignment]
 
 # PubMed and Semantic Scholar
 try:
     from .tools_pubmed import PubMedTool  # type: ignore[import]
 except Exception:  # pragma: no cover
-    try:
-        from tools_pubmed import PubMedTool  # type: ignore[import]
-    except Exception:
-        PubMedTool = None  # type: ignore[assignment]
+    PubMedTool = None  # type: ignore[assignment]
 
 try:
     from .tools_semantic_scholar import SemanticScholarTool  # type: ignore[import]
 except Exception:  # pragma: no cover
-    try:
-        from tools_semantic_scholar import SemanticScholarTool  # type: ignore[import]
-    except Exception:
-        SemanticScholarTool = None  # type: ignore[assignment]
+    SemanticScholarTool = None  # type: ignore[assignment]
 
 # Hypothesis engine
 try:
     from .hypothesis_engine import generate_hypotheses  # type: ignore[import]
 except Exception:  # pragma: no cover
-    try:
-        from hypothesis_engine import generate_hypotheses  # type: ignore[import]
-    except Exception:
 
-        def generate_hypotheses(
-            goal: str,
-            notes: List[Dict[str, Any]],
-            citations: List[Dict[str, Any]],
-            max_hypotheses: int = 5,
-        ) -> List[Dict[str, Any]]:
-            """Fallback hypothesis generator when hypothesis_engine is unavailable.
+    def generate_hypotheses(
+        goal: str,
+        notes: List[Dict[str, Any]],
+        citations: List[Dict[str, Any]],
+        max_hypotheses: int = 5,
+    ) -> List[Dict[str, Any]]:
+        """Fallback hypothesis generator when hypothesis_engine is unavailable.
 
-            This returns an empty list so the rest of the loop can still run.
-            """
-            return []
+        This returns an empty list so the rest of the loop can still run.
+        """
+        return []
 
 
 # Optional Toolbelt / ToolUsage import to mirror CoreAgent behavior.
@@ -248,22 +224,19 @@ except Exception:  # pragma: no cover
 try:
     from .tools import Toolbelt, ToolUsage, web_search as core_web_search  # type: ignore[attr-defined]
 except Exception:  # pragma: no cover
-    try:
-        from tools import Toolbelt, ToolUsage, web_search as core_web_search  # type: ignore[attr-defined]
-    except Exception:
-        Toolbelt = None  # type: ignore[assignment]
-        core_web_search = None  # type: ignore[assignment]
+    Toolbelt = None  # type: ignore[assignment]
+    core_web_search = None  # type: ignore[assignment]
 
-        class ToolUsage:  # type: ignore[no-redef]
-            """Minimal fallback usage tracker if tools.ToolUsage is unavailable."""
+    class ToolUsage:  # type: ignore[no-redef]
+        """Minimal fallback usage tracker if tools.ToolUsage is unavailable."""
 
-            def __init__(self) -> None:
-                self.web_calls: int = 0
-                self.browser_actions: int = 0
-                self.code_execs: int = 0
-                self.sql_queries: int = 0
-                self.data_loads: int = 0
-                self.approx_tokens: int = 0
+        def __init__(self) -> None:
+            self.web_calls: int = 0
+            self.browser_actions: int = 0
+            self.code_execs: int = 0
+            self.sql_queries: int = 0
+            self.data_loads: int = 0
+            self.approx_tokens: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -1119,6 +1092,98 @@ class TGRMLoop:
     # Main cycle
     # ------------------------------------------------------------------
     def run_cycle(
+        self,
+        goal: str,
+        cycle_index: int,
+        role: str = "agent",
+        source_controls: Optional[Dict[str, bool]] = None,
+        pdf_bytes: Optional[bytes] = None,
+        biomarker_snapshot: Optional[Dict[str, Any]] = None,
+        domain: Optional[str] = None,
+        msil_mode: str = "v1",
+        msil_track_mode: str = "single",
+        rye_mode: str = "v3",
+        stage: str = "idea",
+        hallmark: Optional[str] = None,
+        subgoal: Optional[str] = None,
+        replay_buffer: Optional[Any] = None,
+        curriculum_state: Optional[Dict[str, Any]] = None,
+        run_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        swarm_profile: Optional[Dict[str, Any]] = None,
+        deadline_ts: Optional[float] = None,
+        experiment_mode: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Run a single TGRM cycle with crash protection.
+
+        The engine worker marks a job as *error* if an exception escapes the agent loop.
+        In large swarms, rare edge cases (tool errors, serialization issues, unexpected
+        payloads) can bubble up. This wrapper keeps the worker alive by returning a
+        structured error payload instead of raising.
+        """
+        _kwargs = {
+            "goal": goal,
+            "cycle_index": cycle_index,
+            "role": role,
+            "source_controls": source_controls,
+            "pdf_bytes": pdf_bytes,
+            "biomarker_snapshot": biomarker_snapshot,
+            "domain": domain,
+            "msil_mode": msil_mode,
+            "msil_track_mode": msil_track_mode,
+            "rye_mode": rye_mode,
+            "stage": stage,
+            "hallmark": hallmark,
+            "subgoal": subgoal,
+            "replay_buffer": replay_buffer,
+            "curriculum_state": curriculum_state,
+            "run_id": run_id,
+            "agent_id": agent_id,
+            "swarm_profile": swarm_profile,
+            "deadline_ts": deadline_ts,
+            "experiment_mode": experiment_mode,
+        }
+        try:
+            return self._run_cycle_impl(**_kwargs)
+        except Exception as e:
+            err = f"{type(e).__name__}: {e}"
+            tb = traceback.format_exc()
+
+            try:
+                logger.exception("TGRMLoop.run_cycle crashed: %s", err)
+            except Exception:
+                pass
+
+            safe_domain = domain or getattr(self, "config", {}).get("domain") or "general"
+            summary = {
+                "cycle_index": cycle_index,
+                "role": role,
+                "domain": safe_domain,
+                "goal": goal,
+                "stage": stage,
+                "hallmark": hallmark,
+                "subgoal": subgoal,
+                "RYE": 0.0,
+                "delta_R": 0.0,
+                "Energy": 0.0,
+                "repairs": [],
+                "notes": [f"[ERROR] {err}"],
+                "hypotheses": [],
+                "errors": 1,
+            }
+            log = {
+                "error": err,
+                "traceback": tb,
+                "tool_usage": {},
+            }
+            return {
+                "summary": summary,
+                "log": log,
+                "tool_stats": {"errors": 1},
+                "citations": [],
+            }
+
+    def _run_cycle_impl(
         self,
         goal: str,
         cycle_index: int,
@@ -2641,7 +2706,7 @@ class TGRMLoop:
 
         if source_controls.get("pubmed", False) and not self._deadline_hit(deadline_ts):
             try:
-                pubmed_results = self.pubmed_tool.search(goal, max_results=5)
+                pubmed_results = self.pubmed_tool.search(self._goal_to_search_query(goal, domain=domain), max_results=5)
             except Exception:
                 pubmed_results = []
                 note_lines.append("PubMed search failed for initial research; continuing without PubMed results.")
@@ -2668,7 +2733,7 @@ class TGRMLoop:
 
         if source_controls.get("semantic", False) and not self._deadline_hit(deadline_ts):
             try:
-                sem_results = self.semantic_tool.search(goal, max_results=5)
+                sem_results = self.semantic_tool.search(self._goal_to_search_query(goal, domain=domain), max_results=5)
             except Exception:
                 sem_results = []
                 note_lines.append(
