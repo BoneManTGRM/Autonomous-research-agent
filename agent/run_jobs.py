@@ -850,11 +850,22 @@ def _inject_run_id_into_config(run_id: str, config: Dict[str, Any]) -> Dict[str,
     # Always force run_id at the top level and common nested sections.
     try:
         cfg["run_id"] = run_id
+        # Ensure a deterministic per-run directory exists and is visible to all components.
+        # This prevents runs from merging when run_id is missing and gives the report builder
+        # a stable place to find the JSONL event stream (runs_root/<run_id>/events.jsonl).
+        try:
+            cfg["run_dir"] = str(BASE_DIR / str(run_id))
+        except Exception:
+            pass
 
         for key in ("engine", "runtime", "run", "agent", "controller"):
             sub = cfg.get(key)
             if isinstance(sub, dict):
                 sub["run_id"] = run_id
+                try:
+                    sub["run_dir"] = cfg.get("run_dir")
+                except Exception:
+                    pass
                 cfg[key] = sub
     except Exception:
         # Never crash job creation because of config munging
@@ -1540,6 +1551,23 @@ def create_job(
     if isinstance(meta, dict):
         meta_with_id.update(meta)
     meta_with_id.setdefault("run_id", run_id)
+    # Ensure each run has its own directory (runs_root/<run_id>).
+    # This is the canonical location for per-run artifacts and events.jsonl.
+    try:
+        run_dir_path = BASE_DIR / str(run_id)
+        run_dir_path.mkdir(parents=True, exist_ok=True)
+        # Optional conventional subfolders
+        (run_dir_path / "artifacts").mkdir(parents=True, exist_ok=True)
+        (run_dir_path / "logs").mkdir(parents=True, exist_ok=True)
+        meta_with_id.setdefault("run_dir", str(run_dir_path))
+        try:
+            cfg.setdefault("run_dir", str(run_dir_path))
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
     if requested_run_id and requested_run_id != run_id:
         meta_with_id.setdefault("requested_run_id", requested_run_id)
 
