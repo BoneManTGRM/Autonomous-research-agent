@@ -1,36 +1,21 @@
 """
 run_state_manager.py
-=====================
+====================
 
-This module defines a simple run state manager for the Autonomous Research
-Agent (ARA).  It encapsulates a run's metadata (such as the number of
-cycles, the current phase index and name, and timestamps) and provides
-helpers for reading and writing this state to JSON on disk.  Other
-components (like the queue worker and Streamlit front‑end) are expected to
-use this module to coordinate progress reporting and persistence.
+A small, explicit "run state" model used to coordinate a single engine run across:
+  - the queue/worker (producer of progress + state)
+  - the Streamlit UI (consumer / viewer)
+  - report builders (consumers)
 
-The design deliberately keeps the model free from business logic; it
-simply holds data and offers convenience methods.  Should you need to
-extend the state with additional fields (for example, to track
-equilibrium statistics or RYE metrics), you can add new attributes to
-``RunState`` and they will automatically be included in the serialized
-output.
+The key fixes in this version:
+  1) A run always has a non-empty run_id (UUID4 by default).
+  2) Each run has an explicit run_dir (runs_root/<run_id>) that can be created on demand.
+  3) The state exposes run_id, run_dir, and cycle index consistently (phase_index/current/current_cycle/cycle_index).
 
-Usage example::
-
-    from pathlib import Path
-    from run_state_manager import RunState
-
-    run_state = RunState.new(run_id="123", total_cycles=10, goal="ARA test")
-    run_state.update_phase(index=0, name="setup")
-    run_state.save(Path("runs/logs/run_state.json"))
-
-    # later on
-    loaded = RunState.load(Path("runs/logs/run_state.json"))
-    print(loaded.current_cycle, loaded.phase_name)
-
-The module does not depend on any of the agent internals, so it can be
-reused in both the streamlit UI and the background worker.
+Notes
+-----
+* This module stays "dumb": it does not implement business logic, it only stores and persists state.
+* Unknown keys in JSON are ignored on load to allow forwards/backwards compatibility.
 """
 
 from __future__ import annotations
@@ -38,71 +23,93 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from dataclasses import dataclass, asdict, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 
 def _utc_iso() -> str:
-    """Return the current UTC time in ISO 8601 format without timezone info."""
-    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds")
+    """Return current UTC timestamp in ISO 8601 (seconds precision)."""
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
+
+
+def resolve_runs_root() -> Path:
+    """Resolve the base runs directory.
+
+    Preference order:
+      1) env ARA_RUNS_DIR / ARA_RUNS_ROOT / RUNS_DIR
+      2) run_jobs.BASE_DIR if available
+      3) repo-local ./runs (next to this file's parent package)
+    """
+    for k in ("ARA_RUNS_DIR", "ARA_RUNS_ROOT", "RUNS_DIR"):
+        v = os.getenv(k)
+        if v:
+            try:
+                return Path(v).expanduser().resolve()
+            except Exception:
+                pass
+
+    try:
+        # Optional: align with run_jobs.py if present
+        from .run_jobs import BASE_DIR as _BASE_DIR  # type: ignore
+        if isinstance(_BASE_DIR, Path):
+            return _BASE_DIR
+        if isinstance(_BASE_DIR, str) and _BASE_DIR.strip():
+            return Path(_BASE_DIR).expanduser().resolve()
+    except Exception:
+        pass
+
+    # Fallback: <repo>/runs
+    try:
+        here = Path(__file__).resolve()
+        # common layout: repo_root/agent/run_state_manager.py -> repo_root/runs
+        return (here.parent.parent / "runs").resolve()
+    except Exception:
+        return Path("./runs").resolve()
+
+
+def resolve_run_dir(run_id: str, *, runs_root: Optional[Path] = None) -> Path:
+    root = runs_root if isinstance(runs_root, Path) else resolve_runs_root()
+    return root / str(run_id)
+
+
+def default_state_path(run_id: str, *, runs_root: Optional[Path] = None) -> Path:
+    """Default location for per-run state."""
+    return resolve_run_dir(run_id, runs_root=runs_root) / "run_state.json"
 
 
 @dataclass
 class RunState:
-    """Representation of a run's lifecycle and progress.
+    """Lightweight, JSON-serialisable run state."""
 
-    Attributes
-    ----------
-    run_id:
-        A unique identifier for this run.  If not provided at construction
-        time a new UUID4 string will be generated.
-    status:
-        A human‑readable status string (e.g. "queued", "running", "finished").
-    phase_total:
-        The total number of phases expected for this run.  This should
-        correspond to the number of cycles passed in when the job is
-        created; if you support multi‑phase workflows you can adjust
-        accordingly.
-    phase_index:
-        Zero‑based index of the current phase.  ``None`` until the first
-        phase starts.
-    phase_name:
-        Optional human‑readable name for the current phase.  This is
-        useful when displaying progress in the UI.
-    current:
-        Alias for ``phase_index``; maintained for backwards compatibility
-        with existing UIs that expect ``current`` and ``total`` keys.
-    total:
-        Alias for ``phase_total``.
-    current_cycle:
-        The current cycle number.  In simple finite mode this is
-        identical to ``phase_index``.
-    total_cycles:
-        Total number of cycles requested for this run.  Usually equal to
-        ``phase_total``.
-    notes:
-        Optional notes or metadata about the run.
-    goal:
-        Optional string describing the research goal for display.
-    created_at:
-        Timestamp of when the state was first created.
-    updated_at:
-        Timestamp of when the state was last persisted.
-    """
-
+    # Identity + storage
     run_id: str
-    status: str = "queued"
+    run_dir: Optional[str] = None  # stored as a string to keep JSON serialisable
+
+    # Human metadata
+    status: str = "queued"  # queued|running|finished|failed|...
+    goal: str = ""
+    domain: str = "general"
+    mode: str = ""  # single|swarm|...
+
+    # Progress tracking
     phase_total: int = 0
     phase_index: Optional[int] = None
     phase_name: Optional[str] = None
+
+    # Back-compat aliases used by older UI code
     current: Optional[int] = None
     total: int = 0
     current_cycle: Optional[int] = None
     total_cycles: int = 0
+
+    # Preferred explicit alias (matches requested wording)
+    cycle_index: Optional[int] = None
+
     notes: str = ""
-    goal: str = ""
+
+    # Timestamps
     created_at: str = field(default_factory=_utc_iso)
     updated_at: str = field(default_factory=_utc_iso)
 
@@ -113,129 +120,146 @@ class RunState:
     def new(
         cls,
         run_id: Optional[str] = None,
+        *,
         total_cycles: int = 0,
         goal: str = "",
+        domain: str = "general",
+        mode: str = "",
+        runs_root: Optional[Path] = None,
+        ensure_dirs: bool = True,
     ) -> "RunState":
-        """Create a new RunState with reasonable defaults.
-
-        Parameters
-        ----------
-        run_id:
-            If provided, use this value; otherwise a new UUID4 string will be
-            generated.  Use deterministic IDs if you need reproducibility.
-        total_cycles:
-            The number of cycles/phases requested for this run.  This
-            populates both ``phase_total`` and ``total_cycles``.
-        goal:
-            Description of the run's objective.
-        """
-        rid = run_id or str(uuid.uuid4())
-        return cls(
+        rid = (str(run_id).strip() if run_id is not None else "") or str(uuid.uuid4())
+        run_dir = str(resolve_run_dir(rid, runs_root=runs_root))
+        st = cls(
             run_id=rid,
+            run_dir=run_dir,
             status="queued",
-            phase_total=total_cycles,
-            total=total_cycles,
-            total_cycles=total_cycles,
-            goal=goal,
+            goal=goal or "",
+            domain=domain or "general",
+            mode=mode or "",
+            phase_total=int(total_cycles) if total_cycles else 0,
+            phase_index=None,
+            phase_name=None,
+            current=None,
+            total=int(total_cycles) if total_cycles else 0,
+            current_cycle=None,
+            total_cycles=int(total_cycles) if total_cycles else 0,
+            cycle_index=None,
         )
+        if ensure_dirs:
+            try:
+                Path(run_dir).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+        return st
 
-    # ------------------------------------------------------------------
-    # Serialization helpers
-    # ------------------------------------------------------------------
-    
     @classmethod
     def new_running(
         cls,
         run_id: Optional[str] = None,
+        *,
         total_cycles: int = 0,
         goal: str = "",
-        domain: str = "",
+        domain: str = "general",
         mode: str = "",
+        runs_root: Optional[Path] = None,
+        ensure_dirs: bool = True,
     ) -> "RunState":
-        """Create a run state already reset to 0 and marked running.
-
-        This is useful when a worker claims a new job and needs the UI counters
-        to restart from 0 for the new run.
-        """
-        st = cls.new(run_id=run_id, total_cycles=total_cycles, goal=goal)
+        st = cls.new(
+            run_id=run_id,
+            total_cycles=total_cycles,
+            goal=goal,
+            domain=domain,
+            mode=mode,
+            runs_root=runs_root,
+            ensure_dirs=ensure_dirs,
+        )
         st.status = "running"
-        st.domain = domain
-        st.mode = mode
-        st.phase_index = 0
-        st.current = 0
-        st.current_cycle = 0
-        st.total = int(total_cycles)
-        st.total_cycles = int(total_cycles)
+        st.update_phase(0, name="cycle 0")
         return st
 
+    # ------------------------------------------------------------------
+    # IO helpers
+    # ------------------------------------------------------------------
     @classmethod
     def load(cls, path: Path) -> "RunState":
-        """Load a RunState from a JSON file.
-
-        Raises ``FileNotFoundError`` if the file does not exist or
-        ``json.JSONDecodeError`` on malformed JSON.  Unknown keys in the
-        JSON will be ignored.
-        """
+        """Load a RunState from a JSON file, ignoring unknown keys."""
         with path.open("r", encoding="utf-8") as f:
             data: Dict[str, Any] = json.load(f)
-        # Filter keys to those defined on the dataclass
-        field_names = {f.name for f in cls.__dataclass_fields__.values()}
-        kwargs = {k: v for k, v in data.items() if k in field_names}
-        return cls(**kwargs)  # type: ignore[arg-type]
+        field_names = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
+        kwargs = {k: v for k, v in (data or {}).items() if k in field_names}
+        st = cls(**kwargs)  # type: ignore[arg-type]
+        # Ensure run_id non-empty
+        try:
+            if not str(st.run_id).strip():
+                st.run_id = str(uuid.uuid4())
+        except Exception:
+            st.run_id = str(uuid.uuid4())
+        # Ensure run_dir present
+        if not (isinstance(st.run_dir, str) and st.run_dir.strip()):
+            st.run_dir = str(resolve_run_dir(st.run_id))
+        return st
 
-    def save(self, path: Path) -> None:
-        """Persist the current state to a JSON file.
+    def ensure_run_dir(self, *, runs_root: Optional[Path] = None) -> Path:
+        """Ensure this run has a directory and return it."""
+        rid = str(self.run_id).strip() or str(uuid.uuid4())
+        self.run_id = rid
+        rd = self.run_dir if isinstance(self.run_dir, str) and self.run_dir.strip() else str(resolve_run_dir(rid, runs_root=runs_root))
+        self.run_dir = rd
+        p = Path(rd)
+        try:
+            p.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        return p
 
-        The ``updated_at`` timestamp will be refreshed before writing.  The
-        directory will be created if it does not already exist.
-        """
+    def save(self, path: Optional[Path] = None, *, runs_root: Optional[Path] = None) -> Path:
+        """Persist state to disk (atomic write). Returns the written path."""
         self.updated_at = _utc_iso()
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if path is None:
+            # Default to per-run state file
+            run_dir = self.ensure_run_dir(runs_root=runs_root)
+            path = run_dir / "run_state.json"
 
-        # Atomic write to avoid corrupt/partial JSON on process interruption
         tmp_path = path.with_suffix(path.suffix + ".tmp")
+        tmp_path.parent.mkdir(parents=True, exist_ok=True)
         with tmp_path.open("w", encoding="utf-8") as f:
             json.dump(self.to_dict(), f, ensure_ascii=False, indent=2)
         os.replace(tmp_path, path)
+        return path
 
     def to_dict(self) -> Dict[str, Any]:
-        """Return a JSON‑serialisable dictionary representation of this state."""
+        """Return a JSON-serialisable dict."""
         return asdict(self)
 
     # ------------------------------------------------------------------
     # Progress updates
     # ------------------------------------------------------------------
-    def update_phase(self, index: int, name: Optional[str] = None) -> None:
-        """Update the current phase index and optionally its name.
+    def update_phase(self, index: int, *, name: Optional[str] = None) -> None:
+        """Update phase/cycle counters consistently."""
+        try:
+            idx = int(index)
+        except Exception:
+            idx = 0
 
-        The caller is responsible for ensuring that ``index`` does not
-        exceed ``phase_total``.  The ``current`` and ``current_cycle``
-        aliases will also be updated for compatibility with older UIs.
-
-        Parameters
-        ----------
-        index:
-            Zero‑based index of the phase that just started.
-        name:
-            Optional human‑readable name for the phase (e.g. "run").
-        """
-        self.phase_index = index
-        self.current = index
-        self.current_cycle = index
+        self.phase_index = idx
         if name is not None:
-            self.phase_name = name
-        # Do not update ``total``; it should remain the original cycle count
-        # ``updated_at`` is refreshed on save
+            self.phase_name = str(name)
+
+        # Back-compat aliases
+        self.current = idx
+        self.current_cycle = idx
+
+        # Preferred explicit alias
+        self.cycle_index = idx
 
     def mark_finished(self) -> None:
-        """Mark this run as finished.
-
-        This sets the status to ``finished`` and moves the phase index to the
-        last phase (phase_total - 1) if it wasn't already there.
-        """
         self.status = "finished"
-        if self.phase_total > 0 and (self.phase_index is None or self.phase_index < self.phase_total - 1):
-            self.update_phase(self.phase_total - 1, name=self.phase_name)
+        # Move to the last known phase if we have a total
+        if self.phase_total > 0:
+            last = max(0, int(self.phase_total) - 1)
+            if self.phase_index is None or self.phase_index < last:
+                self.update_phase(last, name=self.phase_name)
 
 
-__all__ = ["RunState"]
+__all__ = ["RunState", "resolve_runs_root", "resolve_run_dir", "default_state_path"]
