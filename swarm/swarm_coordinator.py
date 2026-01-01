@@ -19,7 +19,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Callable, Dict, List, Optional, Tuple
+import hashlib
+import math
+import re
+from typing import Any, Callable, Iterable, Dict, List, Optional, Tuple
 
 from agent.core_agent import CoreAgent
 from agent.rye_metrics import (
@@ -62,8 +65,37 @@ class SwarmAgentConfig:
 @dataclass
 class SwarmRunConfig:
     """Top level configuration for a swarm run."""
+
+    # Required
     goal: str
     total_cycles: int
+
+    # Identity (propagated to per-cycle logs/events when available)
+    run_id: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Funnel controls (pressure-driven discovery)
+    # ------------------------------------------------------------------
+    # None => auto-enable for multi-cycle runs
+    funnel_mode: Optional[bool] = None
+    # Cull stage target: eliminate this fraction of candidates
+    funnel_kill_quota: float = 0.80
+    # Minimum distinct domain lenses to activate in MAP/CLUSTER
+    funnel_min_domains: int = 3
+    # Novelty floor used for directives (0-1). Higher => stricter novelty demands.
+    funnel_novelty_floor: float = 0.35
+    # Early stop guardrail when the run drifts
+    funnel_early_stop: bool = True
+    funnel_stability_floor: float = 0.30
+    funnel_negative_slope_patience: int = 2
+    # Reduce cost/noise: cap agents during COMMIT (0 => no cap)
+    funnel_commit_max_agents: int = 8
+    # Optional explicit domain lenses (overrides defaults)
+    funnel_domain_lenses: Optional[List[str]] = None
+
+    # ------------------------------------------------------------------
+    # Scheduling + curriculum controls
+    # ------------------------------------------------------------------
     # ``max_parallel`` controls how many agents run concurrently.  A value of
     # 0 or a negative number means "unlimited": all agents run in each
     # scheduler tick.  The engine will then derive an appropriate parallelism
@@ -168,6 +200,7 @@ class SwarmCoordinator:
     # ------------------------------------------------------------------
     # Main swarm loop
     # ------------------------------------------------------------------
+
     def run_swarm(
         self,
         run_config: SwarmRunConfig,
@@ -185,17 +218,24 @@ class SwarmCoordinator:
               "cycle_logs": [...],
             }
         """
-        goal = run_config.goal
-        # Interpret run_config.total_cycles as the number of rounds each agent
-        # should complete rather than the number of global scheduler ticks.
-        # To produce the expected number of microâcycles (rounds Ã agents),
-        # compute how many batches are needed per round based on max_parallel.
-        total_rounds = max(1, int(run_config.total_cycles))
+
+        goal = str(run_config.goal)
+        total_cycles = max(1, int(run_config.total_cycles))
+
+        # Auto-enable the funnel for multi-cycle runs unless explicitly disabled.
+        funnel_mode = self._auto_funnel_enabled(run_config, total_cycles)
+
         agent_count = len(self.agent_configs) if self.agent_configs else 0
-        # Determine the parallel cap.  A value of <= 0 means "no cap"
-        # (i.e. run all agents concurrently).  Otherwise use the provided
-        # positive integer.  Always clamp to at least 1 to avoid a divide by
-        # zero when computing group counts.
+        if agent_count <= 0:
+            return {
+                "goal": goal,
+                "swarm_config": {"total_cycles": total_cycles, "max_parallel": 0},
+                "agent_summaries": {},
+                "swarm_metrics": {},
+                "cycle_logs": [],
+            }
+
+        # Determine the parallel cap.  A value of <= 0 means "no cap" (run all agents).
         try:
             requested_parallel = int(run_config.max_parallel)
         except Exception:
@@ -203,37 +243,63 @@ class SwarmCoordinator:
         if requested_parallel and requested_parallel > 0:
             max_parallel = requested_parallel
         else:
-            # Unlimited parallelism: run all agents per tick
-            max_parallel = agent_count if agent_count > 0 else 1
-        # Number of groups required to run all agents once given the parallel cap.
-        groups_per_round = 1
-        if agent_count > 0 and max_parallel > 0:
-            # Ceiling division
-            groups_per_round = (agent_count + max_parallel - 1) // max_parallel
-        # Effective number of scheduler ticks to run the requested rounds across all agents.
-        total_cycles = total_rounds * groups_per_round
-        idea_fraction = min(1.0, max(0.0, run_config.idea_fraction))
+            max_parallel = agent_count
+        max_parallel = max(1, min(max_parallel, agent_count))
 
+        hallmark_targets = self._resolve_hallmark_targets(run_config.hallmark_targets)
+        curriculum_profile = run_config.curriculum_profile
+        idea_fraction = float(run_config.idea_fraction or 0.6)
+
+        # Run-level logs/metrics
         cycle_logs: List[Dict[str, Any]] = []
         swarm_level_rye: List[float] = []
         swarm_level_delta_r: List[float] = []
         swarm_level_energy: List[float] = []
 
-        # Curriculum and hallmark state
-        hallmark_targets = self._resolve_hallmark_targets(run_config.hallmark_targets)
-        curriculum_profile = run_config.curriculum_profile
+        # Funnel guardrails
+        cycle_rye_means: List[float] = []
+        down_streak = 0
+        early_stop: Optional[Dict[str, Any]] = None
+
+        # Context helpers used in directives
+        is_longevity = self._is_longevity_context(goal, hallmark_targets)
+        domain_lenses = self._resolve_domain_lenses(run_config, is_longevity)
+
+        # Funnel state is a light-weight baton passed between stages. It is populated
+        # opportunistically from structured agent outputs when available.
+        funnel_state: Dict[str, Any] = {
+            "candidates": [],
+            "clusters": [],
+            "survivors": [],
+            "stress_survivors": [],
+            "filtered": [],
+        }
+
 
         for global_cycle in range(total_cycles):
-            # (1) Decide which agents run on this step
-            eligible = self._eligible_agents(global_cycle, run_config)
-            scheduled_agents = self._pick_agents_for_cycle(eligible, max_parallel)
+            # Determine funnel stage and the legacy idea/verify stage tag.
+            funnel_stage: Optional[str] = None
+            if funnel_mode:
+                funnel_stage = self._funnel_stage_for_cycle(global_cycle, total_cycles)
+                stage = "idea" if funnel_stage in ("map", "cluster") else "verify"
+            else:
+                stage = self._stage_for_cycle(global_cycle, total_cycles, run_config)
 
-            if not scheduled_agents:
-                # No agent eligible. Stop early.
-                break
+            # (1) Select which agents run this global cycle
+            eligible_agents = self._eligible_agents(global_cycle, run_config)
+            if not eligible_agents:
+                continue
 
-            # Estimate idea vs verify stage for this cycle
-            stage = self._stage_for_cycle(global_cycle, total_cycles, run_config)
+            max_parallel_this_cycle = max_parallel
+            if funnel_mode and funnel_stage == "commit":
+                try:
+                    cap = int(run_config.funnel_commit_max_agents or 0)
+                except Exception:
+                    cap = 0
+                if cap and cap > 0:
+                    max_parallel_this_cycle = max(1, min(max_parallel_this_cycle, cap, len(eligible_agents)))
+
+            scheduled_agents = self._pick_agents_for_cycle(eligible_agents, max_parallel_this_cycle)
 
             # Ask curriculum (if present) what to focus on at this stage
             curriculum_state = self._query_curriculum(
@@ -246,11 +312,28 @@ class SwarmCoordinator:
             )
 
             # Optional hallmark selection
-            hallmark_name, subgoal = self._pick_hallmark_and_subgoal(
+            hallmark_name, hallmark_subgoal = self._pick_hallmark_and_subgoal(
                 hallmark_targets,
                 global_cycle,
                 curriculum_state,
             )
+
+            funnel_directive: Optional[str] = None
+            if funnel_mode and funnel_stage is not None:
+                funnel_directive = self._funnel_directive_for_stage(
+                    funnel_stage,
+                    goal=goal,
+                    is_longevity=is_longevity,
+                    run_config=run_config,
+                    domain_lenses=domain_lenses,
+                    state=funnel_state,
+                )
+
+            # Merge hallmark subgoal with funnel directive (without changing the base goal).
+            subgoal = self._merge_subgoals(hallmark_subgoal, funnel_directive)
+
+            # Per-cycle aggregates for guardrails
+            cycle_rye_vals: List[float] = []
 
             # (2) Run each scheduled agent for one cycle
             for agent_id in scheduled_agents:
@@ -258,15 +341,23 @@ class SwarmCoordinator:
                 agent = self._ensure_agent_instance(agent_id, cfg)
 
                 cycle_index = self.agent_stats[agent_id].cycles
-                domain = cfg.domain or "general"
+                base_domain = cfg.domain or "general"
                 source_controls = cfg.source_controls
 
-                # Note: CoreAgent is already wired to use TGRM and internal
-                # curriculum. We pass down domain and role. Stage and hallmark
-                # are added via extra_config if CoreAgent supports them.
+                role_for_call = cfg.role or "agent"
+                domain_for_call = base_domain
+
+                if funnel_mode and funnel_stage is not None:
+                    role_for_call = self._role_for_funnel_stage(funnel_stage, role_for_call)
+                    if funnel_stage in ("map", "cluster") and domain_lenses:
+                        lens_idx = self._stable_index(f"{agent_id}:{global_cycle}:{funnel_stage}", len(domain_lenses))
+                        lens = domain_lenses[lens_idx]
+                        domain_for_call = self._compose_domain(base_domain, lens)
+
                 extra_kwargs: Dict[str, Any] = {}
 
-                if run_config.two_stage_mode:
+                # Always pass stage when funnel is active; otherwise only when two-stage mode is enabled.
+                if funnel_mode or run_config.two_stage_mode:
                     extra_kwargs["stage"] = stage
                 if hallmark_name is not None:
                     extra_kwargs["hallmark_target"] = hallmark_name
@@ -275,28 +366,52 @@ class SwarmCoordinator:
                 if curriculum_state is not None:
                     extra_kwargs["curriculum_state"] = curriculum_state
 
-                try:
-                    result = agent.run_cycle(  # type: ignore[arg-type]
-                        goal=goal,
-                        cycle_index=cycle_index,
-                        role=cfg.role,
-                        source_controls=source_controls,
-                        domain=domain,
-                        **extra_kwargs,
-                    )
-                except TypeError:
-                    # Backward compatibility if CoreAgent does not accept extras
-                    result = agent.run_cycle(  # type: ignore[arg-type]
-                        goal=goal,
-                        cycle_index=cycle_index,
-                        role=cfg.role,
-                        source_controls=source_controls,
-                        domain=domain,
-                    )
+                # Propagate run_id when available (used by event/report queries).
+                if run_config.run_id is not None:
+                    extra_kwargs["run_id"] = str(run_config.run_id)
 
-                summary = result.get("summary", {})
-                log_entry = result.get("log", {})
-                stats = summary.get("tool_usage", {}) or {}
+                # Call CoreAgent with best-effort compatibility: if it doesn't accept newer
+                # kwargs, drop them incrementally (preserving funnel-critical fields when possible).
+                base_call_kwargs = dict(
+                    goal=goal,
+                    cycle_index=cycle_index,
+                    role=role_for_call,
+                    source_controls=source_controls,
+                    domain=domain_for_call,
+                )
+
+                try:
+                    result = agent.run_cycle(**base_call_kwargs, **extra_kwargs)
+                except TypeError:
+                    retry_extras = dict(extra_kwargs)
+                    for drop_key in ("run_id", "curriculum_state", "hallmark_target", "subgoal", "stage"):
+                        if drop_key in retry_extras:
+                            retry_extras.pop(drop_key, None)
+                            try:
+                                result = agent.run_cycle(**base_call_kwargs, **retry_extras)
+                                break
+                            except TypeError:
+                                continue
+                    else:
+                        result = agent.run_cycle(**base_call_kwargs)
+
+                summary = result.get("summary", {}) or {}
+                log_entry = result.get("log", {}) or {}
+
+                # Feed structured outputs (when present) into a baton that the next stage can use.
+                if funnel_mode and funnel_stage is not None:
+                    try:
+                        self._update_funnel_state(
+                            funnel_state=funnel_state,
+                            stage=funnel_stage,
+                            summary=summary,
+                            log_entry=log_entry,
+                            is_longevity=is_longevity,
+                            novelty_floor=float(run_config.funnel_novelty_floor or 0.35),
+                        )
+                    except Exception:
+                        pass
+
 
                 # Extract metrics
                 delta_r = float(summary.get("delta_R", 0.0) or 0.0)
@@ -306,34 +421,50 @@ class SwarmCoordinator:
                 self.agent_stats[agent_id].record_cycle(delta_r, energy_e, rye_value)
 
                 if rye_value is not None:
-                    swarm_level_rye.append(float(rye_value))
+                    try:
+                        rye_f = float(rye_value)
+                        swarm_level_rye.append(rye_f)
+                        cycle_rye_vals.append(rye_f)
+                    except Exception:
+                        pass
                 swarm_level_delta_r.append(delta_r)
                 swarm_level_energy.append(energy_e)
 
                 # Tag log entry with swarm metadata
                 log_entry = dict(log_entry)
-                log_entry["swarm"] = {
-                    "agent_id": agent_id,
-                    "role": cfg.role,
-                    "stage": stage,
-                    "hallmark": hallmark_name,
-                    "subgoal": subgoal,
-                    "curriculum_profile": curriculum_profile,
-                    "global_cycle_index": global_cycle,
-                }
-                log_entry["tool_usage"] = stats
+                if run_config.run_id is not None:
+                    try:
+                        log_entry.setdefault("run_id", str(run_config.run_id))
+                    except Exception:
+                        pass
+                try:
+                    log_entry.setdefault("cycle", global_cycle)
+                except Exception:
+                    pass
+                log_entry.setdefault("global_cycle", global_cycle)
+                log_entry.setdefault("funnel_stage", funnel_stage)
+                log_entry.setdefault("stage", stage)
+                log_entry.setdefault("role", role_for_call)
+                log_entry.setdefault("domain", domain_for_call)
+                log_entry.setdefault("base_role", cfg.role)
+                log_entry.setdefault("base_domain", base_domain)
+
                 cycle_logs.append(log_entry)
 
-                # Feed replay buffer if available
-                self._log_to_replay(
-                    agent_id=agent_id,
-                    cfg=cfg,
-                    summary=summary,
-                    log_entry=log_entry,
-                    stage=stage,
-                    hallmark=hallmark_name,
-                    subgoal=subgoal,
-                )
+                # Replay buffer logging
+                if run_config.replay_enabled:
+                    try:
+                        self._log_to_replay(
+                            agent_id=agent_id,
+                            cfg=cfg,
+                            summary=summary,
+                            log_entry=log_entry,
+                            stage=stage,
+                            hallmark=hallmark_name,
+                            subgoal=subgoal,
+                        )
+                    except Exception:
+                        pass
 
                 # Stream short_view for dashboards
                 if stream_callback is not None:
@@ -341,15 +472,76 @@ class SwarmCoordinator:
                     payload = {
                         "timestamp": datetime.utcnow().isoformat() + "Z",
                         "agent_id": agent_id,
-                        "role": cfg.role,
+                        "role": role_for_call,
+                        "base_role": cfg.role,
                         "goal": goal,
                         "stage": stage,
+                        "funnel_stage": funnel_stage,
                         "hallmark": hallmark_name,
                         "subgoal": subgoal,
                         "short_view": short_view,
                         "meta_signals": summary.get("meta_signals") or {},
                     }
                     stream_callback(payload)
+
+            # -----------------------------
+            # Funnel health guardrails
+            # -----------------------------
+            if funnel_mode and run_config.funnel_early_stop and cycle_rye_vals:
+                mean_rye = sum(cycle_rye_vals) / float(len(cycle_rye_vals))
+                cycle_rye_means.append(mean_rye)
+
+                if len(cycle_rye_means) >= 2 and cycle_rye_means[-1] < cycle_rye_means[-2]:
+                    down_streak += 1
+                else:
+                    down_streak = 0
+
+                stab = self._simple_stability_index(cycle_rye_means, window=5)
+                patience = max(1, int(run_config.funnel_negative_slope_patience or 2))
+                stability_floor = float(run_config.funnel_stability_floor or 0.30)
+
+                if down_streak >= patience:
+                    early_stop = {
+                        "reason": "rye_declining_consecutively",
+                        "global_cycle": global_cycle,
+                        "down_streak": down_streak,
+                        "cycle_rye_means": list(cycle_rye_means),
+                        "stability_index": stab,
+                    }
+                    break
+
+                if len(cycle_rye_means) >= 3 and stab is not None and stab < stability_floor:
+                    early_stop = {
+                        "reason": "low_stability_after_cycle_3",
+                        "global_cycle": global_cycle,
+                        "cycle_rye_means": list(cycle_rye_means),
+                        "stability_index": stab,
+                        "stability_floor": stability_floor,
+                    }
+                    break
+
+        # If a funnel guardrail triggered, append a lightweight system log entry so
+        # downstream code (reports/UI) can surface the stop reason even if the caller
+        # only returns cycle logs.
+        if early_stop is not None:
+            _cycle = early_stop.get("global_cycle")
+            try:
+                _cycle_i = int(_cycle) if _cycle is not None else None
+            except Exception:
+                _cycle_i = None
+            cycle_logs.append(
+                {
+                    "run_id": str(run_config.run_id) if run_config.run_id is not None else None,
+                    "cycle": _cycle_i,
+                    "global_cycle": _cycle_i,
+                    "stage": "verify",
+                    "funnel_stage": "guardrail",
+                    "role": "system",
+                    "domain": "system",
+                    "text": f"EARLY STOP: {early_stop.get('reason')} (cycle={_cycle_i}, stability={early_stop.get('stability_index')})",
+                    "guardrail": early_stop,
+                }
+            )
 
         # Build swarm level metrics and summary
         swarm_metrics = self._build_swarm_metrics(
@@ -358,6 +550,20 @@ class SwarmCoordinator:
             swarm_level_delta_r=swarm_level_delta_r,
             swarm_level_energy=swarm_level_energy,
         )
+
+        if funnel_mode:
+            swarm_metrics.setdefault("funnel", {})
+            swarm_metrics["funnel"].update(
+                {
+                    "enabled": True,
+                    "is_longevity": is_longevity,
+                    "domain_lenses": list(domain_lenses),
+                    "cycle_rye_means": list(cycle_rye_means),
+                }
+            )
+            if early_stop is not None:
+                swarm_metrics["funnel"]["early_stop"] = early_stop
+
         agent_summaries = {aid: st.to_dict() for aid, st in self.agent_stats.items()}
 
         return {
@@ -369,15 +575,14 @@ class SwarmCoordinator:
                 "curriculum_profile": curriculum_profile,
                 "two_stage_mode": run_config.two_stage_mode,
                 "idea_fraction": idea_fraction,
+                "funnel_mode": funnel_mode,
+                "funnel_commit_max_agents": int(run_config.funnel_commit_max_agents or 0),
             },
             "agent_summaries": agent_summaries,
             "swarm_metrics": swarm_metrics,
             "cycle_logs": cycle_logs,
         }
 
-    # ------------------------------------------------------------------
-    # Scheduling and selection
-    # ------------------------------------------------------------------
     def _eligible_agents(self, global_cycle: int, run_config: SwarmRunConfig) -> List[str]:
         """Return agent ids that can run on this global cycle."""
         eligible: List[str] = []
@@ -453,6 +658,488 @@ class SwarmCoordinator:
         if global_cycle < cutoff:
             return "idea"
         return "verify"
+
+
+    # ------------------------------------------------------------------
+    # Funnel helpers (pressure-driven discovery)
+    # ------------------------------------------------------------------
+    def _auto_funnel_enabled(self, run_config: SwarmRunConfig, total_cycles: int) -> bool:
+        """Return whether the funnel should be enabled for this run."""
+        if run_config.funnel_mode is not None:
+            return bool(run_config.funnel_mode)
+        # Default: enable for multi-cycle runs (2+). Users can disable explicitly.
+        return bool(total_cycles >= 2)
+
+    def _funnel_stage_for_cycle(self, global_cycle: int, total_cycles: int) -> str:
+        """Map a 0-indexed cycle into a funnel stage."""
+        if total_cycles <= 1:
+            return "map"
+        if total_cycles == 2:
+            return "map" if global_cycle == 0 else "commit"
+        if total_cycles == 3:
+            return ["map", "cull", "commit"][min(global_cycle, 2)]
+        if total_cycles == 4:
+            return ["map", "cluster", "stress", "commit"][min(global_cycle, 3)]
+
+        # 5+ cycles: map -> cluster -> (cull/stress alternating) -> commit
+        if global_cycle == 0:
+            return "map"
+        if global_cycle == 1:
+            return "cluster"
+        if global_cycle >= total_cycles - 1:
+            return "commit"
+        # alternate starting with cull on cycle 2
+        return "cull" if (global_cycle % 2 == 0) else "stress"
+
+    def _role_for_funnel_stage(self, stage: str, base_role: str) -> str:
+        """Assign a pressure-appropriate role label for the stage."""
+        role = (base_role or "agent").strip()
+        low = role.lower()
+
+        def has_any(*keys: str) -> bool:
+            return any(k in low for k in keys)
+
+        if stage == "map":
+            return role if has_any("explor", "research", "mapper") else "explorer"
+        if stage == "cluster":
+            return role if has_any("synth", "integr", "cluster", "planner", "architect") else "synthesizer"
+        if stage == "cull":
+            return role if has_any("critic", "skeptic", "verif", "falsif", "review") else "critic"
+        if stage == "stress":
+            return role if has_any("red", "advers", "critic", "verif", "skeptic") else "adversary"
+        if stage == "commit":
+            return role if has_any("writer", "integr", "synth", "planner") else "integrator"
+        return role or "agent"
+
+    def _is_longevity_context(self, goal: str, hallmark_targets: Optional[List[str]] = None) -> bool:
+        text = (goal or "").lower()
+        if any(k in text for k in ("longevity", "aging", "ageing", "senescence", "geroscience")):
+            return True
+        if hallmark_targets:
+            # Hallmarks are strongly tied to aging/longevity contexts.
+            return True
+        return False
+
+    def _resolve_domain_lenses(self, run_config: SwarmRunConfig, is_longevity: bool) -> List[str]:
+        # User override
+        if run_config.funnel_domain_lenses:
+            lenses = [str(x).strip() for x in (run_config.funnel_domain_lenses or []) if str(x).strip()]
+            if lenses:
+                return lenses
+
+        if is_longevity:
+            return [
+                "transport_physics",
+                "systems_immunology",
+                "error_correction_clearance",
+                "mechanical_stress_tissue_flow",
+                "information_theory_control",
+            ]
+        # Generic multi-lens set
+        return [
+            "mechanistic_model",
+            "systems_dynamics",
+            "measurement_validation",
+            "engineering_constraints",
+            "failure_modes_safety",
+        ]
+
+    def _stable_index(self, key: str, modulo: int) -> int:
+        """Stable integer hashing for deterministic domain-lens assignment."""
+        if modulo <= 0:
+            return 0
+        try:
+            h = hashlib.md5(key.encode("utf-8")).hexdigest()
+            return int(h[:8], 16) % modulo
+        except Exception:
+            return abs(hash(key)) % modulo
+
+    def _compose_domain(self, base_domain: str, lens: str) -> str:
+        base = (base_domain or "general").strip()
+        lens = (lens or "").strip()
+        if not lens:
+            return base
+        if base and base.lower() not in ("general", "default"):
+            if lens in base:
+                return base
+            return f"{base}:{lens}"
+        return lens
+
+    def _merge_subgoals(self, base: Optional[str], extra: Optional[str]) -> Optional[str]:
+        b = (base or "").strip()
+        e = (extra or "").strip()
+        if not b and not e:
+            return None
+        if b and not e:
+            return b
+        if e and not b:
+            return e
+        # Avoid duplicates if the extra is already included
+        if e.lower() in b.lower():
+            return b
+        if b.lower() in e.lower():
+            return e
+        return b + "\n\n" + e
+
+    def _funnel_directive_for_stage(
+        self,
+        stage: str,
+        *,
+        goal: str,
+        is_longevity: bool,
+        run_config: SwarmRunConfig,
+        domain_lenses: List[str],
+        state: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Stage-specific mechanical instructions that drive convergence."""
+
+        kill_q = float(run_config.funnel_kill_quota or 0.80)
+        min_domains = max(1, int(run_config.funnel_min_domains or 3))
+        novelty_floor = float(run_config.funnel_novelty_floor or 0.35)
+
+        # Longevity-specific stress axes
+        stress_axes = [
+            "cancer_risk",
+            "fibrosis_risk",
+            "immune_collapse_risk",
+            "metabolic_failure_risk",
+        ] if is_longevity else [
+            "safety_risk",
+            "feasibility_risk",
+            "scalability_risk",
+            "confounders_and_failure_modes",
+        ]
+
+        novelty_bans = []
+        if is_longevity:
+            novelty_bans = [
+                "mTOR/rapamycin",
+                "metformin/AMPK",
+                "NAD+/sirtuins",
+                "senolytics",
+                "caloric restriction mimetics",
+            ]
+
+        lines: List[str] = []
+        lines.append(f"Funnel stage: {stage.upper()} (mechanical, pressure-driven).")
+        lines.append("Do not be polite. Prefer elimination + compression over exploration.")
+        lines.append("Output MUST be explicit and falsifiable (no vague speculation).")
+
+        if stage == "map":
+            lines.append("MAP: Generate 20â30 raw candidate mechanisms/constraints. No conclusions allowed.")
+            lines.append("Each candidate must include: (a) mechanism in 1 sentence, (b) quick falsifier, (c) 2-domain mix.")
+            if domain_lenses:
+                lines.append(f"Activate at least {min_domains} domain lenses across the swarm: {', '.join(domain_lenses)}.")
+            if novelty_bans:
+                lines.append(
+                    "Novelty floor: reject ideas that resemble mainstream longevity pathways "
+                    f"(examples to avoid: {', '.join(novelty_bans)})."
+                )
+
+        elif stage == "cluster":
+            lines.append("CLUSTER: Group candidates into 3â5 mechanism families.")
+            lines.append("For each family: name it, list members, and state the single core bottleneck.")
+            lines.append("Carry forward only the families with clear bottlenecks and falsifiers.")
+
+        elif stage == "cull":
+            lines.append("CULL: Eliminate aggressively.")
+            lines.append(f"Requirement: reject at least {int(kill_q * 100)}% of candidates.")
+            lines.append("Each rejection must include: (a) why it fails, (b) fastest falsification test, (c) what evidence would revive it.")
+            lines.append("Output: top 3 survivors with crisp theses (1â2 sentences each).")
+
+        elif stage == "stress":
+            lines.append("STRESS: Red-team survivors until they break.")
+            lines.append("Force adversarial checks across:")
+            for ax in stress_axes:
+                lines.append(f"  - {ax}")
+            lines.append("Output: 1â2 survivors still standing + one decisive failure mode per survivor.")
+
+        elif stage == "commit":
+            lines.append("COMMIT: Convert the best survivor into a single thesis and an action plan.")
+            lines.append("Output must include:")
+            lines.append("  - 1 core thesis")
+            lines.append("  - 3 falsifiable predictions")
+            lines.append("  - 2 minimal experiments (fast + cheap if possible)")
+            lines.append("  - 1 clear failure mode / stop condition")
+            lines.append("No brainstorming. Commit to the most defensible option.")
+
+        else:
+            lines.append("Proceed with high-pressure discovery and explicit falsification.")
+
+        # Context baton (best effort): carry forward prior-stage outputs when available.
+        if state:
+            try:
+                if stage == "cluster":
+                    cand = state.get("candidates") or []
+                    if cand:
+                        lines.append("")
+                        lines.append("Context baton (from MAP): candidates to cluster:")
+                        for item in cand[:40]:
+                            lines.append(f"  - {item}")
+                elif stage == "cull":
+                    pool = state.get("clusters") or state.get("candidates") or []
+                    if pool:
+                        lines.append("")
+                        lines.append("Context baton: pool to cull (clustered families preferred):")
+                        for item in pool[:40]:
+                            lines.append(f"  - {item}")
+                elif stage == "stress":
+                    pool = state.get("survivors") or []
+                    if not pool:
+                        pool = (state.get("candidates") or [])[:10]
+                    if pool:
+                        lines.append("")
+                        lines.append("Context baton: survivors to stress-test (fallback to top candidates):")
+                        for item in pool[:10]:
+                            lines.append(f"  - {item}")
+                elif stage == "commit":
+                    pool = state.get("stress_survivors") or state.get("survivors") or []
+                    if pool:
+                        lines.append("")
+                        lines.append("Context baton: option(s) to commit (pick the most defensible):")
+                        for item in pool[:5]:
+                            lines.append(f"  - {item}")
+            except Exception:
+                pass
+
+        lines.append(f"Novelty floor target: >= {novelty_floor:.2f} (qualitative).")
+        return "\n".join(lines)
+
+    def _simple_stability_index(self, values: List[float], window: int = 5) -> Optional[float]:
+        """A lightweight [0,1] stability proxy based on relative variability."""
+        if not values:
+            return None
+        n = min(len(values), max(2, int(window)))
+        recent = values[-n:]
+        mean = sum(recent) / float(n)
+        var = sum((v - mean) ** 2 for v in recent) / float(n)
+        std = math.sqrt(var)
+        rsd = std / (abs(mean) + 1e-9)
+        stab = 1.0 - rsd
+        if stab < 0.0:
+            stab = 0.0
+        if stab > 1.0:
+            stab = 1.0
+        return stab
+
+
+    # ------------------------------------------------------------------
+    # Funnel baton extraction (best-effort parsing of structured outputs)
+    # ------------------------------------------------------------------
+    def _extract_strings(self, value: Any, *, limit: int = 200) -> List[str]:
+        """Best-effort extraction of strings from nested JSON-ish values."""
+        out: List[str] = []
+
+        def _rec(v: Any) -> None:
+            if len(out) >= limit:
+                return
+            if v is None:
+                return
+            if isinstance(v, str):
+                s = v.strip()
+                if s:
+                    out.append(s)
+                return
+            if isinstance(v, (int, float, bool)):
+                return
+            if isinstance(v, dict):
+                # Prefer common "text" fields if present
+                for k in ("text", "thesis", "hypothesis", "candidate", "name"):
+                    if k in v and isinstance(v.get(k), str):
+                        s = str(v.get(k)).strip()
+                        if s:
+                            out.append(s)
+                            if len(out) >= limit:
+                                return
+                for vv in v.values():
+                    _rec(vv)
+                return
+            if isinstance(v, list):
+                for item in v:
+                    _rec(item)
+                return
+
+        _rec(value)
+        return out[:limit]
+
+    def _collect_by_keys(self, obj: Any, keys: Iterable[str], *, max_depth: int = 3) -> List[str]:
+        """Collect strings for any matching key in a nested mapping."""
+        wanted = {str(k).lower() for k in keys}
+        out: List[str] = []
+
+        def _rec(v: Any, depth: int) -> None:
+            if depth < 0:
+                return
+            if isinstance(v, dict):
+                for k, vv in v.items():
+                    kk = str(k).lower()
+                    if kk in wanted:
+                        out.extend(self._extract_strings(vv, limit=200))
+                    else:
+                        _rec(vv, depth - 1)
+                return
+            if isinstance(v, list):
+                for item in v:
+                    _rec(item, depth - 1)
+
+        _rec(obj, max_depth)
+        return out
+
+    def _novelty_score(self, text: str, *, is_longevity: bool) -> float:
+        """Heuristic novelty score in [0,1]. This is intentionally simple."""
+        t = (text or "").lower()
+        score = 1.0
+
+        if len(t.strip()) < 30:
+            score -= 0.20
+
+        # Penalize mainstream longevity pathways
+        if is_longevity:
+            mainstream = [
+                "rapamycin",
+                "mtor",
+                "metformin",
+                "ampk",
+                "nad",
+                "sirtuin",
+                "senolytic",
+                "dasatinib",
+                "quercetin",
+                "caloric restriction",
+                "cr mimetic",
+            ]
+            if any(k in t for k in mainstream):
+                score -= 0.70
+
+        # Penalize generic lifestyle advice (low mechanism novelty)
+        generic = ["exercise", "diet", "sleep", "meditation", "fasting"]
+        if any(k in t for k in generic):
+            score -= 0.25
+
+        if score < 0.0:
+            score = 0.0
+        if score > 1.0:
+            score = 1.0
+        return score
+
+    def _clean_item(self, s: str) -> str:
+        s2 = (s or "").strip()
+        # Strip common list/bullet prefixes
+        s2 = re.sub(r"^[-*â¢\s]+", "", s2)
+        s2 = re.sub(r"^\(?\d+\)?[\.)]\s+", "", s2)
+        s2 = re.sub(r"\s+", " ", s2).strip()
+        return s2
+
+    def _update_funnel_state(
+        self,
+        *,
+        funnel_state: Dict[str, Any],
+        stage: str,
+        summary: Dict[str, Any],
+        log_entry: Dict[str, Any],
+        is_longevity: bool,
+        novelty_floor: float,
+    ) -> None:
+        """Update the baton with any structured candidates/survivors found."""
+
+        # Candidate-like keys we might see in structured outputs
+        candidate_keys = [
+            "candidates",
+            "candidate_hypotheses",
+            "hypotheses",
+            "ideas",
+            "proposals",
+            "candidate_interventions",
+        ]
+        cluster_keys = ["clusters", "families", "groups", "mechanism_families"]
+        survivor_keys = ["survivors", "top_survivors", "kept", "selected", "finalists"]
+
+        # Pull candidates opportunistically from summary/log
+        candidates = []
+        candidates.extend(self._collect_by_keys(summary, candidate_keys, max_depth=3))
+        candidates.extend(self._collect_by_keys(log_entry, candidate_keys, max_depth=3))
+
+        clusters = []
+        clusters.extend(self._collect_by_keys(summary, cluster_keys, max_depth=3))
+        clusters.extend(self._collect_by_keys(log_entry, cluster_keys, max_depth=3))
+
+        survivors = []
+        survivors.extend(self._collect_by_keys(summary, survivor_keys, max_depth=3))
+        survivors.extend(self._collect_by_keys(log_entry, survivor_keys, max_depth=3))
+
+        def _norm(x: str) -> str:
+            return re.sub(r"\s+", " ", (x or "").strip().lower())
+
+        # Ensure internal containers exist
+        for k in ("candidates", "clusters", "survivors", "stress_survivors", "filtered"):
+            if k not in funnel_state or not isinstance(funnel_state.get(k), list):
+                funnel_state[k] = []
+
+        # Update candidates on MAP/CLUSTER primarily
+        if stage in ("map", "cluster") and candidates:
+            seen = {_norm(x) for x in funnel_state["candidates"] if isinstance(x, str)}
+            for raw in candidates:
+                item = self._clean_item(raw)
+                if not item:
+                    continue
+                key = _norm(item)
+                if key in seen:
+                    continue
+                score = self._novelty_score(item, is_longevity=is_longevity)
+                if score < float(novelty_floor):
+                    # keep a breadcrumb for debugging
+                    if len(funnel_state["filtered"]) < 120:
+                        funnel_state["filtered"].append({"text": item, "score": score})
+                    continue
+                funnel_state["candidates"].append(item)
+                seen.add(key)
+                if len(funnel_state["candidates"]) >= 220:
+                    break
+
+        # Update clusters on CLUSTER
+        if stage == "cluster" and clusters:
+            seen = {_norm(x) for x in funnel_state["clusters"] if isinstance(x, str)}
+            for raw in clusters:
+                item = self._clean_item(raw)
+                if not item:
+                    continue
+                key = _norm(item)
+                if key in seen:
+                    continue
+                funnel_state["clusters"].append(item)
+                seen.add(key)
+                if len(funnel_state["clusters"]) >= 120:
+                    break
+
+        # Update survivors on CULL
+        if stage == "cull" and survivors:
+            seen = {_norm(x) for x in funnel_state["survivors"] if isinstance(x, str)}
+            for raw in survivors:
+                item = self._clean_item(raw)
+                if not item:
+                    continue
+                key = _norm(item)
+                if key in seen:
+                    continue
+                funnel_state["survivors"].append(item)
+                seen.add(key)
+                if len(funnel_state["survivors"]) >= 30:
+                    break
+
+        # Update stress survivors on STRESS
+        if stage == "stress" and survivors:
+            seen = {_norm(x) for x in funnel_state["stress_survivors"] if isinstance(x, str)}
+            for raw in survivors:
+                item = self._clean_item(raw)
+                if not item:
+                    continue
+                key = _norm(item)
+                if key in seen:
+                    continue
+                funnel_state["stress_survivors"].append(item)
+                seen.add(key)
+                if len(funnel_state["stress_survivors"]) >= 15:
+                    break
 
     def _query_curriculum(
         self,
