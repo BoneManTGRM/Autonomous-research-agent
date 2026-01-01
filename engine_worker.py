@@ -93,7 +93,7 @@ try:
 except Exception:  # pragma: no cover
     emit_event = None  # type: ignore[assignment]
 
-# --- early import marker (helps diagnose ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂno logsÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
+# --- early import marker (helps diagnose ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂno logsÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ situations on platforms like Render) ---
 try:
     # Use timezone-aware UTC timestamp to avoid deprecation warnings
     _module_import_utc = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -290,7 +290,7 @@ def _normalize_ui_text(s: str) -> str:
     be misinterpreted by downstream decoders. This function attempts to
     re-encode the text as UTF-8 and decode it as ASCII, ignoring any
     problematic bytes. This avoids the dreaded "mojibake" sequences such
-    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
+    as 'ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ' which show up when UTF-8 is decoded twice.
 
     Args:
         s: The string to normalize.
@@ -959,6 +959,8 @@ except Exception:  # pragma: no cover
 
 _EVENT_LOG_ENABLED: bool = _env_bool("WORKER_EVENT_LOG", default=True)
 
+_EVENT_LOG_MAX_STR_CHARS: int = _env_int("WORKER_EVENT_LOG_MAX_STR_CHARS", 200000)
+
 _EVENT_LOG_THROTTLE = _LogThrottle(
     max_keys=_env_int("WORKER_EVENT_LOG_THROTTLE_MAX_KEYS", 1024),
     min_interval_s=_env_float_value("WORKER_EVENT_LOG_THROTTLE_MIN_INTERVAL_SECONDS", 2.0),
@@ -999,7 +1001,7 @@ def _event(
             if not allowed:
                 return
 
-        payload = _to_jsonable(data) if isinstance(data, dict) else {}
+        payload = _to_jsonable(data, max_str_chars=_EVENT_LOG_MAX_STR_CHARS) if isinstance(data, dict) else {}
         if not isinstance(payload, dict):
             payload = {}
 
@@ -1723,8 +1725,8 @@ HARD_MAX_CYCLES: int = _parse_int_env("WORKER_HARD_MAX_CYCLES", 10_000_000)
 HARD_MAX_ROUNDS: int = _parse_int_env("WORKER_HARD_MAX_ROUNDS", HARD_MAX_CYCLES)
 # Disable the hard minute clamp by default.  When WORKER_HARD_MAX_MINUTES
 # is unset, default to 0.0 which instructs _clamp_minutes() to treat
-# time budgets as unlimited (no cap).  This allows multiÃÂ¢ÃÂÃÂmonth runs
-# without unexpectedly hitting the 90ÃÂ¢ÃÂÃÂday hard cap.
+# time budgets as unlimited (no cap).  This allows multiÃÂÃÂ¢ÃÂÃÂÃÂÃÂmonth runs
+# without unexpectedly hitting the 90ÃÂÃÂ¢ÃÂÃÂÃÂÃÂday hard cap.
 HARD_MAX_MINUTES: float = _parse_float_env("WORKER_HARD_MAX_MINUTES", 0.0)
 
 
@@ -2953,7 +2955,7 @@ def _normalize_cycles_for_ui(cycles_list: List[Any]) -> List[Dict[str, Any]]:
             c = {"raw": entry}
         # Renumber the cycle for UI purposes.  Regardless of what the agent
         # returned (e.g. micro cycle indices), we want the displayed cycle
-        # sequence to be 0, 1, 2, â¦ so that the cycle history table is
+        # sequence to be 0, 1, 2, Ã¢ÂÂ¦ so that the cycle history table is
         # intuitive.  Preserve other fields on the entry.
         c["cycle"] = i
         c.setdefault("index", i + 1)
@@ -2965,7 +2967,7 @@ def _normalize_cycles_for_ui(cycles_list: List[Any]) -> List[Dict[str, Any]]:
     return normalized
 
 # ---------------------------------------------------------------------------
-# Helper: collapse microâcycles to macro cycles for UI
+# Helper: collapse microÃ¢ÂÂcycles to macro cycles for UI
 #
 # Some agent implementations return many more cycle summaries than the user
 # requested (e.g. 200 micro steps when the user asked for 3 cycles).  When
@@ -2988,7 +2990,7 @@ def _collapse_cycles_for_ui(cycles_list: List[Any], total: Optional[int]) -> Lis
         A list containing at most ``total`` entries sampled from ``cycles_list``.
     """
     try:
-        # Guard against nonâlist inputs
+        # Guard against nonÃ¢ÂÂlist inputs
         if not isinstance(cycles_list, list):
             return cycles_list  # type: ignore[return-value]
         n = len(cycles_list)
@@ -3000,7 +3002,7 @@ def _collapse_cycles_for_ui(cycles_list: List[Any], total: Optional[int]) -> Lis
             for i in range(total):
                 # Compute the index of the representative entry for this cycle.
                 # We use ceil to bias toward later entries in each segment so that
-                # the collapsed list includes the most recent microâcycles.
+                # the collapsed list includes the most recent microÃ¢ÂÂcycles.
                 idx = int(_math.ceil((i + 1) * step)) - 1
                 if idx < 0:
                     idx = 0
@@ -3013,8 +3015,8 @@ def _collapse_cycles_for_ui(cycles_list: List[Any], total: Optional[int]) -> Lis
                     # Preserve a copy so we don't mutate the original list.
                     if isinstance(entry, dict):
                         new_entry = dict(entry)
-                        # Reset the cycle field to the current macro index (0âbased).
-                        # Some agent implementations use a 0âbased "cycle" index; the UI
+                        # Reset the cycle field to the current macro index (0Ã¢ÂÂbased).
+                        # Some agent implementations use a 0Ã¢ÂÂbased "cycle" index; the UI
                         # will display this value. Renumbering here ensures that when
                         # collapsing from e.g. 200 micro cycles to 3 macro cycles, the
                         # resulting rows have cycle values 0, 1, 2 instead of 66, 133, 199.
@@ -3029,6 +3031,459 @@ def _collapse_cycles_for_ui(cycles_list: List[Any], total: Optional[int]) -> Lis
     except Exception:
         pass
     return cycles_list  # type: ignore[return-value]
+def _collapse_swarm_microcycles_for_ui(
+    cycles_list: List[Any],
+    *,
+    max_rounds: Optional[int] = None,
+) -> List[Any]:
+    """Collapse swarm micro-cycle entries (one per agent) into macro cycles.
+
+    Many swarm backends emit one dictionary per *agent* per scheduler tick, which
+    makes the UI look like it ran (agents Ã cycles) cycles. For reports and
+    diagnostics we usually want one entry per tick/round.
+
+    Grouping strategy:
+      - Prefer entry["swarm"]["round_index"] if present
+      - Else entry["swarm"]["global_cycle_index"]
+      - Else fall back to the entry's own "cycle"/"round"/"cycle_index"
+      - If no group key is found, fall back to sampling collapse.
+
+    Output:
+      A list of dicts, one per macro cycle, each containing:
+        - "swarm": {macro metadata}
+        - "agent_outputs": [original micro entries]
+        - aggregated delta_r/energy/rye when available
+        - aggregated citations/sources/discoveries when available
+        - "summary": short combined preview
+    """
+    if not isinstance(cycles_list, list) or not cycles_list:
+        return cycles_list  # type: ignore[return-value]
+
+    groups: Dict[Any, List[Dict[str, Any]]] = {}
+    for entry in cycles_list:
+        if not isinstance(entry, dict):
+            continue
+        swarm_meta = entry.get("swarm") if isinstance(entry.get("swarm"), dict) else {}
+        g = swarm_meta.get("round_index")
+        if g is None:
+            g = swarm_meta.get("global_cycle_index")
+        if g is None:
+            g = entry.get("round")
+        if g is None:
+            g = entry.get("cycle_index")
+        if g is None:
+            g = entry.get("cycle")
+        if g is None:
+            # Cannot group reliably; fall back to sampling.
+            return _collapse_cycles_for_ui(cycles_list, int(max_rounds) if max_rounds else len(cycles_list))
+
+        try:
+            gk: Any = int(g)
+        except Exception:
+            gk = str(g)
+        groups.setdefault(gk, []).append(entry)
+
+    if not groups:
+        return _collapse_cycles_for_ui(cycles_list, int(max_rounds) if max_rounds else len(cycles_list))
+
+    def _sort_key(x: Any) -> Any:
+        try:
+            return (0, int(x))
+        except Exception:
+            return (1, str(x))
+
+    keys = sorted(groups.keys(), key=_sort_key)
+    macro: List[Dict[str, Any]] = []
+
+    for k in keys:
+        entries = groups.get(k, [])
+        if not entries:
+            continue
+
+        delta_r_sum: float = 0.0
+        energy_sum: float = 0.0
+        rye_vals: List[float] = []
+        citations: List[Any] = []
+        sources: List[Any] = []
+        discoveries: List[Any] = []
+        preview_lines: List[str] = []
+
+        for e in entries:
+            swarm_meta = e.get("swarm") if isinstance(e.get("swarm"), dict) else {}
+            agent_id = swarm_meta.get("agent_id") or e.get("agent_id")
+            role = swarm_meta.get("role") or e.get("role") or "agent"
+
+            # Preview text: pick the best-guess string field without truncating.
+            text_val: Any = None
+            for key in ("text", "output", "content", "message", "summary", "analysis", "final", "result"):
+                v = e.get(key)
+                if isinstance(v, str) and v.strip():
+                    text_val = v.strip()
+                    break
+                if isinstance(v, dict):
+                    for kk in ("text", "content", "message", "summary", "analysis", "final", "result"):
+                        vv = v.get(kk)
+                        if isinstance(vv, str) and vv.strip():
+                            text_val = vv.strip()
+                            break
+                if isinstance(text_val, str) and text_val:
+                    break
+
+            if isinstance(text_val, str) and text_val:
+                prefix = f"[{role}"
+                if agent_id is not None:
+                    prefix += f":{agent_id}"
+                prefix += "] "
+                preview_lines.append(prefix + text_val)
+
+            # Metrics
+            dr = e.get("delta_r") or e.get("deltaR") or e.get("delta_R")
+            en = e.get("energy") or e.get("energy_e") or e.get("E")
+            ry = e.get("rye") or e.get("RYE") or e.get("rye_value") or e.get("rye_score")
+
+            try:
+                if dr is not None:
+                    delta_r_sum += float(dr)
+            except Exception:
+                pass
+            try:
+                if en is not None:
+                    energy_sum += float(en)
+            except Exception:
+                pass
+            try:
+                if ry is not None:
+                    rye_vals.append(float(ry))
+            except Exception:
+                pass
+
+            # Evidence / sources / discoveries
+            for key in ("citations", "sources", "discoveries"):
+                v = e.get(key)
+                if isinstance(v, list) and v:
+                    if key == "citations":
+                        citations.extend(v)
+                    elif key == "sources":
+                        sources.extend(v)
+                    elif key == "discoveries":
+                        discoveries.extend(v)
+
+        # Make a short human-friendly summary preview (first few lines)
+        if preview_lines:
+            preview_lines = preview_lines[: min(3, len(preview_lines))]
+
+        rye_avg: Optional[float] = None
+        if rye_vals:
+            try:
+                rye_avg = sum(rye_vals) / float(len(rye_vals))
+            except Exception:
+                rye_avg = None
+
+        macro_entry: Dict[str, Any] = {
+            "cycle": k,
+            "swarm": {
+                "macro_cycle": k,
+                "agent_count": len(entries),
+            },
+            "agent_outputs": entries,
+            "summary": "\n".join(preview_lines) if preview_lines else "",
+            "delta_r": delta_r_sum,
+            "energy": energy_sum,
+            "rye": rye_avg,
+        }
+
+        if citations:
+            macro_entry["citations"] = citations
+        if sources:
+            macro_entry["sources"] = sources
+        if discoveries:
+            macro_entry["discoveries"] = discoveries
+
+        macro.append(macro_entry)
+
+    # Honor max_rounds by trimming to the first N macro cycles.
+    if max_rounds is not None:
+        try:
+            n = int(max_rounds)
+            if n > 0 and len(macro) > n:
+                macro = macro[:n]
+        except Exception:
+            pass
+
+    return macro
+
+
+def _emit_structured_events_from_cycles(
+    *,
+    run_id: str,
+    mode: str,
+    goal: str,
+    domain: str,
+    summaries: List[Any],
+) -> None:
+    """Emit queryable structured events from raw cycle entries.
+
+    This bridges the gap between "cycles in memory" and "discoveries in reports".
+
+    Emitted kinds (when detectable):
+      - agent_output: always (when text is present)
+      - discovery: for items in entry["discoveries"]
+      - candidate_hypothesis: for explicit hypothesis fields
+      - verification: for explicit verification fields
+      - rye_update: when delta_r/energy/rye values are present
+    """
+    if not run_id or not isinstance(summaries, list):
+        return
+
+    def _int_or_none(x: Any) -> Optional[int]:
+        try:
+            if x is None:
+                return None
+            return int(x)
+        except Exception:
+            return None
+
+    def _best_text(obj: Any) -> str:
+        if isinstance(obj, str):
+            return obj
+        if isinstance(obj, dict):
+            for k in ("text", "content", "message", "summary", "analysis", "final", "result", "output"):
+                v = obj.get(k)
+                if isinstance(v, str) and v.strip():
+                    return v
+        return ""
+
+    # De-duplicate funnel stage events (one per cycle).
+    seen_funnel_stage_cycles = set()
+
+    for entry in summaries:
+        if not isinstance(entry, dict):
+            continue
+
+        swarm_meta = entry.get("swarm") if isinstance(entry.get("swarm"), dict) else {}
+        cycle_idx = (
+            _int_or_none(swarm_meta.get("round_index"))
+            or _int_or_none(swarm_meta.get("global_cycle_index"))
+            or _int_or_none(entry.get("round"))
+            or _int_or_none(entry.get("cycle_index"))
+            or _int_or_none(entry.get("cycle"))
+        )
+
+        role = swarm_meta.get("role") or entry.get("role") or "agent"
+        agent_id = swarm_meta.get("agent_id") or entry.get("agent_id")
+        stage = swarm_meta.get("stage") or entry.get("stage")
+        hallmark = swarm_meta.get("hallmark") or entry.get("hallmark")
+
+        # Funnel stage (if present): emit one event per cycle for reports/UI.
+        funnel_stage = swarm_meta.get("funnel_stage") or entry.get("funnel_stage")
+        if isinstance(funnel_stage, str):
+            fs = funnel_stage.strip()
+        else:
+            fs = ""
+        if fs and cycle_idx is not None:
+            _k = (int(cycle_idx), fs)
+            if _k not in seen_funnel_stage_cycles:
+                seen_funnel_stage_cycles.add(_k)
+                _event(
+                    run_id=run_id,
+                    kind="funnel_stage",
+                    message=f"cycle {cycle_idx}: {fs}",
+                    role="system",
+                    domain=domain,
+                    cycle=cycle_idx,
+                    data={
+                        "funnel_stage": fs,
+                        "stage": stage,
+                        "subgoal": entry.get("subgoal"),
+                    },
+                )
+
+
+        # Sources/citations (best-effort)
+        sources: List[Any] = []
+        for key in ("sources", "citations"):
+            v = entry.get(key)
+            if isinstance(v, list):
+                sources.extend(v)
+
+        # Full text output (best-effort)
+        text_val: str = ""
+        for key in ("text", "output", "content", "message"):
+            v = entry.get(key)
+            if isinstance(v, str) and v.strip():
+                text_val = v
+                break
+        if not text_val:
+            v = entry.get("summary")
+            if isinstance(v, str) and v.strip():
+                text_val = v
+            elif isinstance(v, dict):
+                text_val = _best_text(v)
+
+        if isinstance(text_val, str) and text_val.strip():
+            msg_preview = text_val.strip().replace("\n", " ")
+            if len(msg_preview) > 120:
+                msg_preview = msg_preview[:117] + "..."
+            _event(
+                run_id=run_id,
+                kind="agent_output",
+                message=f"{role} output: {msg_preview}",
+                role=str(role),
+                domain=domain,
+                cycle=cycle_idx,
+                data={
+                    "text": text_val,
+                    "agent_id": agent_id,
+                    "stage": stage,
+                    "hallmark": hallmark,
+                    "sources": sources,
+                    "goal": goal,
+                    "mode": mode,
+                },
+                force=True,
+            )
+
+        # Discoveries
+        disc_list = entry.get("discoveries")
+        if isinstance(disc_list, list):
+            for d in disc_list:
+                if isinstance(d, dict):
+                    title = d.get("title") or d.get("name") or d.get("hypothesis") or "discovery"
+                    _event(
+                        run_id=run_id,
+                        kind="discovery",
+                        message=str(title),
+                        role=str(role),
+                        domain=domain,
+                        cycle=cycle_idx,
+                        data={
+                            **d,
+                            "agent_id": agent_id,
+                            "stage": stage,
+                            "hallmark": hallmark,
+                            "goal": goal,
+                            "mode": mode,
+                        },
+                        force=True,
+                    )
+
+        # Candidate hypotheses (explicit fields only)
+        hyp_texts: List[str] = []
+        for hk in ("candidate_hypothesis", "hypothesis", "proposed_hypothesis"):
+            v = entry.get(hk)
+            if isinstance(v, str) and v.strip():
+                hyp_texts.append(v.strip())
+        v = entry.get("hypotheses")
+        if isinstance(v, list):
+            for item in v:
+                if isinstance(item, str) and item.strip():
+                    hyp_texts.append(item.strip())
+                elif isinstance(item, dict):
+                    tt = _best_text(item)
+                    if tt.strip():
+                        hyp_texts.append(tt.strip())
+        for ht in hyp_texts:
+            _event(
+                run_id=run_id,
+                kind="candidate_hypothesis",
+                message="candidate_hypothesis",
+                role=str(role),
+                domain=domain,
+                cycle=cycle_idx,
+                data={
+                    "text": ht,
+                    "agent_id": agent_id,
+                    "stage": stage,
+                    "hallmark": hallmark,
+                    "sources": sources,
+                    "goal": goal,
+                    "mode": mode,
+                },
+                force=True,
+            )
+
+        # Verification (explicit fields only)
+        ver = entry.get("verification") or entry.get("verifier") or entry.get("verification_result")
+        ver_list = entry.get("verifications")
+        ver_items: List[Any] = []
+        if isinstance(ver, dict):
+            ver_items.append(ver)
+        elif isinstance(ver, list):
+            ver_items.extend(ver)
+        if isinstance(ver_list, list):
+            ver_items.extend(ver_list)
+        for vi in ver_items:
+            if not isinstance(vi, dict):
+                continue
+            passed = vi.get("passed")
+            if passed is None:
+                passed = vi.get("pass")
+            if passed is None:
+                passed = vi.get("ok")
+            rationale = vi.get("rationale") or vi.get("reason") or vi.get("notes") or vi.get("text")
+            _event(
+                run_id=run_id,
+                kind="verification",
+                message="verification",
+                role=str(role),
+                domain=domain,
+                cycle=cycle_idx,
+                data={
+                    "passed": passed,
+                    "rationale": rationale,
+                    "agent_id": agent_id,
+                    "stage": stage,
+                    "hallmark": hallmark,
+                    "sources": sources,
+                    "goal": goal,
+                    "mode": mode,
+                    **{k: v for k, v in vi.items() if k not in ("rationale", "reason", "notes", "text")},
+                },
+                force=True,
+            )
+
+        # RYE metrics per entry (best-effort)
+        dr = entry.get("delta_r") or entry.get("deltaR") or entry.get("delta_R")
+        en = entry.get("energy") or entry.get("energy_e") or entry.get("E")
+        ry = entry.get("rye") or entry.get("RYE") or entry.get("rye_value") or entry.get("rye_score")
+        delta_r_f: Optional[float] = None
+        energy_f: Optional[float] = None
+        rye_f: Optional[float] = None
+        try:
+            if dr is not None:
+                delta_r_f = float(dr)
+        except Exception:
+            pass
+        try:
+            if en is not None:
+                energy_f = float(en)
+        except Exception:
+            pass
+        try:
+            if ry is not None:
+                rye_f = float(ry)
+        except Exception:
+            pass
+
+        if delta_r_f is not None or energy_f is not None or rye_f is not None:
+            _event(
+                run_id=run_id,
+                kind="rye_update",
+                message="rye_update",
+                role="metrics",
+                domain=domain,
+                cycle=cycle_idx,
+                data={
+                    "delta_R": delta_r_f,
+                    "E": energy_f,
+                    "RYE": rye_f,
+                    "agent_id": agent_id,
+                    "goal": goal,
+                    "mode": mode,
+                },
+                force=True,
+            )
+
 
 
 def _aggregate_from_cycles(cycles: List[Dict[str, Any]], key: str) -> List[Any]:
@@ -3039,17 +3494,17 @@ def _aggregate_from_cycles(cycles: List[Dict[str, Any]], key: str) -> List[Any]:
     across all cycles.  However, certain keys such as ``"citations"`` or
     ``"sources"`` may contain entries that are not valid (for example
     placeholder objects created when a web search fails or returns an error).
-    These invalid records can pollute the topâlevel result and inflate
+    These invalid records can pollute the topÃ¢ÂÂlevel result and inflate
     metrics like ``sources_used``.  In particular, Tavily search errors may
     produce citation stubs with empty URLs and generic error titles.
 
     To address this, when aggregating citations we skip any entry that
-    lacks a nonâempty URL.  This filters out search error stubs while
+    lacks a nonÃ¢ÂÂempty URL.  This filters out search error stubs while
     preserving legitimate citations.  All other keys are aggregated
     unchanged.
 
     Args:
-        cycles: list of perâcycle dictionaries
+        cycles: list of perÃ¢ÂÂcycle dictionaries
         key: the key to aggregate
 
     Returns:
@@ -3063,7 +3518,7 @@ def _aggregate_from_cycles(cycles: List[Dict[str, Any]], key: str) -> List[Any]:
             continue
         # For citation lists, filter out entries without a valid URL to avoid
         # including search error placeholders.  A valid citation should
-        # typically include a nonâempty "url" field.  If the structure of
+        # typically include a nonÃ¢ÂÂempty "url" field.  If the structure of
         # citation objects changes in the future, this check can be
         # tightened or relaxed accordingly.
         if key == "citations":
@@ -3078,11 +3533,11 @@ def _aggregate_from_cycles(cycles: List[Dict[str, Any]], key: str) -> List[Any]:
                     continue
         elif key == "hypotheses":
             # Deduplicate hypotheses by title and description to avoid
-            # repeated autoâgenerated placeholders polluting the run summary.
+            # repeated autoÃ¢ÂÂgenerated placeholders polluting the run summary.
             seen: set = set()
             for entry in val:
                 if not isinstance(entry, dict):
-                    # Unknown structure; include asâis
+                    # Unknown structure; include asÃ¢ÂÂis
                     out.append(entry)
                     continue
                 title = entry.get("title")
@@ -3273,12 +3728,26 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
 
     if isinstance(job, dict):
         cfg: Dict[str, Any] = dict(job.get("config") or {})
-        run_id = str(job.get("run_id") or cfg.get("run_id") or f"job-{int(time.time())}")
+        run_id = str(job.get("run_id") or cfg.get("run_id") or str(uuid.uuid4()))
         job_meta = job.get("meta")
     else:
         cfg = dict(getattr(job, "config", {}) or {})
-        run_id = str(getattr(job, "run_id", f"job-{int(time.time())}"))
+        run_id = str(getattr(job, "run_id", str(uuid.uuid4())))
         job_meta = getattr(job, "meta", None)
+    # Ensure a unique, non-empty run_id (UUID4) and keep it stable everywhere.
+    try:
+        run_id = str(run_id).strip()
+    except Exception:
+        run_id = ""
+    if not run_id or str(run_id).lower() == "null":
+        run_id = str(uuid.uuid4())
+    # Prevent path traversal / separators leaking into filenames.
+    try:
+        run_id = run_id.replace("/", "_").replace("\\", "_")
+    except Exception:
+        pass
+
+
 
     base_goal, base_domain = build_goal_and_domain()
 
@@ -3350,7 +3819,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
 
         # Ensure the agent adopts the job-defined roles list. Many agents
         # initialize with a default set of roles (~32), which can cause a
-        # 64âagent swarm to fall back to 32 if the worker uses the agent's
+        # 64Ã¢ÂÂagent swarm to fall back to 32 if the worker uses the agent's
         # internal roles. If the agent provides a set_agent_roles method,
         # invoke it with the roles for this run.  Wrap in try/except to
         # avoid crashing the worker if the method is absent or fails.
@@ -3362,9 +3831,9 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
 
         # Synchronize swarm configuration with the resolved roles list.  Some swarm
         # runners default to a maximum of 32 agents unless a higher cap is
-        # explicitly provided.  To prevent a 64âagent swarm from silently
+        # explicitly provided.  To prevent a 64Ã¢ÂÂagent swarm from silently
         # falling back to a smaller size, ensure that any nested swarm config
-        # and topâlevel hints reflect the number of roles.  This does not
+        # and topÃ¢ÂÂlevel hints reflect the number of roles.  This does not
         # override explicit settings if they already exceed the role count.
         try:
             if roles_list:
@@ -3464,13 +3933,13 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
     max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "max_cycles")
     max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
     # When running in swarm mode compute the macro_total as the total number
-    # of microâcycles across all roles.  Each round contributes one cycle per
+    # of microÃ¢ÂÂcycles across all roles.  Each round contributes one cycle per
     # active role.  Derive the role count from the config if available; if
     # roles are missing or invalid, fall back to a single role to avoid
     # division by zero.  For single agent runs macro_total is simply
     # max_cycles (the number of cycles requested).
     if mode == "swarm":
-        # For swarm mode, compute the total number of microâcycles by
+        # For swarm mode, compute the total number of microÃ¢ÂÂcycles by
         # multiplying the number of rounds by the number of active agents.
         # The number of agents may be greater than the number of unique roles
         # when the swarm uses multiple instances of each role.  When an
@@ -3579,7 +4048,7 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
         "snapshot": snapshot_cfg,
     }
 
-    # When running in swarm mode, include the total number of miniâagents
+    # When running in swarm mode, include the total number of miniÃ¢ÂÂagents
     # participating in the swarm.  Without this hint the UI may only
     # consider the length of the unique roles list, leading to a
     # miscalculated cycle total.  Prefer any explicit swarm_size or
@@ -3705,8 +4174,8 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                     roles_list = agent.get_agent_roles()
                 except Exception:
                     roles_list = ["agent"]
-            # Compute a perâtick concurrency hint based on the size of the roles list.
-            # Many agents default to a fixed perâtick cap (often 32) unless
+            # Compute a perÃ¢ÂÂtick concurrency hint based on the size of the roles list.
+            # Many agents default to a fixed perÃ¢ÂÂtick cap (often 32) unless
             # explicitly instructed otherwise.  When running swarms larger than the
             # default cap (e.g. 64 agents), the engine needs to pass a hint to
             # allow all agents to run each round.  Derive the cap from the
@@ -3782,20 +4251,35 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
 
         _heartbeat(agent, label="direct_job_finished", run_id=run_id)
 
-        # Collapse any microâcycle summaries down to the requested macro total before
+        # Collapse any microÃ¢ÂÂcycle summaries down to the requested macro total before
         # computing diagnostics and writing cycles.  When the agent returns more
         # summaries than max_cycles/max_rounds (e.g. 200 micro cycles for a 3
         # cycle request), this will sample the list down to the desired length.
+        # Keep an untouched copy of raw cycle entries for event emission / debugging.
+        summaries_raw = summaries
+
         try:
             if mode == "single":
-                # For single agent runs collapse micro-cycles down to the requested number
+                # For single agent runs collapse micro-cycles down to the requested number.
                 summaries = _collapse_cycles_for_ui(summaries, max_cycles)
             elif mode == "swarm":
-                # For swarm runs we do not collapse by default.  Leave the full
-                # history intact so that the UI can display every micro-cycle.
-                # This preserves detailed cycle history for each agent rather than
-                # sampling down to the number of requested rounds.
-                summaries = summaries  # no collapse
+                # Swarm runs often return one entry per agent per tick. By default we collapse
+                # those micro entries into one macro cycle per tick/round for stable UI and
+                # diagnostics. Opt out via ARA_SWARM_KEEP_MICRO_CYCLES=1 or
+                # cfg["swarm"]["keep_micro_cycles"]=true.
+                keep_micro = _env_bool("ARA_SWARM_KEEP_MICRO_CYCLES", default=False)
+                try:
+                    if isinstance(cfg, dict):
+                        swarm_cfg_local = cfg.get("swarm")
+                        if isinstance(swarm_cfg_local, dict) and bool(swarm_cfg_local.get("keep_micro_cycles")):
+                            keep_micro = True
+                except Exception:
+                    pass
+
+                if keep_micro:
+                    summaries = summaries_raw
+                else:
+                    summaries = _collapse_swarm_microcycles_for_ui(summaries_raw, max_rounds=max_rounds)
         except Exception:
             pass
 
@@ -5578,7 +6062,7 @@ def _write_job_progress(
 
         # Emit a progress event for the live console if the emitter is available.
         # Each call writes a JSON line with the current and total cycles.  The
-        # runâscoped directory is derived from the progress path and run ID.
+        # runÃ¢ÂÂscoped directory is derived from the progress path and run ID.
         if emit_event is not None:
             try:
                 # Derive a run directory to store events.  Many deployments
@@ -5647,7 +6131,7 @@ def _write_job_progress(
                 phase_idx = 0
             # Build an extra payload for stability signals.  When at least one
             # cycle has executed (current >= 1), emit flags so the UI can
-            # interpret the run as selfÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂstabilizing.  Otherwise omit these.
+            # interpret the run as selfÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂstabilizing.  Otherwise omit these.
             extra_local: Optional[Dict[str, Any]] = None
             try:
                 if isinstance(phase_idx, (int, float)) and phase_idx >= 1:
@@ -5941,7 +6425,7 @@ def _process_single_job(
                 pass
             # Ensure the agent adopts the job-defined roles list. Many agents
             # initialize with a default set of roles (~32), which can cause
-            # a 64âagent swarm to fall back to a smaller size if the worker
+            # a 64Ã¢ÂÂagent swarm to fall back to a smaller size if the worker
             # uses the agent's internal roles. If the agent provides a
             # set_agent_roles method, invoke it with the roles for this run.
             try:
@@ -5952,9 +6436,9 @@ def _process_single_job(
 
             # Synchronize swarm configuration with the resolved roles list.  Some swarm
             # runners default to a maximum of 32 agents unless a higher cap is
-            # explicitly provided.  To prevent a 64âagent swarm from silently
+            # explicitly provided.  To prevent a 64Ã¢ÂÂagent swarm from silently
             # falling back to a smaller size, ensure that any nested swarm config
-            # and topâlevel hints reflect the number of roles.  This does not
+            # and topÃ¢ÂÂlevel hints reflect the number of roles.  This does not
             # override explicit settings if they already exceed the role count.
             try:
                 if roles_list:
@@ -5991,14 +6475,14 @@ def _process_single_job(
             or ("rounds" in cfg and cfg.get("rounds") is not None)
         )
 
-        # Derive the requested number of cycles for singleâagent runs.
+        # Derive the requested number of cycles for singleÃ¢ÂÂagent runs.
         # Prefer explicit max_cycles or cycles values.  When absent, fall back
         # to a manual_cycles hint if present before resorting to the hard cap.
         raw_cycles = cfg.get("max_cycles")
         if raw_cycles is None:
             raw_cycles = cfg.get("cycles")
         # Some job creators (e.g. Streamlit) pass manual_cycles in runtime_hints
-        # but do not set cycles or max_cycles on the topâlevel config.  Honor
+        # but do not set cycles or max_cycles on the topÃ¢ÂÂlevel config.  Honor
         # manual_cycles as a synonym for max_cycles to avoid defaulting to the
         # HARD_MAX_CYCLES when the user specified a finite number of cycles.
         if raw_cycles is None:
@@ -6034,13 +6518,13 @@ def _process_single_job(
 
         max_cycles = _clamp_int(requested_cycles, HARD_MAX_CYCLES, "max_cycles")
         max_rounds = _clamp_int(requested_rounds, HARD_MAX_ROUNDS, "max_rounds")
-        # Compute the progress total.  For singleâagent runs use the number of cycles,
-        # but for swarm runs count microâcycles by multiplying the number of
+        # Compute the progress total.  For singleÃ¢ÂÂagent runs use the number of cycles,
+        # but for swarm runs count microÃ¢ÂÂcycles by multiplying the number of
         # rounds by the number of roles.  This allows the UI cycle counter
         # to reflect the total work performed across all agents rather than
         # showing only the number of rounds (macro cycles).
         if mode == "swarm":
-            # Compute the total microâcycles for swarm runs based on the
+            # Compute the total microÃ¢ÂÂcycles for swarm runs based on the
             # configured number of agents. Prefer explicit swarm_size or
             # max_agents_per_tick overrides, but never let the count be
             # smaller than the length of the provided roles list.  This
@@ -6353,16 +6837,16 @@ def _process_single_job(
                     eff_cur = cur_int
                     eff_tot = macro_total
                     # In the default implementation the progress callback reports
-                    # granular microâstep counts (cur_int) and a total number of
-                    # microâsteps (tot_int).  For single agent runs the UI wants
-                    # to map these microâsteps back into macro cycles so that
-                    # âCycle X/Yâ advances one integer per cycle.  For swarm
-                    # runs, however, each agent contributes its own microâcycles
-                    # and the user expects to see the full microâcycle count.
-                    # The original remapping logic would divide the microâstep
-                    # progress by the ratio of total microâsteps to macro
+                    # granular microÃ¢ÂÂstep counts (cur_int) and a total number of
+                    # microÃ¢ÂÂsteps (tot_int).  For single agent runs the UI wants
+                    # to map these microÃ¢ÂÂsteps back into macro cycles so that
+                    # Ã¢ÂÂCycle X/YÃ¢ÂÂ advances one integer per cycle.  For swarm
+                    # runs, however, each agent contributes its own microÃ¢ÂÂcycles
+                    # and the user expects to see the full microÃ¢ÂÂcycle count.
+                    # The original remapping logic would divide the microÃ¢ÂÂstep
+                    # progress by the ratio of total microÃ¢ÂÂsteps to macro
                     # cycles.  This resulted in swarm runs displaying only
-                    # macro cycles (e.g. 3/3) even when hundreds of microâsteps
+                    # macro cycles (e.g. 3/3) even when hundreds of microÃ¢ÂÂsteps
                     # occurred.  To fix this, when running in swarm mode we
                     # bypass the remapping entirely and treat cur_int as the
                     # effective cycle.  Otherwise we retain the original
@@ -6391,7 +6875,7 @@ def _process_single_job(
                     # Update last progress values based on effective cycle progress
                     # Capture the previous effective cycle so we can emit an event only
                     # when the cycle number changes.  This prevents flooding the
-                    # live console with microâstep events and instead records a
+                    # live console with microÃ¢ÂÂstep events and instead records a
                     # single event per macro cycle.
                     prev_eff_cur: Optional[int]
                     try:
@@ -6415,7 +6899,7 @@ def _process_single_job(
                     # ``emit_event`` is available (i.e. events module is present) and
                     # the cycle number changed.  This allows the Streamlit
                     # Live console to update on each macro cycle without relying on
-                    # the autoârefresh component.
+                    # the autoÃ¢ÂÂrefresh component.
                     try:
                         if emit_event is not None and eff_cur is not None:
                             if prev_eff_cur is None or int(eff_cur) != int(prev_eff_cur):
@@ -6496,7 +6980,7 @@ def _process_single_job(
                         # Use the reported status if provided; otherwise default to 'running_job'.
                         ws_status = status_local if status_local else "running_job"
                         # Normalize to supported refresh statuses used by the Streamlit UI.  The UI only
-                        # autoÃÂÃÂ¢ÃÂÃÂÃÂÃÂrefreshes for a handful of values (running, active, in_progress, working), so
+                        # autoÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂrefreshes for a handful of values (running, active, in_progress, working), so
                         # map our internal 'running_job' status to 'running'.
                         if ws_status == "running_job":
                             ws_status = "running"
@@ -6747,7 +7231,7 @@ def _process_single_job(
                         try:
                             # Derive concurrency hints from the roles list.  Many
                             # run_swarm_continuous implementations default to a
-                            # perâtick cap (commonly 32) unless a higher cap is
+                            # perÃ¢ÂÂtick cap (commonly 32) unless a higher cap is
                             # explicitly passed.  Use the length of roles_list as
                             # the desired cap so that all agents can run each
                             # round.  Unsupported keywords will be ignored via
@@ -6946,7 +7430,7 @@ def _process_single_job(
 
         # For swarm runs, report the actual last progress cycle rather than
         # always forcing completion when progress is less than the macro_total.
-        # The macro_total still reflects the total microâcycle count for the run.
+        # The macro_total still reflects the total microÃ¢ÂÂcycle count for the run.
         if mode == "swarm":
             try:
                 if last_progress_current is not None:
@@ -6967,23 +7451,23 @@ def _process_single_job(
             prompt_details=prompt_details,
         )
 
-        # Collapse microâcycle summaries down to the user requested macro total prior
+        # Collapse microÃ¢ÂÂcycle summaries down to the user requested macro total prior
         # to diagnostics and normalization.  This sampling prevents runs with
         # many internal steps (e.g. 200 micro cycles) from appearing as hundreds
         # of cycles in the UI when the user asked for a handful.  Only collapse
         # when a finite max_cycles/max_rounds is defined.
-        # Collapse cycle summaries for singleâagent runs only. In swarm mode,
-        # we preserve the full microâcycle history so the UI can display
+        # Collapse cycle summaries for singleÃ¢ÂÂagent runs only. In swarm mode,
+        # we preserve the full microÃ¢ÂÂcycle history so the UI can display
         # every step executed by each agent. Previously the worker would
-        # collapse microâcycles down to ``max_rounds`` entries in swarm
+        # collapse microÃ¢ÂÂcycles down to ``max_rounds`` entries in swarm
         # mode, which made the cycle count appear artificially low (e.g. a
-        # 32âagent, 3âround run would display as 3/3 cycles). To retain
+        # 32Ã¢ÂÂagent, 3Ã¢ÂÂround run would display as 3/3 cycles). To retain
         # fidelity, we avoid collapsing summaries when ``mode == "swarm"``.
         try:
             if mode == "single":
                 summaries = _collapse_cycles_for_ui(summaries, max_cycles)
             elif mode == "swarm":
-                # Preserve all microâcycles; no collapsing for swarms
+                # Preserve all microÃ¢ÂÂcycles; no collapsing for swarms
                 summaries = summaries
         except Exception:
             pass
@@ -7006,6 +7490,19 @@ def _process_single_job(
             diagnostics=diag,
             expected_total=final_total,
         )
+
+        # Emit structured discovery/agent_output/verification/rye_update events from the *raw* summaries
+        # so reports can be generated solely from the event stream (and never from templates).
+        try:
+            _emit_structured_events_from_cycles(
+                run_id=run_id,
+                mode=mode,
+                goal=goal,
+                domain=domain,
+                summaries=summaries_raw if isinstance(locals().get("summaries_raw"), list) else summaries,
+            )
+        except Exception:
+            pass
 
         if snapshot_enabled:
             _safe_write_snapshot(
@@ -8489,7 +8986,7 @@ def run_swarm_engine(agent: CoreAgent, config: Dict[str, Any]) -> None:
                 summaries_all: List[Dict[str, Any]] = []
 
                 if not repeat_shifts or shift_minutes is None or shift_minutes <= 0:
-                    # Pass perâtick concurrency hints when running swarms so
+                    # Pass perÃ¢ÂÂtick concurrency hints when running swarms so
                     # that all agents are scheduled each round.  Without this,
                     # implementations with a default cap (e.g. 32 agents) will
                     # drop agents when the swarm is larger.  Compute the cap
