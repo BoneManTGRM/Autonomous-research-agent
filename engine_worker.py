@@ -219,12 +219,6 @@ def _intish(value: Any) -> Optional[int]:
                 return int(s)
             # If it's numeric with decimal, cast via float
             try:
-                cfg = job.config if isinstance(job.config, dict) else {}
-                cfg_cycles = int(cfg.get("cycles") or cfg.get("num_cycles") or 1)
-                cfg_mode = str(cfg.get("mode") or cfg.get("engine_mode") or "single")
-                cfg_swarm = int(cfg.get("swarm_size") or cfg.get("agents") or cfg.get("agent_count") or 1)
-                total_cycles = cfg_swarm * cfg_cycles if cfg_mode.lower() == "swarm" else cfg_cycles
-                phase_total = cfg_cycles
                 return int(float(s))
             except Exception:
                 return None
@@ -2741,8 +2735,8 @@ def _write_cycles_and_run_state(
             goal=goal,
             domain=domain,
             mode=mode,
-            phase_total=phase_total,
-            phase_index=0,
+            phase_total=1,
+            phase_index=1,
             phase_name="run",
             extra={"diagnostics": diag_local, "summary": summary_text} if isinstance(diag_local, dict) else None,
             force=True,
@@ -6183,6 +6177,50 @@ def _process_single_job(
             fingerprint=experiment_fingerprint,
         )
 
+        # Force-reset run_state.json at job start so the top bar counter never inherits the previous run.
+        try:
+            _emit_run_progress_file(
+                run_id=run_id,
+                status="running",
+                note="Job started",
+                current=0,
+                total=macro_total,
+                goal=goal,
+                domain=domain,
+                mode=mode,
+                phase_total=None,
+                phase_index=None,
+                phase_name="run",
+                extra={"job_config": cfg},
+                force=True,
+            )
+        except Exception:
+            pass
+
+
+        # Force worker_state.json to reset the top-bar cycle counter immediately.
+        # Without this, the worker_state write can be throttled and the UI may briefly
+        # inherit the previous run's max/max counter.
+        try:
+            _emit_worker_state_file(
+                status="running_job",
+                mode=mode,
+                goal=goal,
+                domain=domain,
+                roles=roles_list if mode == "swarm" else [role],
+                runtime_profile=runtime_profile,
+                stop_rye=stop_rye,
+                max_minutes=max_minutes,
+                run_id=run_id,
+                experiment_mode="queue_worker",
+                current=0,
+                total=macro_total,
+                extra={"note": "Job started"},
+                force=True,
+            )
+        except Exception:
+            pass
+
         _update_worker_state(
             agent,
             status="running_job",
@@ -7457,7 +7495,7 @@ def run_job_queue_worker() -> None:
             run_id=None,
             experiment_mode="queue_worker",
             current=None,
-            total=total_cycles,
+            total=None,
             extra={"queue": {"counts": queue.scan_counts()}},
             force=True,
         )
@@ -7620,53 +7658,19 @@ def run_job_queue_worker() -> None:
                 claim_token=job.claim_token,
             )
 
-
-            # Emit worker_state with a fresh 0/total so the sticky counter bar resets per job.
-            try:
-                cfg = job.config if isinstance(job.config, dict) else {}
-                cfg_cycles = int(cfg.get("cycles") or cfg.get("num_cycles") or 1)
-                cfg_mode = str(cfg.get("mode") or cfg.get("engine_mode") or "single")
-                cfg_swarm = int(cfg.get("swarm_size") or cfg.get("agents") or cfg.get("agent_count") or 1)
-                total_cycles = cfg_swarm * cfg_cycles if cfg_mode.lower() == "swarm" else cfg_cycles
-                _emit_worker_state_file(
-                    status="running",
-                    mode="queue",
-                    goal=str(cfg.get("goal") or default_goal),
-                    domain=str(cfg.get("domain") or default_domain),
-                    roles=None,
-                    runtime_profile=None,
-                    stop_rye=None,
-                    max_minutes=None,
-                    run_id=job.run_id,
-                    experiment_mode="queue_worker",
-                    current=0,
-                    total=total_cycles,
-                    extra={"queue": {"counts": counts}},
-                    force=True,
-                )
-            except Exception:
-                pass
-
             # Streamlit artifacts: show active run claimed (pre-exec)
             try:
-                cfg = job.config if isinstance(job.config, dict) else {}
-                cfg_cycles = int(cfg.get("cycles") or cfg.get("num_cycles") or 1)
-                cfg_mode = str(cfg.get("mode") or cfg.get("engine_mode") or "single")
-                cfg_swarm = int(cfg.get("swarm_size") or cfg.get("agents") or cfg.get("agent_count") or 1)
-                total_cycles = cfg_swarm * cfg_cycles if cfg_mode.lower() == "swarm" else cfg_cycles
-                phase_total = cfg_cycles
-
                 _emit_run_progress_file(
                     run_id=job.run_id,
                     status="claimed",
                     note="Job claimed by worker",
                     current=0,
-                    total=total_cycles,
+                    total=None,
                     goal=str(job.config.get("goal") or default_goal),
                     domain=str(job.config.get("domain") or default_domain),
                     mode=str(job.config.get("mode") or job.config.get("engine_mode") or "single"),
-                    phase_total=phase_total,
-                    phase_index=0,
+                    phase_total=1,
+                    phase_index=1,
                     phase_name="run",
                     extra={"retry_count": job.retry_count, "max_retries": job.max_retries},
                     force=True,
