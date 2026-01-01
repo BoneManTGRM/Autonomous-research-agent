@@ -47,9 +47,9 @@ Streamlit integration (runs_root/logs/*.json):
         <runs_root>/logs/watchdog_heartbeat.json
         <runs_root>/logs/run_state.json
         <runs_root>/logs/<run_id>_progress.json
-    - Live event stream (JSONL, per run; tail-friendly):
-        <runs_root>/<run_id>/events.jsonl
-
+    - Narrative timeline (best-effort, optional):
+        <runs_root>/logs/event_log.json
+        <runs_root>/logs/<run_id>_event_log.json
 
 You can start it with commands like:
     WORKER_GOAL="Long run test on reparodynamics" \
@@ -219,6 +219,12 @@ def _intish(value: Any) -> Optional[int]:
                 return int(s)
             # If it's numeric with decimal, cast via float
             try:
+                cfg = job.config if isinstance(job.config, dict) else {}
+                cfg_cycles = int(cfg.get("cycles") or cfg.get("num_cycles") or 1)
+                cfg_mode = str(cfg.get("mode") or cfg.get("engine_mode") or "single")
+                cfg_swarm = int(cfg.get("swarm_size") or cfg.get("agents") or cfg.get("agent_count") or 1)
+                total_cycles = cfg_swarm * cfg_cycles if cfg_mode.lower() == "swarm" else cfg_cycles
+                phase_total = cfg_cycles
                 return int(float(s))
             except Exception:
                 return None
@@ -945,11 +951,18 @@ def _to_jsonable(
 
 
 # ---------------------------------------------------------------------------
-# Narrative event timeline (events.jsonl) integration (best-effort)
+# Narrative event timeline (agent/event_log.py) integration (best-effort)
 # ---------------------------------------------------------------------------
 
-# Controls whether narrative events are emitted.  Kept compatible with older
-# deployments that already set WORKER_EVENT_LOG.
+try:  # pragma: no cover
+    from agent.event_log import log_event as _event_log_write  # type: ignore[import]
+except Exception:  # pragma: no cover
+    # Some deployments place event_log.py at repo root rather than in agent/.
+    try:
+        from event_log import log_event as _event_log_write  # type: ignore[import]
+    except Exception:  # pragma: no cover
+        _event_log_write = None  # type: ignore[assignment]
+
 _EVENT_LOG_ENABLED: bool = _env_bool("WORKER_EVENT_LOG", default=True)
 
 _EVENT_LOG_THROTTLE = _LogThrottle(
@@ -976,18 +989,10 @@ def _event(
     force: bool = False,
 ) -> None:
     """
-    Best-effort narrative event write to <runs_root>/<run_id>/events.jsonl.
+    Best-effort narrative event write to runs/logs/event_log.json and <run_id>_event_log.json.
     Never raises; safe to call anywhere in the worker.
-
-    Notes:
-    - Uses events.emit_event when available.
-    - Throttling is applied only when throttle_key is provided.
     """
-    if not _EVENT_LOG_ENABLED or emit_event is None:
-        return
-
-    # Run-scoped log requires a run_id.
-    if not run_id:
+    if not _EVENT_LOG_ENABLED or _event_log_write is None:
         return
 
     try:
@@ -1004,47 +1009,22 @@ def _event(
         if not isinstance(payload, dict):
             payload = {}
 
-        # Derive the run directory where events.jsonl should live.
-        try:
-            if 'RUNS_LOGS_DIR' in globals() and RUNS_LOGS_DIR is not None:
-                run_dir_for_events = RUNS_LOGS_DIR.parent / str(run_id)
-            else:
-                run_dir_for_events = Path(BASE_DIR) / str(run_id)
-        except Exception:
-            run_dir_for_events = Path(str(run_id))
-
-        # Merge caller-provided payload with legacy structured fields so the UI can
-        # render rich timelines without depending on agent/event_log.py.
-        extra_payload: Dict[str, Any] = dict(payload)
-        extra_payload["kind"] = kind
-        extra_payload["run_id"] = run_id
-        if role is not None:
-            extra_payload["role"] = role
-        if phase_index is not None:
-            extra_payload["phase_index"] = phase_index
-        if phase_total is not None:
-            extra_payload["phase_total"] = phase_total
-        if phase_name is not None:
-            extra_payload["phase_name"] = phase_name
-        if cycle is not None:
-            extra_payload["cycle"] = cycle
-
-        eff_domain = (
-            str(domain).strip()
-            if isinstance(domain, str) and str(domain).strip()
-            else (str(kind).strip() if isinstance(kind, str) and str(kind).strip() else "general")
-        )
-
-        emit_event(
-            run_dir_for_events,
-            level=str(level or "info"),
-            domain=eff_domain,
-            msg=str(message),
-            extra=extra_payload,
+        _event_log_write(
+            run_id=run_id,
+            kind=kind,
+            message=message,
+            level=level,
+            data=payload,
+            role=role,
+            domain=domain,
+            phase_index=phase_index,
+            phase_total=phase_total,
+            phase_name=phase_name,
+            cycle=cycle,
+            logs_dir=RUNS_LOGS_DIR,  # keep worker + UI aligned
         )
     except Exception:
         return
-
 
 
 def _disk_write_json(
@@ -2761,8 +2741,8 @@ def _write_cycles_and_run_state(
             goal=goal,
             domain=domain,
             mode=mode,
-            phase_total=1,
-            phase_index=1,
+            phase_total=phase_total,
+            phase_index=0,
             phase_name="run",
             extra={"diagnostics": diag_local, "summary": summary_text} if isinstance(diag_local, dict) else None,
             force=True,
@@ -7477,7 +7457,7 @@ def run_job_queue_worker() -> None:
             run_id=None,
             experiment_mode="queue_worker",
             current=None,
-            total=None,
+            total=total_cycles,
             extra={"queue": {"counts": queue.scan_counts()}},
             force=True,
         )
@@ -7640,19 +7620,53 @@ def run_job_queue_worker() -> None:
                 claim_token=job.claim_token,
             )
 
+
+            # Emit worker_state with a fresh 0/total so the sticky counter bar resets per job.
+            try:
+                cfg = job.config if isinstance(job.config, dict) else {}
+                cfg_cycles = int(cfg.get("cycles") or cfg.get("num_cycles") or 1)
+                cfg_mode = str(cfg.get("mode") or cfg.get("engine_mode") or "single")
+                cfg_swarm = int(cfg.get("swarm_size") or cfg.get("agents") or cfg.get("agent_count") or 1)
+                total_cycles = cfg_swarm * cfg_cycles if cfg_mode.lower() == "swarm" else cfg_cycles
+                _emit_worker_state_file(
+                    status="running",
+                    mode="queue",
+                    goal=str(cfg.get("goal") or default_goal),
+                    domain=str(cfg.get("domain") or default_domain),
+                    roles=None,
+                    runtime_profile=None,
+                    stop_rye=None,
+                    max_minutes=None,
+                    run_id=job.run_id,
+                    experiment_mode="queue_worker",
+                    current=0,
+                    total=total_cycles,
+                    extra={"queue": {"counts": counts}},
+                    force=True,
+                )
+            except Exception:
+                pass
+
             # Streamlit artifacts: show active run claimed (pre-exec)
             try:
+                cfg = job.config if isinstance(job.config, dict) else {}
+                cfg_cycles = int(cfg.get("cycles") or cfg.get("num_cycles") or 1)
+                cfg_mode = str(cfg.get("mode") or cfg.get("engine_mode") or "single")
+                cfg_swarm = int(cfg.get("swarm_size") or cfg.get("agents") or cfg.get("agent_count") or 1)
+                total_cycles = cfg_swarm * cfg_cycles if cfg_mode.lower() == "swarm" else cfg_cycles
+                phase_total = cfg_cycles
+
                 _emit_run_progress_file(
                     run_id=job.run_id,
                     status="claimed",
                     note="Job claimed by worker",
                     current=0,
-                    total=None,
+                    total=total_cycles,
                     goal=str(job.config.get("goal") or default_goal),
                     domain=str(job.config.get("domain") or default_domain),
                     mode=str(job.config.get("mode") or job.config.get("engine_mode") or "single"),
-                    phase_total=1,
-                    phase_index=1,
+                    phase_total=phase_total,
+                    phase_index=0,
                     phase_name="run",
                     extra={"retry_count": job.retry_count, "max_retries": job.max_retries},
                     force=True,
