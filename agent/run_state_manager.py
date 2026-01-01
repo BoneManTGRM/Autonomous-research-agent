@@ -142,6 +142,32 @@ class RunState:
     # ------------------------------------------------------------------
     # Serialization helpers
     # ------------------------------------------------------------------
+    
+    @classmethod
+    def new_running(
+        cls,
+        run_id: Optional[str] = None,
+        total_cycles: int = 0,
+        goal: str = "",
+        domain: str = "",
+        mode: str = "",
+    ) -> "RunState":
+        """Create a run state already reset to 0 and marked running.
+
+        This is useful when a worker claims a new job and needs the UI counters
+        to restart from 0 for the new run.
+        """
+        st = cls.new(run_id=run_id, total_cycles=total_cycles, goal=goal)
+        st.status = "running"
+        st.domain = domain
+        st.mode = mode
+        st.phase_index = 0
+        st.current = 0
+        st.current_cycle = 0
+        st.total = int(total_cycles)
+        st.total_cycles = int(total_cycles)
+        return st
+
     @classmethod
     def load(cls, path: Path) -> "RunState":
         """Load a RunState from a JSON file.
