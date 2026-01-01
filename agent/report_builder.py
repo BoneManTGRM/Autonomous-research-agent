@@ -1,287 +1,620 @@
 """
-Advanced Report Builder for the Autonomous Research Agent (Option C Edition)
+report_builder.py
+================
 
-This combines:
-- Full run diagnostics (RYE Level 3, Stability, Momentum, Trends)
-- Option C signatures (equilibrium, harmonic index, volatility)
-- Breakthrough estimators (24h, 7d, 90d)
-- Swarm role summaries
-- Intelligence profile summary
-- Biomarker snapshots (if enabled)
-- PDF-ready structured fields
-- Markdown builder for Streamlit + headless use
+Build a run report *from the structured event stream*, not from templates.
 
-This replaces nothing.
-It is a new module that supercharges your existing report_generator.
+Key behaviour:
+  * Reads the per-run JSONL stream: runs_root/<run_id>/events.jsonl
+  * Falls back to legacy JSON-array logs when JSONL is unavailable
+  * Ranks cycles by RYE signals (delta_R, E, RYE)
+  * Produces a narrative Markdown report with citations and **full agent outputs**
+    (no truncation of the output text)
+
+The entrypoint is `build_agent_report(...)` which keeps backwards compatibility
+with earlier callers that pass (goal, domain, diagnostics, history).
 """
 
 from __future__ import annotations
 
 import json
+import os
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-
-from .rye_metrics import (
-    build_run_diagnostics,
-    rye_volatility_signature,
-    detect_rye_equilibrium,
-    tgrm_harmonic_index,
-    estimate_breakthrough_probability,
-    breakthrough_likelihood_90d,
-    autonomy_safety_envelope,
-    early_failure_warning_score,
-    classify_run_tier,
-    build_option_c_signature,
-)
-
-from .memory_store import MemoryStore
+from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Tuple, Union
 
 
-# -------------------------------------------------------------
-# Helpers
-# -------------------------------------------------------------
-
-def _iso_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+JsonObj = Dict[str, Any]
 
 
-def _json(obj: Any) -> str:
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
+
+
+def _resolve_runs_root() -> Path:
+    for k in ("ARA_RUNS_DIR", "ARA_RUNS_ROOT", "RUNS_DIR"):
+        v = os.getenv(k)
+        if v:
+            try:
+                return Path(v).expanduser().resolve()
+            except Exception:
+                pass
+
+    # Optional: align with run_jobs if available
     try:
-        return json.dumps(obj, indent=2, ensure_ascii=False)
-    except Exception:
-        return str(obj)
-
-
-def _md_section(title: str, body: str) -> str:
-    return f"## {title}\n\n{body}\n\n---\n\n"
-
-
-def _safe_get_cycle_history(memory_store: MemoryStore) -> List[Dict[str, Any]]:
-    """Defensive wrapper for MemoryStore.get_cycle_history."""
-    try:
-        hist = memory_store.get_cycle_history()
-        if isinstance(hist, list):
-            return hist
+        from .run_jobs import BASE_DIR as _BASE_DIR  # type: ignore
+        if isinstance(_BASE_DIR, Path):
+            return _BASE_DIR
+        if isinstance(_BASE_DIR, str) and _BASE_DIR.strip():
+            return Path(_BASE_DIR).expanduser().resolve()
     except Exception:
         pass
+
+    try:
+        here = Path(__file__).resolve()
+        return (here.parent.parent / "runs").resolve()
+    except Exception:
+        return Path("./runs").resolve()
+
+
+def _read_json(path: Path) -> Any:
+    with path.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _read_jsonl(path: Path) -> List[JsonObj]:
+    out: List[JsonObj] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+                if isinstance(obj, dict):
+                    out.append(obj)
+            except Exception:
+                continue
+    return out
+
+
+def _safe_str(x: Any) -> str:
+    try:
+        return str(x)
+    except Exception:
+        return ""
+
+
+def _source_key(src: Any) -> str:
+    if isinstance(src, dict):
+        return _safe_str(src.get("url") or src.get("id") or src.get("title") or json.dumps(src, sort_keys=True, ensure_ascii=False))
+    return _safe_str(src)
+
+
+def _format_source(src: Any) -> str:
+    if isinstance(src, dict):
+        title = _safe_str(src.get("title") or src.get("name") or src.get("source") or src.get("url") or "")
+        url = _safe_str(src.get("url") or "")
+        if url and title and title != url:
+            return f"{title} â {url}"
+        return title or url or _safe_str(src)
+    return _safe_str(src)
+
+
+def _load_events_for_run(run_id: str, *, runs_root: Optional[Path] = None) -> List[JsonObj]:
+    """Load events for a run from the best available location."""
+    rid = _safe_str(run_id).strip()
+    if not rid:
+        return []
+    root = runs_root if isinstance(runs_root, Path) else _resolve_runs_root()
+    logs = root / "logs"
+
+    candidates: List[Path] = [
+        root / rid / "events.jsonl",                 # primary (per-run JSONL)
+        logs / "events_global.jsonl",                # global mirror JSONL
+        logs / f"{rid}_event_log.json",              # legacy per-run JSON array
+        logs / f"{rid}_events.json",                 # another legacy naming
+        logs / "event_log.json",                     # legacy global
+        logs / "events.json",                        # legacy global alt
+    ]
+
+    events: List[JsonObj] = []
+    for p in candidates:
+        if not p.exists():
+            continue
+        try:
+            if p.suffix.lower() == ".jsonl":
+                loaded = _read_jsonl(p)
+            else:
+                loaded = _read_json(p)
+            if isinstance(loaded, list):
+                events.extend([e for e in loaded if isinstance(e, dict)])
+            elif isinstance(loaded, dict):
+                # common wrappers
+                if isinstance(loaded.get("events"), list):
+                    events.extend([e for e in loaded.get("events") if isinstance(e, dict)])
+        except Exception:
+            continue
+
+        # If we loaded from the primary per-run file, we can stop early.
+        if p == (root / rid / "events.jsonl") and events:
+            break
+
+    # Filter to run_id (important when reading from global mirrors)
+    filtered: List[JsonObj] = []
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        if _safe_str(e.get("run_id") or "").strip() == rid:
+            filtered.append(e)
+
+    # Sort by timestamp if available
+    def _ts_key(ev: JsonObj) -> str:
+        return _safe_str(ev.get("timestamp") or ev.get("time") or "")
+
+    filtered.sort(key=_ts_key)
+    return filtered
+
+
+def _extract_text_from_event(ev: JsonObj) -> str:
+    data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+    for k in ("text", "output", "content", "message"):
+        v = data.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    # Some writers store the text at top-level
+    for k in ("message", "msg", "text"):
+        v = ev.get(k)
+        if isinstance(v, str) and v.strip():
+            return v
+    return ""
+
+
+def _extract_sources_from_event(ev: JsonObj) -> List[Any]:
+    data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+    sources = data.get("sources")
+    if isinstance(sources, list):
+        return sources
+    citations = data.get("citations")
+    if isinstance(citations, list):
+        return citations
+    # top-level fallbacks
+    if isinstance(ev.get("sources"), list):
+        return ev.get("sources")  # type: ignore[return-value]
+    if isinstance(ev.get("citations"), list):
+        return ev.get("citations")  # type: ignore[return-value]
     return []
 
 
-def _safe_get_tool_stats(memory_store: MemoryStore) -> Dict[str, Any]:
-    """Defensive wrapper for MemoryStore.get_tool_stats."""
+def _cycle_int(ev: JsonObj) -> Optional[int]:
+    c = ev.get("cycle")
     try:
-        if hasattr(memory_store, "get_tool_stats"):
-            stats = memory_store.get_tool_stats()  # type: ignore[attr-defined]
-            if isinstance(stats, dict):
-                return stats
+        return None if c is None else int(c)
     except Exception:
-        pass
-    return {}
+        return None
 
 
-# -------------------------------------------------------------
-# MAIN REPORT BUILDER
-# -------------------------------------------------------------
+def _float_or_none(x: Any) -> Optional[float]:
+    try:
+        if x is None:
+            return None
+        return float(x)
+    except Exception:
+        return None
+
+
+def _compute_cycle_metrics(events: List[JsonObj]) -> Dict[int, Dict[str, Any]]:
+    """Aggregate delta_R, E, RYE per cycle from rye_update events."""
+    metrics: Dict[int, Dict[str, Any]] = {}
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+        if str(ev.get("kind") or "") != "rye_update":
+            continue
+        c = _cycle_int(ev)
+        if c is None:
+            continue
+        data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+        dr = _float_or_none(data.get("delta_R") or data.get("deltaR") or data.get("delta_r"))
+        en = _float_or_none(data.get("E") or data.get("energy"))
+        ry = _float_or_none(data.get("RYE") or data.get("rye") or data.get("rye_value"))
+
+        m = metrics.setdefault(c, {"delta_R_sum": 0.0, "E_sum": 0.0, "RYE_values": []})
+        if dr is not None:
+            m["delta_R_sum"] += dr
+        if en is not None:
+            m["E_sum"] += en
+        if ry is not None:
+            m["RYE_values"].append(ry)
+
+    for c, m in metrics.items():
+        vals = m.get("RYE_values") or []
+        if isinstance(vals, list) and vals:
+            try:
+                m["RYE_avg"] = sum(vals) / float(len(vals))
+                m["RYE_max"] = max(vals)
+            except Exception:
+                m["RYE_avg"] = None
+                m["RYE_max"] = None
+        else:
+            m["RYE_avg"] = None
+            m["RYE_max"] = None
+    return metrics
+
+
+def _rank_cycles(cycle_metrics: Dict[int, Dict[str, Any]]) -> List[int]:
+    """Return cycles ranked by RYE signals (desc)."""
+    def key(c: int) -> Tuple[float, float, float]:
+        m = cycle_metrics.get(c, {})
+        rye = m.get("RYE_avg")
+        dr = m.get("delta_R_sum")
+        en = m.get("E_sum")
+        rye_f = float(rye) if isinstance(rye, (int, float)) else float("-inf")
+        dr_f = float(dr) if isinstance(dr, (int, float)) else 0.0
+        en_f = float(en) if isinstance(en, (int, float)) else 0.0
+        return (rye_f, dr_f, en_f)
+
+    return sorted(cycle_metrics.keys(), key=key, reverse=True)
+
+
+def _collect_source_index(events: List[JsonObj]) -> Dict[str, int]:
+    """Assign stable 1-based indices for unique sources across the run."""
+    seen: Dict[str, int] = {}
+    for ev in events:
+        for src in _extract_sources_from_event(ev):
+            k = _source_key(src)
+            if not k:
+                continue
+            if k not in seen:
+                seen[k] = len(seen) + 1
+    return seen
+
+
+def _format_source_refs(ev: JsonObj, source_index: Dict[str, int]) -> str:
+    idxs: List[int] = []
+    for src in _extract_sources_from_event(ev):
+        k = _source_key(src)
+        if not k or k not in source_index:
+            continue
+        idxs.append(source_index[k])
+    if not idxs:
+        return ""
+    idxs = sorted(set(idxs))
+    return " [" + ", ".join(str(i) for i in idxs) + "]"
+
 
 def build_agent_report(
+    goal: str,
+    domain: str,
+    diagnostics: Optional[Dict[str, Any]],
+    history: Optional[List[Dict[str, Any]]],
     *,
-    memory_store: MemoryStore,
-    goal: Optional[str] = None,
-    domain: Optional[str] = None,
-    hours_run_so_far: Optional[float] = None,
-    swarm_stats: Optional[Dict[str, Any]] = None,
-    intelligence_profile: Optional[Dict[str, Any]] = None,
-    biomarker_snapshot: Optional[Dict[str, Any]] = None,
+    run_id: Optional[str] = None,
+    runs_root: Optional[Path] = None,
+    top_cycles: int = 5,
 ) -> str:
+    """Build a narrative Markdown report for a run.
+
+    Parameters
+    ----------
+    goal/domain/diagnostics/history:
+        Kept for backwards compatibility with older callers.
+    run_id:
+        If provided, uses the event stream for that run_id. If not provided, we will
+        attempt to infer it from diagnostics or history entries.
+    top_cycles:
+        Number of cycles to highlight (ranked by RYE signals). The appendix includes
+        full agent outputs for *all* cycles present in the event stream.
+
+    Returns
+    -------
+    Markdown string.
     """
-    Generates a full Option C scientific report:
+    rid = _safe_str(run_id or (diagnostics or {}).get("run_id") or "").strip()
+    if not rid and history:
+        for h in history:
+            if isinstance(h, dict) and _safe_str(h.get("run_id") or "").strip():
+                rid = _safe_str(h.get("run_id")).strip()
+                break
 
-    - Cycle history summary
-    - RYE diagnostics bundle
-    - Stability and trend analysis
-    - Option C composite signature
-    - Breakthrough estimators
-    - Run tier classification
-    - Tool stats (from MemoryStore)
-    - Swarm mode summary
-    - Intelligence profile summary
-    - Biomarkers (anti-aging mode)
-    """
+    events: List[JsonObj] = _load_events_for_run(rid, runs_root=runs_root) if rid else []
 
-    # History and tool stats with defensive wrappers
-    history = _safe_get_cycle_history(memory_store)
-    tool_stats = _safe_get_tool_stats(memory_store)
+    # If we cannot load events, fall back to the old history-based dump.
+    if not events:
+        # Very small, deterministic fallback to avoid empty reports.
+        lines: List[str] = []
+        lines.append(f"# Run Report")
+        if rid:
+            lines.append(f"- run_id: `{rid}`")
+        lines.append(f"- generated_at: `{_utc_iso()}`")
+        lines.append(f"- domain: `{domain}`")
+        lines.append("")
+        lines.append("## Goal")
+        lines.append(goal or "")
+        lines.append("")
+        lines.append("## Diagnostics")
+        lines.append("```json")
+        try:
+            lines.append(json.dumps(diagnostics or {}, ensure_ascii=False, indent=2))
+        except Exception:
+            lines.append("{}")
+        lines.append("```")
+        lines.append("")
+        lines.append("## Cycle history (fallback)")
+        if history:
+            for i, h in enumerate(history[-20:]):
+                lines.append(f"### Cycle {i}")
+                try:
+                    lines.append("```json")
+                    lines.append(json.dumps(h, ensure_ascii=False, indent=2))
+                    lines.append("```")
+                except Exception:
+                    lines.append(str(h))
+        return "\n".join(lines)
 
-    # Core metrics with best effort guards
-    try:
-        diag_raw = build_run_diagnostics(history, domain=domain)
-        diag: Dict[str, Any] = diag_raw if isinstance(diag_raw, dict) else {}
-    except Exception:
-        diag = {}
+    # Organize events
+    agent_outputs = [e for e in events if str(e.get("kind") or "") == "agent_output"]
+    funnel_stages = [e for e in events if (e.get("kind") or "").lower() == "funnel_stage"]
+    discoveries = [e for e in events if str(e.get("kind") or "") == "discovery"]
+    hypotheses = [e for e in events if str(e.get("kind") or "") == "candidate_hypothesis"]
+    verifications = [e for e in events if str(e.get("kind") or "") == "verification"]
+    rye_events = [e for e in events if str(e.get("kind") or "") == "rye_update"]
 
-    try:
-        vol = rye_volatility_signature(history)
-    except Exception:
-        vol = {}
+    cycle_metrics = _compute_cycle_metrics(events)
+    ranked_cycles = _rank_cycles(cycle_metrics)
+    highlight_cycles = ranked_cycles[: max(1, int(top_cycles))] if ranked_cycles else []
 
-    try:
-        eq = detect_rye_equilibrium(history)
-    except Exception:
-        eq = {}
+    # Sources index (global, stable)
+    source_index = _collect_source_index(events)
 
-    try:
-        harm = tgrm_harmonic_index(history)
-    except Exception:
-        harm = None
+    # Group by cycle for narrative sections
+    by_cycle_outputs: DefaultDict[int, List[JsonObj]] = defaultdict(list)
+    by_cycle_discoveries: DefaultDict[int, List[JsonObj]] = defaultdict(list)
+    by_cycle_hyp: DefaultDict[int, List[JsonObj]] = defaultdict(list)
+    by_cycle_ver: DefaultDict[int, List[JsonObj]] = defaultdict(list)
+    by_cycle_funnel: DefaultDict[int, List[JsonObj]] = defaultdict(list)
 
-    try:
-        bp_raw = estimate_breakthrough_probability(diag, domain=domain, horizon_hours=None)
-        bp: Dict[str, Any] = bp_raw if isinstance(bp_raw, dict) else {}
-    except Exception:
-        bp = {}
+    def _cycle_bucket(ev: JsonObj) -> int:
+        c = _cycle_int(ev)
+        return int(c) if c is not None else -1
 
-    try:
-        bp90_raw = breakthrough_likelihood_90d(
-            diag,
-            domain=domain,
-            hours_run_so_far=hours_run_so_far,
-        )
-        bp90: Dict[str, Any] = bp90_raw if isinstance(bp90_raw, dict) else {}
-    except Exception:
-        bp90 = {}
+    for ev in agent_outputs:
+        by_cycle_outputs[_cycle_bucket(ev)].append(ev)
+    for ev in discoveries:
+        by_cycle_discoveries[_cycle_bucket(ev)].append(ev)
+    for ev in hypotheses:
+        by_cycle_hyp[_cycle_bucket(ev)].append(ev)
+    for ev in verifications:
+        by_cycle_ver[_cycle_bucket(ev)].append(ev)
+    for ev in funnel_stages:
+        by_cycle_funnel[_cycle_bucket(ev)].append(ev)
 
-    try:
-        env = autonomy_safety_envelope(diag)
-    except Exception:
-        env = {}
+    # Build report
+    out: List[str] = []
+    out.append(f"# Run Report")
+    out.append(f"- run_id: `{rid}`")
+    out.append(f"- generated_at: `{_utc_iso()}`")
+    out.append(f"- domain: `{domain}`")
+    out.append(f"- total_events: `{len(events)}`")
+    out.append(f"- total_agent_outputs: `{len(agent_outputs)}`")
+    out.append(f"- total_discoveries: `{len(discoveries)}`")
+    out.append(f"- total_candidate_hypotheses: `{len(hypotheses)}`")
+    out.append(f"- total_verifications: `{len(verifications)}`")
+    out.append("")
 
-    try:
-        fail = early_failure_warning_score(diag)
-    except Exception:
-        fail = {}
+    out.append("## Goal")
+    out.append(goal or "")
+    out.append("")
 
-    # Safe breakthrough probability extraction for tier classification
-    bp_prob_raw = bp.get("probability") if isinstance(bp, dict) else None
-    try:
-        bp_prob = float(bp_prob_raw) if bp_prob_raw is not None else 0.0
-    except Exception:
-        bp_prob = 0.0
+    # Executive summary driven by discoveries/hypotheses/verifications
+    out.append("## Executive summary")
+    if discoveries:
+        out.append(f"- **Discoveries logged:** {len(discoveries)}")
+    if hypotheses:
+        out.append(f"- **Candidate hypotheses logged:** {len(hypotheses)}")
+    if verifications:
+        passed = 0
+        total = 0
+        for v in verifications:
+            data = v.get("data") if isinstance(v.get("data"), dict) else {}
+            if data.get("passed") is True:
+                passed += 1
+            if data.get("passed") is not None:
+                total += 1
+        if total:
+            out.append(f"- **Verifications:** {passed}/{total} marked as passed")
+        else:
+            out.append(f"- **Verifications logged:** {len(verifications)}")
+    if cycle_metrics:
+        out.append(f"- **Cycles with RYE updates:** {len(cycle_metrics)}")
+    out.append("")
 
-    try:
-        tier_raw = classify_run_tier(diag, breakthrough_prob=bp_prob)
-        tier: Dict[str, Any] = tier_raw if isinstance(tier_raw, dict) else {}
-    except Exception:
-        tier = {}
-
-    try:
-        option_c_signature = build_option_c_signature(
-            history,
-            domain=domain,
-            hours_run_so_far=hours_run_so_far,
-        )
-    except Exception:
-        option_c_signature = {}
-
-    # Lightweight learning speed summary for quick inspection
-    learning_speed_summary: Dict[str, Any] = {
-        "trend_slope": diag.get("trend_slope") if isinstance(diag, dict) else None,
-        "recovery_momentum": diag.get("recovery_momentum") if isinstance(diag, dict) else None,
-        "stability_index": diag.get("stability_index") if isinstance(diag, dict) else None,
-        "breakthrough_probability": bp.get("probability") if isinstance(bp, dict) else None,
-        "breakthrough_likelihood_90d": bp90.get("probability") if isinstance(bp90, dict) else None,
-        "run_tier": tier.get("tier") if isinstance(tier, dict) else None,
-    }
-
-    # Last 20 cycles condensed view
-    if isinstance(history, list) and history:
-        condensed_history = history[-20:]
+    # RYE highlight table
+    out.append("## RYE highlights")
+    if not cycle_metrics:
+        out.append("_No rye_update events were found._")
     else:
-        condensed_history = []
+        out.append("| Cycle | RYE_avg | ÎR_sum | E_sum |")
+        out.append("|---:|---:|---:|---:|")
+        for c in (highlight_cycles or ranked_cycles):
+            m = cycle_metrics.get(c, {})
+            out.append(
+                f"| {c} | {m.get('RYE_avg') if m.get('RYE_avg') is not None else ''} | {m.get('delta_R_sum', '')} | {m.get('E_sum', '')} |"
+            )
+    out.append("")
 
-    # -------------------------------------------------------
-    # Build Markdown
-    # -------------------------------------------------------
+    # Key discoveries
+    out.append("## Key discoveries")
+    if not discoveries:
+        out.append("_No discoveries were logged in the event stream._")
+    else:
+        # Show up to 15 most recent discoveries with citations
+        for ev in discoveries[-15:]:
+            data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+            title = data.get("title") or data.get("name") or ev.get("message") or "discovery"
+            desc = data.get("description") or data.get("details") or data.get("text") or ""
+            role = ev.get("role") or data.get("role") or "agent"
+            cycle = _cycle_int(ev)
+            cite = _format_source_refs(ev, source_index)
+            out.append(f"- **{title}** (cycle {cycle}, role {role}){cite}")
+            if desc:
+                out.append(f"  - {desc}")
+    out.append("")
 
-    lines: List[str] = []
+    # Hypotheses and verifications
+    out.append("## Hypotheses and verification")
+    if not hypotheses and not verifications:
+        out.append("_No hypotheses or verification events were logged._")
+    else:
+        if hypotheses:
+            out.append("### Candidate hypotheses")
+            for ev in hypotheses[-15:]:
+                data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+                text = data.get("text") or data.get("hypothesis") or _extract_text_from_event(ev)
+                role = ev.get("role") or "agent"
+                cycle = _cycle_int(ev)
+                cite = _format_source_refs(ev, source_index)
+                if text:
+                    out.append(f"- (cycle {cycle}, role {role}){cite}")
+                    out.append(f"  - {text}")
+        if verifications:
+            out.append("")
+            out.append("### Verification results")
+            for ev in verifications[-20:]:
+                data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+                passed = data.get("passed")
+                rationale = data.get("rationale") or data.get("reason") or data.get("notes") or ""
+                role = ev.get("role") or "agent"
+                cycle = _cycle_int(ev)
+                cite = _format_source_refs(ev, source_index)
+                out.append(f"- (cycle {cycle}, role {role}){cite} â **passed={passed}**")
+                if rationale:
+                    out.append(f"  - {rationale}")
+    out.append("")
 
-    # Header
-    lines.append("# Autonomous Research Agent - Full Option C Report")
-    lines.append(f"**Timestamp:** { _iso_now() }")
-    if goal:
-        lines.append(f"**Goal:** {goal}")
-    if domain:
-        lines.append(f"**Domain:** `{domain}`")
-    lines.append("")
-    lines.append("---\n")
+    # Cycle-by-cycle narrative for top cycles
+    out.append("## Narrative by highlighted cycle")
+    if not highlight_cycles:
+        out.append("_No cycle metrics available to select highlights._")
+    for c in highlight_cycles:
+        out.append(f"### Cycle {c}")
+        fs_events = by_cycle_funnel.get(c) or []
+        if fs_events:
+            fs = fs_events[-1]  # last writer wins
+            fs_data = fs.get("data") or {}
+            stage_name = (fs_data.get("funnel_stage") or fs.get("message") or "").strip()
+            stage_tag = (fs_data.get("stage") or "").strip()
+            if stage_name:
+                if stage_tag and stage_tag not in stage_name:
+                    out.append(f"**Funnel stage:** {stage_name}  *(stage tag: {stage_tag})*")
+                else:
+                    out.append(f"**Funnel stage:** {stage_name}")
+        m = cycle_metrics.get(c, {})
+        if m:
+            out.append(f"- RYE_avg: `{m.get('RYE_avg')}`; ÎR_sum: `{m.get('delta_R_sum')}`; E_sum: `{m.get('E_sum')}`")
+        # discoveries/hyp/ver for this cycle
+        disc_c = by_cycle_discoveries.get(c, [])
+        hyp_c = by_cycle_hyp.get(c, [])
+        ver_c = by_cycle_ver.get(c, [])
+        if disc_c:
+            out.append("")
+            out.append("**Discoveries:**")
+            for ev in disc_c:
+                data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+                title = data.get("title") or data.get("name") or ev.get("message") or "discovery"
+                desc = data.get("description") or data.get("details") or data.get("text") or ""
+                cite = _format_source_refs(ev, source_index)
+                out.append(f"- {title}{cite}")
+                if desc:
+                    out.append(f"  - {desc}")
+        if hyp_c:
+            out.append("")
+            out.append("**Candidate hypotheses:**")
+            for ev in hyp_c:
+                data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+                text = data.get("text") or data.get("hypothesis") or _extract_text_from_event(ev)
+                cite = _format_source_refs(ev, source_index)
+                if text:
+                    out.append(f"- {text}{cite}")
+        if ver_c:
+            out.append("")
+            out.append("**Verifications:**")
+            for ev in ver_c:
+                data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+                passed = data.get("passed")
+                rationale = data.get("rationale") or data.get("reason") or data.get("notes") or ""
+                cite = _format_source_refs(ev, source_index)
+                out.append(f"- passed={passed}{cite}")
+                if rationale:
+                    out.append(f"  - {rationale}")
 
-    # 1. Cycle Overview
-    lines.append(
-        _md_section(
-            "Cycle Overview",
-            _json({
-                "total_cycles": len(history),
-                "domain": domain,
-                "hours_run_so_far": hours_run_so_far,
-            })
-        )
-    )
+        # A short narrative paragraph built from agent outputs (roles + first sentences)
+        outs_c = by_cycle_outputs.get(c, [])
+        if outs_c:
+            out.append("")
+            out.append("**Agent contributions (preview):**")
+            for ev in outs_c:
+                role = ev.get("role") or "agent"
+                text = _extract_text_from_event(ev)
+                if not text:
+                    continue
+                first_line = text.strip().splitlines()[0]
+                cite = _format_source_refs(ev, source_index)
+                out.append(f"- {role}: {first_line}{cite}")
+        out.append("")
 
-    # 2. RYE Diagnostics
-    lines.append(_md_section("RYE Diagnostics", _json(diag)))
+    # Appendix with full agent outputs (no truncation)
+    out.append("## Appendix: full agent outputs (no truncation)")
+    # Determine sorted cycles encountered in outputs
+    all_cycles = sorted([c for c in by_cycle_outputs.keys() if c is not None])
+    for c in all_cycles:
+        out.append(f"### Cycle {c}")
+        outs = by_cycle_outputs.get(c, [])
+        if not outs:
+            out.append("_No agent_output events for this cycle._")
+            out.append("")
+            continue
 
-    # 3. Learning Speed Summary (10x signals)
-    lines.append(_md_section("Learning Speed Summary", _json(learning_speed_summary)))
+        # Group by role for readability
+        by_role: DefaultDict[str, List[JsonObj]] = defaultdict(list)
+        for ev in outs:
+            r = _safe_str(ev.get("role") or "agent")
+            by_role[r].append(ev)
 
-    # 4. Volatility
-    lines.append(_md_section("Volatility Signature", _json(vol)))
+        for role, evs in sorted(by_role.items(), key=lambda kv: kv[0]):
+            out.append(f"#### Role: {role}")
+            for ev in evs:
+                ts = ev.get("timestamp")
+                cite = _format_source_refs(ev, source_index)
+                out.append(f"- timestamp: `{ts}`{cite}")
+                text = _extract_text_from_event(ev)
+                out.append("```")
+                out.append(text or "")
+                out.append("```")
+            out.append("")
 
-    # 5. Equilibrium Detection
-    lines.append(_md_section("Equilibrium Detection", _json(eq)))
+    # Global sources / citations index
+    if source_index:
+        out.append("## Sources")
+        # Invert index to keep stable order
+        inv = {v: k for k, v in source_index.items()}
+        for i in range(1, len(inv) + 1):
+            k = inv.get(i)
+            if not k:
+                continue
+            # Find one representative src object to format nicely
+            src_obj: Any = None
+            for ev in events:
+                for src in _extract_sources_from_event(ev):
+                    if _source_key(src) == k:
+                        src_obj = src
+                        break
+                if src_obj is not None:
+                    break
+            out.append(f"{i}. {_format_source(src_obj) if src_obj is not None else k}")
 
-    # 6. TGRM Harmonic Index
-    lines.append(_md_section("TGRM Harmonic Index", _json({"harmonic_index": harm})))
+    return "\n".join(out)
 
-    # 7. Breakthrough Probability (short term)
-    lines.append(_md_section("Breakthrough Probability (Short-Term)", _json(bp)))
 
-    # 8. 90 Day Breakthrough Likelihood
-    lines.append(_md_section("90-Day Breakthrough Likelihood", _json(bp90)))
-
-    # 9. Autonomy Stability Envelope
-    lines.append(_md_section("Autonomy Stability Envelope", _json(env)))
-
-    # 10. Critical Failure Early Warning
-    lines.append(_md_section("Critical-Failure Early Warning", _json(fail)))
-
-    # 11. Run Tier Classification
-    lines.append(_md_section("Run Tier Classification", _json(tier)))
-
-    # 12. Option C Composite Signature
-    lines.append(_md_section("Option C Composite Signature", _json(option_c_signature)))
-
-    # 13. Tool Diagnostics
-    lines.append(_md_section("Tool Diagnostics", _json(tool_stats)))
-
-    # 14. Swarm Stats
-    lines.append(_md_section("Swarm Stats", _json(swarm_stats or {})))
-
-    # 15. Intelligence Profile
-    lines.append(_md_section("Intelligence Profile", _json(intelligence_profile or {})))
-
-    # 16. Biomarker Snapshot (Longevity Mode)
-    lines.append(_md_section("Biomarker Snapshot", _json(biomarker_snapshot or {})))
-
-    # 17. Raw Cycle History (condensed)
-    lines.append(
-        _md_section(
-            "Cycle History (condensed)",
-            (
-                f"Cycles: {len(history)}\n\n"
-                "Only the last 20 entries shown:\n\n"
-                f"```json\n{_json(condensed_history)}\n```"
-            ),
-        )
-    )
-
-    return "\n".join(lines)
+__all__ = ["build_agent_report"]
