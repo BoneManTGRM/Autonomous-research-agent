@@ -26,7 +26,7 @@ def phases_for_cycles(total_cycles: int) -> List[str]:
     phase named ``"run"``.  This helper returns a list of that name
     repeated ``total_cycles`` times.  You can customise this behaviour
     by replacing the body of this function to partition cycles into
-    sub‑phases or to use different names depending on the index.
+    subâphases or to use different names depending on the index.
 
     Parameters
     ----------
@@ -37,7 +37,7 @@ def phases_for_cycles(total_cycles: int) -> List[str]:
     -------
     list of str
         A list whose length equals ``total_cycles``, each element being a
-        human‑readable phase name.
+        humanâreadable phase name.
     """
     if total_cycles < 1:
         return []
@@ -53,7 +53,7 @@ def phase_name_for_index(index: int, total_cycles: int) -> Optional[str]:
     Parameters
     ----------
     index:
-        Zero‑based index of the phase.  If out of bounds, ``None`` is
+        Zeroâbased index of the phase.  If out of bounds, ``None`` is
         returned.
     total_cycles:
         Total number of cycles requested for the run.
@@ -61,7 +61,7 @@ def phase_name_for_index(index: int, total_cycles: int) -> Optional[str]:
     Returns
     -------
     str or None
-        The human‑readable name for the phase, or ``None`` if the
+        The humanâreadable name for the phase, or ``None`` if the
         index is invalid.
     """
     if index < 0 or index >= total_cycles:
