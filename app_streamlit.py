@@ -6789,3 +6789,8 @@ def main() -> None:
                     st.experimental_rerun()
                 except Exception:
                     pass
+
+
+# Streamlit entry point
+if __name__ == "__main__":
+    main()
