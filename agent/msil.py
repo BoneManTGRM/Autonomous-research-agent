@@ -62,6 +62,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
 import math
 import statistics
+import re
 
 
 __all__ = [
@@ -248,6 +249,63 @@ def _norm_domain(value: Any) -> str:
     return s or "general"
 
 
+
+def _extract_domains_from_row(row: 'HistoryRow') -> List[str]:
+    """Extract one or more normalized domain labels from a cycle/history row.
+
+    MSIL historically used a single ``row['domain']`` value, which often stays
+    constant (e.g. 'general') even when the underlying hypotheses mix multiple
+    domains. To better reflect cross-domain synthesis, we also look for
+    multi-domain fields (lists/strings) commonly produced by cycle logs or
+    discovery payloads.
+    """
+    if not isinstance(row, dict):
+        return ['general']
+
+    candidates: List[str] = []
+
+    def _ingest(val: Any) -> None:
+        if val is None:
+            return
+        if isinstance(val, str):
+            # Split on common separators for compact domain strings
+            parts = [p.strip() for p in re.split(r"[;,|]", val) if p.strip()]
+            candidates.extend(parts or [val.strip()])
+            return
+        if isinstance(val, (list, tuple, set)):
+            for x in val:
+                if x is None:
+                    continue
+                candidates.append(str(x))
+
+    # Common keys used by engines/promoters
+    for key in (
+        'domains_involved',
+        'domains',
+        'domain_lenses',
+        'domain_tags',
+        'cross_domain',
+        'tags',
+    ):
+        _ingest(row.get(key))
+
+    # Nested discovery payloads may carry domains
+    disc = row.get('discovery')
+    if isinstance(disc, dict):
+        for key in ('domains', 'domains_involved', 'domain_lenses', 'cross_domain', 'tags'):
+            _ingest(disc.get(key))
+
+    # Fallback to the single-domain field
+    if not candidates:
+        candidates = [str(row.get('domain') or 'general')]
+
+    # Normalize and unique-preserve
+    out: List[str] = []
+    for d in candidates:
+        nd = _norm_domain(d)
+        if nd and nd not in out:
+            out.append(nd)
+    return out or ['general']
 def _get_cycle_index(row: HistoryRow) -> Optional[int]:
     for k in ("cycle_index", "cycle", "index", "i"):
         if k in row and row.get(k) is not None:
@@ -497,7 +555,8 @@ class MetaSkillIntelligenceLayer:
         if not self.enabled:
             return self._build_disabled_snapshot(goal)
 
-        history = self._get_history_for_goal(goal, limit=self.long_window)
+        run_id = cycle_log.get("run_id")
+        history = self._get_history_for_goal(goal, run_id=str(run_id) if run_id else None, limit=self.long_window)
         history = _sorted_history(history)
 
         # Ensure the current cycle is present (avoid duplicates by cycle_index if possible).
@@ -662,32 +721,55 @@ class MetaSkillIntelligenceLayer:
     # ------------------------------------------------------------------
     # History helpers
     # ------------------------------------------------------------------
-    def _get_history_for_goal(self, goal: str, limit: int) -> List[HistoryRow]:
-        """Get cycle history for a single goal with soft fallbacks."""
+    def _get_history_for_goal(self, goal: str, limit: int, run_id: Optional[str] = None) -> List[HistoryRow]:
+        """Get cycle history for a single goal with soft fallbacks.
+
+        If run_id is provided, history is filtered so repeated runs with the same
+        goal do not blend together (this can otherwise inflate cycle counts and
+        smear MSIL/MSIL-trend signals across runs).
+        """
         goal_s = str(goal or "unknown_goal")
         lim = max(1, int(limit))
+        history: List[HistoryRow] = []
 
+        # Prefer the goal-specific accessor when available (best signal for TGRM)
         try:
             if hasattr(self.memory_store, "get_cycle_history_for_goal"):
-                rows = self.memory_store.get_cycle_history_for_goal(goal_s, limit=lim)  # type: ignore[attr-defined]
+                try:
+                    if run_id is not None:
+                        rows = self.memory_store.get_cycle_history_for_goal(goal_s, limit=lim, run_id=run_id)  # type: ignore[attr-defined]
+                    else:
+                        rows = self.memory_store.get_cycle_history_for_goal(goal_s, limit=lim)  # type: ignore[attr-defined]
+                except TypeError:
+                    # Older MemoryStore implementations may not accept run_id
+                    rows = self.memory_store.get_cycle_history_for_goal(goal_s, limit=lim)  # type: ignore[attr-defined]
                 if isinstance(rows, list):
-                    return rows[-lim:]
+                    history = rows
         except Exception:
             pass
 
-        try:
-            if hasattr(self.memory_store, "get_cycle_history"):
-                full = self.memory_store.get_cycle_history(limit=lim)  # type: ignore[attr-defined]
-            else:
-                full = self.memory_store.get_cycle_history()  # type: ignore[attr-defined]
-        except Exception:
+        # Fallback: general history (optionally filtered by run_id)
+        if not history:
+            try:
+                if hasattr(self.memory_store, "get_cycle_history"):
+                    try:
+                        history = self.memory_store.get_cycle_history(limit=lim, run_id=run_id)  # type: ignore[attr-defined]
+                    except TypeError:
+                        history = self.memory_store.get_cycle_history(limit=lim)  # type: ignore[attr-defined]
+                else:
+                    history = self.memory_store.get_cycle_history()  # type: ignore[attr-defined]
+            except Exception:
+                return []
+
+        if not isinstance(history, list):
             return []
 
-        if not isinstance(full, list):
-            return []
-        filtered = [r for r in full if str(r.get("goal") or "") == goal_s]
+        filtered = [r for r in history if isinstance(r, dict) and str(r.get("goal") or "") == goal_s]
+        if run_id is not None:
+            rid = str(run_id)
+            filtered = [r for r in filtered if str(r.get("run_id") or "") == rid]
+
         return filtered[-lim:]
-
     def _get_history(
         self,
         goal: Optional[str] = None,
@@ -957,8 +1039,8 @@ class MetaSkillIntelligenceLayer:
 
         by_domain: Dict[str, List[HistoryRow]] = {}
         for row in history:
-            dom = _norm_domain(row.get("domain"))
-            by_domain.setdefault(dom, []).append(row)
+            for dom in _extract_domains_from_row(row):
+                by_domain.setdefault(dom, []).append(row)
 
         profiles: List[DomainProfile] = []
         for dom, rows in by_domain.items():
