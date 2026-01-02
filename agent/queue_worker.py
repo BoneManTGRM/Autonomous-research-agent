@@ -26,6 +26,7 @@ into your core engine and emit meaningful events.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import traceback
 from pathlib import Path
@@ -51,7 +52,25 @@ except Exception:
 # ----------------------------------------------------------------------
 # Queue directory constants
 # ----------------------------------------------------------------------
-BASE_DIR = Path("runs").resolve()
+
+def _resolve_runs_root() -> Path:
+    """Resolve the runs root directory for queue-worker artifacts.
+
+    Uses ARA_RUNS_DIR when set, otherwise falls back to a local ./runs folder.
+    """
+    env = (
+        os.environ.get("ARA_RUNS_DIR")
+        or os.environ.get("ARA_RUN_ROOT")
+        or os.environ.get("RUNS_DIR")
+    )
+    if env:
+        try:
+            return Path(env).expanduser().resolve()
+        except Exception:
+            return Path(env)
+    return Path('runs').resolve()
+
+BASE_DIR = _resolve_runs_root()
 QUEUE_ROOT = BASE_DIR / "queue"
 PENDING_DIR = QUEUE_ROOT / "pending"
 ACTIVE_DIR = QUEUE_ROOT / "active"
@@ -72,18 +91,58 @@ def _load_job_definition(job_path: Path) -> Dict[str, Any]:
 
 
 def _write_event_log(run_id: str, events: List[Dict[str, Any]]) -> None:
-    """Write an event log for the run into the logs directory.
+    """Write an event log for the run.
 
-    The event log is stored as JSON with one object per event.  This
-    is deliberately simple; the Streamlit UI can parse and display
-    these events to build a narrative timeline.
+    Backwards compatible behavior:
+      - Writes a legacy JSON array file: logs/<run_id>_events.json
+
+    New behavior (preferred for Streamlit tailing and per-run isolation):
+      - Writes per-run JSONL: <runs_root>/<run_id>/events.jsonl
+      - Appends to a global mirror: logs/events_global.jsonl
     """
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    path = LOGS_DIR / f"{run_id}_events.json"
-    with path.open("w", encoding="utf-8") as f:
-        json.dump(events, f, ensure_ascii=False, indent=2)
 
+    # Legacy JSON array (easy to load but not tail-friendly)
+    try:
+        path = LOGS_DIR / f"{run_id}_events.json"
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(events, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
+    # Per-run JSONL (append-only friendly; we overwrite for this worker since we emit once per run)
+    try:
+        run_dir = BASE_DIR / str(run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        jsonl_path = run_dir / "events.jsonl"
+        with jsonl_path.open("w", encoding="utf-8") as f:
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Global mirror for dashboards that aggregate across runs
+    try:
+        global_path = LOGS_DIR / "events_global.jsonl"
+        with global_path.open("a", encoding="utf-8") as f:
+            for ev in events:
+                if not isinstance(ev, dict):
+                    continue
+                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+    except Exception:
+        pass
 def _default_memory_store() -> Any:
     """Return a dummy memory store if none is provided.
 
@@ -155,7 +214,27 @@ def process_next_job(memory_store: Optional[Any] = None) -> Optional[str]:
         job_def = _load_job_definition(active_path)
         cycles = int(job_def.get("cycles", 0))
         goal = str(job_def.get("goal", ""))
-        run_id = job_def.get("run_id") or active_path.stem
+        run_id = job_def.get('run_id')
+        if not run_id:
+            # Derive from filename when job payload omitted run_id (e.g. <run_id>_job.json)
+            stem = active_path.stem
+            for suf in ('__job', '_job'):
+                if stem.endswith(suf):
+                    stem = stem[: -len(suf)]
+                    break
+            run_id = stem
+
+        # Ensure per-run directory exists (for events.jsonl, snapshots, etc.)
+        run_dir = BASE_DIR / str(run_id)
+        snap_dir = run_dir / 'snapshots'
+        run_dir.mkdir(parents=True, exist_ok=True)
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        events_jsonl_path = run_dir / 'events.jsonl'
+        try:
+            events_jsonl_path.touch(exist_ok=True)
+        except Exception:
+            pass
+
 
         # Initialise run state
         state = RunState.new(run_id=run_id, total_cycles=cycles, goal=goal)
@@ -177,12 +256,33 @@ def process_next_job(memory_store: Optional[Any] = None) -> Optional[str]:
         for idx, pname in enumerate(phase_names):
             state.update_phase(idx, pname)
             # Persist run state after each phase
-            state_path = LOGS_DIR / f"run_state_{run_id}.json"
-            state.save(state_path)
+            state_path = run_dir / 'run_state.json'
+            legacy_state_path = LOGS_DIR / f"run_state_{run_id}.json"
+            # Optionally persist a minimal run_state (cycle index only) for lightweight dashboards
+            if os.environ.get('ARA_MINIMAL_RUN_STATE', '').strip().lower() in ('1','true','yes','on'):
+                try:
+                    with state_path.open('w', encoding='utf-8') as sf:
+                        json.dump({'cycle_index': int(idx)}, sf)
+                except Exception:
+                    pass
+            else:
+                state.save(state_path)
+            # Legacy mirror for older UI paths
+            try:
+                if os.environ.get('ARA_MINIMAL_RUN_STATE', '').strip().lower() in ('1','true','yes','on'):
+                    with legacy_state_path.open('w', encoding='utf-8') as sf:
+                        json.dump({'cycle_index': int(idx)}, sf)
+                else:
+                    state.save(legacy_state_path)
+            except Exception:
+                pass
             # Emit event
             events.append({
                 "ts": datetime.utcnow().isoformat() + "Z",  # type: ignore[call-arg]
                 "kind": "phase_start",
+                "role": "system",
+                "cycle": idx,
+                "data": {"phase_index": idx, "phase_total": cycles, "phase_name": pname},
                 "phase_index": idx,
                 "phase_total": cycles,
                 "phase_name": pname,
@@ -199,10 +299,29 @@ def process_next_job(memory_store: Optional[Any] = None) -> Optional[str]:
 
         # Mark finished
         state.mark_finished()
-        state.save(LOGS_DIR / f"run_state_{run_id}.json")
+        # Final state persist
+        if os.environ.get('ARA_MINIMAL_RUN_STATE', '').strip().lower() in ('1','true','yes','on'):
+            try:
+                with state_path.open('w', encoding='utf-8') as sf:
+                    json.dump({'cycle_index': int(state.phase_index or 0)}, sf)
+            except Exception:
+                pass
+        else:
+            state.save(state_path)
+        try:
+            if os.environ.get('ARA_MINIMAL_RUN_STATE', '').strip().lower() in ('1','true','yes','on'):
+                with legacy_state_path.open('w', encoding='utf-8') as sf:
+                    json.dump({'cycle_index': int(state.phase_index or 0)}, sf)
+            else:
+                state.save(legacy_state_path)
+        except Exception:
+            pass
         events.append({
             "ts": datetime.utcnow().isoformat() + "Z",  # type: ignore[call-arg]
             "kind": "run_finished",
+            "role": "system",
+            "cycle": int(state.phase_index or 0),
+            "data": {"phase_total": cycles},
             "run_id": run_id,
             "phase_total": cycles,
         })
@@ -235,7 +354,7 @@ def process_next_job(memory_store: Optional[Any] = None) -> Optional[str]:
                 },
             }
             # List snapshot filenames if available
-            snap_dir = (BASE_DIR / "snapshots" / run_id)
+            snap_dir = (run_dir / 'snapshots')
             if snap_dir.is_dir():
                 result_payload["result"]["snapshots"] = sorted([p.name for p in snap_dir.glob("*.json")])
             rpath = _result_path(run_id)
