@@ -38,7 +38,7 @@ Environment variables
   ARA_EVENT_LOG_MIRROR_GLOBAL:
       "1" to mirror per-run events to global jsonl/json (default: "1")
   ARA_EVENT_LOG_FSYNC:
-      "1" to fsync() after each JSONL append (default: "0") â safer, slower
+      "1" to fsync() after each JSONL append (default: "0") Ã¢ÂÂ safer, slower
 """
 
 from __future__ import annotations
@@ -79,7 +79,7 @@ def _env_bool(name: str, default: bool) -> bool:
     return default
 
 
-WRITE_LEGACY_JSON: bool = _env_bool("ARA_WRITE_LEGACY_EVENT_JSON", True)
+WRITE_LEGACY_JSON: bool = _env_bool("ARA_WRITE_LEGACY_EVENT_JSON", False) or _env_bool("ARA_EVENT_LOG_WRITE_LEGACY_JSON", False)
 DEFAULT_MAX_EVENTS: int = _env_int("ARA_EVENT_LOG_MAX_EVENTS", 1000)
 DEFAULT_MIRROR_GLOBAL: bool = _env_bool("ARA_EVENT_LOG_MIRROR_GLOBAL", True)
 _FSYNC: bool = _env_bool("ARA_EVENT_LOG_FSYNC", False)
