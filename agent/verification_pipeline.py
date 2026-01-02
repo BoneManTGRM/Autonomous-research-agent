@@ -30,6 +30,15 @@ This file is written to be optional:
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
+
+# Optional event stream integration (append-only JSONL via agent/event_log.py).
+try:  # pragma: no cover
+    from .event_log import log_event as _log_event  # type: ignore
+except Exception:  # pragma: no cover
+    try:
+        from event_log import log_event as _log_event  # type: ignore
+    except Exception:
+        _log_event = None  # type: ignore
 import statistics
 from datetime import datetime
 
@@ -115,7 +124,18 @@ class VerificationPipeline:
         goal = cycle_log.get("goal", "")
         domain = cycle_log.get("domain", "general")
 
-        # Flexible RYE extraction to match other modules (DiscoveryManager etc)
+        
+        # Preserve run isolation when possible (prevents blended runs with same goal)
+        run_id = cycle_log.get("run_id")
+        if run_id is None:
+            rm = cycle_log.get("run_metadata") or {}
+            if isinstance(rm, dict):
+                run_id = rm.get("run_id")
+        try:
+            run_id = str(run_id) if run_id is not None else None
+        except Exception:
+            run_id = None
+# Flexible RYE extraction to match other modules (DiscoveryManager etc)
         rye_raw = cycle_log.get("RYE")
         if rye_raw is None:
             rye_raw = (
@@ -191,6 +211,7 @@ class VerificationPipeline:
 
         verification_summary = {
             "cycle": cycle_log.get("cycle"),
+            "run_id": run_id,
             "timestamp": datetime.utcnow().isoformat() + "Z",
             "goal": goal,
             "domain": domain,
@@ -219,11 +240,15 @@ class VerificationPipeline:
         self,
         goal: str,
         limit: int,
+        run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Try to fetch recent history rows for this goal."""
         try:
             if hasattr(self.memory_store, "get_cycle_history_for_goal"):
-                rows = self.memory_store.get_cycle_history_for_goal(goal, limit=limit)  # type: ignore[attr-defined]
+                try:
+                    rows = self.memory_store.get_cycle_history_for_goal(goal, limit=limit, run_id=run_id)  # type: ignore[attr-defined]
+                except TypeError:
+                    rows = self.memory_store.get_cycle_history_for_goal(goal, limit=limit)  # type: ignore[attr-defined]
                 if isinstance(rows, list):
                     return rows
         except Exception:
@@ -231,7 +256,10 @@ class VerificationPipeline:
 
         try:
             if hasattr(self.memory_store, "get_cycle_history"):
-                full = self.memory_store.get_cycle_history()  # type: ignore[attr-defined]
+                try:
+                    full = self.memory_store.get_cycle_history(run_id=run_id)  # type: ignore[attr-defined]
+                except TypeError:
+                    full = self.memory_store.get_cycle_history()  # type: ignore[attr-defined]
                 if isinstance(full, list):
                     filtered = [r for r in full if r.get("goal") == goal]
                     return filtered[-limit:]
@@ -732,6 +760,21 @@ class VerificationPipeline:
                 # Fallback: append into cycle history if a generic logger exists
                 if hasattr(self.memory_store, "log_cycle_annotation"):
                     self.memory_store.log_cycle_annotation(summary)  # type: ignore[attr-defined]
+            # Mirror into the unified event stream (events.jsonl) so UI/report can tail verification
+            if _log_event is not None and isinstance(summary, dict):
+                try:
+                    _log_event(
+                        run_id=str(summary.get("run_id")) if summary.get("run_id") is not None else None,
+                        kind="verification",
+                        message="verification_summary",
+                        level="info",
+                        data=summary,
+                        role="verification_pipeline",
+                        domain=summary.get("domain"),
+                        cycle=summary.get("cycle"),
+                    )
+                except Exception:
+                    pass
         except Exception:
             # Logging failures must not break verification
             pass
