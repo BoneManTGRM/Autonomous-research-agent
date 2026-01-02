@@ -10415,4 +10415,9 @@ if __name__ == "__main__":
             _SHUTDOWN_REQUESTED.set()
             time.sleep(0.2)
             continue
-        except Except
+        except Exception as e:
+            log_exception("main_crash_shield", e)
+            sleep_s = crash_backoff.on_error()
+            log_kv("main_restart_sleep", level="WARNING", sleep_s=round(sleep_s, 3))
+            time.sleep(sleep_s)
+            continue
