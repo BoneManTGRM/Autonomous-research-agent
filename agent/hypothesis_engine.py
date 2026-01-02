@@ -30,6 +30,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+# Optional event stream integration (append-only JSONL via agent/event_log.py).
+try:  # pragma: no cover
+    from .event_log import log_event as _log_event  # type: ignore
+except Exception:  # pragma: no cover
+    try:
+        from event_log import log_event as _log_event  # type: ignore
+    except Exception:
+        _log_event = None  # type: ignore
+
 # ---------------------------------------------------------------------
 # Small domain keyword hints (mirrors presets but kept local and static)
 # ---------------------------------------------------------------------
@@ -206,9 +215,9 @@ def _estimate_delta_r_hint(
     domain: Optional[str],
     role: Optional[str],
 ) -> float:
-    """Deterministic hint for how much ΔR this hypothesis might deliver if confirmed.
+    """Deterministic hint for how much ÎR this hypothesis might deliver if confirmed.
 
-    This is NOT ΔR itself, just a small scalar that can feed into
+    This is NOT ÎR itself, just a small scalar that can feed into
     compute_delta_r(...) as an extra signal or be logged with the hypothesis.
     """
     d = (domain or "").lower()
@@ -230,7 +239,7 @@ def _estimate_delta_r_hint(
     elif r == "researcher":
         base *= 1.0
 
-    # Map to a gentle ΔR hint range, for example [0.0, 2.0]
+    # Map to a gentle ÎR hint range, for example [0.0, 2.0]
     return max(0.0, min(2.0, 2.0 * base))
 
 
@@ -641,6 +650,9 @@ def _build_tags(
     domain: Optional[str],
     role: Optional[str],
     swarm_size: Optional[int] = None,
+    run_id: Optional[str] = None,
+    cycle_index: Optional[int] = None,
+    emit_events: bool = False,
     tier_label: Optional[str] = None,
 ) -> List[str]:
     """Lightweight tags for downstream filtering or visualization."""
@@ -766,6 +778,9 @@ def generate_hypotheses(
     *,
     intelligence_profile: Optional[Dict[str, Any]] = None,
     swarm_size: Optional[int] = None,
+    run_id: Optional[str] = None,
+    cycle_index: Optional[int] = None,
+    emit_events: bool = False,
 ) -> List[Dict[str, Any]]:
     """Generate simple, structured hypotheses.
 
@@ -805,7 +820,7 @@ def generate_hypotheses(
               "rye_relevance": 0.0-1.0,
               "priority": 0.0-1.0,
               "score": 0.0-1.0,              # alias of priority for reports/sorting
-              "delta_r_hint": float,         # estimated ΔR contribution if confirmed
+              "delta_r_hint": float,         # estimated ÎR contribution if confirmed
               "tier_label": "tier1_candidate" | "tier2_candidate" | "tier3_candidate" | None,
               "classification": {
                   "kind": "...",
@@ -985,5 +1000,48 @@ def generate_hypotheses(
         idx += 1
         if len(hypo_list) >= max_hypotheses:
             break
+
+
+    # Optional: mirror hypotheses into the unified event stream for UI/report consumption.
+    # This is a best-effort helper; core workers may also emit richer structured events.
+    if emit_events and _log_event is not None and run_id is not None:
+        try:
+            for h in hypo_list:
+                title = h.get("title")
+                if not title:
+                    cls = h.get("classification") or {}
+                    k1 = cls.get("k1") if isinstance(cls, dict) else None
+                    k2 = cls.get("k2") if isinstance(cls, dict) else None
+                    if k1 and k2:
+                        title = f"{k1} â {k2} constraint"
+                    else:
+                        title = "candidate hypothesis"
+                _log_event(
+                    run_id=str(run_id),
+                    kind="candidate_hypothesis",
+                    message=str(title),
+                    level="info",
+                    data={
+                        "title": title,
+                        "text": h.get("text"),
+                        "goal": goal,
+                        "domain": domain,
+                        "cycle": cycle_index,
+                        "novelty": h.get("novelty"),
+                        "priority": h.get("priority"),
+                        "score": h.get("score"),
+                        "delta_r_hint": h.get("delta_r_hint"),
+                        "tier_label": h.get("tier_label"),
+                        "classification": h.get("classification"),
+                        "tags": h.get("tags"),
+                        "swarm_size": swarm_size,
+                        "citations": citations,
+                    },
+                    role=role,
+                    domain=domain,
+                    cycle=cycle_index,
+                )
+        except Exception:
+            pass
 
     return hypo_list
