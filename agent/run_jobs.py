@@ -1688,6 +1688,41 @@ def create_job(
     # Save into the canonical pending folder
     pending_path = job.save_to(PENDING_DIR)
 
+    # Ensure per-run directory exists immediately so the UI/report builder can
+    # safely tail per-run artifacts even before the worker starts.
+    try:
+        run_dir = BASE_DIR / str(run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "snapshots").mkdir(parents=True, exist_ok=True)
+        # Touch per-run events.jsonl for Streamlit tailing
+        ev_path = run_dir / "events.jsonl"
+        if not ev_path.exists():
+            ev_path.write_text("", encoding="utf-8")
+        # Initialize a per-run run_state.json (optional; minimal by default)
+        state_path = run_dir / "run_state.json"
+        if not state_path.exists():
+            try:
+                from run_state_manager import RunState  # type: ignore
+
+                st0 = RunState.new(run_id=str(run_id), total_cycles=int(max_cycles) if isinstance(max_cycles, int) else 0, goal=str(cfg.get("goal") or ""))
+                st0.status = "queued"
+                # Persist to the per-run state path
+                st0.save(state_path)
+            except Exception:
+                now_iso = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                init_state = {
+                    "run_id": str(run_id),
+                    "status": "queued",
+                    "cycle_index": 0,
+                    "phase_index": 0,
+                    "phase_total": int(max_cycles) if isinstance(max_cycles, int) else 0,
+                    "created_at": now_iso,
+                    "updated_at": now_iso,
+                }
+                state_path.write_text(json.dumps(init_state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
     # Shadow copy to queue root for compatibility with any older watchers.
     # Best-effort only: failure here should not prevent enqueue.
     try:
