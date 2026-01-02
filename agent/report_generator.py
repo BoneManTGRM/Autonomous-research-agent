@@ -61,6 +61,233 @@ from .rye_metrics import (
 )
 
 import textwrap
+import json
+import os
+from pathlib import Path
+from collections import Counter
+
+
+# ---------------------------------------------------------
+# Event stream helpers (per-run events.jsonl)
+# ---------------------------------------------------------
+def _resolve_runs_root() -> Optional[Path]:
+    """Resolve the runs root directory where per-run folders live.
+
+    This is intentionally best-effort and mirrors the rest of the codebase:
+    - Prefer ARA_RUNS_DIR when set.
+    - Fall back to a local ./runs folder if nothing is configured.
+    """
+    env_val = os.getenv("ARA_RUNS_DIR")
+    if isinstance(env_val, str) and env_val.strip():
+        try:
+            return Path(env_val.strip()).expanduser().resolve()
+        except Exception:
+            pass
+    try:
+        return (Path.cwd() / "runs").resolve()
+    except Exception:
+        return None
+
+
+def _infer_run_id(
+    memory_store: Any,
+    cycles: List[Dict[str, Any]],
+    explicit: Optional[str] = None,
+) -> Optional[str]:
+    """Infer the active run_id from explicit arg, memory_store, or cycle history."""
+    if explicit:
+        try:
+            return str(explicit)
+        except Exception:
+            return explicit  # type: ignore[return-value]
+
+    # Common attributes / helpers
+    for attr in ("run_id", "active_run_id", "current_run_id"):
+        try:
+            v = getattr(memory_store, attr, None)
+            if v:
+                return str(v)
+        except Exception:
+            continue
+
+    try:
+        getter = getattr(memory_store, "get_run_id", None)
+        if callable(getter):
+            v = getter()
+            if v:
+                return str(v)
+    except Exception:
+        pass
+
+    # Mode of run_id values present in cycle history
+    try:
+        ids = [str(c.get("run_id")) for c in cycles if c.get("run_id") is not None]
+        if ids:
+            return Counter(ids).most_common(1)[0][0]
+    except Exception:
+        pass
+
+    return None
+
+
+def _read_jsonl_events(path: Path, max_lines: int = 20000) -> List[Dict[str, Any]]:
+    """Read a JSONL file into a list of dict events (tail-limited)."""
+    out: List[Dict[str, Any]] = []
+    try:
+        if not path.exists():
+            return out
+        data = path.read_bytes()
+        lines = data.splitlines()
+        if max_lines and len(lines) > max_lines:
+            lines = lines[-max_lines:]
+        for raw in lines:
+            try:
+                s = raw.decode("utf-8", errors="ignore").strip()
+            except Exception:
+                continue
+            if not s:
+                continue
+            try:
+                obj = json.loads(s)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+    except Exception:
+        return out
+    return out
+
+
+def _load_run_events(run_id: str, runs_root: Optional[Path] = None) -> List[Dict[str, Any]]:
+    """Load per-run events.jsonl for a run_id."""
+    if not run_id:
+        return []
+    root = runs_root or _resolve_runs_root()
+    if root is None:
+        return []
+    # Primary per-run path
+    p = root / str(run_id) / "events.jsonl"
+    events = _read_jsonl_events(p)
+    if events:
+        return events
+
+    # Optional global mirror (if present)
+    alt = root / "logs" / "events_global.jsonl"
+    evs = _read_jsonl_events(alt)
+    if not evs:
+        return []
+
+    # Filter global mirror to run_id
+    filtered: List[Dict[str, Any]] = []
+    for e in evs:
+        try:
+            e_run = e.get("run_id")
+            if e_run is not None and str(e_run) == str(run_id):
+                filtered.append(e)
+        except Exception:
+            continue
+    return filtered
+
+
+def _events_to_discovery_log(events: List[Dict[str, Any]], goal: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Convert events.jsonl entries into the discovery-log shape this module expects."""
+    out: List[Dict[str, Any]] = []
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        kind = str(e.get("kind") or "").strip()
+        if kind not in ("candidate_hypothesis", "discovery", "discovery_candidate"):
+            continue
+
+        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        # Optional goal filter if goal exists in event payload
+        if goal:
+            ev_goal = e.get("goal") or data.get("goal")
+            if isinstance(ev_goal, str) and ev_goal and ev_goal != goal:
+                continue
+
+        label = (
+            data.get("title")
+            or data.get("label")
+            or data.get("thesis")
+            or data.get("headline")
+            or e.get("message")
+            or kind
+        )
+        ts = e.get("timestamp") or e.get("ts") or ""
+        score = data.get("score") or e.get("score")
+        tier = data.get("tier") or data.get("discovery_tier")
+        out.append(
+            {
+                "timestamp": ts,
+                "kind": kind,
+                "label": str(label) if label is not None else kind,
+                "score": score,
+                "tier": tier,
+                "raw_event": e,
+            }
+        )
+    return out
+
+
+def _events_to_structured_discoveries(events: List[Dict[str, Any]], goal: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Convert events to a structured discoveries list (closer to get_discoveries())."""
+    structured: List[Dict[str, Any]] = []
+    for e in events:
+        if not isinstance(e, dict):
+            continue
+        kind = str(e.get("kind") or "").strip()
+        if kind not in ("candidate_hypothesis", "discovery", "discovery_candidate"):
+            continue
+        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        if goal:
+            ev_goal = e.get("goal") or data.get("goal")
+            if isinstance(ev_goal, str) and ev_goal and ev_goal != goal:
+                continue
+        structured.append(
+            {
+                "timestamp": e.get("timestamp") or e.get("ts") or "",
+                "kind": kind,
+                "label": data.get("title") or data.get("thesis") or data.get("label") or "",
+                "score": data.get("score") or e.get("score"),
+                "tier": data.get("tier") or data.get("discovery_tier"),
+                "data": data,
+            }
+        )
+    return structured
+
+
+def _render_event_only_report(events: List[Dict[str, Any]], run_id: Optional[str] = None, goal: Optional[str] = None) -> str:
+    """Fallback report when cycle history is empty but events exist."""
+    disc = _events_to_discovery_log(events, goal=goal)
+    lines: List[str] = []
+    lines.append("# Autonomous Research Agent Report\n")
+    if run_id:
+        lines.append(f"**Run ID:** `{run_id}`\n")
+    if goal:
+        lines.append(f"**Goal:** `{goal}`\n")
+    lines.append("## Event-only summary\n")
+    if not disc:
+        lines.append("No candidate hypotheses or discoveries found in the event stream.\n")
+    else:
+        lines.append(f"Found **{len(disc)}** candidate/discovery events.\n")
+        for d in disc[-20:]:
+            ts = d.get("timestamp", "")
+            kind = d.get("kind", "")
+            label = d.get("label", "")
+            lines.append(f"- [{ts}] [{kind}] {label}")
+        lines.append("")
+    return "\n".join(lines)
+
+def _render_event_only_findings_report(
+    events: List[Dict[str, Any]],
+    run_id: Optional[str] = None,
+    goal: Optional[str] = None,
+) -> str:
+    """Fallback findings report when cycle history is empty but events exist."""
+    md = _render_event_only_report(events, run_id=run_id, goal=goal)
+    return md.replace("# Autonomous Research Agent Report", "# Targeted Findings Report", 1)
+
 
 # Optional PDF support
 try:
@@ -269,7 +496,7 @@ def _markdown_to_plain_lines(text: str, width: int = 90) -> List[str]:
     for raw in text.splitlines():
         s = raw.lstrip()
         # strip some simple markdown markers
-        for prefix in ("#", "* ", "- ", "• ", "> "):
+        for prefix in ("#", "* ", "- ", "â¢ ", "> "):
             if s.startswith(prefix):
                 s = s[len(prefix):].lstrip()
                 break
@@ -611,7 +838,7 @@ def _render_generic_optional_dict(
 # ---------------------------------------------------------
 # FULL REPORT
 # ---------------------------------------------------------
-def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
+def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optional[str] = None) -> str:
     """Generate full Reparodynamics markdown report with advanced metrics."""
 
     all_cycles: List[Dict[str, Any]] = _safe_get_cycle_history(memory_store)
@@ -621,10 +848,38 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     else:
         cycles = list(all_cycles)
 
+    # Run scoping: prefer explicit run_id, then infer from memory/cycle history.
+    inferred_run_id = _infer_run_id(memory_store, cycles, explicit=run_id)
+
+    # If cycles carry run_id fields, filter to the inferred run_id to avoid blending runs.
+    if inferred_run_id and any(c.get("run_id") is not None for c in cycles):
+        try:
+            filtered = [c for c in cycles if str(c.get("run_id")) == str(inferred_run_id)]
+            if filtered:
+                cycles = filtered
+        except Exception:
+            pass
+
     n_cycles = len(cycles)
 
     if n_cycles == 0:
+        # Fall back to the per-run event stream if cycles are not available.
+        if inferred_run_id:
+            try:
+                _events = _load_run_events(str(inferred_run_id))
+                if _events:
+                    return _render_event_only_report(_events, run_id=str(inferred_run_id), goal=goal)
+            except Exception:
+                pass
         return "# Autonomous Research Agent Report\n\nNo cycles logged."
+
+    # Load per-run events once (used for discovery/candidate sections and robustness).
+    run_events: List[Dict[str, Any]] = []
+    if inferred_run_id:
+        try:
+            run_events = _load_run_events(str(inferred_run_id))
+        except Exception:
+            run_events = []
 
     # Optional control and watchdog snapshots
     run_state: Optional[Dict[str, Any]] = None
@@ -777,6 +1032,13 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     except Exception:
         discoveries = []
 
+    # If agent memory has no structured discoveries yet, fall back to the event stream.
+    if not discoveries and run_events:
+        try:
+            discoveries = _events_to_discovery_log(run_events, goal=goal) or discoveries
+        except Exception:
+            pass
+
     # Option C meta segment stats
     meta_segments = _meta_segment_stats(cycles)
 
@@ -835,6 +1097,8 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     # Runtime
     if runtime:
         lines.append(f"**Session runtime:** {runtime}\n")
+    if inferred_run_id:
+        lines.append(f"**Run ID:** `{inferred_run_id}`\n")
 
     # Run control snapshot
     if run_state or worker_state or watchdog_info:
@@ -1004,7 +1268,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     lines.append(f"- Total cycles: **{n_cycles}**")
     lines.append(f"- Domains: **{', '.join(sorted(str(d) for d in domains))}**")
     lines.append(f"- Avg RYE: **{avg_rye:.3f}**")
-    lines.append(f"- Avg ΔR: **{avg_delta:.3f}**")
+    lines.append(f"- Avg ÎR: **{avg_delta:.3f}**")
     lines.append(f"- Avg Energy: **{avg_energy:.3f}**")
 
     if cycles_per_hour is not None:
@@ -1384,8 +1648,8 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
     # Interpretation
     lines.append("## Reparodynamics interpretation\n")
     lines.append(
-        "This session reflects a sequence of TGRM cycles (Test → Detect → Repair → Verify). "
-        "RYE quantifies how much verified improvement (ΔR) occurred per unit energy (E). "
+        "This session reflects a sequence of TGRM cycles (Test â Detect â Repair â Verify). "
+        "RYE quantifies how much verified improvement (ÎR) occurred per unit energy (E). "
         "The stability index, momentum, trend, oscillation level, Option C safety envelope, "
         "and MSIL snapshot together indicate whether the system is moving toward a stable high "
         "repair yield equilibrium or oscillating in a more exploratory regime. Run tier, learning "
@@ -1400,7 +1664,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None) -> str:
 # ---------------------------------------------------------
 # TARGETED FINDINGS REPORT
 # ---------------------------------------------------------
-def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> str:
+def generate_findings_report(memory_store: Any, goal: Optional[str] = None, run_id: Optional[str] = None) -> str:
     """
     Extract actionable findings such as:
     - Possible cures
@@ -1417,8 +1681,35 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> s
     else:
         cycles = list(all_cycles)
 
+    # Run scoping: prefer explicit run_id, then infer from memory/cycle history.
+    inferred_run_id = _infer_run_id(memory_store, cycles, explicit=run_id)
+
+    # If cycles carry run_id fields, filter to the inferred run_id to avoid blending runs.
+    if inferred_run_id and any(c.get("run_id") is not None for c in cycles):
+        try:
+            filtered = [c for c in cycles if str(c.get("run_id")) == str(inferred_run_id)]
+            if filtered:
+                cycles = filtered
+        except Exception:
+            pass
+
     if not cycles:
-        return "# Findings Report\n\nNo cycles found."
+        if inferred_run_id:
+            try:
+                _events = _load_run_events(str(inferred_run_id))
+                if _events:
+                    return _render_event_only_findings_report(_events, run_id=str(inferred_run_id), goal=goal)
+            except Exception:
+                pass
+        return "# Targeted Findings Report\n\nNo cycles logged."
+
+    # Load per-run events once (used for discovery/candidate sections and robustness).
+    run_events: List[Dict[str, Any]] = []
+    if inferred_run_id:
+        try:
+            run_events = _load_run_events(str(inferred_run_id))
+        except Exception:
+            run_events = []
 
     timestamps: List[str] = []
     all_citations: List[Dict[str, Any]] = []
@@ -1449,6 +1740,13 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> s
     except Exception:
         structured = []
 
+    # If agent memory has no structured discoveries yet, fall back to the event stream.
+    if not structured and run_events:
+        try:
+            structured = _events_to_structured_discoveries(run_events, goal=goal) or structured
+        except Exception:
+            pass
+
     # Text mined findings from hypotheses
     findings_text: List[str] = []
     KEYWORDS = [
@@ -1478,12 +1776,40 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> s
             if any(k.lower() in text.lower() for k in KEYWORDS):
                 findings_text.append(text)
 
+    # If cycle summaries have no hypothesis text, mine the event stream for keyword hits.
+    if not findings_text and run_events:
+        try:
+            for e in run_events:
+                if not isinstance(e, dict):
+                    continue
+                k = str(e.get("kind") or "").strip()
+                data = e.get("data") if isinstance(e.get("data"), dict) else {}
+                text_blob = ""
+                if k in ("candidate_hypothesis", "discovery", "discovery_candidate"):
+                    text_blob = (
+                        data.get("mechanism_chain")
+                        or data.get("hidden_constraint")
+                        or data.get("thesis")
+                        or data.get("title")
+                        or ""
+                    )
+                elif k == "agent_output":
+                    text_blob = data.get("text") or ""
+                if text_blob and any(kw.lower() in str(text_blob).lower() for kw in KEYWORDS):
+                    findings_text.append(str(text_blob))
+                if len(findings_text) >= 200:
+                    break
+        except Exception:
+            pass
+
     # Build report
     lines: List[str] = []
     lines.append("# Targeted Findings Report\n")
 
     if runtime:
         lines.append(f"**Session runtime:** {runtime}\n")
+    if inferred_run_id:
+        lines.append(f"**Run ID:** `{inferred_run_id}`\n")
 
     if goal:
         lines.append(f"**Filtered goal:** {goal}\n")
@@ -1573,10 +1899,11 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None) -> s
 def generate_report_pdf(
     memory_store: Any,
     goal: Optional[str] = None,
+    run_id: Optional[str] = None,
     output_path: str = "autonomous_agent_report.pdf",
 ) -> str:
     """Generate the full report and write it to a PDF file."""
-    md = generate_report(memory_store, goal=goal)
+    md = generate_report(memory_store, goal=goal, run_id=run_id)
     title = "Autonomous Research Agent Report"
     if goal:
         title = f"{title} - Goal Snapshot"
@@ -1586,10 +1913,11 @@ def generate_report_pdf(
 def generate_findings_report_pdf(
     memory_store: Any,
     goal: Optional[str] = None,
+    run_id: Optional[str] = None,
     output_path: str = "autonomous_agent_findings_report.pdf",
 ) -> str:
     """Generate the targeted findings report and write it to a PDF file."""
-    md = generate_findings_report(memory_store, goal=goal)
+    md = generate_findings_report(memory_store, goal=goal, run_id=run_id)
     title = "Autonomous Agent Findings Report"
     if goal:
         title = f"{title} - Goal Snapshot"
