@@ -212,6 +212,8 @@ class CurriculumState:
     stage_hint: str
     replay_focus_hint: str
     biomarker_focus: List[str] = field(default_factory=list)
+    # Optional funnel step hint for short / structured runs (e.g. 2-cycle or 5-cycle discovery funnel)
+    funnel_step: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -605,6 +607,29 @@ class CurriculumController:
             breakthrough_score=breakthrough_score,
         )
 
+        # Optional funnel hint: for short runs, guide the system through a pressure-driven structure.
+        funnel_step: Optional[str] = None
+        try:
+            total_cycles_req = run_progress.get("total_cycles_requested") or run_progress.get("total_cycles") or run_progress.get("cycle_target")
+            if total_cycles_req is not None:
+                total_cycles_req_int = int(total_cycles_req)
+            else:
+                total_cycles_req_int = None
+        except Exception:
+            total_cycles_req_int = None
+
+        if total_cycles_req_int is not None and total_cycles_req_int > 0:
+            try:
+                idx0 = max(0, int(cycles_completed))
+            except Exception:
+                idx0 = 0
+            if total_cycles_req_int <= 2:
+                funnel_step = "cycle1_map_cluster" if idx0 == 0 else "cycle2_cull_commit"
+            elif total_cycles_req_int <= 5:
+                steps = ["map", "cluster", "cull", "stress", "commit"]
+                if 0 <= idx0 < len(steps):
+                    funnel_step = f"cycle{idx0+1}_{steps[idx0]}"
+
         state = CurriculumState(
             profile=self.profile_name,
             phase_name=phase.name,
@@ -620,6 +645,7 @@ class CurriculumController:
             stage_hint=stage_hint,
             replay_focus_hint=replay_focus_hint,
             biomarker_focus=biomarker_focus,
+            funnel_step=funnel_step,
         )
         return state
 
