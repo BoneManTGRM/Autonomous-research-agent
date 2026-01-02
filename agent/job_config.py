@@ -15,6 +15,7 @@ extend the dataclass with additional fields as your engine requires.
 
 from __future__ import annotations
 
+import os
 import json
 import uuid
 from dataclasses import dataclass, asdict, field
@@ -22,7 +23,25 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
-PENDING_DIR = Path("runs") / "queue" / "pending"
+
+def resolve_runs_root() -> Path:
+    """Resolve the runs root directory.
+
+    Uses ARA_RUNS_DIR when set, otherwise falls back to a local ./runs folder.
+    """
+    env = (
+        os.environ.get("ARA_RUNS_DIR")
+        or os.environ.get("ARA_RUN_ROOT")
+        or os.environ.get("RUNS_DIR")
+    )
+    if env:
+        try:
+            return Path(env).expanduser().resolve()
+        except Exception:
+            return Path(env)
+    return Path('runs').resolve()
+
+PENDING_DIR = resolve_runs_root() / 'queue' / 'pending'
 
 
 @dataclass
