@@ -1836,7 +1836,7 @@ class MemoryStore:
 
         self._save()
 
-    def get_cycle_history(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    def get_cycle_history(self, limit: Optional[int] = None, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Return the history of cycles (oldest to newest).
 
@@ -1861,6 +1861,11 @@ class MemoryStore:
         cycles = self._data.get("cycles", [])
         if not isinstance(cycles, list):
             return []
+        # Optional: filter to a specific run_id to avoid blending across runs
+        if run_id is not None:
+            rid = str(run_id)
+            cycles = [c for c in cycles if isinstance(c, dict) and str(c.get('run_id') or '') == rid]
+
         # No limit or invalid limit -> return full history
         if limit is None:
             return list(cycles)
@@ -1872,7 +1877,7 @@ class MemoryStore:
             return []
         return list(cycles[-lim:])
 
-    def get_cycle_history_for_goal(self, goal: str, limit: int = 200) -> List[Dict[str, Any]]:
+    def get_cycle_history_for_goal(self, goal: str, limit: int = 200, run_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Return recent cycles for a goal, oldest to newest, up to ``limit``.
 
@@ -1885,6 +1890,7 @@ class MemoryStore:
         Args:
             goal: The goal identifier to filter cycles by.
             limit: The maximum number of cycles to return.
+            run_id: Optional run_id to filter cycles by (prevents blended multi-run goal history).
 
         Returns:
             A list of cycle dictionaries filtered by goal.
@@ -1894,7 +1900,18 @@ class MemoryStore:
             self._load()
         except Exception:
             pass
-        history = [c for c in self._data.get("cycles", []) if isinstance(c, dict) and c.get("goal") == goal]
+        source_cycles = self._data.get('cycles', [])
+        # If a run_id is provided, prefer per-run cycle_history to avoid blending
+        if run_id:
+            hist = self._data.get('cycle_history')
+            if isinstance(hist, dict):
+                run_hist = hist.get(str(run_id))
+                if isinstance(run_hist, list):
+                    source_cycles = run_hist
+        history = [c for c in source_cycles if isinstance(c, dict) and c.get('goal') == goal]
+        if run_id:
+            rid = str(run_id)
+            history = [c for c in history if str(c.get('run_id') or '') == rid]
         # Sort newest to oldest then slice
         history_sorted = sorted(
             history,
