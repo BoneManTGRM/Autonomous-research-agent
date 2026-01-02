@@ -90,34 +90,115 @@ def infer_agent_presence(job_def: Dict[str, Any]) -> List[Tuple[str, str]]:
 
 
 def build_narrative_timeline(events: Iterable[Dict[str, Any]]) -> List[str]:
-    """Construct a human‑readable narrative from event log entries.
+    """Construct a human-readable narrative from event log entries.
 
     This helper takes an iterable of event dicts (e.g. produced by the
-    queue worker) and returns a list of strings summarising the run
-    progression.  It expects events to have a ``kind`` key and may
-    utilise other fields to build descriptive sentences.
+    queue worker or event_log JSONL) and returns a list of strings summarising
+    run progression.
 
-    Currently recognised kinds are ``phase_start`` and ``run_finished``;
-    unrecognised kinds are rendered generically.  You can extend this
-    function to support additional event types.
+    Recognised kinds include (best-effort):
+      - phase_start / cycle_start
+      - run_finished
+      - agent_output
+      - candidate_hypothesis
+      - verification
+      - discovery
+      - rye_update
+
+    Unrecognised kinds are rendered generically.
     """
     narrative: List[str] = []
     for ev in events:
+        if not isinstance(ev, dict):
+            continue
         kind = ev.get("kind")
-        if kind == "phase_start":
-            idx = ev.get("phase_index")
-            total = ev.get("phase_total")
-            name = ev.get("phase_name", "phase")
-            narrative.append(f"Started {name} {idx + 1} of {total}.")
-        elif kind == "run_finished":
+        kind_s = str(kind or "")
+        data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+
+        # Common index fields
+        idx = ev.get("phase_index")
+        if idx is None:
+            idx = ev.get("cycle")
+        if idx is None:
+            idx = ev.get("cycle_index")
+        try:
+            idx_i = int(idx) if idx is not None else None
+        except Exception:
+            idx_i = None
+
+        # Phase / cycle starts
+        if kind_s in ("phase_start", "cycle_start", "cycle_started", "cycle_begin"):
+            total = ev.get("phase_total") or ev.get("cycle_total") or ev.get("total_cycles")
+            name = ev.get("phase_name") or ev.get("cycle_name") or "cycle"
+            if idx_i is not None and total is not None:
+                narrative.append(f"Started {name} {idx_i + 1} of {total}.")
+            elif idx_i is not None:
+                narrative.append(f"Started {name} {idx_i + 1}.")
+            else:
+                narrative.append(f"Started {name}.")
+            continue
+
+        # Agent output
+        if kind_s == "agent_output":
+            role = ev.get("role") or data.get("role") or "agent"
+            text = data.get("text") or data.get("output") or data.get("message") or ""
+            text_s = str(text) if text is not None else ""
+            snippet = (text_s[:120] + "…") if len(text_s) > 120 else text_s
+            if idx_i is not None:
+                narrative.append(f"Cycle {idx_i + 1}: {role} produced output: {snippet}")
+            else:
+                narrative.append(f"{role} produced output: {snippet}")
+            continue
+
+        # Candidate hypothesis
+        if kind_s in ("candidate_hypothesis", "discovery_candidate"):
+            title = data.get("title") or data.get("thesis") or data.get("headline") or "candidate"
+            if idx_i is not None:
+                narrative.append(f"Cycle {idx_i + 1}: Proposed candidate hypothesis: {title}")
+            else:
+                narrative.append(f"Proposed candidate hypothesis: {title}")
+            continue
+
+        # Verification
+        if kind_s == "verification":
+            verdict = data.get("verdict") or data.get("pass_fail") or data.get("result")
+            title = data.get("title") or data.get("candidate") or ""
+            if verdict is None:
+                msg = "Verification event."
+            else:
+                msg = f"Verification: {verdict}"
+            if title:
+                msg += f" ({title})"
+            if idx_i is not None:
+                narrative.append(f"Cycle {idx_i + 1}: {msg}")
+            else:
+                narrative.append(msg)
+            continue
+
+        # Final discovery
+        if kind_s == "discovery":
+            thesis = data.get("thesis") or data.get("title") or "discovery"
+            if idx_i is not None:
+                narrative.append(f"Cycle {idx_i + 1}: Discovery committed: {thesis}")
+            else:
+                narrative.append(f"Discovery committed: {thesis}")
+            continue
+
+        # RYE update
+        if kind_s == "rye_update":
+            rye = data.get("RYE") or data.get("rye") or ev.get("rye")
+            delta_r = data.get("delta_R") or data.get("delta_r") or ev.get("delta_R") or ev.get("delta_r")
+            if idx_i is not None:
+                narrative.append(f"Cycle {idx_i + 1}: RYE update (RYE={rye}, delta_R={delta_r})")
+            else:
+                narrative.append(f"RYE update (RYE={rye}, delta_R={delta_r})")
+            continue
+
+        # Run finished
+        if kind_s == "run_finished":
             narrative.append("Run finished.")
-        else:
-            narrative.append(f"Event: {kind}")
+            continue
+
+        narrative.append(f"Event: {kind_s}")
+
     return narrative
-
-
-__all__ = [
-    "compute_autonomy_level",
-    "infer_agent_presence",
-    "build_narrative_timeline",
-]
