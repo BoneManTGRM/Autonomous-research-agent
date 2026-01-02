@@ -37,6 +37,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Optional event stream integration (events.jsonl via agent/event_log.py).
+# This keeps the manager backward-compatible with older discovery_log based flows.
+try:  # pragma: no cover
+    from .event_log import log_event as _log_event  # type: ignore
+except Exception:  # pragma: no cover
+    try:
+        from event_log import log_event as _log_event  # type: ignore
+    except Exception:
+        _log_event = None  # type: ignore
+
 # Root folders for hypothesis storage
 ROOT_DIR = Path("hypotheses")
 PENDING_DIR = ROOT_DIR / "pending"
@@ -327,6 +337,56 @@ class HypothesisManager:
             swarm_config=record.swarm_config,
         )
 
+
+    def _log_to_event_stream(
+        self,
+        kind: str,
+        record: HypothesisRecord,
+        *,
+        note: Optional[str] = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Best effort logging into the append-only JSONL event stream.
+
+        This complements (not replaces) discovery_log. The Streamlit UI and report
+        pipeline can reliably tail events.jsonl without truncation. Safe no-op if
+        event_log is not available.
+        """
+        if _log_event is None:
+            return
+        try:
+            run_id = record.run_id or self.run_id
+            cycle = record.cycle_index
+            role = record.agent_role
+            data: Dict[str, Any] = {}
+            # Preserve the record as structured metadata for downstream tooling.
+            try:
+                data.update(record.to_dict())
+            except Exception:
+                data["record"] = str(record)
+
+            # Add a stable, UI-friendly summary mapping.
+            data.setdefault("title", record.title)
+            data.setdefault("description", record.description)
+            if note:
+                data.setdefault("note", note)
+            if extra and isinstance(extra, dict):
+                data.setdefault("extra", {})
+                if isinstance(data.get("extra"), dict):
+                    data["extra"].update(extra)  # type: ignore[index]
+            _log_event(
+                run_id=str(run_id) if run_id is not None else None,
+                kind=str(kind),
+                message=str(record.title) if record.title else str(kind),
+                level="info",
+                data=data,
+                role=str(role) if role else None,
+                domain=record.domain,
+                cycle=cycle,
+            )
+        except Exception:
+            # Logging must never break the hypothesis pipeline.
+            return
     def _push_to_memory_store_on_create(self, record: HypothesisRecord) -> None:
         """
         Optional hook: if a MemoryStore-like object is provided, record the
@@ -466,6 +526,7 @@ class HypothesisManager:
         # Learning hooks
         self._push_to_memory_store_on_create(record)
         self._log_to_discovery_log("hypothesis_created", record)
+        self._log_to_event_stream("candidate_hypothesis", record)
 
         return record
 
@@ -504,10 +565,13 @@ class HypothesisManager:
         if new_status == "validated":
             self._push_to_memory_store_on_validate(record)
             self._log_to_discovery_log("hypothesis_validated", record, note=note)
+            self._log_to_event_stream("verification", record, note=note, extra={"status": "validated"})
         elif new_status == "rejected":
             self._log_to_discovery_log("hypothesis_rejected", record, note=note)
+            self._log_to_event_stream("rejection", record, note=note, extra={"status": "rejected"})
         else:
             self._log_to_discovery_log("hypothesis_status_change", record, note=note)
+            self._log_to_event_stream("hypothesis_status_change", record, note=note, extra={"status": str(new_status), "old_status": str(old_status)})
 
         return record
 
