@@ -24,6 +24,15 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+# Optional event stream integration (append-only JSONL via agent/event_log.py).
+try:  # pragma: no cover
+    from .event_log import log_event as _log_event  # type: ignore
+except Exception:  # pragma: no cover
+    try:
+        from event_log import log_event as _log_event  # type: ignore
+    except Exception:
+        _log_event = None  # type: ignore
+
 
 def _score_range(value: float, low: float, high: float) -> int:
     """Return a simple risk score: 0=good, 1=borderline, 2=high-risk."""
@@ -64,7 +73,7 @@ def analyze_biomarkers(snapshot: Dict[str, Any]) -> Dict[str, Any]:
 
     summary_lines = []
     if scores["bmi"] > 0:
-        summary_lines.append("Body weight or composition may be suboptimal (BMI outside 18.5–25).")
+        summary_lines.append("Body weight or composition may be suboptimal (BMI outside 18.5â25).")
     if scores["ldl"] > 0:
         summary_lines.append("LDL cholesterol is above ideal range; cardiovascular risk may be higher.")
     if scores["hdl"] > 0:
