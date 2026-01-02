@@ -328,6 +328,11 @@ class HallmarkProfiles:
             default_subgoals=[
                 "map cross hallmark interventions that appear robust in human data",
                 "prioritize interventions with strong evidence and clear biomarkers",
+                # Underexplored system-level constraint lenses (useful for discovery swarms)
+                "identify transport/clearance bottlenecks (glymphatic/lymphatic, microvascular flow, ECM diffusion)",
+                "map repair logistics constraints (immune trafficking, proteostasis traffic, stem-cell niche access)",
+                "quantify mechanical stress / tissue flow ceilings that limit regeneration with age",
+                "seek control-theory style failure modes (feedback delay, saturation, congestion) in repair loops",
             ],
             biomarkers_primary=[
                 "standard clinical panel relevant to aging risk",
