@@ -131,166 +131,179 @@ MAX_WEB_QUERY_LEN = 380
 
 
 # ---------------------------------------------------------------------------
-# Web search timeout guard
-#
-# Tavily (and other web providers) can occasionally hang or back off for a very
-# long time under load. In a 64-agent swarm, a single hung web call can block
-# an entire cycle barrier. This lightweight wrapper enforces a hard timeout so
-# the agent continues the cycle with empty web results rather than stalling.
-#
-# Configure via env vars:
-#   WORKER_WEB_TIMEOUT_S (default 25)
-#   WORKER_WEB_TIMEOUT_WORKERS (default 4)
-#   WORKER_WEB_TIMEOUT_MAX_INFLIGHT (default workers*4)
+# Web search timeout / hang guard
 # ---------------------------------------------------------------------------
+# In large swarms a single hung web-provider request (e.g., Tavily) can block the
+# entire round barrier. The helpers below wrap web calls in a hard timeout and
+# cap in-flight requests so stuck sockets can't freeze the run indefinitely.
+#
+# This is intentionally "fail open": on timeout we return no results and allow
+# the agent to continue (it may fall back to internal reasoning or other tools).
 
-_WEB_TIMEOUT_EXECUTOR = None  # lazily initialized ThreadPoolExecutor
-_WEB_TIMEOUT_EXECUTOR_LOCK = threading.Lock()
-_WEB_TIMEOUT_INFLIGHT = 0
-_WEB_TIMEOUT_INFLIGHT_LOCK = threading.Lock()
+_WEB_GUARD_LOCK = threading.Lock()
+_WEB_GUARD_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
+_WEB_GUARD_MAX_WORKERS: Optional[int] = None
+_WEB_GUARD_SEM: Optional[threading.BoundedSemaphore] = None
+_WEB_GUARD_MAX_INFLIGHT: Optional[int] = None
 
 
-def _env_float(name: str, default: float) -> float:
-    val = os.getenv(name)
-    if val is None or val == "":
-        return float(default)
+def _env_int(name: str, default: int, *, lo: Optional[int] = None, hi: Optional[int] = None) -> int:
+    """Parse an int env var with optional clamping (never raises)."""
     try:
-        return float(val)
+        raw = os.environ.get(name)
+        if raw is None or str(raw).strip() == "":
+            v = int(default)
+        else:
+            v = int(float(str(raw).strip()))
     except Exception:
-        return float(default)
+        v = int(default)
+    if lo is not None and v < int(lo):
+        v = int(lo)
+    if hi is not None and v > int(hi):
+        v = int(hi)
+    return v
 
 
-def _env_int(name: str, default: int) -> int:
-    val = os.getenv(name)
-    if val is None or val == "":
-        return int(default)
+def _env_float(name: str, default: float, *, lo: Optional[float] = None, hi: Optional[float] = None) -> float:
+    """Parse a float env var with optional clamping (never raises)."""
     try:
-        return int(val)
+        raw = os.environ.get(name)
+        if raw is None or str(raw).strip() == "":
+            v = float(default)
+        else:
+            v = float(str(raw).strip())
     except Exception:
-        return int(default)
+        v = float(default)
+    if lo is not None and v < float(lo):
+        v = float(lo)
+    if hi is not None and v > float(hi):
+        v = float(hi)
+    return v
 
 
-def _get_web_timeout_s() -> float:
-    timeout_s = _env_float(
-        "WORKER_WEB_TIMEOUT_S",
-        _env_float("WEB_TIMEOUT_S", _env_float("TAVILY_TIMEOUT_S", 25.0)),
-    )
-    # Clamp to a sane range.
-    if timeout_s < 3.0:
-        timeout_s = 3.0
-    if timeout_s > 180.0:
-        timeout_s = 180.0
-    return float(timeout_s)
-
-
-def _get_web_timeout_workers() -> int:
-    workers = _env_int("WORKER_WEB_TIMEOUT_WORKERS", _env_int("WORKER_WEB_MAX_CONCURRENCY", 4))
-    if workers < 1:
-        workers = 1
-    if workers > 32:
-        workers = 32
-    return int(workers)
-
-
-def _get_web_timeout_max_inflight(workers: int) -> int:
-    cap = _env_int("WORKER_WEB_TIMEOUT_MAX_INFLIGHT", int(workers) * 4)
-    if cap < int(workers):
-        cap = int(workers)
-    if cap > 256:
-        cap = 256
-    return int(cap)
-
-
-def _get_web_timeout_executor() -> concurrent.futures.ThreadPoolExecutor:
-    global _WEB_TIMEOUT_EXECUTOR
-    if _WEB_TIMEOUT_EXECUTOR is not None:
-        return _WEB_TIMEOUT_EXECUTOR
-    with _WEB_TIMEOUT_EXECUTOR_LOCK:
-        if _WEB_TIMEOUT_EXECUTOR is not None:
-            return _WEB_TIMEOUT_EXECUTOR
-        max_workers = _get_web_timeout_workers()
-        _WEB_TIMEOUT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
-            max_workers=max_workers,
-            thread_name_prefix="tgrm-web-timeout",
-        )
-        return _WEB_TIMEOUT_EXECUTOR
-
-
-def _decrement_web_inflight(_future: "concurrent.futures.Future[Any]") -> None:
-    global _WEB_TIMEOUT_INFLIGHT
+def _get_web_guard(max_workers: int, max_inflight: int) -> Tuple[concurrent.futures.ThreadPoolExecutor, threading.BoundedSemaphore]:
+    """Return (executor, semaphore) used to guard web calls."""
+    global _WEB_GUARD_EXECUTOR, _WEB_GUARD_MAX_WORKERS, _WEB_GUARD_SEM, _WEB_GUARD_MAX_INFLIGHT
+    # Defensive clamps
     try:
-        with _WEB_TIMEOUT_INFLIGHT_LOCK:
-            _WEB_TIMEOUT_INFLIGHT = max(0, int(_WEB_TIMEOUT_INFLIGHT) - 1)
+        max_workers = int(max_workers)
     except Exception:
-        pass
+        max_workers = 4
+    if max_workers < 1:
+        max_workers = 1
+    if max_workers > 64:
+        max_workers = 64
+
+    try:
+        max_inflight = int(max_inflight)
+    except Exception:
+        max_inflight = max_workers * 4
+    if max_inflight < max_workers:
+        max_inflight = max_workers
+    if max_inflight > 512:
+        max_inflight = 512
+
+    with _WEB_GUARD_LOCK:
+        if _WEB_GUARD_EXECUTOR is None:
+            _WEB_GUARD_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+                max_workers=max_workers, thread_name_prefix="tgrm-web"
+            )
+            _WEB_GUARD_MAX_WORKERS = max_workers
+        else:
+            # Avoid recreating the executor at runtime to prevent thread leaks.
+            if _WEB_GUARD_MAX_WORKERS is None:
+                _WEB_GUARD_MAX_WORKERS = max_workers
+
+        if _WEB_GUARD_SEM is None or _WEB_GUARD_MAX_INFLIGHT != max_inflight:
+            _WEB_GUARD_SEM = threading.BoundedSemaphore(value=max_inflight)
+            _WEB_GUARD_MAX_INFLIGHT = max_inflight
+
+        # At this point both should be non-None
+        return _WEB_GUARD_EXECUTOR, _WEB_GUARD_SEM  # type: ignore[return-value]
 
 
-def _call_with_timeout(
-    fn: Any,
-    timeout_s: float,
-    default: Any,
-    allow_exceptions: Tuple[type, ...] = (),
-) -> Any:
-    """Run fn() with a hard timeout; return `default` on timeout or error.
+def _call_with_timeout_guard(fn: Any, timeout_s: float, *, max_workers: int, max_inflight: int) -> Tuple[Any, str]:
+    """Run fn() in a guarded thread with a hard timeout.
 
-    NOTE: Python cannot force-kill a running thread, but this prevents the
-    *agent* from blocking forever on a hanging provider call. In-flight calls
-    are capped to avoid unbounded queue growth if upstream calls hang.
+    Returns:
+        (result, status) where status is one of: "ok", "timeout", "busy", "error".
     """
-    global _WEB_TIMEOUT_INFLIGHT
-
+    # If timeout is disabled or non-positive, just call directly.
     try:
         timeout_s = float(timeout_s)
     except Exception:
         timeout_s = 25.0
-
     if timeout_s <= 0:
         try:
-            return fn()
-        except Exception as e:
-            if allow_exceptions and isinstance(e, allow_exceptions):
-                raise
-            return default
+            return fn(), "ok"
+        except Exception:
+            return None, "error"
 
-    workers = _get_web_timeout_workers()
-    max_inflight = _get_web_timeout_max_inflight(workers)
-
-    future: Optional["concurrent.futures.Future[Any]"] = None
-
-    # Guard against unbounded queue growth when upstream calls hang.
     try:
-        with _WEB_TIMEOUT_INFLIGHT_LOCK:
-            if int(_WEB_TIMEOUT_INFLIGHT) >= int(max_inflight):
-                return default
-            _WEB_TIMEOUT_INFLIGHT = int(_WEB_TIMEOUT_INFLIGHT) + 1
+        executor, sem = _get_web_guard(max_workers=max_workers, max_inflight=max_inflight)
     except Exception:
-        pass
+        # If the guard fails for any reason, fall back to direct call.
+        try:
+            return fn(), "ok"
+        except Exception:
+            return None, "error"
 
+    # Acquire an in-flight token without blocking. If we're saturated, fail open.
     try:
-        executor = _get_web_timeout_executor()
-        future = executor.submit(fn)
+        acquired = sem.acquire(blocking=False)
+    except Exception:
+        acquired = True
+    if not acquired:
+        return None, "busy"
+
+    released_flag = {"released": False}
+
+    def _release_once(_f: Any = None) -> None:
+        if released_flag.get("released"):
+            return
+        released_flag["released"] = True
         try:
-            return future.result(timeout=timeout_s)
-        except concurrent.futures.TimeoutError:
-            try:
-                future.cancel()
-            except Exception:
-                pass
-            return default
-        except Exception as e:
-            if allow_exceptions and isinstance(e, allow_exceptions):
-                raise
-            return default
-    finally:
-        try:
-            if future is not None:
-                future.add_done_callback(_decrement_web_inflight)
-            else:
-                with _WEB_TIMEOUT_INFLIGHT_LOCK:
-                    _WEB_TIMEOUT_INFLIGHT = max(0, int(_WEB_TIMEOUT_INFLIGHT) - 1)
+            sem.release()
         except Exception:
             pass
 
+    fut = None
+    callback_installed = False
+    try:
+        fut = executor.submit(fn)
+        try:
+            fut.add_done_callback(_release_once)
+            callback_installed = True
+        except Exception:
+            callback_installed = False
+
+        try:
+            res = fut.result(timeout=timeout_s)
+            if not callback_installed:
+                # We waited until completion; release now.
+                _release_once()
+            return res, "ok"
+        except concurrent.futures.TimeoutError:
+            # Do not block the caller; leave the underlying call running.
+            try:
+                fut.cancel()
+            except Exception:
+                pass
+            # If callback wasn't installed, the token may remain held. This is
+            # safer than allowing unbounded in-flight calls when sockets hang.
+            return None, "timeout"
+        except Exception:
+            try:
+                fut.cancel()
+            except Exception:
+                pass
+            if not callback_installed:
+                _release_once()
+            return None, "error"
+    finally:
+        # If submit failed before fut existed, release the token.
+        if fut is None and not released_flag.get("released"):
+            _release_once()
 
 
 def _clamp_query(q: str, limit: int = MAX_WEB_QUERY_LEN) -> str:
@@ -2665,8 +2678,48 @@ class TGRMLoop:
         # Normalize params dictionary
         params = dict(params or {})
 
-        # Hard timeout to prevent a single hanging web call from stalling the whole cycle.
-        timeout_s = _get_web_timeout_s()
+        # --- Hard timeout + inflight guard (prevents swarm stalls on hung web calls) ---
+        now_ts = time.time()
+        try:
+            disabled_until = float(getattr(self, "_web_disabled_until_ts", 0.0) or 0.0)
+        except Exception:
+            disabled_until = 0.0
+        if disabled_until and now_ts < disabled_until:
+            return []
+
+        # Read guard settings from env first, then allow config overrides (best-effort)
+        timeout_s = _env_float("WORKER_WEB_TIMEOUT_S", 25.0, lo=3.0, hi=180.0)
+        max_workers = _env_int("WORKER_WEB_TIMEOUT_WORKERS", 4, lo=1, hi=32)
+        max_inflight = _env_int("WORKER_WEB_TIMEOUT_MAX_INFLIGHT", max_workers * 4, lo=max_workers, hi=256)
+        disable_after_timeouts = _env_int("WORKER_WEB_TIMEOUTS_BEFORE_DISABLE", 3, lo=1, hi=50)
+        disable_after_errors = _env_int("WORKER_WEB_ERRORS_BEFORE_DISABLE", 5, lo=1, hi=50)
+        circuit_open_s = _env_float("WORKER_WEB_CIRCUIT_OPEN_S", 120.0, lo=10.0, hi=1800.0)
+
+        try:
+            timeout_s = float(self.config.get("web_timeout_s", timeout_s))
+        except Exception:
+            pass
+        try:
+            max_workers = int(self.config.get("web_timeout_workers", max_workers))
+        except Exception:
+            pass
+        try:
+            max_inflight = int(self.config.get("web_timeout_max_inflight", max_inflight))
+        except Exception:
+            pass
+        try:
+            disable_after_timeouts = int(self.config.get("web_timeouts_before_disable", disable_after_timeouts))
+        except Exception:
+            pass
+        try:
+            disable_after_errors = int(self.config.get("web_errors_before_disable", disable_after_errors))
+        except Exception:
+            pass
+        try:
+            circuit_open_s = float(self.config.get("web_circuit_open_s", circuit_open_s))
+        except Exception:
+            pass
+
 
         # If a unified search helper is available, use it. This helper handles
         # Tavily concurrency limits and implements retry/backoff. It returns
@@ -2693,10 +2746,9 @@ class TGRMLoop:
             topic = params.get("topic")
             if not isinstance(topic, str) or not topic:
                 topic = "general"
-            # Wrap the provider call with a hard timeout. This prevents one slow/hung
-            # Tavily request from blocking the entire swarm cycle.
-            def _invoke_core_search() -> Any:
-                # Try the most complete signature first; degrade gracefully.
+
+            # Try the most complete signature first; degrade gracefully
+            def _do_core_search() -> Any:
                 try:
                     return core_web_search(
                         query=query,
@@ -2712,13 +2764,66 @@ class TGRMLoop:
                             search_depth=search_depth,
                         )
                     except TypeError:
-                        return core_web_search(
-                            query=query,
-                            max_results=max_results,
-                        )
+                        try:
+                            return core_web_search(
+                                query=query,
+                                max_results=max_results,
+                            )
+                        except Exception:
+                            return None
+                    except Exception:
+                        return None
+                except Exception:
+                    return None
 
-            res = _call_with_timeout(_invoke_core_search, timeout_s=timeout_s, default=None)
+            res, _guard_status = _call_with_timeout_guard(
+                _do_core_search, timeout_s, max_workers=max_workers, max_inflight=max_inflight
+            )
 
+            if _guard_status != "ok":
+                # Track failures and optionally open a circuit breaker to prevent credit burn.
+                try:
+                    timeout_streak = int(getattr(self, "_web_timeout_streak", 0) or 0)
+                except Exception:
+                    timeout_streak = 0
+                try:
+                    error_streak = int(getattr(self, "_web_error_streak", 0) or 0)
+                except Exception:
+                    error_streak = 0
+
+                if _guard_status == "timeout":
+                    timeout_streak += 1
+                    error_streak = 0
+                elif _guard_status == "error":
+                    error_streak += 1
+                    timeout_streak = 0
+
+                try:
+                    setattr(self, "_web_timeout_streak", timeout_streak)
+                    setattr(self, "_web_error_streak", error_streak)
+                except Exception:
+                    pass
+
+                try:
+                    if (_guard_status == "timeout" and timeout_streak >= disable_after_timeouts) or (
+                        _guard_status == "error" and error_streak >= disable_after_errors
+                    ):
+                        setattr(self, "_web_disabled_until_ts", time.time() + float(circuit_open_s))
+                        setattr(self, "_web_timeout_streak", 0)
+                        setattr(self, "_web_error_streak", 0)
+                except Exception:
+                    pass
+
+                # On timeout/busy, fail open with no results; on error, fall through to legacy tool.
+                if _guard_status in ("timeout", "busy"):
+                    return []
+            else:
+                # Success (even if empty): reset failure streaks.
+                try:
+                    setattr(self, "_web_timeout_streak", 0)
+                    setattr(self, "_web_error_streak", 0)
+                except Exception:
+                    pass
             if isinstance(res, dict) and isinstance(res.get("results"), list):
                 items: List[Dict[str, Any]] = []
                 for item in res.get("results") or []:
@@ -2752,25 +2857,67 @@ class TGRMLoop:
         except Exception:
             filtered = params
 
-        try:
-            return _call_with_timeout(
-                lambda: self.web_tool.search(query, **filtered),  # type: ignore[misc]
-                timeout_s=timeout_s,
-                default=[],
-                allow_exceptions=(TypeError,),
-            )
-        except TypeError:
-            # Last resort: try a no-kwargs call
+        def _do_legacy_search() -> Any:
             try:
-                return _call_with_timeout(
-                    lambda: self.web_tool.search(query),  # type: ignore[misc]
-                    timeout_s=timeout_s,
-                    default=[],
-                )
+                return self.web_tool.search(query, **filtered)  # type: ignore[misc]
+            except TypeError:
+                # Last resort: try a no-kwargs call
+                try:
+                    return self.web_tool.search(query)  # type: ignore[misc]
+                except Exception:
+                    return []
             except Exception:
                 return []
-        except Exception:
+
+        res2, _guard_status2 = _call_with_timeout_guard(
+            _do_legacy_search, timeout_s, max_workers=max_workers, max_inflight=max_inflight
+        )
+        if _guard_status2 != "ok":
+            # Track failures and optionally open a circuit breaker to prevent credit burn.
+            try:
+                timeout_streak = int(getattr(self, "_web_timeout_streak", 0) or 0)
+            except Exception:
+                timeout_streak = 0
+            try:
+                error_streak = int(getattr(self, "_web_error_streak", 0) or 0)
+            except Exception:
+                error_streak = 0
+
+            if _guard_status2 == "timeout":
+                timeout_streak += 1
+                error_streak = 0
+            elif _guard_status2 == "error":
+                error_streak += 1
+                timeout_streak = 0
+
+            try:
+                setattr(self, "_web_timeout_streak", timeout_streak)
+                setattr(self, "_web_error_streak", error_streak)
+            except Exception:
+                pass
+
+            try:
+                if (_guard_status2 == "timeout" and timeout_streak >= disable_after_timeouts) or (
+                    _guard_status2 == "error" and error_streak >= disable_after_errors
+                ):
+                    setattr(self, "_web_disabled_until_ts", time.time() + float(circuit_open_s))
+                    setattr(self, "_web_timeout_streak", 0)
+                    setattr(self, "_web_error_streak", 0)
+            except Exception:
+                pass
+
             return []
+
+        # Success (even if empty): reset failure streaks.
+        try:
+            setattr(self, "_web_timeout_streak", 0)
+            setattr(self, "_web_error_streak", 0)
+        except Exception:
+            pass
+
+        if isinstance(res2, list):
+            return res2
+        return []
 
     def _initial_research(
         self,
