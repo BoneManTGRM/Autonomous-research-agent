@@ -33,6 +33,19 @@ def _utc_iso() -> str:
     """Return current UTC timestamp in ISO 8601 (seconds precision)."""
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    s = str(raw).strip().lower()
+    return s in {"1", "true", "yes", "y", "on"}
+
+
+# If enabled, persist only {"cycle_index": N} to run_state.json.
+# This reduces noise and avoids accidental run mixing.
+MINIMAL_RUN_STATE: bool = _env_bool("ARA_MINIMAL_RUN_STATE", False)
+
+
 
 def resolve_runs_root() -> Path:
     """Resolve the base runs directory.
@@ -186,6 +199,26 @@ class RunState:
         """Load a RunState from a JSON file, ignoring unknown keys."""
         with path.open("r", encoding="utf-8") as f:
             data: Dict[str, Any] = json.load(f)
+
+        # Minimal schema support: if run_id is missing, infer it from the run folder name.
+        if not (data or {}).get("run_id"):
+            try:
+                data = dict(data or {})
+                data["run_id"] = path.parent.name
+            except Exception:
+                pass
+
+        # Minimal schema support: {"cycle_index": N} should populate phase_index/current/current_cycle.
+        if isinstance(data, dict) and data.get("cycle_index") is not None:
+            try:
+                ci = int(data.get("cycle_index"))
+            except Exception:
+                ci = None
+            if ci is not None:
+                data.setdefault("phase_index", ci)
+                data.setdefault("current", ci)
+                data.setdefault("current_cycle", ci)
+
         field_names = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
         kwargs = {k: v for k, v in (data or {}).items() if k in field_names}
         st = cls(**kwargs)  # type: ignore[arg-type]
@@ -229,7 +262,24 @@ class RunState:
         return path
 
     def to_dict(self) -> Dict[str, Any]:
-        """Return a JSON-serialisable dict."""
+        """Return a JSON-serialisable dict.
+
+        When MINIMAL_RUN_STATE is enabled, only persist the current cycle index.
+        """
+        if MINIMAL_RUN_STATE:
+            # Prefer the explicit alias if set; otherwise fall back to phase_index.
+            idx = self.cycle_index
+            if idx is None:
+                idx = self.phase_index
+            if idx is None:
+                idx = self.current_cycle
+            if idx is None:
+                idx = self.current
+            try:
+                ci = int(idx) if idx is not None else 0
+            except Exception:
+                ci = 0
+            return {"cycle_index": ci}
         return asdict(self)
 
     # ------------------------------------------------------------------
