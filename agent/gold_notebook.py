@@ -233,10 +233,38 @@ def build_gold_snapshot(
     memory_store: MemoryStore,
     domain: Optional[str] = None,
     hours_run_so_far: Optional[float] = None,
+    run_id: Optional[str] = None,
 ) -> GoldNotebookSnapshot:
     """Build a structured snapshot of the current run for analysis."""
 
-    history = memory_store.get_cycle_history()
+    # Keep runs isolated when possible (prevents blended histories)
+    try:
+        if run_id is not None and hasattr(memory_store, "get_cycle_history"):
+            history = memory_store.get_cycle_history(run_id=run_id)  # type: ignore[arg-type]
+        else:
+            history = memory_store.get_cycle_history()
+    except TypeError:
+        history = memory_store.get_cycle_history()
+    except Exception:
+        history = memory_store.get_cycle_history() if hasattr(memory_store, "get_cycle_history") else []
+
+    # Fallback filtering if the store does not support run_id yet
+    if run_id is not None and isinstance(history, list):
+        try:
+            history = [
+                h
+                for h in history
+                if isinstance(h, dict)
+                and (
+                    h.get("run_id") == run_id
+                    or (
+                        isinstance(h.get("run_metadata"), dict)
+                        and h.get("run_metadata", {}).get("run_id") == run_id
+                    )
+                )
+            ]
+        except Exception:
+            pass
     total_cycles = len(history)
 
     diagnostics = build_run_diagnostics(history=history, domain=domain)
@@ -305,7 +333,7 @@ def build_gold_snapshot(
     goals_info = _goal_summary(history)
 
     notes = {
-        "total_discoveries": None,
+        "total_discoveries": 0,
         "top_discovery_labels": [],
         "harmonic_index": harm,
     }
@@ -313,11 +341,28 @@ def build_gold_snapshot(
     # Optional: pull discovery log if MemoryStore exposes helper
     try:
         if hasattr(memory_store, "get_discoveries"):
-            disc = memory_store.get_discoveries(goal=None)
+            try:
+                disc = memory_store.get_discoveries(goal=None, run_id=run_id)  # type: ignore[arg-type]
+            except TypeError:
+                disc = memory_store.get_discoveries(goal=None)
         else:
             disc = []
     except Exception:
         disc = []
+
+    try:
+        notes["total_discoveries"] = len(disc) if isinstance(disc, list) else 0
+        # Best-effort labels for UI notebooks
+        if isinstance(disc, list):
+            labels: List[str] = []
+            for d in disc[:10]:
+                if isinstance(d, dict):
+                    t = d.get("title") or d.get("label") or d.get("thesis")
+                    if t:
+                        labels.append(str(t))
+            notes["top_discovery_labels"] = labels
+    except Exception:
+        pass
 
     if isinstance(disc, list):
         notes["total_discoveries"] = len(disc)
