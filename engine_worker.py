@@ -1988,6 +1988,12 @@ def _configure_tavily_from_env() -> None:
     for _worker_var, _target_var in [
         ("WORKER_TAVILY_MAX_CONCURRENCY", "TAVILY_MAX_CONCURRENCY"),
         ("WORKER_TAVILY_MAX_RETRIES", "TAVILY_MAX_RETRIES"),
+        # Optional: hard request timeout for web search wrappers.
+        ("WORKER_TAVILY_TIMEOUT_SECONDS", "TAVILY_TIMEOUT_SECONDS"),
+        ("WORKER_WEB_SEARCH_TIMEOUT_SECONDS", "TAVILY_TIMEOUT_SECONDS"),
+        # Optional: clamp Tavily results (reduces credits in big swarms).
+        ("WORKER_TAVILY_MAX_RESULTS", "TAVILY_MAX_RESULTS"),
+        ("WORKER_WEB_MAX_RESULTS", "TAVILY_MAX_RESULTS"),
     ]:
         worker_val = os.getenv(_worker_var)
         existing_val = os.getenv(_target_var)
@@ -2223,80 +2229,6 @@ def _infer_cycle_count_from_memory(agent: CoreAgent, run_id: str) -> Optional[in
         pass
 
     return None
-
-
-def _load_cycle_history_from_memory(agent: CoreAgent, run_id: str) -> List[Dict[str, Any]]:
-    """Best-effort retrieval of the current cycle history from the MemoryStore.
-
-    This is used to compute lightweight diagnostics for UI snapshots during a
-    running job. Never raises.
-    """
-    try:
-        rid = str(run_id).strip()
-        if not rid:
-            return []
-    except Exception:
-        return []
-
-    ms = _get_memory_store(agent)
-    if ms is None:
-        return []
-
-    # 1) Try common MemoryStore APIs (best-effort, signatures vary across versions)
-    for name in (
-        "get_cycle_history",
-        "load_cycle_history",
-        "read_cycle_history",
-        "get_history",
-        "get_run_history",
-    ):
-        fn = getattr(ms, name, None)
-        if callable(fn):
-            try:
-                hist = None
-                try:
-                    hist = fn(run_id=rid)  # type: ignore[misc]
-                except TypeError:
-                    try:
-                        hist = fn(rid)  # type: ignore[misc]
-                    except TypeError:
-                        hist = fn()  # type: ignore[misc]
-                if isinstance(hist, list):
-                    return [x for x in hist if isinstance(x, dict)]
-            except Exception:
-                pass
-
-    # 2) Inspect the underlying data dict for common layouts
-    try:
-        data_attr = getattr(ms, "data", getattr(ms, "_data", None))
-        if isinstance(data_attr, dict):
-            for key in ("cycle_history", "cycle_histories", "cycle_log", "cycle_logs", "history", "histories"):
-                v = data_attr.get(key)
-                if isinstance(v, dict):
-                    rv = v.get(rid)
-                    if isinstance(rv, list):
-                        return [x for x in rv if isinstance(x, dict)]
-                elif isinstance(v, list):
-                    # Common: data["cycle_log"] = [{run_id:..., ...}, ...]
-                    if v and isinstance(v[0], dict):
-                        return [
-                            item
-                            for item in v
-                            if isinstance(item, dict) and str(item.get("run_id", "")).strip() == rid
-                        ]
-
-            direct = data_attr.get(rid)
-            if isinstance(direct, list):
-                return [x for x in direct if isinstance(x, dict)]
-            if isinstance(direct, dict):
-                for k in ("cycles", "history", "cycle_history", "cycle_log"):
-                    vv = direct.get(k)
-                    if isinstance(vv, list):
-                        return [x for x in vv if isinstance(x, dict)]
-    except Exception:
-        pass
-
-    return []
 
 
 def _current_run_id(mode: str) -> str:
@@ -6836,11 +6768,6 @@ def _process_single_job(
         last_progress_current: Optional[int] = 0
         last_progress_total: Optional[int] = macro_total
         last_progress_note: str = ""
-        # Track the last cycle for which we wrote snapshot artifacts, to avoid
-        # emitting duplicate snapshots when the progress callback fires multiple
-        # times within the same cycle.
-        last_ui_snapshot_cycle: Optional[int] = None
-        last_mem_snapshot_cycle: Optional[int] = None
         progress_lock = threading.Lock()
 
         hb_stop: Optional[threading.Event] = None
@@ -6889,7 +6816,6 @@ def _process_single_job(
 
             def _progress_cb(update: Dict[str, Any]) -> None:
                 nonlocal last_progress_current, last_progress_total, last_progress_note
-                nonlocal last_ui_snapshot_cycle, last_mem_snapshot_cycle
                 # Abort early if the user has requested the run to stop.  The stop
                 # signal is detected by presence of the stop.flag file.  If
                 # encountered, raise ``StopRunRequested`` so the surrounding
@@ -7026,45 +6952,18 @@ def _process_single_job(
                             last_progress_note = str(note_local) if note_local is not None else ""
                     except Exception:
                         pass
-                    # Periodically write snapshot artifacts if enabled.
-                    #
-                    # IMPORTANT: Use the effective (macro) cycle, not raw internal step
-                    # progress, so snapshots align with the UI's notion of cycles.
-                    if snapshot_enabled and eff_cur is not None and eff_cur > 0:
-                        # Two tiers of snapshots:
-                        # 1) Memory snapshots (potentially large) governed by snapshot_cfg.interval
-                        # 2) Lightweight UI diagnostics snapshots (small JSON) governed by
-                        #    snapshot_cfg.ui_interval (defaults to every cycle for short runs)
-                        mem_interval: int = 25
-                        ui_interval: int = 25
+                    # Periodically write snapshot if enabled
+                    if snapshot_enabled and cur_int is not None:
                         try:
+                            interval = None
                             if isinstance(snapshot_cfg, dict):
-                                _iv = snapshot_cfg.get("interval")
-                                if isinstance(_iv, int) and _iv > 0:
-                                    mem_interval = int(_iv)
-
-                                _uiv = (
-                                    snapshot_cfg.get("ui_interval")
-                                    or snapshot_cfg.get("uiInterval")
-                                    or snapshot_cfg.get("timeline_interval")
-                                )
-                                if isinstance(_uiv, int) and _uiv > 0:
-                                    ui_interval = int(_uiv)
-                                else:
-                                    if isinstance(macro_total, int) and macro_total and macro_total <= 30:
-                                        ui_interval = 1
-                                    else:
-                                        ui_interval = mem_interval
+                                interval = snapshot_cfg.get("interval")
+                            if not isinstance(interval, int) or interval is None:
+                                interval = 25
                         except Exception:
-                            pass
-
-                        # Memory snapshot (heavier) at mem_interval
+                            interval = 25
                         try:
-                            if (
-                                mem_interval > 0
-                                and (eff_cur % mem_interval == 0)
-                                and (last_mem_snapshot_cycle != eff_cur)
-                            ):
+                            if interval and interval > 0 and cur_int % interval == 0:
                                 _safe_write_snapshot(
                                     agent,
                                     run_id=run_id,
@@ -7072,29 +6971,9 @@ def _process_single_job(
                                     goal=goal,
                                     domain=domain,
                                     snapshot_cfg=snapshot_cfg,
-                                    current_cycle=eff_cur,
+                                    current_cycle=cur_int,
                                     diagnostics=None,
                                 )
-                                last_mem_snapshot_cycle = eff_cur
-                        except Exception:
-                            pass
-
-                        # UI snapshot (lightweight) at ui_interval
-                        try:
-                            if (
-                                ui_interval > 0
-                                and (eff_cur % ui_interval == 0)
-                                and (last_ui_snapshot_cycle != eff_cur)
-                            ):
-                                hist_now = _load_cycle_history_from_memory(agent, run_id)
-                                diag_now: Dict[str, Any] = {}
-                                if hist_now:
-                                    try:
-                                        diag_now = build_run_diagnostics(history=hist_now, domain=domain, window=10)
-                                    except Exception:
-                                        diag_now = {}
-                                _persist_snapshot_json(run_id=run_id, current_cycle=eff_cur, diagnostics=diag_now)
-                                last_ui_snapshot_cycle = eff_cur
                         except Exception:
                             pass
                     # Write progress artifact using effective cycle progress.  The UI
@@ -7386,6 +7265,35 @@ def _process_single_job(
                                 if _conc2:
                                     for _kw in ("max_agents_per_tick", "swarm_size", "max_parallel", "max_workers"):
                                         _extra_swarm_kwargs2[_kw] = _conc2
+                            except Exception:
+                                pass
+
+                            # Optional: per-agent / per-task timeout hints. These are best-effort
+                            # and will be ignored by implementations that don't support them.
+                            try:
+                                raw_timeout = (
+                                    cfg.get("agent_timeout_seconds")
+                                    or cfg.get("agent_timeout_s")
+                                    or cfg.get("task_timeout_seconds")
+                                    or cfg.get("task_timeout_s")
+                                    or os.getenv("WORKER_AGENT_TIMEOUT_SECONDS")
+                                    or os.getenv("WORKER_TASK_TIMEOUT_SECONDS")
+                                )
+                                if raw_timeout is not None and str(raw_timeout).strip() != "":
+                                    try:
+                                        timeout_s = float(raw_timeout)
+                                    except Exception:
+                                        timeout_s = None
+                                    if timeout_s is not None and timeout_s > 0:
+                                        for _kw in (
+                                            "agent_timeout_seconds",
+                                            "agent_timeout_s",
+                                            "per_agent_timeout_seconds",
+                                            "per_agent_timeout_s",
+                                            "task_timeout_seconds",
+                                            "task_timeout_s",
+                                        ):
+                                            _extra_swarm_kwargs2.setdefault(_kw, timeout_s)
                             except Exception:
                                 pass
                             summaries = agent.run_swarm_continuous(
