@@ -142,6 +142,7 @@ class VectorMemory:
     def _match_filters(
         self,
         item: MemoryItem,
+        run_id: Optional[str],
         goal: Optional[str],
         role: Optional[str],
         domain: Optional[str],
@@ -151,6 +152,21 @@ class VectorMemory:
     ) -> bool:
         """Return True if the item passes the metadata filters."""
         meta = item.metadata or {}
+
+        # Run isolation filter (prevents cross-run blending when goals are similar)
+        if run_id is not None:
+            meta_run_id = meta.get("run_id")
+            if meta_run_id is None:
+                rm = meta.get("run_metadata") or {}
+                if isinstance(rm, dict):
+                    meta_run_id = rm.get("run_id")
+            try:
+                meta_run_id_str = str(meta_run_id) if meta_run_id is not None else None
+            except Exception:
+                meta_run_id_str = None
+            if meta_run_id_str != str(run_id):
+                return False
+
 
         if goal is not None and meta.get("goal") != goal:
             return False
@@ -219,6 +235,7 @@ class VectorMemory:
         self,
         text: str,
         *,
+        run_id: Optional[str] = None,
         goal: Optional[str] = None,
         role: Optional[str] = None,
         domain: Optional[str] = None,
@@ -232,6 +249,8 @@ class VectorMemory:
         for existing callers that use add_item directly.
         """
         meta: Dict[str, Any] = dict(extra_metadata or {})
+        if run_id is not None:
+            meta.setdefault("run_id", run_id)
         if goal is not None:
             meta.setdefault("goal", goal)
         if role is not None:
@@ -262,6 +281,7 @@ class VectorMemory:
         query: str,
         top_k: int = 5,
         *,
+        run_id: Optional[str] = None,
         goal: Optional[str] = None,
         role: Optional[str] = None,
         domain: Optional[str] = None,
@@ -300,6 +320,7 @@ class VectorMemory:
         for item in self.items:
             if self._match_filters(
                 item,
+                run_id=run_id,
                 goal=goal,
                 role=role,
                 domain=domain,
