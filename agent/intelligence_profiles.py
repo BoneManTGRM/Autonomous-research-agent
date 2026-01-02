@@ -702,6 +702,40 @@ INTELLIGENCE_PROFILES: Dict[str, Dict[str, Any]] = {
             "default_runtime_profile": "90_days",
         },
     },
+    # ---------------------------------------------------------------
+    # Short-run (2-cycle) pressure-driven longevity discovery funnel
+    # ---------------------------------------------------------------
+    "longevity_funnel_2cycle": {
+        "label": "Longevity discovery funnel (2-cycle)",
+        "description": (
+            "Two-cycle, pressure-driven discovery funnel: map/cluster then cull/commit. "
+            "Designed to raise stability and RYE by enforcing elimination and cross-domain recombination."
+        ),
+        "depth": 0.7,
+        "exploration": 0.55,
+        "verification_intensity": 0.75,
+        "discovery_focus": 0.85,
+        "tier3_bias": 0.35,
+        "swarm_recommended": True,
+        "preferred_swarm_size": 64,
+        "cycle_funnel": {
+            "cycle_1": "map_cluster",
+            "cycle_2": "cull_stress_commit",
+        },
+        "constraints": {
+            "kill_quota": {"min_rejections_fraction": 0.5, "ratio_reject_to_create": 0.8},
+            "domain_mix_min": 2,
+            "novelty_floor": {"penalize_mainstream_overlap": True},
+        },
+        "event_logging": {
+            "emit_agent_output": True,
+            "emit_candidate_hypotheses": True,
+            "emit_verifications": True,
+            "emit_discoveries": True,
+            "store_sources": True,
+        },
+    },
+
 }
 
 
