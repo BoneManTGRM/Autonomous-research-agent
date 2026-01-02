@@ -55,6 +55,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+# Optional event stream integration (append-only JSONL via agent/event_log.py).
+# This complements discovery_log based logging and enables Streamlit to tail events.
+try:  # pragma: no cover
+    from .event_log import log_event as _log_event  # type: ignore
+except Exception:  # pragma: no cover
+    try:
+        from event_log import log_event as _log_event  # type: ignore
+    except Exception:
+        _log_event = None  # type: ignore
+
 from .hypothesis_manager import HypothesisManager, HypothesisRecord  # type: ignore
 from .discovery_log import DiscoveryLogger  # type: ignore
 
@@ -1041,6 +1051,32 @@ class VerificationEngine:
             },
         )
 
+        # Mirror into the unified event stream (events.jsonl) for UI/report consumption
+        if _log_event is not None:
+            try:
+                _log_event(
+                    run_id=str(self.run_id) if self.run_id is not None else None,
+                    kind="verification",
+                    message=str(hyp.title) if hyp.title else "verification",
+                    level="info",
+                    data={
+                        "hypothesis_id": hyp.hypothesis_id,
+                        "status": "pass",
+                        "result": "pass",
+                        "verification_score": float(score),
+                        "reasons": list(reasons or []),
+                        "component_scores": dict(component_scores or {}),
+                        "checks": extra,
+                        "thresholds": dict(thresholds or {}),
+                        "tier_label": tier_label,
+                    },
+                    role=hyp.agent_role,
+                    domain=hyp.domain,
+                    cycle=hyp.cycle_index,
+                )
+            except Exception:
+                pass
+
     def _log_rejected(
         self,
         hyp: HypothesisRecord,
@@ -1093,6 +1129,31 @@ class VerificationEngine:
                 "logged_at": _utc_iso(),
             },
         )
+
+        # Mirror into the unified event stream (events.jsonl) for UI/report consumption
+        if _log_event is not None:
+            try:
+                _log_event(
+                    run_id=str(self.run_id) if self.run_id is not None else None,
+                    kind="verification",
+                    message=str(hyp.title) if hyp.title else "verification",
+                    level="info",
+                    data={
+                        "hypothesis_id": hyp.hypothesis_id,
+                        "status": "fail",
+                        "result": "fail",
+                        "verification_score": float(score),
+                        "reasons": list(reasons or []),
+                        "component_scores": dict(component_scores or {}),
+                        "checks": extra,
+                        "thresholds": dict(thresholds or {}),
+                    },
+                    role=hyp.agent_role,
+                    domain=hyp.domain,
+                    cycle=hyp.cycle_index,
+                )
+            except Exception:
+                pass
 
     def _log_inconclusive(
         self,
