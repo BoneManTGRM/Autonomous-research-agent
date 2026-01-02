@@ -102,6 +102,8 @@ import re
 import os
 import time
 import traceback
+import concurrent.futures
+import threading
 from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 from typing import Any, Dict, List, Optional, Tuple, Sequence
@@ -126,6 +128,169 @@ except Exception:  # pragma: no cover
 # Tavily imposes a maximum query length of 400 characters. We clamp slightly
 # below that to leave room for any internal decorations.
 MAX_WEB_QUERY_LEN = 380
+
+
+# ---------------------------------------------------------------------------
+# Web search timeout guard
+#
+# Tavily (and other web providers) can occasionally hang or back off for a very
+# long time under load. In a 64-agent swarm, a single hung web call can block
+# an entire cycle barrier. This lightweight wrapper enforces a hard timeout so
+# the agent continues the cycle with empty web results rather than stalling.
+#
+# Configure via env vars:
+#   WORKER_WEB_TIMEOUT_S (default 25)
+#   WORKER_WEB_TIMEOUT_WORKERS (default 4)
+#   WORKER_WEB_TIMEOUT_MAX_INFLIGHT (default workers*4)
+# ---------------------------------------------------------------------------
+
+_WEB_TIMEOUT_EXECUTOR = None  # lazily initialized ThreadPoolExecutor
+_WEB_TIMEOUT_EXECUTOR_LOCK = threading.Lock()
+_WEB_TIMEOUT_INFLIGHT = 0
+_WEB_TIMEOUT_INFLIGHT_LOCK = threading.Lock()
+
+
+def _env_float(name: str, default: float) -> float:
+    val = os.getenv(name)
+    if val is None or val == "":
+        return float(default)
+    try:
+        return float(val)
+    except Exception:
+        return float(default)
+
+
+def _env_int(name: str, default: int) -> int:
+    val = os.getenv(name)
+    if val is None or val == "":
+        return int(default)
+    try:
+        return int(val)
+    except Exception:
+        return int(default)
+
+
+def _get_web_timeout_s() -> float:
+    timeout_s = _env_float(
+        "WORKER_WEB_TIMEOUT_S",
+        _env_float("WEB_TIMEOUT_S", _env_float("TAVILY_TIMEOUT_S", 25.0)),
+    )
+    # Clamp to a sane range.
+    if timeout_s < 3.0:
+        timeout_s = 3.0
+    if timeout_s > 180.0:
+        timeout_s = 180.0
+    return float(timeout_s)
+
+
+def _get_web_timeout_workers() -> int:
+    workers = _env_int("WORKER_WEB_TIMEOUT_WORKERS", _env_int("WORKER_WEB_MAX_CONCURRENCY", 4))
+    if workers < 1:
+        workers = 1
+    if workers > 32:
+        workers = 32
+    return int(workers)
+
+
+def _get_web_timeout_max_inflight(workers: int) -> int:
+    cap = _env_int("WORKER_WEB_TIMEOUT_MAX_INFLIGHT", int(workers) * 4)
+    if cap < int(workers):
+        cap = int(workers)
+    if cap > 256:
+        cap = 256
+    return int(cap)
+
+
+def _get_web_timeout_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _WEB_TIMEOUT_EXECUTOR
+    if _WEB_TIMEOUT_EXECUTOR is not None:
+        return _WEB_TIMEOUT_EXECUTOR
+    with _WEB_TIMEOUT_EXECUTOR_LOCK:
+        if _WEB_TIMEOUT_EXECUTOR is not None:
+            return _WEB_TIMEOUT_EXECUTOR
+        max_workers = _get_web_timeout_workers()
+        _WEB_TIMEOUT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+            max_workers=max_workers,
+            thread_name_prefix="tgrm-web-timeout",
+        )
+        return _WEB_TIMEOUT_EXECUTOR
+
+
+def _decrement_web_inflight(_future: "concurrent.futures.Future[Any]") -> None:
+    global _WEB_TIMEOUT_INFLIGHT
+    try:
+        with _WEB_TIMEOUT_INFLIGHT_LOCK:
+            _WEB_TIMEOUT_INFLIGHT = max(0, int(_WEB_TIMEOUT_INFLIGHT) - 1)
+    except Exception:
+        pass
+
+
+def _call_with_timeout(
+    fn: Any,
+    timeout_s: float,
+    default: Any,
+    allow_exceptions: Tuple[type, ...] = (),
+) -> Any:
+    """Run fn() with a hard timeout; return `default` on timeout or error.
+
+    NOTE: Python cannot force-kill a running thread, but this prevents the
+    *agent* from blocking forever on a hanging provider call. In-flight calls
+    are capped to avoid unbounded queue growth if upstream calls hang.
+    """
+    global _WEB_TIMEOUT_INFLIGHT
+
+    try:
+        timeout_s = float(timeout_s)
+    except Exception:
+        timeout_s = 25.0
+
+    if timeout_s <= 0:
+        try:
+            return fn()
+        except Exception as e:
+            if allow_exceptions and isinstance(e, allow_exceptions):
+                raise
+            return default
+
+    workers = _get_web_timeout_workers()
+    max_inflight = _get_web_timeout_max_inflight(workers)
+
+    future: Optional["concurrent.futures.Future[Any]"] = None
+
+    # Guard against unbounded queue growth when upstream calls hang.
+    try:
+        with _WEB_TIMEOUT_INFLIGHT_LOCK:
+            if int(_WEB_TIMEOUT_INFLIGHT) >= int(max_inflight):
+                return default
+            _WEB_TIMEOUT_INFLIGHT = int(_WEB_TIMEOUT_INFLIGHT) + 1
+    except Exception:
+        pass
+
+    try:
+        executor = _get_web_timeout_executor()
+        future = executor.submit(fn)
+        try:
+            return future.result(timeout=timeout_s)
+        except concurrent.futures.TimeoutError:
+            try:
+                future.cancel()
+            except Exception:
+                pass
+            return default
+        except Exception as e:
+            if allow_exceptions and isinstance(e, allow_exceptions):
+                raise
+            return default
+    finally:
+        try:
+            if future is not None:
+                future.add_done_callback(_decrement_web_inflight)
+            else:
+                with _WEB_TIMEOUT_INFLIGHT_LOCK:
+                    _WEB_TIMEOUT_INFLIGHT = max(0, int(_WEB_TIMEOUT_INFLIGHT) - 1)
+        except Exception:
+            pass
+
 
 
 def _clamp_query(q: str, limit: int = MAX_WEB_QUERY_LEN) -> str:
@@ -2500,6 +2665,9 @@ class TGRMLoop:
         # Normalize params dictionary
         params = dict(params or {})
 
+        # Hard timeout to prevent a single hanging web call from stalling the whole cycle.
+        timeout_s = _get_web_timeout_s()
+
         # If a unified search helper is available, use it. This helper handles
         # Tavily concurrency limits and implements retry/backoff. It returns
         # a dict with a 'results' key which we convert into our normalized
@@ -2525,34 +2693,31 @@ class TGRMLoop:
             topic = params.get("topic")
             if not isinstance(topic, str) or not topic:
                 topic = "general"
-
-            try:
-                # Try the most complete signature first; degrade gracefully
-                res = core_web_search(
-                    query=query,
-                    max_results=max_results,
-                    search_depth=search_depth,
-                    topic=topic,
-                )
-            except TypeError:
+            # Wrap the provider call with a hard timeout. This prevents one slow/hung
+            # Tavily request from blocking the entire swarm cycle.
+            def _invoke_core_search() -> Any:
+                # Try the most complete signature first; degrade gracefully.
                 try:
-                    res = core_web_search(
+                    return core_web_search(
                         query=query,
                         max_results=max_results,
                         search_depth=search_depth,
+                        topic=topic,
                     )
                 except TypeError:
                     try:
-                        res = core_web_search(
+                        return core_web_search(
+                            query=query,
+                            max_results=max_results,
+                            search_depth=search_depth,
+                        )
+                    except TypeError:
+                        return core_web_search(
                             query=query,
                             max_results=max_results,
                         )
-                    except Exception:
-                        res = None
-                except Exception:
-                    res = None
-            except Exception:
-                res = None
+
+            res = _call_with_timeout(_invoke_core_search, timeout_s=timeout_s, default=None)
 
             if isinstance(res, dict) and isinstance(res.get("results"), list):
                 items: List[Dict[str, Any]] = []
@@ -2588,11 +2753,20 @@ class TGRMLoop:
             filtered = params
 
         try:
-            return self.web_tool.search(query, **filtered)  # type: ignore[misc]
+            return _call_with_timeout(
+                lambda: self.web_tool.search(query, **filtered),  # type: ignore[misc]
+                timeout_s=timeout_s,
+                default=[],
+                allow_exceptions=(TypeError,),
+            )
         except TypeError:
             # Last resort: try a no-kwargs call
             try:
-                return self.web_tool.search(query)  # type: ignore[misc]
+                return _call_with_timeout(
+                    lambda: self.web_tool.search(query),  # type: ignore[misc]
+                    timeout_s=timeout_s,
+                    default=[],
+                )
             except Exception:
                 return []
         except Exception:
