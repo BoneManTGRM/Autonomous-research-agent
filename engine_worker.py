@@ -3931,21 +3931,22 @@ def run_engine_job(job: Any) -> Dict[str, Any]:
                 elif isinstance(cfg.get("swarm_config"), dict):
                     swarm_cfg_ref = cfg.get("swarm_config")
                 if swarm_cfg_ref is not None:
-                    # max_agents is an explicit cap on swarm size in some implementations
-                    ma = swarm_cfg_ref.get("max_agents")
-                    if ma is None or (isinstance(ma, int) and ma < _role_count):
-                        swarm_cfg_ref["max_agents"] = _role_count
-                    # swarm_size may also be used to cap the number of agents
-                    ss = swarm_cfg_ref.get("swarm_size")
-                    if ss is not None and isinstance(ss, int) and ss < _role_count:
-                        swarm_cfg_ref["swarm_size"] = _role_count
+                    # Ensure common swarm sizing keys are present and at least the number of roles.
+                    for _k in ("max_agents", "swarm_size", "max_agents_per_tick", "max_parallel", "max_workers"):
+                        try:
+                            _iv = _intish(swarm_cfg_ref.get(_k))
+                            if _iv is None or _iv < _role_count:
+                                swarm_cfg_ref[_k] = _role_count
+                        except Exception:
+                            swarm_cfg_ref[_k] = _role_count
                 # top level hints
-                ss_top = cfg.get("swarm_size")
-                if ss_top is not None and isinstance(ss_top, int) and ss_top < _role_count:
-                    cfg["swarm_size"] = _role_count
-                ma_top = cfg.get("max_agents")
-                if ma_top is not None and isinstance(ma_top, int) and ma_top < _role_count:
-                    cfg["max_agents"] = _role_count
+                for _k in ("swarm_size", "max_agents", "max_agents_per_tick", "max_parallel", "max_workers"):
+                    try:
+                        _iv = _intish(cfg.get(_k))
+                        if _iv is None or _iv < _role_count:
+                            cfg[_k] = _role_count
+                    except Exception:
+                        cfg[_k] = _role_count
         except Exception:
             pass
 
@@ -6836,6 +6837,8 @@ def _process_single_job(
         last_progress_current: Optional[int] = 0
         last_progress_total: Optional[int] = macro_total
         last_progress_note: str = ""
+        # Track unique swarm agent completions per round to derive stable micro-cycle progress.
+        swarm_seen: Dict[int, set] = {}
         # Track the last cycle for which we wrote snapshot artifacts, to avoid
         # emitting duplicate snapshots when the progress callback fires multiple
         # times within the same cycle.
@@ -7040,6 +7043,49 @@ def _process_single_job(
                                 eff_cur = cur_int
                     except Exception:
                         eff_cur = cur_int
+                    # In swarm mode, attempt to derive a stable micro-cycle counter from swarm metadata.
+                    if mode == "swarm":
+                        try:
+                            sw_meta = update.get("swarm")
+                            if isinstance(sw_meta, dict):
+                                _r = _to_int(
+                                    sw_meta.get("round_index")
+                                    if sw_meta.get("round_index") is not None
+                                    else sw_meta.get("round")
+                                )
+                                if _r is None:
+                                    _r = _to_int(sw_meta.get("round_idx"))
+                                if _r is None:
+                                    _r = _to_int(
+                                        update.get("round_index")
+                                        if update.get("round_index") is not None
+                                        else update.get("round")
+                                    )
+                                _aid = (
+                                    sw_meta.get("agent_id")
+                                    or sw_meta.get("agent")
+                                    or sw_meta.get("id")
+                                    or update.get("agent_id")
+                                    or update.get("agent")
+                                    or update.get("role")
+                                )
+                                if _r is not None and _aid is not None:
+                                    with progress_lock:
+                                        swarm_seen.setdefault(int(_r), set()).add(str(_aid))
+                                        _seen_total = sum(len(v) for v in swarm_seen.values())
+                                    if _seen_total and (eff_cur is None or int(_seen_total) > int(eff_cur or 0)):
+                                        eff_cur = int(_seen_total)
+                        except Exception:
+                            pass
+
+                    # Clamp to planned total to avoid runaway values.
+                    if eff_cur is not None and isinstance(macro_total, int) and macro_total > 0:
+                        try:
+                            if int(eff_cur) > int(macro_total):
+                                eff_cur = int(macro_total)
+                        except Exception:
+                            pass
+
                     # Update last progress values based on effective cycle progress
                     # Capture the previous effective cycle so we can emit an event only
                     # when the cycle number changes.  This prevents flooding the
@@ -7648,11 +7694,33 @@ def _process_single_job(
         # The macro_total still reflects the total microÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂcycle count for the run.
         if mode == "swarm":
             try:
+                # Prefer the number of cycle summaries returned by the swarm runner when available.
+                _actual_cycles = None
+                if isinstance(summaries, list):
+                    _actual_cycles = len(summaries)
+                if _actual_cycles is None and isinstance(full_result, dict):
+                    _cycles_val = full_result.get("cycles") or full_result.get("summaries")
+                    if isinstance(_cycles_val, list):
+                        _actual_cycles = len(_cycles_val)
+
+                _best = 0
                 if last_progress_current is not None:
-                    final_current = last_progress_current
+                    _best = max(_best, int(last_progress_current))
+                if _actual_cycles is not None:
+                    _best = max(_best, int(_actual_cycles))
+
+                if isinstance(macro_total, int) and macro_total > 0 and _best > macro_total:
+                    _best = macro_total
+
+                final_current = int(_best)
                 final_total = macro_total
             except Exception:
-                pass
+                try:
+                    if last_progress_current is not None:
+                        final_current = last_progress_current
+                    final_total = macro_total
+                except Exception:
+                    pass
 
         _write_job_progress(
             run_id,
