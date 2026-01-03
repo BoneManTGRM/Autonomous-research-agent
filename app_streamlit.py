@@ -513,57 +513,57 @@ def _parse_timestamp_str(ts: str) -> Optional[datetime]:
 
 
 def _event_ts_to_dt(ts_val: Any) -> Optional[datetime]:
-    """Convert event timestamps into a naive UTC datetime.
+    """Convert event timestamps to a naive UTC datetime.
 
     Accepts:
-    - ISO strings (supports trailing Z and timezone offsets)
-    - epoch seconds (int/float or numeric string)
-    - epoch milliseconds (values > 1e12 treated as ms)
-    - datetime objects (tz-aware converted to UTC, tzinfo stripped)
+    - ISO 8601 strings (with or without a trailing 'Z' / timezone offset)
+    - epoch seconds (int/float) or epoch milliseconds
+    - datetime objects
 
-    Returns None if the value cannot be parsed.
+    Returns:
+    - naive datetime in UTC, or None if not parseable
     """
     if ts_val is None:
         return None
 
+    # Already a datetime
     if isinstance(ts_val, datetime):
         dt = ts_val
         if dt.tzinfo is not None:
-            try:
-                dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-            except Exception:
-                dt = dt.replace(tzinfo=None)
+            dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt
 
-    # Numeric epoch (seconds or milliseconds)
+    # Epoch seconds / milliseconds
     if isinstance(ts_val, (int, float)) and not isinstance(ts_val, bool):
         try:
-            f = float(ts_val)
-            if f > 1e12:
-                f = f / 1000.0
-            return datetime.utcfromtimestamp(f)
+            v = float(ts_val)
+            # Heuristic: anything above ~1e11 is almost certainly epoch ms
+            if v > 1e11:
+                v = v / 1000.0
+            return datetime.fromtimestamp(v, tz=timezone.utc).replace(tzinfo=None)
         except Exception:
             return None
 
+    # Strings: numeric epoch or ISO
     if isinstance(ts_val, str):
         s = ts_val.strip()
         if not s:
             return None
 
-        # Numeric string epoch
+        # Numeric epoch encoded as a string
         try:
-            f = float(s)
-            if f > 1e12:
-                f = f / 1000.0
-            return datetime.utcfromtimestamp(f)
+            v = float(s)
+            if v > 1e11:
+                v = v / 1000.0
+            return datetime.fromtimestamp(v, tz=timezone.utc).replace(tzinfo=None)
         except Exception:
             pass
 
-        # ISO string
-        return _parse_timestamp_str(s)
+        dt = _parse_timestamp_str(s)
+        if dt is not None:
+            return dt
 
     return None
-
 
 def _coalesce(*values: Any) -> Any:
     """Return the first value that is not None (preserves 0/False)."""
