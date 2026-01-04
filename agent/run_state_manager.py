@@ -196,55 +196,84 @@ class RunState:
     # ------------------------------------------------------------------
     @classmethod
     def load(cls, path: Path) -> "RunState":
-        """Load a RunState from a JSON file, ignoring unknown keys."""
-        with path.open("r", encoding="utf-8") as f:
-            data: Dict[str, Any] = json.load(f)
+        """Load RunState from disk.
 
-        # Minimal schema support: if run_id is missing, infer it from the run folder name.
-        if not (data or {}).get("run_id"):
-            try:
-                data = dict(data or {})
-                data["run_id"] = path.parent.name
-            except Exception:
-                pass
+        If run_state.json is not available yet (or the worker is running in a mode
+        that doesn't persist full state continuously), fall back to the live
+        progress.json artifacts written by the worker so the UI can display
+        up-to-date cycle counts without parsing history logs.
+        """
 
-        # Minimal schema support: {"cycle_index": N} should populate phase_index/current/current_cycle.
-        if isinstance(data, dict) and data.get("cycle_index") is not None:
-            try:
-                ci = int(data.get("cycle_index"))
-            except Exception:
-                ci = None
-            if ci is not None:
-                data.setdefault("phase_index", ci)
-                data.setdefault("current", ci)
-                data.setdefault("current_cycle", ci)
+        p = Path(path)
 
-        field_names = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-        kwargs = {k: v for k, v in (data or {}).items() if k in field_names}
-        st = cls(**kwargs)  # type: ignore[arg-type]
-        # Ensure run_id non-empty
+        # 1) Preferred: run_state.json
         try:
-            if not str(st.run_id).strip():
-                st.run_id = str(uuid.uuid4())
-        except Exception:
-            st.run_id = str(uuid.uuid4())
-        # Ensure run_dir present
-        if not (isinstance(st.run_dir, str) and st.run_dir.strip()):
-            st.run_dir = str(resolve_run_dir(st.run_id))
-        return st
-
-    def ensure_run_dir(self, *, runs_root: Optional[Path] = None) -> Path:
-        """Ensure this run has a directory and return it."""
-        rid = str(self.run_id).strip() or str(uuid.uuid4())
-        self.run_id = rid
-        rd = self.run_dir if isinstance(self.run_dir, str) and self.run_dir.strip() else str(resolve_run_dir(rid, runs_root=runs_root))
-        self.run_dir = rd
-        p = Path(rd)
-        try:
-            p.mkdir(parents=True, exist_ok=True)
+            if p.exists():
+                raw = json.loads(p.read_text(encoding="utf-8"))
+                allowed = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore
+                filtered = {k: v for k, v in raw.items() if k in allowed}
+                st = cls(**filtered)
+                st._sync_aliases()
+                st._set_updated()
+                return st
         except Exception:
             pass
-        return p
+
+        # 2) Fallback: live progress.json (per-run)
+        try:
+            run_dir = p.parent
+            candidates = [
+                run_dir / "progress.json",
+                run_dir / "logs" / "progress.json",
+            ]
+            prog = None
+            for cand in candidates:
+                if cand.exists():
+                    try:
+                        prog = json.loads(cand.read_text(encoding="utf-8"))
+                    except Exception:
+                        prog = None
+                    if isinstance(prog, dict):
+                        break
+                    prog = None
+
+            if isinstance(prog, dict):
+                rid = str(prog.get("run_id") or run_dir.name)
+                st = cls(run_id=rid)
+
+                # Populate the most important live fields
+                cyc = prog.get("cycle_current")
+                tot = prog.get("cycle_total")
+                if isinstance(cyc, int):
+                    st.cycle_index = cyc
+                if isinstance(tot, int):
+                    st.total_cycles = tot
+
+                dom = prog.get("domain")
+                if dom:
+                    st.domain = str(dom)
+
+                status = prog.get("status")
+                if status:
+                    st.status = str(status)
+
+                note = prog.get("note")
+                if note:
+                    st.note = str(note)
+
+                # Mark provenance
+                st.extra = st.extra or {}
+                st.extra["from_progress_file"] = True
+                st.extra["progress_file"] = str(candidates[0])
+
+                st._sync_aliases()
+                st._set_updated()
+                return st
+        except Exception:
+            pass
+
+        raise FileNotFoundError(f"No run_state.json or progress.json found for {p}")
+
 
     def save(self, path: Optional[Path] = None, *, runs_root: Optional[Path] = None) -> Path:
         """Persist state to disk (atomic write). Returns the written path."""
