@@ -55,7 +55,7 @@ def resolve_runs_root() -> Path:
       2) run_jobs.BASE_DIR if available
       3) repo-local ./runs (next to this file's parent package)
     """
-    for k in ("ARA_RUNS_DIR", "ARA_RUNS_ROOT", "RUNS_DIR"):
+    for k in ("ARA_RUNS_DIR", "ARA_RUNS_ROOT", "RUNS_BASE_DIR", "RUNS_DIR", "RUNS_ROOT"):
         v = os.getenv(k)
         if v:
             try:
