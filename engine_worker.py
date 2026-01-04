@@ -771,7 +771,7 @@ def _resolve_base_dir() -> Path:
     We prefer agent.run_jobs.BASE_DIR when available so worker, Streamlit,
     and queue layer always point at the same place.
     """
-    raw = os.getenv("ARA_RUNS_DIR")
+    raw = os.getenv("ARA_RUNS_DIR") or os.getenv("RUNS_DIR") or os.getenv("RUNS_ROOT")
     env_val = raw.strip() if isinstance(raw, str) and raw.strip() else None
     base: Path = Path(env_val) if env_val else Path("runs")
 
@@ -2150,77 +2150,208 @@ def _get_memory_store(agent: CoreAgent) -> Optional[MemoryStore]:
     return None
 
 
-def _infer_cycle_count_from_memory(agent: CoreAgent, run_id: str) -> Optional[int]:
-    """
-    Best-effort cycle counter for the live UI.
+def _infer_cycle_count_from_memory(agent: Any, run_id: str) -> Optional[int]:
+    """Best-effort inference of the *current* cycle count for live UI updates.
 
-    Some agent implementations do not invoke progress callbacks frequently.
-    This helper attempts to infer the current completed cycle count from the
-    MemoryStore so the Streamlit dashboard can show incremental progress (e.g. 1/3, 2/3)
-    instead of jumping from 0/3 directly to 3/3.
+    Why this exists:
+    - Some job modes don't reliably surface per-cycle progress through the progress callback.
+    - The UI needs a monotonic cycle count without having to parse large history logs.
 
-    Never raises; returns None when no reasonable signal can be found.
+    Strategy:
+    1) Try direct numeric fields in MemoryStore state (fast path).
+    2) If only a (possibly truncated) cycle history list is available, attempt to extract a
+       cycle number from items and take the maximum.
+    3) Fall back to list length as a last resort.
+
+    Returns a 1-based cycle count when possible.
     """
-    try:
-        rid = str(run_id).strip()
-        if not rid:
-            return None
-    except Exception:
+
+    if not run_id:
         return None
+
+    # 0) Direct agent attributes (cheap, occasionally available)
+    for attr in ("current_cycle", "cycle", "cycle_index", "cycle_idx", "cycle_count", "cycles_completed"):
+        try:
+            v = getattr(agent, attr, None)
+        except Exception:
+            v = None
+        if isinstance(v, int):
+            # Treat *_index / *_idx as 0-based indices.
+            if "index" in attr or attr.endswith("_idx"):
+                return max(0, v) + 1
+            return max(0, v)
 
     ms = _get_memory_store(agent)
-    if ms is None:
+    if not ms:
         return None
 
-    # 1) Try common MemoryStore APIs (best-effort, signatures vary across versions)
-    for name in ("get_cycle_history", "load_cycle_history", "read_cycle_history", "get_history", "get_run_history"):
-        fn = getattr(ms, name, None)
-        if callable(fn):
-            try:
-                hist = None
-                try:
-                    hist = fn(run_id=rid)  # type: ignore[misc]
-                except TypeError:
-                    try:
-                        hist = fn(rid)  # type: ignore[misc]
-                    except TypeError:
-                        hist = fn()  # type: ignore[misc]
-                if isinstance(hist, list):
-                    return len([x for x in hist if x is not None])
-            except Exception:
-                pass
+    import re
 
-    # 2) Inspect the underlying data dict for common layouts
+    def _as_int(x: Any) -> Optional[int]:
+        try:
+            if x is None or isinstance(x, bool):
+                return None
+            if isinstance(x, int):
+                return x
+            if isinstance(x, float):
+                return int(x)
+            if isinstance(x, str):
+                s = x.strip()
+                if not s:
+                    return None
+                # Accept "25/128" style.
+                if "/" in s:
+                    s = s.split("/", 1)[0].strip()
+                return int(s)
+        except Exception:
+            return None
+        return None
+
+    def _extract_cycle(item: Any) -> tuple[Optional[int], bool]:
+        """Return (cycle_value, zero_based_hint)."""
+        if item is None or isinstance(item, bool):
+            return (None, False)
+        if isinstance(item, int):
+            return (item, False)
+        if isinstance(item, float):
+            return (int(item), False)
+        if isinstance(item, str):
+            # "Cycle 25/128" or "cycle:25" etc.
+            m = re.search(r"\bcycle\b\s*[:#]?\s*(\d+)", item, re.IGNORECASE)
+            if m:
+                return (int(m.group(1)), False)
+            m = re.search(r"\b(\d+)\s*/\s*\d+\b", item)
+            if m:
+                return (int(m.group(1)), False)
+            return (None, False)
+        if isinstance(item, (list, tuple)) and item:
+            for sub in item:
+                num, hint = _extract_cycle(sub)
+                if num is not None:
+                    return (num, hint)
+            return (None, False)
+        if isinstance(item, dict):
+            # Look for common keys.
+            key_sets = [
+                (item, False),
+                (item.get("data"), True),
+                (item.get("meta"), True),
+                (item.get("metadata"), True),
+                (item.get("payload"), True),
+                (item.get("state"), True),
+            ]
+            for maybe, _ in key_sets:
+                if not isinstance(maybe, dict):
+                    continue
+                for k in (
+                    "cycle_current",
+                    "current_cycle",
+                    "cycle",
+                    "cycle_index",
+                    "cycle_idx",
+                    "cycle_count",
+                    "cycles_completed",
+                    "idx",
+                    "index",
+                    "i",
+                    "step",
+                    "iteration",
+                    "iter",
+                    "n",
+                ):
+                    if k in maybe:
+                        v = _as_int(maybe.get(k))
+                        if v is None:
+                            continue
+                        zero_based = k in ("cycle_index", "cycle_idx", "idx", "index", "i", "step", "iteration", "iter")
+                        return (v, zero_based)
+        return (None, False)
+
+    def _max_cycle_from_list(lst: list[Any]) -> Optional[int]:
+        max_num: Optional[int] = None
+        saw_zero_based_hint = False
+        saw_zero_value = False
+        for it in lst:
+            num, hint = _extract_cycle(it)
+            if num is None:
+                continue
+            if num == 0:
+                saw_zero_value = True
+            if hint:
+                saw_zero_based_hint = True
+            if max_num is None or num > max_num:
+                max_num = num
+        if max_num is None:
+            return None
+        if saw_zero_value or saw_zero_based_hint:
+            return max_num + 1
+        return max_num
+
+    # 1) MemoryStore.get_state fast path
     try:
-        data_attr = getattr(ms, "data", getattr(ms, "_data", None))
-        if isinstance(data_attr, dict):
-            # Common: data["cycle_history"][run_id] = [ ... ]
-            for key in ("cycle_history", "cycle_histories", "cycle_log", "cycle_logs", "history", "histories"):
-                v = data_attr.get(key)
-                if isinstance(v, dict):
-                    rv = v.get(rid)
-                    if isinstance(rv, list):
-                        return len([x for x in rv if x is not None])
-                elif isinstance(v, list):
-                    # Common: data["cycle_log"] = [{run_id:..., ...}, ...]
-                    if v and isinstance(v[0], dict):
-                        return sum(
-                            1
-                            for item in v
-                            if isinstance(item, dict) and str(item.get("run_id", "")).strip() == rid
-                        )
-
-            # Occasionally stored directly under the run_id key
-            direct = data_attr.get(rid)
-            if isinstance(direct, list):
-                return len([x for x in direct if x is not None])
-            if isinstance(direct, dict):
-                for k in ("cycles", "history", "cycle_history", "cycle_log"):
-                    vv = direct.get(k)
-                    if isinstance(vv, list):
-                        return len([x for x in vv if x is not None])
+        state = ms.get_state(run_id)
     except Exception:
-        pass
+        state = None
+
+    if isinstance(state, dict):
+        # Direct numeric fields (preferred over list length).
+        for k in (
+            "cycle_current",
+            "current_cycle",
+            "cycle",
+            "cycle_index",
+            "cycle_idx",
+            "cycle_count",
+            "cycles_completed",
+        ):
+            v = _as_int(state.get(k))
+            if v is None:
+                continue
+            if k in ("cycle_index", "cycle_idx"):
+                return max(0, v) + 1
+            return max(0, v)
+
+        # History lists (may be truncated)
+        for k in ("cycle_history", "cycles", "history", "cycleEvents", "events"):
+            hist = state.get(k)
+            if isinstance(hist, list) and hist:
+                m = _max_cycle_from_list(hist)
+                if m is not None:
+                    return m
+                return len(hist)
+
+    # 2) Fallback to ms.data structure
+    try:
+        data = getattr(ms, "data", None)
+    except Exception:
+        data = None
+
+    if isinstance(data, dict):
+        rd = data.get(run_id)
+        if isinstance(rd, dict):
+            for k in (
+                "cycle_current",
+                "current_cycle",
+                "cycle",
+                "cycle_index",
+                "cycle_idx",
+                "cycle_count",
+                "cycles_completed",
+            ):
+                v = _as_int(rd.get(k))
+                if v is None:
+                    continue
+                if k in ("cycle_index", "cycle_idx"):
+                    return max(0, v) + 1
+                return max(0, v)
+
+            for k in ("cycle_history", "cycles", "history", "cycleEvents", "events"):
+                hist = rd.get(k)
+                if isinstance(hist, list) and hist:
+                    m = _max_cycle_from_list(hist)
+                    if m is not None:
+                        return m
+                    return len(hist)
 
     return None
 
