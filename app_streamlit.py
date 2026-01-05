@@ -4263,6 +4263,101 @@ def build_cycle_count_events_from_history(
 
 
 
+def build_cycle_count_events_from_event_log(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Synthesize `cycle_progress` events from cycle-indexed entries in a raw event log.
+
+    Some workers do not emit explicit "Cycle X/Y" events and may only emit a coarse
+    progress counter (e.g. 0/N then N/N). However, most per-cycle work products
+    (candidate hypotheses, metrics, etc.) carry a `cycle` field. This helper
+    collapses those into one high-signal row per cycle.
+
+    Returns a list of events shaped like:
+      {"ts": "...", "kind": "cycle_progress", "message": "Cycle 3/6", ...}
+    """
+    if not events:
+        return []
+
+    # Collect earliest timestamp per raw cycle index.
+    raw_cycles: set[int] = set()
+    cycle_dt: Dict[int, Optional[datetime]] = {}
+    saw_zero = False
+
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+
+        kind = str(ev.get("kind") or ev.get("event") or ev.get("domain") or "").lower()
+        if kind == "cycle_progress":
+            continue
+
+        raw = _as_int(ev.get("cycle"))
+        if raw is None:
+            data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+            raw = _as_int(data.get("cycle"))
+
+        if raw is None:
+            continue
+
+        if raw == 0:
+            saw_zero = True
+
+        raw_cycles.add(raw)
+
+        dt = _event_ts_to_dt(ev.get("ts"))
+        prev = cycle_dt.get(raw)
+        if prev is None:
+            cycle_dt[raw] = dt
+        else:
+            if dt is not None and (prev is None or dt < prev):
+                cycle_dt[raw] = dt
+
+    if not raw_cycles:
+        return []
+
+    # Best effort total cycle hint from the same event log.
+    _, total_hint = _infer_cycle_progress_from_events(events)
+
+    # Normalize to 1-based display if we detect a 0-based cycle index.
+    display_cycles = sorted(
+        {
+            (c + 1 if saw_zero else c)
+            for c in raw_cycles
+            if (c + 1 if saw_zero else c) > 0
+        }
+    )
+    if not display_cycles:
+        return []
+
+    total = total_hint if isinstance(total_hint, int) and total_hint > 0 else max(display_cycles)
+
+    out: List[Dict[str, Any]] = []
+    for dc in display_cycles:
+        raw = dc - 1 if saw_zero else dc
+        dt = cycle_dt.get(raw)
+
+        ts = _now_iso()
+        if isinstance(dt, datetime):
+            # `_event_ts_to_dt` returns UTC (often naive). Format with a Z suffix.
+            ts = dt.isoformat()
+            if dt.tzinfo is None:
+                ts = f"{ts}Z"
+            elif ts.endswith("+00:00"):
+                ts = ts.replace("+00:00", "Z")
+
+        out.append(
+            {
+                "ts": ts,
+                "kind": "cycle_progress",
+                "message": f"Cycle {dc}/{total}",
+                "cycle": dc,
+                "total": total,
+                "_synthetic": True,
+                "_source": "event_log",
+            }
+        )
+
+    return out
+
 def build_cycle_count_events_from_progress(
     progress_view: Optional[Dict[str, Any]],
     run_id: Optional[str],
@@ -5280,6 +5375,14 @@ def main() -> None:
         narrative_events = _filter_cycle_only_events(event_log0)
         if narrative_events and event_src0 and event_src0 != "not found":
             event_src0 = f"{event_src0} (cycle only)"
+
+
+    # 1b) If the log contains per-cycle events (candidate hypotheses, metrics, etc.) but
+    #     no explicit cycle_progress rows, synthesize a cycle timeline from the `cycle` field.
+    if (not narrative_events) and event_log0:
+        narrative_events = build_cycle_count_events_from_event_log(event_log0)
+        if narrative_events and event_src0 and event_src0 != "not found":
+            event_src0 = f"{event_src0} (inferred from cycle field)"
 
     # 2) While a run is active, prefer a live cycle timeline built from progress
     #    counters (run_state/worker_state/progress.json). This avoids the stale
