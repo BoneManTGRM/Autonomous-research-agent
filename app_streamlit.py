@@ -4320,13 +4320,15 @@ def build_cycle_count_events_from_progress(
         events = [{"ts": _now_iso(), "kind": "cycle_progress", "message": _msg(0), "cycle": 0}]
         last = 0
 
-    # Append newly observed cycles
+    # Append newly observed cycle count (no backfill).
+    #
+    # IMPORTANT: We do NOT fabricate intermediate cycles when `cur` jumps,
+    # because that looks like history reconstruction. We only emit what we
+    # actually observed in the live progress counters.
     if last is None:
         last = -1
     if cur > last:
-        start_c = max(1, last + 1)
-        for c in range(start_c, cur + 1):
-            events.append({"ts": _now_iso(), "kind": "cycle_progress", "message": _msg(c), "cycle": c})
+        events.append({"ts": _now_iso(), "kind": "cycle_progress", "message": _msg(cur), "cycle": cur})
         last = cur
 
     # Trim to the last `limit` entries
