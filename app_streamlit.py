@@ -112,10 +112,11 @@ def tail_lines(path: Path, max_lines: int = 200) -> List[str]:
     except Exception:
         return []
 
-st.set_page_config(page_title="Autonomous Research Agent", page_icon="ð§ ", layout="wide")
+# IMPORTANT: st.set_page_config must be the FIRST Streamlit command executed
 # (cached decorators count as Streamlit commands). Keep this at module top level.
-# (comment trimmed for readability)
-# (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
+# (comment trimmed to keep this file renderable in GitHub)
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ð§ ", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -126,6 +127,23 @@ if not (REPO_ROOT / "agent").is_dir() and (_THIS_FILE_DIR.parent / "agent").is_d
 
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+def _load_ui_asset_lines(rel_path: str) -> List[str]:
+    """Load small text assets shipped with the repo (one item per line)."""
+    try:
+        p = (REPO_ROOT / rel_path).resolve()
+        if not p.exists() or not p.is_file():
+            return []
+        out: List[str] = []
+        with p.open('r', encoding='utf-8', errors='replace') as f:
+            for line in f:
+                s = line.strip()
+                if s:
+                    out.append(s)
+        return out
+    except Exception:
+        return []
+
 
 # These will be filled from run_jobs imports when available
 RUNS_BASE_DIR: Optional[Path] = None
@@ -652,7 +670,6 @@ MAX_POINTS_FOR_CHARTS: int = 1000
 
 # Live console defaults
 LIVE_EVENTS_LIMIT: int = 30
-LIVE_CYCLE_STATE_KEY: str = "__ara_live_cycle_state__"
 DISCOVERY_CARDS_LIMIT: int = 6
 
 
@@ -2869,11 +2886,11 @@ def compute_progress_view(
     )
 
     # Select which progress track to display
-    # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
     phase_total_int = _safe_int(phase_tot, None)
     use_phase = phase_total_int
     # When phase_total is 1 or less, fall back to cycle progress instead of using phase progress.  This
-    # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
     if phase_total_int is not None and phase_total_int > 1:
         phase_cur_raw = phase_cur
         c = _safe_int(phase_cur_raw, 0) or 0
@@ -2926,7 +2943,7 @@ def compute_progress_view(
     # reached the total, treat it as complete.  This prevents the
     # progress bar from appearing partially filled when the run
     # terminated early (e.g. in swarm mode where early stopping
-    # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
     # configured maximum).  By promoting the current value to
     # equal the total for finished runs, the UI more clearly
     # communicates that no more cycles remain.
@@ -2959,9 +2976,9 @@ def compute_progress_view(
             if mode_pd == "swarm":
                 # In swarm mode a single round consists of one cycle per role.
                 # When only ``max_rounds`` is used, the UI remaps hundreds of
-                # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
                 # obscuring the true progress through all agents.  To better
-                # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
                 # number of roles.  For example, 3 rounds with 32 roles
                 # produces 96 logical cycles.  If roles is missing, assume 1.
                 mc = pd.get("max_rounds") or pd.get("max_cycles")
@@ -3001,8 +3018,8 @@ def compute_progress_view(
             else:
                 mc = pd.get("max_cycles") or pd.get("max_rounds")
                 macro_total_ui = _safe_int(mc, None)
-        # (comment trimmed for readability)
-        # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
+# (comment trimmed to keep this file renderable in GitHub)
         # be hundreds of steps) instead of collapsing to the requested number of rounds.
         if (
             mode_pd != "swarm"
@@ -3026,7 +3043,7 @@ def compute_progress_view(
         # number of unique roles (e.g. 32) rather than the requested swarm size
         # (e.g. 64).  When prompt_details provides a larger macro_total_ui for
         # swarm mode, prefer that over the reported total to ensure the cycle
-        # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
         # current value here; leave c2 untouched so it still reflects the
         # actual number of steps executed so far.
         try:
@@ -3555,12 +3572,12 @@ def _infer_agents_from_job_config(job_payload: Optional[Dict[str, Any]]) -> List
 
     swarm_size = _safe_int(swarm_cfg.get("swarm_size"), 1) or 1
 
-    # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
     # (including the patched Streamlit UI) set roles on the top level of
     # the run configuration to include every mini agent in the swarm.  If
     # provided, use this list as the authoritative set of agents so that
     # all agents are rendered in the UI.  Fall back to swarm_config roles
-    # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
     roles_top = cfg.get("roles")
     if isinstance(roles_top, list) and roles_top:
         role_names = [str(r) for r in roles_top if str(r).strip()]
@@ -3983,7 +4000,11 @@ def load_event_log_unified(run_id: Optional[str], logs_dir_hint: Optional[Path] 
         # Fallback: attempt tail parsing (covers some "one JSON object per line" dumps).
         return _load_event_dicts_tail(pth, max_lines=max_lines)
 
-    def _first_existing_events(candidates: List[Path]) -> Tuple[List[Dict[str, Any]], Optional[Path]]:
+    def _first_existing_events(
+        candidates: List[Path],
+        filter_for_run: bool = False,
+    ) -> Tuple[List[Dict[str, Any]], Optional[Path]]:
+        """Return the first candidate file that yields events (optionally filtered to run_id)."""
         for pth in candidates:
             try:
                 if not pth.exists():
@@ -3992,8 +4013,14 @@ def load_event_log_unified(run_id: Optional[str], logs_dir_hint: Optional[Path] 
                 continue
             try:
                 evs = _load_events_from_file(pth)
-                if evs:
-                    return evs, pth
+                if not evs:
+                    continue
+                if filter_for_run and run_id:
+                    evs_f = _filter_events_for_run(evs, run_id=run_id, source_path=pth)
+                    if not evs_f:
+                        continue
+                    return evs_f, pth
+                return evs, pth
             except Exception:
                 continue
         return [], None
@@ -4002,15 +4029,15 @@ def load_event_log_unified(run_id: Optional[str], logs_dir_hint: Optional[Path] 
     p: Optional[Path] = None
 
     if per_run_paths:
-        events, p = _first_existing_events(per_run_paths)
+        events, p = _first_existing_events(per_run_paths, filter_for_run=bool(run_id))
 
     if not events:
-        events, p = _first_existing_events(global_paths)
+        events, p = _first_existing_events(global_paths, filter_for_run=bool(run_id))
 
     if not events:
         return [], "not found"
 
-    events = _filter_events_for_run(events, run_id=run_id, source_path=p)
+
     return events, str(p) if p else "unknown"
 
 
@@ -4027,11 +4054,12 @@ def _event_ts_to_str(ts_val: Any) -> str:
 
 
 def _now_iso() -> str:
-    """UTC ISO-8601 timestamp with trailing Z."""
+    """Current UTC time as ISO-8601 with 'Z' suffix."""
     try:
-        return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+        return datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     except Exception:
-        return ""
+        # Last resort: avoid crashing if datetime/timezone is unavailable
+        return ''
 
 def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: int = LIVE_EVENTS_LIMIT) -> List[Dict[str, Any]]:
     """Create a narrative event feed from cycle history."""
@@ -4060,7 +4088,7 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
             parts.append(f"RYE {float(rye):.3f}")
         if isinstance(d_r, (int, float)):
             # Use a readable delta symbol instead of a misencoded character
-            parts.append(f"\u0394R {float(d_r):.3f}")
+            parts.append(f"\u0394R {float(d_r):.3f}")  # (trimmed)
         if repairs_n:
             parts.append(f"{repairs_n} repairs")
         if notes_n:
@@ -4079,79 +4107,6 @@ def build_narrative_events_from_history(history: List[Dict[str, Any]], limit: in
         )
     return events
 
-
-
-def build_cycle_count_events_from_progress(
-    progress_view: Optional[Dict[str, Any]],
-    run_id: Optional[str] = None,
-    limit: int = LIVE_EVENTS_LIMIT,
-) -> List[Dict[str, Any]]:
-    """Build a *live* cycle-progress feed from the current progress view.
-
-    This is used when we do not (yet) have a structured event log on disk but we
-    still want the UI to show cycle counts in real time.
-
-    It maintains a small per-run in-memory timeline in st.session_state so the
-    feed grows as cycles advance (instead of re-synthesizing from unrelated
-    finished-run history).
-    """
-    if not isinstance(progress_view, dict):
-        return []
-
-    # We only emit live events for cycle progress (not phase pipelines).
-    if str(progress_view.get('kind') or '') != 'cycle':
-        return []
-
-    cur = progress_view.get('current')
-    tot = progress_view.get('total')
-    if not isinstance(cur, int) or cur < 0:
-        return []
-
-    run_key = str(run_id or 'global')
-    state = st.session_state.get(LIVE_CYCLE_STATE_KEY)
-    if not isinstance(state, dict):
-        state = {}
-
-    per = state.get(run_key)
-    if not isinstance(per, dict):
-        per = {'last': 0, 'events': []}
-
-    last = per.get('last')
-    events = per.get('events')
-    if not isinstance(last, int):
-        last = 0
-    if not isinstance(events, list):
-        events = []
-
-    # If the counter ever goes backwards (new run, restart), reset the live feed.
-    if cur < last:
-        last = 0
-        events = []
-
-    # Baseline: show Cycle 0/N (or 0) so we don't fall back to history on the first tick.
-    if cur == 0 and not events:
-        if isinstance(tot, int) and tot > 0:
-            msg0 = f"Cycle 0/{tot}"
-        else:
-            msg0 = "Cycle 0"
-        events = [{"ts": "", "kind": "cycle_progress", "message": msg0, "cycle": 0, "total": tot}]
-
-    # Append new cycle markers when the displayed count increases.
-    start = max(last + 1, 1)
-    if cur >= start:
-        for c in range(start, cur + 1):
-            if isinstance(tot, int) and tot > 0:
-                msg = f"Cycle {c}/{tot}"
-            else:
-                msg = f"Cycle {c}"
-            events.append({"ts": _now_iso(), "kind": "cycle_progress", "message": msg, "cycle": c, "total": tot})
-
-    # Persist trimmed state
-    per['last'] = cur
-    per['events'] = events[-limit:]
-    state[run_key] = per
-    st.session_state[LIVE_CYCLE_STATE_KEY] = state
-    return per['events']
 
 def build_cycle_count_events_from_history(
     history: List[Dict[str, Any]],
@@ -4284,6 +4239,103 @@ def build_cycle_count_events_from_history(
         )
     return events
 
+
+
+def build_cycle_count_events_from_progress(
+    progress_view: Optional[Dict[str, Any]],
+    run_id: Optional[str],
+    limit: int = LIVE_EVENTS_LIMIT,
+) -> List[Dict[str, Any]]:
+    """Create a Cycle X/Y timeline from *live progress counters* (no history).
+
+    This keeps a small rolling list in `st.session_state` so the timeline grows
+    as cycles complete, even if the UI reruns frequently.
+    """
+    if not isinstance(progress_view, dict):
+        return []
+
+    def _as_int(v: Any) -> Optional[int]:
+        try:
+            if isinstance(v, bool):
+                return None
+            if isinstance(v, int):
+                return v
+            if isinstance(v, float):
+                if v != v:  # NaN
+                    return None
+                return int(v)
+            if isinstance(v, str):
+                s = v.strip()
+                if not s:
+                    return None
+                return int(float(s))
+        except Exception:
+            return None
+        return None
+
+    cur = _as_int(progress_view.get("current"))
+    tot = _as_int(progress_view.get("total"))
+    if cur is None:
+        # Some progress views use alternative keys
+        cur = _as_int(progress_view.get("cycle")) or _as_int(progress_view.get("cycle_index"))
+    if tot is None:
+        tot = _as_int(progress_view.get("total_cycles")) or _as_int(progress_view.get("cycles_total"))
+
+    if cur is None:
+        return []
+
+    if cur < 0:
+        cur = 0
+    if tot is not None and tot < 0:
+        tot = None
+
+    # Session-scoped rolling timeline
+    ss = st.session_state
+    key_rid = "_live_cycle_timeline_run_id"
+    key_last = "_live_cycle_timeline_last"
+    key_events = "_live_cycle_timeline_events"
+
+    rid = str(run_id) if run_id else ""
+    if ss.get(key_rid) != rid:
+        ss[key_rid] = rid
+        ss[key_last] = None
+        ss[key_events] = []
+
+    last = _as_int(ss.get(key_last))
+    events = ss.get(key_events) if isinstance(ss.get(key_events), list) else []
+    events = [e for e in events if isinstance(e, dict)]
+
+    # Reset if progress counter moved backwards (new run / restart)
+    if last is not None and cur < last:
+        last = None
+        events = []
+
+    def _msg(c: int) -> str:
+        if isinstance(tot, int) and tot > 0:
+            return f"Cycle {c}/{tot}"
+        return f"Cycle {c}"
+
+    # Ensure we show something at the start of a run
+    if (last is None) and cur == 0 and not events:
+        events = [{"ts": _now_iso(), "kind": "cycle_progress", "message": _msg(0), "cycle": 0}]
+        last = 0
+
+    # Append newly observed cycles
+    if last is None:
+        last = -1
+    if cur > last:
+        start_c = max(1, last + 1)
+        for c in range(start_c, cur + 1):
+            events.append({"ts": _now_iso(), "kind": "cycle_progress", "message": _msg(c), "cycle": c})
+        last = cur
+
+    # Trim to the last `limit` entries
+    if isinstance(limit, int) and limit > 0 and len(events) > limit:
+        events = events[-limit:]
+
+    ss[key_events] = events
+    ss[key_last] = last
+    return events
 
 def _filter_cycle_only_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Keep only per-cycle progress events from a mixed event stream."""
@@ -5198,23 +5250,28 @@ def main() -> None:
     # Recent activity should stay high-signal. Prefer showing only per-cycle
     # progress (Cycle X/Y) and hide noisy worker/job events.
     narrative_events: List[Dict[str, Any]] = []
+
+    # 1) Prefer real cycle_progress events when available (per-run event log).
     if event_log0:
         narrative_events = _filter_cycle_only_events(event_log0)
         if narrative_events and event_src0 and event_src0 != "not found":
             event_src0 = f"{event_src0} (cycle only)"
 
-    # Prefer live cycle progress for an active run (avoid pulling from finished-run history).
-    if not narrative_events and active_run_id:
+    # 2) While a run is active, prefer a live cycle timeline built from progress
+    #    counters (run_state/worker_state/progress.json). This avoids the stale
+    #    'from history' behavior during active runs.
+    if (not narrative_events) and active_run_id:
         narrative_events = build_cycle_count_events_from_progress(
             progress_view0 if isinstance(progress_view0, dict) else None,
             run_id=active_run_id,
             limit=LIVE_EVENTS_LIMIT,
         )
         if narrative_events:
-            event_src0 = "cycle count (live)"
+            event_src0 = "cycle count (live from run state/progress)"
 
-    # Fall back to synthesizing minimal cycle progress from history (idle mode only).
-    if not narrative_events and not active_run_id:
+    # 3) Only when there is no active run do we synthesize a minimal cycle feed
+    #    from history (useful for completed runs).
+    if (not narrative_events) and (not active_run_id):
         tot_hint: Optional[int] = None
         try:
             _tot0 = progress_view0.get("total")
@@ -5232,12 +5289,12 @@ def main() -> None:
         if narrative_events:
             event_src0 = "cycle count (from history)"
 
-    # If we still have nothing but the worker state shows progress, display it.
+    # 4) Last resort: show a single live counter line if available.
     if not narrative_events:
         try:
             cur0 = progress_view0.get("current")
             tot0 = progress_view0.get("total")
-            if isinstance(cur0, int) and cur0 > 0:
+            if isinstance(cur0, int) and cur0 >= 0:
                 if isinstance(tot0, int) and tot0 > 0:
                     msg = f"Cycle {cur0}/{tot0}"
                 else:
@@ -5719,7 +5776,51 @@ def main() -> None:
     # Biomarker section removed: disable the display of the Longevity Biomarker Summary
     # by forcing the condition to false.  Previously this section displayed a detailed
     # summary of fifteen biomarkers and their citations when the sidebar toggle was enabled.
-    # (Biomarker summary UI removed to keep this file lightweight. Re-add via external data file if needed.)
+    if False and use_biomarkers:
+        st.markdown("## Longevity Biomarker Summary")
+        st.write(
+            "This summary outlines fifteen important biomarkers used in longevity blood tests and why they matter for healthy aging."
+        )
+
+        # Toggle to show/hide citation details.  Off by default.
+        show_biomarker_citations = st.toggle(
+            "Show citation details",
+            value=False,
+            key="show_biomarker_citations",
+            help="Toggle to display or hide detailed source and citation information."
+        )
+
+        # Define biomarker names and descriptions.
+        biomarker_items = [
+            ("Albumin", "Liver-produced protein that helps maintain fluid balance and transport molecules; low levels can suggest inflammation or liver/kidney issues."),
+            ("ALP & ALT", "Liver enzymes; elevated ALT can suggest liver injury and elevated ALP can reflect bile duct disease or bone turnover (interpret with context)."),
+            ("Creatinine (CRE)", "Kidney filtration marker influenced by muscle mass; rising creatinine can suggest reduced kidney function."),
+            ("Creatine Kinase (CK)", "Marker of muscle breakdown; can rise after intense exercise or injury."),
+            ("Reactive Oxygen Metabolites (ROM)", "Proxy for oxidative stress burden; higher values can indicate increased oxidative damage."),
+            ("Total Antioxidant Capacity (TAC)", "Summary measure of antioxidant defenses; low values can indicate reduced oxidative protection."),
+            ("DNA Damage (8-OHdG)", "Oxidative DNA damage marker; higher levels can reflect increased oxidative stress."),
+            ("Intracellular NAD+", "Key cofactor for energy metabolism and DNA repair; levels may decline with age and metabolic stress."),
+            ("Vitamin D (25-OH)", "Common vitamin D status measure; low levels are associated with bone and immune health risks."),
+            ("Glycated Serum Protein (GSP)", "Short-term glycation marker reflecting recent blood sugar control (weeks)."),
+            ("Blood Lipids (HDL, LDL, Triglycerides)", "Cardiometabolic risk indicators; patterns matter more than a single value."),
+            ("Uric Acid", "At high levels can contribute to gout and cardiometabolic risk; also acts as an antioxidant at physiological levels."),
+            ("Klotho", "Hormone-like protein linked to kidney and cardiovascular health; lower levels are associated with aging and disease risk."),
+            ("Inflammation Markers (hs-CRP, IL-6, TNF-Î±)", "Chronic low-grade inflammation (âinflammagingâ) correlates with higher disease and mortality risk."),
+            ("Senescence-Associated Markers (SASP)", "Signals related to senescent-cell burden and secreted inflammatory factors; elevated markers can indicate higher senescence activity."),
+        ]
+        # Render each biomarker item as a bullet point.
+        for name, desc in biomarker_items:
+            st.markdown(f"* **{name}:** {desc}")
+
+        # Only render citations when the toggle is on.
+        if show_biomarker_citations:
+            st.markdown("#### Sources and citations")
+            citation_lines = _load_ui_asset_lines("ui_assets/biomarker_citations.txt")
+            if not citation_lines:
+                citation_lines = ["(no citation asset found: ui_assets/biomarker_citations.txt)"]
+            for cl in citation_lines:
+                st.markdown(f"- {cl}")
+
     stop_rye_threshold: Optional[float] = None
 
     # -----------------------------
@@ -5813,15 +5914,15 @@ def main() -> None:
                 swarm_config: Dict[str, Any] = {
                     "swarm_size": int(swarm_size),
                     "roles": [name for name, _ in swarm_roles] if swarm_roles else ["agent"],
-                    # (comment trimmed for readability)
-                    # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
+# (comment trimmed to keep this file renderable in GitHub)
                     # the cycles slider.  Set to the requested cycles value.
                     "max_cycles_per_agent": int(cycles),
                     "stagger_start": False,
-                    # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
                     # all agents can run each round.  Some backends interpret
                     # zero as a default limit (often 32), which would reduce
-                    # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
                     "max_agents_per_tick": int(swarm_size),
                     "role_goals": {name: role_specific_goal(goal_clean, name) for name, _ in swarm_roles} if swarm_roles else {},
                 }
@@ -5831,7 +5932,7 @@ def main() -> None:
                     "roles": ["agent"],
                     "max_cycles_per_agent": int(cycles),
                     "stagger_start": False,
-                    # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
                     "max_agents_per_tick": 1,
                 }
 
@@ -5845,11 +5946,11 @@ def main() -> None:
                     }
 
             # In swarm mode interpret the cycles slider as the number of rounds
-            # (comment trimmed for readability)
-            # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
+# (comment trimmed to keep this file renderable in GitHub)
             # multiplying the number of rounds by the number of participating
             # agents.  This change avoids a mismatch where the UI requests
-            # (comment trimmed for readability)
+# (comment trimmed to keep this file renderable in GitHub)
             # interprets it as global cycles, leading to runs that end early or
             # overshoot the intended budget.
             total_cycles_requested = int(cycles)
