@@ -67,7 +67,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pandas as pd
 import streamlit as st
@@ -326,6 +326,28 @@ def _infer_cycle_progress_from_event_logs(
         events.extend(_load_event_dicts_tail(p, max_lines=max_lines))
         if len(events) >= 2000:
             break
+
+    # IMPORTANT: Some deployments only write a shared/global events log (e.g. logs/events_global.jsonl).
+    # If we infer progress from that file without filtering, the UI will "replay history" from other runs.
+    if run_id:
+        rid = str(run_id)
+
+        def _event_run_id(ev: Any) -> Optional[str]:
+            if not isinstance(ev, dict):
+                return None
+            # Common placements
+            r = ev.get("run_id")
+            if r:
+                return str(r)
+            data = ev.get("data")
+            if isinstance(data, dict) and data.get("run_id"):
+                return str(data.get("run_id"))
+            extra = ev.get("extra")
+            if isinstance(extra, dict) and extra.get("run_id"):
+                return str(extra.get("run_id"))
+            return None
+
+        events = [ev for ev in events if _event_run_id(ev) == rid]
 
     return _infer_cycle_progress_from_events(events, fallback_total=fallback_total)
 
