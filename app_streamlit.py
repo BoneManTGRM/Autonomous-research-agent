@@ -2125,32 +2125,28 @@ def _extract_state_timestamp_seconds(state: Any, path: Optional[Path] = None) ->
 
 
 def _first_existing_json(paths: List[Path]) -> Tuple[Optional[Any], Optional[Path]]:
-    """Return (json_data, path) for the most recently updated readable JSON in paths.
-
-    The worker may write the same artifact to multiple locations across versions
-    and deployment layouts. If an older (stale) file exists earlier in the search
-    order, returning the first readable JSON can make the UI appear stuck.
-
-    Picking the newest readable JSON makes the dashboard resilient to that.
-    """
-    best_data: Optional[Any] = None
-    best_path: Optional[Path] = None
-    best_mtime: float = -1.0
-
-    for p in paths:
-        data = _load_json_file(p)
-        if data is None:
-            continue
+    """Return (json_data, path) for the most recently modified readable JSON in paths."""
+    # Sort candidate paths by modification time so that the newest artifact is preferred
+    sorted_paths: List[Path] = []
+    try:
+        # Filter to existing paths to avoid exceptions during stat()
+        existing_paths = [p for p in paths if isinstance(p, Path) and p.exists()]
+        sorted_paths = sorted(
+            existing_paths,
+            key=lambda p: p.stat().st_mtime,
+            reverse=True,
+        )
+    except Exception:
+        # If sorting fails, fall back to provided order
+        sorted_paths = list(paths)
+    for p in sorted_paths:
         try:
-            mtime = float(p.stat().st_mtime)
+            data = _load_json_file(p)
         except Exception:
-            mtime = 0.0
-        if best_path is None or mtime > best_mtime:
-            best_data = data
-            best_path = p
-            best_mtime = mtime
-
-    return best_data, best_path
+            data = None
+        if data is not None:
+            return data, p
+    return None, None
 
 
 def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]]:
@@ -4409,97 +4405,85 @@ def build_cycle_count_events_from_progress(
     run_id: Optional[str],
     limit: int = LIVE_EVENTS_LIMIT,
 ) -> List[Dict[str, Any]]:
-    """Create a Cycle X/Y timeline from *live progress counters* (no history).
-
-    This keeps a small rolling list in `st.session_state` so the timeline grows
-    as cycles complete, even if the UI reruns frequently.
     """
-    if not isinstance(progress_view, dict):
+    Build a small rolling timeline strictly from live counters.
+    Never uses history and never fabricates intermediate cycles.
+
+    This helper keeps a per-run rolling list in ``st.session_state`` keyed by the run ID,
+    so the timeline grows as cycles advance even when the Streamlit script reruns frequently.
+    """
+    # require both a dict progress view and a run_id
+    if not isinstance(progress_view, dict) or not run_id:
         return []
 
+    # Helper to normalize arbitrary values to integers when possible
     def _as_int(v: Any) -> Optional[int]:
         try:
-            if isinstance(v, bool):
+            if v is None:
                 return None
-            if isinstance(v, int):
-                return v
-            if isinstance(v, float):
-                if v != v:  # NaN
-                    return None
+            if isinstance(v, bool):
                 return int(v)
-            if isinstance(v, str):
-                s = v.strip()
-                if not s:
-                    return None
-                return int(float(s))
+            if isinstance(v, (int, float)):
+                return int(v)
+            if isinstance(v, str) and v.strip() != "":
+                return int(float(v.strip()))
         except Exception:
             return None
         return None
 
+    # Extract current and total cycle counters, preferring explicit cycle fields
     cur = _as_int(progress_view.get("current"))
     tot = _as_int(progress_view.get("total"))
-    if cur is None:
-        # Some progress views use alternative keys
-        cur = _as_int(progress_view.get("cycle")) or _as_int(progress_view.get("cycle_index"))
-    if tot is None:
-        tot = _as_int(progress_view.get("total_cycles")) or _as_int(progress_view.get("cycles_total"))
+    cur_cycle = _as_int(progress_view.get("current_cycle"))
+    tot_cycles = _as_int(progress_view.get("total_cycles"))
+    if cur_cycle is not None:
+        cur = cur_cycle
+    if tot_cycles is not None:
+        tot = tot_cycles
 
+    # Bail if no current cycle information is available
     if cur is None:
         return []
 
-    if cur < 0:
-        cur = 0
-    if tot is not None and tot < 0:
-        tot = None
-
-    # Session-scoped rolling timeline
     ss = st.session_state
-    key_rid = "_live_cycle_timeline_run_id"
-    key_last = "_live_cycle_timeline_last"
-    key_events = "_live_cycle_timeline_events"
-
-    rid = str(run_id) if run_id else ""
-    if ss.get(key_rid) != rid:
-        ss[key_rid] = rid
-        ss[key_last] = None
-        ss[key_events] = []
-
+    key_last = f"_ara_live_cycle_last::{run_id}"
+    key_events = f"_ara_live_cycle_events::{run_id}"
     last = _as_int(ss.get(key_last))
-    events = ss.get(key_events) if isinstance(ss.get(key_events), list) else []
+    events = ss.get(key_events)
+    if not isinstance(events, list):
+        events = []
     events = [e for e in events if isinstance(e, dict)]
 
-    # Reset if progress counter moved backwards (new run / restart)
+    # If the cycle count goes backwards (new run), reset state
     if last is not None and cur < last:
         last = None
         events = []
 
+    # Message formatter
     def _msg(c: int) -> str:
         if isinstance(tot, int) and tot > 0:
             return f"Cycle {c}/{tot}"
         return f"Cycle {c}"
 
-    # Ensure we show something at the start of a run
+    # If this is the first observation on a new run and cycle 0, seed the timeline
     if (last is None) and cur == 0 and not events:
-        events = [{"ts": _now_iso(), "kind": "cycle_progress", "message": _msg(0), "cycle": 0}]
+        events.append({"ts": _now_iso(), "kind": "cycle_progress", "message": _msg(0), "cycle": 0})
         last = 0
 
-    # Append newly observed cycle count (no backfill).
-    #
-    # IMPORTANT: We do NOT fabricate intermediate cycles when `cur` jumps,
-    # because that looks like history reconstruction. We only emit what we
-    # actually observed in the live progress counters.
+    # Append only what we observe; never fabricate intermediate cycles
     if last is None:
         last = -1
     if cur > last:
         events.append({"ts": _now_iso(), "kind": "cycle_progress", "message": _msg(cur), "cycle": cur})
         last = cur
 
-    # Trim to the last `limit` entries
-    if isinstance(limit, int) and limit > 0 and len(events) > limit:
-        events = events[-limit:]
-
-    ss[key_events] = events
+    # Persist state back to the session
     ss[key_last] = last
+    ss[key_events] = events
+
+    # Return the tail of the events list, constrained by the limit
+    if isinstance(limit, int) and limit > 0 and len(events) > limit:
+        return events[-limit:]
     return events
 
 def _filter_cycle_only_events(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -5717,7 +5701,14 @@ def main() -> None:
 
         # Render the narrative feed summarizing recent cycles.  This provides context
         # for the run even when the event log lacks detailed messages.
-        render_narrative_feed(narrative_events, source_label=event_src0 if event_src0 != "not found" else "synthesized")
+        # When no event log is found but progress counters are available, label the source accordingly.
+        label0 = event_src0
+        try:
+            if label0 == "not found" and progress_src0 not in {"not found", "no run_id"}:
+                label0 = "cycle count (live from progress.json)"
+        except Exception:
+            pass
+        render_narrative_feed(narrative_events, source_label=label0)
 
         # Provide access to the raw event log JSON if available.  Users can expand this
         # section to inspect low-level event details.  When no event log file exists
