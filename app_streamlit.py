@@ -116,7 +116,7 @@ def tail_lines(path: Path, max_lines: int = 200) -> List[str]:
 # (cached decorators count as Streamlit commands). Keep this at module top level.
 # (comment trimmed to keep this file renderable in GitHub)
 # (comment trimmed to keep this file renderable in GitHub)
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ð§ ", layout="wide")
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="Ã°ÂÂ§Â ", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -4274,6 +4274,32 @@ def build_cycle_count_events_from_event_log(events: List[Dict[str, Any]]) -> Lis
     Returns a list of events shaped like:
       {"ts": "...", "kind": "cycle_progress", "message": "Cycle 3/6", ...}
     """
+    def _as_int(v: Any) -> Optional[int]:
+        """Best-effort int coercion; returns None when coercion fails."""
+        try:
+            if v is None:
+                return None
+            # Avoid surprising behaviour: bool is a subclass of int
+            if isinstance(v, bool):
+                return int(v)
+            if isinstance(v, int):
+                return v
+            if isinstance(v, float):
+                # Guard NaN / inf
+                if v != v or v == float("inf") or v == float("-inf"):
+                    return None
+                return int(v)
+            if isinstance(v, str):
+                s = v.strip()
+                if not s:
+                    return None
+                # Extract first integer-like token (handles "5/6", "cycle=3", etc.)
+                m = re.search(r"-?\d+", s)
+                return int(m.group(0)) if m else None
+            return int(v)
+        except Exception:
+            return None
+
     if not events:
         return []
 
@@ -5932,7 +5958,7 @@ def main() -> None:
             ("Blood Lipids (HDL, LDL, Triglycerides)", "Cardiometabolic risk indicators; patterns matter more than a single value."),
             ("Uric Acid", "At high levels can contribute to gout and cardiometabolic risk; also acts as an antioxidant at physiological levels."),
             ("Klotho", "Hormone-like protein linked to kidney and cardiovascular health; lower levels are associated with aging and disease risk."),
-            ("Inflammation Markers (hs-CRP, IL-6, TNF-Î±)", "Chronic low-grade inflammation (âinflammagingâ) correlates with higher disease and mortality risk."),
+            ("Inflammation Markers (hs-CRP, IL-6, TNF-ÃÂ±)", "Chronic low-grade inflammation (Ã¢ÂÂinflammagingÃ¢ÂÂ) correlates with higher disease and mortality risk."),
             ("Senescence-Associated Markers (SASP)", "Signals related to senescent-cell burden and secreted inflammatory factors; elevated markers can indicate higher senescence activity."),
         ]
         # Render each biomarker item as a bullet point.
