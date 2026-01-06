@@ -7711,13 +7711,4 @@ def main() -> None:
                         pass
             else:
                 # When autorefresh is not available, fall back to manual sleep and rerun
-                time.sleep(float(refresh_seconds))
-                try:
-                    st.experimental_rerun()
-                except Exception:
-                    pass
-
-
-# Streamlit entry point
-if __name__ == "__main__":
-    main()
+                time.sleep(float
