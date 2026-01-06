@@ -1139,6 +1139,72 @@ def _watchdog_heartbeat_file_path() -> Path:
     return _ensure_runs_logs_dir() / "watchdog_heartbeat.json"
 
 
+
+def _watchdog_heartbeat_file_paths() -> List[Path]:
+    """Return all watchdog heartbeat file paths to keep in sync.
+
+    The Streamlit UI checks several locations for heartbeat files. If a stale
+    heartbeat JSON exists earlier in the UI's search order, the dashboard can
+    incorrectly report a lost heartbeat even while the worker is updating a
+    different path.
+
+    To make the system robust across layouts and upgrades, we write the watchdog
+    heartbeat JSON to multiple candidate paths.
+    """
+    candidates: List[Path] = []
+
+    # 1) Explicit override(s)
+    for _k in ("ARA_WATCHDOG_HEARTBEAT_PATH", "WATCHDOG_HEARTBEAT_PATH", "ARA_HEARTBEAT_PATH"):
+        try:
+            raw = os.getenv(_k)
+            if isinstance(raw, str) and raw.strip():
+                candidates.append(Path(raw.strip()))
+        except Exception:
+            pass
+
+    # 2) If run_jobs defines a heartbeat path, honor it (best-effort)
+    for _mod_name in ("agent.run_jobs", "run_jobs"):
+        try:
+            _rj = __import__(_mod_name, fromlist=["*"])
+        except Exception:
+            continue
+        for _attr in ("WATCHDOG_HEARTBEAT_PATH", "HEARTBEAT_PATH"):
+            try:
+                p = getattr(_rj, _attr, None)
+                if p:
+                    candidates.append(Path(p))
+            except Exception:
+                pass
+        break
+
+    # 3) Root-level default: <runs_root>/watchdog_heartbeat.json
+    try:
+        candidates.append(BASE_DIR / "watchdog_heartbeat.json")
+    except Exception:
+        pass
+
+    # 4) Logs-level default: <runs_root>/logs/watchdog_heartbeat.json
+    try:
+        candidates.append(_watchdog_heartbeat_file_path())
+    except Exception:
+        pass
+
+    # Normalize + dedupe while preserving order
+    out: List[Path] = []
+    seen: set = set()
+    for p in candidates:
+        try:
+            rp = p.expanduser().resolve()
+        except Exception:
+            rp = Path(str(p))
+        key = str(rp)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(rp)
+    return out
+
+
 def _run_state_file_path() -> Path:
     return _ensure_runs_logs_dir() / "run_state.json"
 
@@ -1304,15 +1370,21 @@ def _emit_watchdog_heartbeat_file(
             "extra": _to_jsonable(extra) if isinstance(extra, dict) else None,
         }
 
-        _disk_write_json(
-            _watchdog_heartbeat_file_path(),
-            payload,
-            throttle_key="watchdog_heartbeat_file",
-            throttle_min_interval_s=_env_float_value(
-                "WORKER_WATCHDOG_HEARTBEAT_FILE_MIN_INTERVAL_SECONDS", 0.25
-            ),
-            force=force,
-        )
+        # Write to all known heartbeat paths so the UI can't get stuck on a stale file.
+        for idx, path in enumerate(_watchdog_heartbeat_file_paths()):
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            _disk_write_json(
+                path,
+                payload,
+                throttle_key=f"watchdog_heartbeat_file_{idx}",
+                throttle_min_interval_s=_env_float_value(
+                    "WORKER_WATCHDOG_HEARTBEAT_FILE_MIN_INTERVAL_SECONDS", 0.25
+                ),
+                force=force,
+            )
     except Exception as e:
         log_exception("watchdog_heartbeat_file_failed", e)
 
@@ -2620,19 +2692,41 @@ def _current_run_id(mode: str) -> str:
     return f"{mode}-{_safe_os_getpid()}"
 
 
+# ---------------------------------------------------------------------------
+# Heartbeat (UI watchdog + optional MemoryStore heartbeat)
+# ---------------------------------------------------------------------------
+
+# These knobs default to "safe" behavior on small machines / hosted platforms:
+# - Always update the watchdog heartbeat JSON for the Streamlit UI.
+# - Avoid frequent stdout logging (log backpressure can stall a worker).
+# - Avoid forcing MemoryStore.save() on every beat (can be very expensive on large runs).
+_HEARTBEAT_STDOUT = _env_bool("WORKER_HEARTBEAT_STDOUT", default=False)
+_HEARTBEAT_STDOUT_MIN_INTERVAL_S = _env_float_value(
+    "WORKER_HEARTBEAT_STDOUT_MIN_INTERVAL_SECONDS", 30.0
+)
+_HEARTBEAT_TOUCH_MEMORYSTORE = _env_bool("WORKER_HEARTBEAT_TOUCH_MEMORYSTORE", default=False)
+_HEARTBEAT_SAVE_MEMORYSTORE = _env_bool("WORKER_HEARTBEAT_SAVE_MEMORYSTORE", default=False)
+_HEARTBEAT_SAVE_MEMORYSTORE_MIN_INTERVAL_S = _env_float_value(
+    "WORKER_HEARTBEAT_SAVE_MEMORYSTORE_MIN_INTERVAL_SECONDS", 120.0
+)
+
+_HEARTBEAT_LOG_THROTTLE = _LogThrottle(
+    max_keys=256, min_interval_s=float(_HEARTBEAT_STDOUT_MIN_INTERVAL_S)
+)
+_HEARTBEAT_MS_SAVE_THROTTLE = _LogThrottle(
+    max_keys=256, min_interval_s=float(_HEARTBEAT_SAVE_MEMORYSTORE_MIN_INTERVAL_S)
+)
+
+
 def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> None:
     """
-    Best effort heartbeat into the MemoryStore and also <runs_root>/logs/watchdog_heartbeat.json
-    so the UI can see that the worker is alive.
-    """
-    try:
-        ts = _now_utc_iso()
-        rid = run_id or "n_a"
-        _emit_log_line(f"[HB] {ts} label={label} run_id={rid} worker_id={WORKER_ID}")
-    except Exception:
-        pass
+    Lightweight heartbeat used by watchdog threads and the Streamlit UI.
 
-    # Streamlit watchdog heartbeat file
+    Always writes <runs_root>/watchdog_heartbeat.json (and sibling paths) so the UI can
+    detect liveness. MemoryStore updates are optional and disabled by default because
+    forcing frequent MemoryStore saves can be extremely expensive for large swarms.
+    """
+    # 1) Streamlit watchdog heartbeat file (ALWAYS)
     try:
         _emit_watchdog_heartbeat_file(
             label=label,
@@ -2642,6 +2736,20 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
         )
     except Exception:
         pass
+
+    # 2) Optional stdout heartbeat line (disabled by default)
+    if _HEARTBEAT_STDOUT:
+        try:
+            rid = run_id or "n_a"
+            if _HEARTBEAT_LOG_THROTTLE.allow(f"hb_stdout:{rid}:{label}", now=time.monotonic()):
+                ts = _now_utc_iso()
+                _emit_log_line(f"[HB] {ts} label={label} run_id={rid} worker_id={WORKER_ID}")
+        except Exception:
+            pass
+
+    # 3) Optional MemoryStore heartbeat (disabled by default)
+    if not _HEARTBEAT_TOUCH_MEMORYSTORE:
+        return
 
     ms = _get_memory_store(agent)
     if ms is None:
@@ -2674,14 +2782,23 @@ def _heartbeat(agent: CoreAgent, label: str, run_id: Optional[str] = None) -> No
                 wd["last_heartbeat_ts"] = time.time()
     except Exception as e:
         log_exception("heartbeat_record_failed", e, label=label, run_id=run_id)
-    finally:
-        try:
-            if hasattr(ms, "save"):
-                ms.save()  # type: ignore[call-arg]
-            elif hasattr(ms, "_save"):
-                ms._save()  # type: ignore[call-arg]
-        except Exception:
-            pass
+
+    # Persist MemoryStore only if explicitly enabled (and throttled)
+    if not _HEARTBEAT_SAVE_MEMORYSTORE:
+        return
+
+    try:
+        key = f"hb_ms_save:{run_id or 'n_a'}"
+        if _HEARTBEAT_MS_SAVE_THROTTLE.allow(key, now=time.monotonic()):
+            try:
+                if hasattr(ms, "save"):
+                    ms.save()  # type: ignore[call-arg]
+                elif hasattr(ms, "_save"):
+                    ms._save()  # type: ignore[call-arg]
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _start_heartbeat_loop(
@@ -7700,6 +7817,16 @@ def _process_single_job(
                 last_emitted_cycle: Optional[int] = None
 
                 while pulse_stop is not None and not pulse_stop.is_set():
+                    # Always bump watchdog heartbeat first (even if other pulse logic fails)
+                    try:
+                        _emit_watchdog_heartbeat_file(
+                            label="queue_job_pulse",
+                            run_id=run_id,
+                            extra={"pulse": True},
+                            force=False,
+                        )
+                    except Exception:
+                        pass
                     try:
                         try:
                             with progress_lock:
@@ -7796,12 +7923,6 @@ def _process_single_job(
                                     throttle_key=f"cycle_progress:{run_id}:{cur}",
                                     throttle_min_interval_s=0.0,
                                 )
-                        except Exception:
-                            pass
-
-                        # Also bump the watchdog heartbeat.
-                        try:
-                            _heartbeat(agent, label="queue_job_pulse", run_id=run_id)
                         except Exception:
                             pass
                     except Exception:
