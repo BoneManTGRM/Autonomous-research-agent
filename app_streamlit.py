@@ -116,7 +116,7 @@ def tail_lines(path: Path, max_lines: int = 200) -> List[str]:
 # (cached decorators count as Streamlit commands). Keep this at module top level.
 # (comment trimmed to keep this file renderable in GitHub)
 # (comment trimmed to keep this file renderable in GitHub)
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="Ã°ÂÂ§Â ", layout="wide")
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂ°ÃÂÃÂ§ÃÂ ", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -2125,12 +2125,32 @@ def _extract_state_timestamp_seconds(state: Any, path: Optional[Path] = None) ->
 
 
 def _first_existing_json(paths: List[Path]) -> Tuple[Optional[Any], Optional[Path]]:
-    """Return (json_data, path) for the first readable JSON in paths."""
+    """Return (json_data, path) for the most recently updated readable JSON in paths.
+
+    The worker may write the same artifact to multiple locations across versions
+    and deployment layouts. If an older (stale) file exists earlier in the search
+    order, returning the first readable JSON can make the UI appear stuck.
+
+    Picking the newest readable JSON makes the dashboard resilient to that.
+    """
+    best_data: Optional[Any] = None
+    best_path: Optional[Path] = None
+    best_mtime: float = -1.0
+
     for p in paths:
         data = _load_json_file(p)
-        if data is not None:
-            return data, p
-    return None, None
+        if data is None:
+            continue
+        try:
+            mtime = float(p.stat().st_mtime)
+        except Exception:
+            mtime = 0.0
+        if best_path is None or mtime > best_mtime:
+            best_data = data
+            best_path = p
+            best_mtime = mtime
+
+    return best_data, best_path
 
 
 def _candidate_state_paths(run_id: Optional[str] = None) -> Dict[str, List[Path]]:
@@ -5958,7 +5978,7 @@ def main() -> None:
             ("Blood Lipids (HDL, LDL, Triglycerides)", "Cardiometabolic risk indicators; patterns matter more than a single value."),
             ("Uric Acid", "At high levels can contribute to gout and cardiometabolic risk; also acts as an antioxidant at physiological levels."),
             ("Klotho", "Hormone-like protein linked to kidney and cardiovascular health; lower levels are associated with aging and disease risk."),
-            ("Inflammation Markers (hs-CRP, IL-6, TNF-ÃÂ±)", "Chronic low-grade inflammation (Ã¢ÂÂinflammagingÃ¢ÂÂ) correlates with higher disease and mortality risk."),
+            ("Inflammation Markers (hs-CRP, IL-6, TNF-ÃÂÃÂ±)", "Chronic low-grade inflammation (ÃÂ¢ÃÂÃÂinflammagingÃÂ¢ÃÂÃÂ) correlates with higher disease and mortality risk."),
             ("Senescence-Associated Markers (SASP)", "Signals related to senescent-cell burden and secreted inflammatory factors; elevated markers can indicate higher senescence activity."),
         ]
         # Render each biomarker item as a bullet point.
