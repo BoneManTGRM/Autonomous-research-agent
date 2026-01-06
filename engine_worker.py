@@ -80,7 +80,7 @@ import socket
 import contextlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union, Set
 from datetime import datetime, timezone
 
 # Optional event emitter for live console.  If present, it will be used to
@@ -1304,51 +1304,48 @@ def _emit_watchdog_heartbeat_file(
             "extra": _to_jsonable(extra) if isinstance(extra, dict) else None,
         }
 
-        # Write the heartbeat to both the logs path and the runs root path.
-        # Older workers wrote only to <runs_root>/logs, while some Streamlit
-        # versions read <runs_root>/watchdog_heartbeat.json first. If a stale file
-        # exists at one location, the UI can incorrectly show "Heartbeat lost".
+        # Write the heartbeat to multiple common locations so that the Streamlit UI can
+        # locate a fresh file regardless of which path it prefers.  The default
+        # location is under the logs directory.  When possible, also write to the
+        # runs root directory (<runs_root>/watchdog_heartbeat.json).  Additional
+        # locations can be added here if needed.
         paths: List[Path] = []
         try:
-            logs_path = _watchdog_heartbeat_file_path()
-            paths.append(Path(logs_path))
-            try:
-                runs_root = Path(logs_path).parent
-                # If logs_path is <runs_root>/logs/watchdog_heartbeat.json, parent is <runs_root>/logs.
-                if runs_root.name == "logs":
-                    runs_root = runs_root.parent
-                paths.append(runs_root / "watchdog_heartbeat.json")
-            except Exception:
-                pass
+            # Primary logs path
+            paths.append(_watchdog_heartbeat_file_path())
         except Exception:
-            paths = []
-
-        # De-duplicate
-        seen: set = set()
-        uniq: List[Path] = []
-        for p in paths:
+            pass
+        # Secondary root path: runs_root/watchdog_heartbeat.json
+        try:
+            root_dir: Optional[Path]
+            if 'RUNS_LOGS_DIR' in globals() and RUNS_LOGS_DIR is not None:
+                root_dir = RUNS_LOGS_DIR.parent
+            else:
+                root_dir = Path(BASE_DIR) / "runs"
+            if isinstance(root_dir, Path):
+                paths.append(root_dir / "watchdog_heartbeat.json")
+        except Exception:
+            pass
+        # Deduplicate and write to each path with a distinct throttle key
+        seen_paths: Set[str] = set()
+        for idx, p in enumerate(paths):
             try:
-                k = str(p)
-                if k in seen:
+                key = str(p)
+                if key in seen_paths:
                     continue
-                seen.add(k)
-                uniq.append(p)
+                seen_paths.add(key)
+                _disk_write_json(
+                    p,
+                    payload,
+                    throttle_key=f"watchdog_heartbeat_file_{idx}",
+                    throttle_min_interval_s=_env_float_value(
+                        "WORKER_WATCHDOG_HEARTBEAT_FILE_MIN_INTERVAL_SECONDS", 0.25
+                    ),
+                    force=force,
+                )
             except Exception:
+                # Continue on errors so other paths may succeed
                 continue
-
-        if not uniq:
-            uniq = [_watchdog_heartbeat_file_path()]
-
-        for idx, p in enumerate(uniq):
-            _disk_write_json(
-                p,
-                payload,
-                throttle_key=f"watchdog_heartbeat_file_{idx}",
-                throttle_min_interval_s=_env_float_value(
-                    "WORKER_WATCHDOG_HEARTBEAT_FILE_MIN_INTERVAL_SECONDS", 0.25
-                ),
-                force=force,
-            )
     except Exception as e:
         log_exception("watchdog_heartbeat_file_failed", e)
 
@@ -6483,17 +6480,14 @@ def _write_job_progress(
             path = _fallback_progress_path(run_id)
 
         payload: Dict[str, Any] = {
-            "schema_version": _RUNS_ARTIFACT_SCHEMA_VERSION,
             "run_id": run_id,
             "status": status,
-            # Primary fields used by most UIs
+            # include both current/total and cycle-specific aliases for compatibility
             "current": current,
             "total": total,
-            # Compatibility aliases
             "current_cycle": current,
             "total_cycles": total,
             "last_update_utc": _now_utc_iso(),
-            "ts": time.time(),
             "notes": _truncate_text(note, 800),
             "goal": _truncate_text(goal, 800) if isinstance(goal, str) else goal,
             "domain": domain,
@@ -6595,7 +6589,7 @@ def _write_job_progress(
                 phase_total=phase_tot,
                 phase_index=phase_idx,
                 phase_name="run",
-                extra={"prompt_details": prompt_details} if isinstance(prompt_details, dict) and prompt_details else extra_local,
+                extra=extra_local,
                 force=status.lower() in {"finished", "error", "failed", "stopped", "retrying"},
             )
             # After emitting the progress artifact, write a narrative event
@@ -7757,7 +7751,7 @@ def _process_single_job(
                             inferred = _infer_cycle_count_from_event_logs(
                                 run_id,
                                 logs_dir=RUNS_LOGS_DIR,
-                                total_cycles=macro_total if isinstance(macro_total, int) else None,
+                                total_cycles=total if isinstance(total, int) else None,
                             )
                         if isinstance(inferred, int):
                             if cur is None or inferred > int(cur or 0):
