@@ -2433,6 +2433,8 @@ def _infer_cycle_count_from_event_logs(
         "cycle",
         "cycle_index",
         "current_cycle",
+        # Common progress keys used by ARA worker events/progress payloads
+        "current",
         "cycles_completed",
         "iteration",
         "iter",
@@ -7751,7 +7753,8 @@ def _process_single_job(
                             inferred = _infer_cycle_count_from_event_logs(
                                 run_id,
                                 logs_dir=RUNS_LOGS_DIR,
-                                total_cycles=total if isinstance(total, int) else None,
+                                # BUGFIX: `total` is not defined in this scope; use the configured macro_total.
+                                total_cycles=macro_total if isinstance(macro_total, int) else None,
                             )
                         if isinstance(inferred, int):
                             if cur is None or inferred > int(cur or 0):
