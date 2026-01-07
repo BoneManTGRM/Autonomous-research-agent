@@ -473,24 +473,35 @@ class WebResearchTool:
 
         except Exception as e:
             # Safe fallback on API errors
-            err_snippet = str(e)
+            #
+            # Historically the tool returned a result with title "Tavily Search Error"
+            # on any exception. This looked like a hard failure in the UI. Instead,
+            # treat API failures the same as stub mode: return a single stub entry
+            # with a descriptive error in the snippet. This preserves agent flow
+            # without causing the critic to abort early. Cache the stub so that
+            # repeated calls with the same query do not repeatedly hit the failing API.
+            err_snippet = f"Tavily API error: {e}"
             if truncated:
                 err_snippet += (
                     f" (Query was truncated to {self.max_query_chars} characters "
                     "before calling Tavily.)"
                 )
 
-            err: Dict[str, Any] = {
-                "title": "Tavily Search Error",
+            stub_err: Dict[str, Any] = {
+                "title": "[ERROR] Tavily API error",
                 "snippet": err_snippet,
                 "url": "",
             }
             if agent_role is not None:
-                err["agent_role"] = agent_role
+                stub_err["agent_role"] = agent_role
             if swarm_id is not None:
-                err["swarm_id"] = swarm_id
-            self._store_in_cache(cache_key, [err])
-            return [err]
+                stub_err["swarm_id"] = swarm_id
+            # Cache the error stub without role/swarm so we don't cache role
+            stub_cache: Dict[str, Any] = dict(stub_err)
+            stub_cache.pop("agent_role", None)
+            stub_cache.pop("swarm_id", None)
+            self._store_in_cache(cache_key, [stub_cache])
+            return [stub_err]
 
     # ------------------------------------------------------------------
     # SUMMARISATION
