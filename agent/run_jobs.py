@@ -1223,16 +1223,15 @@ def update_worker_state(update: Dict[str, Any], *, replace: bool = False) -> Pat
     state["ts"] = now
     state["last_update_utc"] = _utc_iso(now)
 
-    # Ensure a heartbeat timestamp is always present.  Some UIs rely on
-    # ``heartbeat_ts`` to determine liveness, and if this value is missing
-    # or stale the worker can appear "stuck" even though updates are
-    # flowing.  Preserve any explicit heartbeat_ts provided by the caller,
-    # otherwise update to the current time.  This provides a fresh
-    # heartbeat on every worker_state update without requiring the caller
-    # to remember to include it in the update payload.
+    # Some UIs treat `heartbeat_ts` as the primary liveness signal. Ensure it is
+    # always refreshed when we write worker_state so the UI doesn't report
+    # "Heartbeat lost" even if other fields are being updated.
     try:
-        if not isinstance(state.get("heartbeat_ts"), (int, float)):
+        if "heartbeat_ts" not in state or state.get("heartbeat_ts") is None:
             state["heartbeat_ts"] = now
+        else:
+            # If it's present but non-numeric, overwrite with a valid timestamp.
+            _ = float(state.get("heartbeat_ts"))
     except Exception:
         state["heartbeat_ts"] = now
 
