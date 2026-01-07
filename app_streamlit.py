@@ -116,7 +116,7 @@ def tail_lines(path: Path, max_lines: int = 200) -> List[str]:
 # (cached decorators count as Streamlit commands). Keep this at module top level.
 # (comment trimmed to keep this file renderable in GitHub)
 # (comment trimmed to keep this file renderable in GitHub)
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂÃÂ°ÃÂÃÂÃÂÃÂ§ÃÂÃÂ ", layout="wide")
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂÃÂÃÂÃÂ°ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§ÃÂÃÂÃÂÃÂ ", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -3236,6 +3236,28 @@ def compute_activity_pulse_view(
     rate_5m = float(c300) / 5.0 if c300 else 0.0
     event_rate = max(rate_1m, rate_5m)
 
+    # ------------------------------------------------------------------
+    # Adjustments for heartbeatâonly activity
+    #
+    # In many runs the underlying agent may work silently for long periods
+    # (e.g. waiting on network or large tool calls) while still emitting
+    # heartbeat signals. Historically this caused a "Low" pulse because the
+    # event_rate was zero even though the worker was alive. To better
+    # reflect liveness in such cases, when there are no recent events but
+    # a fresh heartbeat is available, bump the event_rate to a small
+    # baseline so the pulse reads as Medium instead of Low. The cutoff
+    # window (120 seconds) matches the typical heartbeat interval.
+    if (
+        event_rate <= 0.1
+        and isinstance(heartbeat_age, (int, float))
+        and heartbeat_age is not None
+        and heartbeat_age <= 120.0
+    ):
+        # Use a baseline rate of 3 events per minute, which yields a
+        # noticeable activity signal without looking overly busy. This
+        # baseline scales naturally with the HIGH_RATE constant below.
+        event_rate = max(event_rate, 3.0)
+
     # Normalize to 0..1 (tunable constants)
     HIGH_RATE = 6.0  # events/min that feels "busy" in most deployments
     activity = _clamp_float(event_rate / HIGH_RATE, 0.0, 1.0) or 0.0
@@ -3260,7 +3282,12 @@ def compute_activity_pulse_view(
         except Exception:
             freshness = 0.0
 
-    score = (0.60 * activity) + (0.40 * freshness)
+    # Weight the freshness signal slightly more than raw event activity.
+    # If the agent is still beating (heartbeat) but event activity is low,
+    # we want the pulse to reflect that the system is alive. Increasing
+    # freshness weight to 0.6 helps avoid spurious "Low" labels when
+    # heartbeat signals are frequent.
+    score = (0.40 * activity) + (0.60 * freshness)
 
     # If the worker is finished/idle, dampen pulse so it doesn't look "alive".
     status_s = str((worker_state or {}).get("status") or "").lower()
@@ -6159,7 +6186,7 @@ def main() -> None:
             ("Blood Lipids (HDL, LDL, Triglycerides)", "Cardiometabolic risk indicators; patterns matter more than a single value."),
             ("Uric Acid", "At high levels can contribute to gout and cardiometabolic risk; also acts as an antioxidant at physiological levels."),
             ("Klotho", "Hormone-like protein linked to kidney and cardiovascular health; lower levels are associated with aging and disease risk."),
-            ("Inflammation Markers (hs-CRP, IL-6, TNF-ÃÂÃÂÃÂÃÂ±)", "Chronic low-grade inflammation (ÃÂÃÂ¢ÃÂÃÂÃÂÃÂinflammagingÃÂÃÂ¢ÃÂÃÂÃÂÃÂ) correlates with higher disease and mortality risk."),
+            ("Inflammation Markers (hs-CRP, IL-6, TNF-ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ±)", "Chronic low-grade inflammation (ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂinflammagingÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ) correlates with higher disease and mortality risk."),
             ("Senescence-Associated Markers (SASP)", "Signals related to senescent-cell burden and secreted inflammatory factors; elevated markers can indicate higher senescence activity."),
         ]
         # Render each biomarker item as a bullet point.
