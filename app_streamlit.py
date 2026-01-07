@@ -116,7 +116,7 @@ def tail_lines(path: Path, max_lines: int = 200) -> List[str]:
 # (cached decorators count as Streamlit commands). Keep this at module top level.
 # (comment trimmed to keep this file renderable in GitHub)
 # (comment trimmed to keep this file renderable in GitHub)
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂ°ÃÂÃÂ§ÃÂ ", layout="wide")
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂÃÂ°ÃÂÃÂÃÂÃÂ§ÃÂÃÂ ", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -244,8 +244,11 @@ def _infer_cycle_progress_from_events(
     for ev in events:
         if not isinstance(ev, dict):
             continue
-        kind = str(ev.get("kind") or ev.get("event") or "").lower()
+        kind = str(ev.get("kind") or ev.get("event") or ev.get("type") or ev.get("domain") or "").lower()
         data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+        if not data and isinstance(ev.get("extra"), dict):
+            # events emitted via emit_event() use 'extra' instead of 'data'
+            data = ev.get("extra")  # type: ignore[assignment]
 
         # Explicit cycle progress events with current/total
         if kind in {"cycle_progress", "progress_cycle", "cycle"} and isinstance(data, dict):
@@ -2125,25 +2128,9 @@ def _extract_state_timestamp_seconds(state: Any, path: Optional[Path] = None) ->
 
 
 def _first_existing_json(paths: List[Path]) -> Tuple[Optional[Any], Optional[Path]]:
-    """Return (json_data, path) for the most recently modified readable JSON in paths."""
-    # Sort candidate paths by modification time so that the newest artifact is preferred
-    sorted_paths: List[Path] = []
-    try:
-        # Filter to existing paths to avoid exceptions during stat()
-        existing_paths = [p for p in paths if isinstance(p, Path) and p.exists()]
-        sorted_paths = sorted(
-            existing_paths,
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-    except Exception:
-        # If sorting fails, fall back to provided order
-        sorted_paths = list(paths)
-    for p in sorted_paths:
-        try:
-            data = _load_json_file(p)
-        except Exception:
-            data = None
+    """Return (json_data, path) for the first readable JSON in paths."""
+    for p in paths:
+        data = _load_json_file(p)
         if data is not None:
             return data, p
     return None, None
@@ -5552,7 +5539,7 @@ def main() -> None:
     )
     refresh_seconds = 5
     if auto_refresh:
-        refresh_seconds = st.sidebar.slider("Refresh interval (seconds)", min_value=2, max_value=30, value=5, step=1)
+        refresh_seconds = st.sidebar.slider("Refresh interval (seconds)", min_value=0.5, max_value=30.0, value=1.0, step=0.25)
 
     st.sidebar.markdown("---")
 
@@ -5969,7 +5956,7 @@ def main() -> None:
             ("Blood Lipids (HDL, LDL, Triglycerides)", "Cardiometabolic risk indicators; patterns matter more than a single value."),
             ("Uric Acid", "At high levels can contribute to gout and cardiometabolic risk; also acts as an antioxidant at physiological levels."),
             ("Klotho", "Hormone-like protein linked to kidney and cardiovascular health; lower levels are associated with aging and disease risk."),
-            ("Inflammation Markers (hs-CRP, IL-6, TNF-ÃÂÃÂ±)", "Chronic low-grade inflammation (ÃÂ¢ÃÂÃÂinflammagingÃÂ¢ÃÂÃÂ) correlates with higher disease and mortality risk."),
+            ("Inflammation Markers (hs-CRP, IL-6, TNF-ÃÂÃÂÃÂÃÂ±)", "Chronic low-grade inflammation (ÃÂÃÂ¢ÃÂÃÂÃÂÃÂinflammagingÃÂÃÂ¢ÃÂÃÂÃÂÃÂ) correlates with higher disease and mortality risk."),
             ("Senescence-Associated Markers (SASP)", "Signals related to senescent-cell burden and secreted inflammatory factors; elevated markers can indicate higher senescence activity."),
         ]
         # Render each biomarker item as a bullet point.
