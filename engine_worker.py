@@ -2433,8 +2433,6 @@ def _infer_cycle_count_from_event_logs(
         "cycle",
         "cycle_index",
         "current_cycle",
-        # Common progress keys used by ARA worker events/progress payloads
-        "current",
         "cycles_completed",
         "iteration",
         "iter",
@@ -7385,51 +7383,51 @@ def _process_single_job(
                     tot_int = _to_int(tot_val)
 
                     # Swarm progress fallbacks: some implementations report round/agent indices
-                    # instead of an absolute micro-cycle count.
-                    if mode == "swarm" and cur_int is None:
+                    # instead of (or in addition to) an absolute micro-cycle count.
+                    #
+                    # IMPORTANT: We do this even when cur_int is present, because some
+                    # implementations emit a constant "current" (e.g. 1) while still
+                    # providing advancing round_index / cycle_index fields.
+                    if mode == "swarm":
                         try:
                             swarm_meta = update.get("swarm") if isinstance(update.get("swarm"), dict) else {}
-                            round_idx = _to_int(
-                                swarm_meta.get("round_index")
-                                if isinstance(swarm_meta, dict) and "round_index" in swarm_meta
-                                else None
-                            )
-                            if round_idx is None:
-                                round_idx = _to_int(
-                                    update.get("round_index")
-                                    or update.get("round_idx")
-                                    or update.get("round")
-                                    or update.get("cycle_index")
-                                )
 
-                            agent_idx = _to_int(
-                                (swarm_meta.get("agent_index") if isinstance(swarm_meta, dict) else None)
-                                or (swarm_meta.get("role_index") if isinstance(swarm_meta, dict) else None)
-                                or (swarm_meta.get("member_index") if isinstance(swarm_meta, dict) else None)
+                            # Prefer explicit *index/*idx keys (typically 0-based)
+                            round_idx0 = _to_int(
+                                (swarm_meta.get("round_index") if isinstance(swarm_meta, dict) else None)
+                                or (swarm_meta.get("round_idx") if isinstance(swarm_meta, dict) else None)
+                                or update.get("round_index")
+                                or update.get("round_idx")
+                                or update.get("cycle_index")
+                                or update.get("cycle_idx")
                             )
-                            if agent_idx is None:
-                                agent_idx = _to_int(
-                                    update.get("agent_index")
-                                    or update.get("role_index")
-                                    or update.get("agent_idx")
-                                    or update.get("role_idx")
-                                )
+                            # Fall back to a plain "round" key (often 1-based)
+                            round_1 = _to_int(
+                                (swarm_meta.get("round") if isinstance(swarm_meta, dict) else None)
+                                or update.get("round")
+                            )
 
-                            role_count_local: Optional[int] = None
-                            try:
-                                if isinstance(roles_list, list) and roles_list:
-                                    role_count_local = len(roles_list)
-                            except Exception:
-                                role_count_local = None
-                            if role_count_local is None:
+                            round_idx = round_idx0 if round_idx0 is not None else round_1
+                            round_is_zero_based = round_idx0 is not None
+
+                            # Derive a stable macro-cycle candidate from the round index
+                            round_cur: Optional[int] = None
+                            if round_idx is not None:
+                                if round_is_zero_based:
+                                    round_cur = int(round_idx) + 1
+                                else:
+                                    round_cur = int(round_idx)
+                                if round_cur < 0:
+                                    round_cur = 0
+
+                            # If round_cur looks more informative than cur_int, prefer it.
+                            if round_cur is not None:
                                 try:
-                                    if isinstance(macro_total, int) and isinstance(max_rounds, int) and max_rounds > 0:
-                                        role_count_local = max(1, int(round(float(macro_total) / float(max_rounds))))
+                                    cur_base = int(cur_int or 0) if isinstance(cur_int, int) else 0
                                 except Exception:
-                                    role_count_local = None
-
-                            if round_idx is not None and agent_idx is not None and role_count_local:
-                                cur_int = int(round_idx) * int(role_count_local) + int(agent_idx) + 1
+                                    cur_base = 0
+                                if cur_int is None or round_cur > cur_base:
+                                    cur_int = round_cur
                         except Exception:
                             pass
 
@@ -7753,7 +7751,6 @@ def _process_single_job(
                             inferred = _infer_cycle_count_from_event_logs(
                                 run_id,
                                 logs_dir=RUNS_LOGS_DIR,
-                                # BUGFIX: `total` is not defined in this scope; use the configured macro_total.
                                 total_cycles=macro_total if isinstance(macro_total, int) else None,
                             )
                         if isinstance(inferred, int):
