@@ -244,11 +244,8 @@ def _infer_cycle_progress_from_events(
     for ev in events:
         if not isinstance(ev, dict):
             continue
-        kind = str(ev.get("kind") or ev.get("event") or ev.get("type") or ev.get("domain") or "").lower()
+        kind = str(ev.get("kind") or ev.get("event") or "").lower()
         data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
-        if not data and isinstance(ev.get("extra"), dict):
-            # events emitted via emit_event() use 'extra' instead of 'data'
-            data = ev.get("extra")  # type: ignore[assignment]
 
         # Explicit cycle progress events with current/total
         if kind in {"cycle_progress", "progress_cycle", "cycle"} and isinstance(data, dict):
@@ -3140,6 +3137,159 @@ def compute_progress_view(
     }
 
 
+
+def compute_activity_pulse_view(
+    events: Optional[List[Dict[str, Any]]],
+    watchdog: Optional[Dict[str, Any]],
+    worker_state: Optional[Dict[str, Any]],
+    *,
+    event_log_src: str = "",
+) -> Dict[str, Any]:
+    """Compute an activity pulse score for the top bar.
+
+    This intentionally does **not** try to count cycles. Instead it derives a
+    liveness / activity signal from:
+      - how recently the event log produced entries
+      - how many events occurred recently (1m + 5m windows)
+      - watchdog heartbeat freshness
+
+    Returns a dict with stable keys:
+      - score: 0..1
+      - label: High | Medium | Low | Idle
+      - events_last_60s / events_last_5m
+      - last_event_age_s / last_event_ts (best effort)
+    """
+    evs: List[Dict[str, Any]] = []
+    if isinstance(events, list):
+        evs = [e for e in events if isinstance(e, dict)]
+
+    now = datetime.utcnow()
+
+    last_dt: Optional[datetime] = None
+    c60 = 0
+    c300 = 0
+
+    for ev in evs:
+        dt = _event_ts_to_dt(
+            _coalesce(
+                ev.get("ts"),
+                ev.get("timestamp"),
+                ev.get("utc"),
+                ev.get("time"),
+                ev.get("created_at"),
+                ev.get("createdAt"),
+                ev.get("updated_at"),
+                ev.get("updatedAt"),
+            )
+        )
+        if dt is None:
+            continue
+
+        if last_dt is None or dt > last_dt:
+            last_dt = dt
+
+        try:
+            age_s = float((now - dt).total_seconds())
+        except Exception:
+            continue
+        if age_s < 0:
+            continue
+        if age_s <= 60.0:
+            c60 += 1
+        if age_s <= 300.0:
+            c300 += 1
+
+    last_event_age: Optional[float] = None
+    last_event_ts: Optional[str] = None
+    if last_dt is not None:
+        try:
+            last_event_age = max(0.0, float((now - last_dt).total_seconds()))
+            last_event_ts = last_dt.replace(microsecond=0).isoformat() + "Z"
+        except Exception:
+            last_event_age = None
+            last_event_ts = None
+
+    # Fallback: if we couldn't parse timestamps from events, use the event log file mtime.
+    if last_event_age is None and isinstance(event_log_src, str) and event_log_src and event_log_src != "not found":
+        try:
+            p = Path(event_log_src)
+            if p.exists():
+                mdt = datetime.fromtimestamp(p.stat().st_mtime, tz=timezone.utc).replace(tzinfo=None)
+                last_event_age = max(0.0, float((now - mdt).total_seconds()))
+                last_event_ts = mdt.replace(microsecond=0).isoformat() + "Z"
+        except Exception:
+            pass
+
+    heartbeat_age = _maybe_float((watchdog or {}).get("seconds_since_last"))
+
+    # Best age signal: prefer last event, otherwise heartbeat.
+    best_age: Optional[float] = None
+    try:
+        candidates = [a for a in [last_event_age, heartbeat_age] if isinstance(a, (int, float))]
+        if candidates:
+            best_age = float(min(candidates))
+    except Exception:
+        best_age = None
+
+    # Event rate per minute, using the more stable of 1m and 5m windows.
+    rate_1m = float(c60)
+    rate_5m = float(c300) / 5.0 if c300 else 0.0
+    event_rate = max(rate_1m, rate_5m)
+
+    # Normalize to 0..1 (tunable constants)
+    HIGH_RATE = 6.0  # events/min that feels "busy" in most deployments
+    activity = _clamp_float(event_rate / HIGH_RATE, 0.0, 1.0) or 0.0
+
+    # Freshness mapping (piecewise; avoids twitchiness)
+    freshness = 0.0
+    if best_age is not None:
+        try:
+            a = float(best_age)
+            if a <= 15.0:
+                freshness = 1.0
+            elif a <= 60.0:
+                freshness = 0.85
+            elif a <= 180.0:
+                freshness = 0.65
+            elif a <= 600.0:
+                freshness = 0.35
+            elif a <= 1800.0:
+                freshness = 0.15
+            else:
+                freshness = 0.05
+        except Exception:
+            freshness = 0.0
+
+    score = (0.60 * activity) + (0.40 * freshness)
+
+    # If the worker is finished/idle, dampen pulse so it doesn't look "alive".
+    status_s = str((worker_state or {}).get("status") or "").lower()
+    if status_s in {"finished", "done", "completed", "complete", "success", "idle", "stopped"}:
+        score = min(score, 0.12)
+
+    score = _clamp_float(score, 0.0, 1.0) or 0.0
+
+    if score >= 0.75:
+        label = "High"
+    elif score >= 0.45:
+        label = "Medium"
+    elif score >= 0.20:
+        label = "Low"
+    else:
+        label = "Idle"
+
+    return {
+        "score": score,
+        "label": label,
+        "events_last_60s": int(c60),
+        "events_last_5m": int(c300),
+        "last_event_age_s": last_event_age,
+        "last_event_ts": last_event_ts,
+        "heartbeat_age_s": heartbeat_age,
+        "event_rate_per_min": float(event_rate),
+    }
+
+
 def derive_health_class(
     worker_state: Optional[Dict[str, Any]],
     watchdog: Optional[Dict[str, Any]],
@@ -3358,10 +3508,11 @@ h1 a, h2 a, h3 a, h4 a { display:none !important; }
 
 
 
+
 def render_topbar(
     worker_state: Optional[Dict[str, Any]],
     watchdog: Optional[Dict[str, Any]],
-    progress_view: Dict[str, Any],
+    pulse_view: Dict[str, Any],
     autonomy_view: Dict[str, Any],
 ):
     """Render the fixed top header bar."""
@@ -3389,30 +3540,30 @@ def render_topbar(
     # Use a simple ASCII separator to avoid mojibake
     mid_txt = " | ".join(mid_parts) if mid_parts else "No active run detected"
 
-    # Progress (show as X/Y + label). If nothing is running, keep the indicator subtle.
-    kind = str(progress_view.get("kind") or "none")
-    # Default to a simple dash when no progress is available
-    right_txt = "-"
-    width_pct = 0.0
+    # Activity pulse (event-driven; does not attempt cycle counting)
+    pv = pulse_view if isinstance(pulse_view, dict) else {}
+    pulse_score = _maybe_float(pv.get("score")) or 0.0
+    try:
+        pulse_score = max(0.0, min(1.0, float(pulse_score)))
+    except Exception:
+        pulse_score = 0.0
+    width_pct = pulse_score * 100.0
 
-    if kind != "none":
-        cur = _safe_int(progress_view.get("current"), 0)
-        tot = _safe_int(progress_view.get("total"), 0)
-        frac = _maybe_float(progress_view.get("fraction")) or 0.0
-        frac = max(0.0, min(1.0, frac))
-        width_pct = frac * 100.0
+    pulse_label = str(pv.get("label") or "-").strip() or "-"
+    right_txt = f"Pulse {pulse_label}" if pulse_label != "-" else "-"
 
-        kind_label = str(progress_view.get("label") or "").strip()
-        # Determine how to display progress: if total cycles is more than one, show X/Y.
-        status_cur = str((worker_state or {}).get("status") or "").lower()
-        running_like = status_cur in {"running", "active", "in_progress", "working"}
-        if isinstance(tot, int) and tot > 1:
-            right_txt = f"{cur}/{tot}" + (f" {kind_label}" if kind_label else "")
-        else:
-            if cur:
-                right_txt = f"{cur}" + (f" {kind_label}" if kind_label else "")
-            else:
-                right_txt = f"{kind_label}" if kind_label else ""
+    # Detail line (kept short)
+    detail_parts: List[str] = []
+    last_age = _maybe_float(pv.get("last_event_age_s"))
+    if last_age is not None:
+        detail_parts.append(f"Last event {_humanize_seconds(last_age)}")
+    ev1m = _safe_int(pv.get("events_last_60s"), None)
+    ev5m = _safe_int(pv.get("events_last_5m"), None)
+    if isinstance(ev1m, int):
+        detail_parts.append(f"1m {ev1m}")
+    if isinstance(ev5m, int):
+        detail_parts.append(f"5m {ev5m}")
+    detail_txt = " | ".join(detail_parts)
 
     # Sanitize dynamic text to avoid stray mojibake
     autonomy_label = str(autonomy_view.get("label") or "Assisted")
@@ -3420,6 +3571,9 @@ def render_topbar(
     autonomy_html = html.escape(_to_ascii(f"{autonomy_label} ({autonomy_score}/4)"))
 
     status_html = html.escape(_to_ascii(status or "unknown"))
+
+    detail_html = html.escape(_to_ascii(detail_txt)) if detail_txt else ""
+    detail_line = f'<div class="ara-kv">{detail_html}</div>' if detail_html else ""
 
     st.markdown(
         textwrap.dedent(
@@ -3440,7 +3594,8 @@ def render_topbar(
 <div class="ara-topbar-right">
 <div class="ara-kv">{autonomy_html}</div>
 <div class="ara-kv"><code>{html.escape(_to_ascii(right_txt))}</code></div>
-<div class="ara-mini-progress" title="progress">
+{detail_line}
+<div class="ara-mini-progress" title="activity pulse">
 <div style="width:{width_pct}%"></div>
 </div>
 </div>
@@ -3450,6 +3605,7 @@ def render_topbar(
         ).strip("\n"),
         unsafe_allow_html=True,
     )
+
 
 def compute_autonomy_view(
     job_payload: Optional[Dict[str, Any]],
@@ -4491,6 +4647,91 @@ def _filter_cycle_only_events(events: List[Dict[str, Any]]) -> List[Dict[str, An
     return out
 
 
+def build_high_signal_events_from_event_log(
+    events: List[Dict[str, Any]],
+    *,
+    limit: int = LIVE_EVENTS_LIMIT,
+) -> List[Dict[str, Any]]:
+    """Build a compact, human-friendly event feed from a raw event log.
+
+    This favors *high-signal* events and skips noisy lifecycle/progress chatter.
+    It does not attempt to infer cycle counts.
+
+    The output is shaped for `render_narrative_feed`:
+      {"ts": "...", "kind": "...", "message": "..."}
+    """
+    if not events:
+        return []
+
+    noise_domains = {"progress", "heartbeat", "watchdog"}
+    noise_kinds = {
+        "cycle_progress",
+        "progress",
+        "progress_update",
+        "heartbeat",
+        "watchdog_heartbeat",
+        "job_running",
+        "job_claimed",
+        "worker_state",
+        "run_state",
+    }
+
+    out: List[Dict[str, Any]] = []
+    for ev in events:
+        if not isinstance(ev, dict):
+            continue
+
+        dom = str(ev.get("domain") or "").strip().lower()
+        kind_raw = ev.get("kind") or ev.get("type") or ev.get("event") or ev.get("domain") or "event"
+        kind_s = str(kind_raw).strip().lower()
+
+        # Skip noise first
+        if dom in noise_domains:
+            continue
+        if kind_s in noise_kinds:
+            continue
+        if "heartbeat" in kind_s:
+            continue
+        if "progress" in kind_s:
+            continue
+
+        msg = ev.get("message") or ev.get("msg") or ev.get("text") or ev.get("summary")
+        if msg is None:
+            data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+            if isinstance(data, dict):
+                msg = data.get("note") or data.get("message") or data.get("summary")
+
+        if isinstance(msg, str):
+            msg_s = msg.strip()
+        else:
+            msg_s = str(msg).strip() if msg is not None else ""
+
+        if not msg_s:
+            continue
+
+        # Avoid duplicative lines even when domain/kind is missing.
+        msg_low = msg_s.lower()
+        if msg_low.startswith("progress "):
+            continue
+        if msg_low.startswith("[hb]") or msg_low.startswith("hb "):
+            continue
+
+        ts_val = _coalesce(ev.get("ts"), ev.get("timestamp"), ev.get("utc"), ev.get("time"))
+        ts_s = _event_ts_to_str(ts_val) if ts_val is not None else ""
+        if not ts_s:
+            ts_s = _now_iso()
+
+        out.append({"ts": ts_s, "kind": str(kind_raw), "message": msg_s})
+
+    if not out:
+        return []
+
+    if isinstance(limit, int) and limit > 0 and len(out) > limit:
+        return out[-limit:]
+    return out
+
+
+
 def render_narrative_feed(events: List[Dict[str, Any]], source_label: str = "") -> None:
     st.markdown('<div class="ara-card">', unsafe_allow_html=True)
     title = "Recent activity"
@@ -5370,8 +5611,8 @@ def main() -> None:
     autonomy_view0 = compute_autonomy_view(job_payload0, ws0, diagnostics_preview)
     agents0 = _infer_agents_from_job_config(job_payload0)
 
-    # Event log (or synthesized)
-    # Hint for where the worker is writing logs (helps avoid "synthesized" when
+    # Event log (best effort) + activity pulse (event-driven)
+    # Hint for where the worker is writing logs (helps avoid "stale" views when
     # Streamlit can't otherwise infer the logs directory).
     logs_dir_hint0: Optional[Path] = None
     try:
@@ -5383,68 +5624,38 @@ def main() -> None:
 
     event_log0, event_src0 = load_event_log_unified(active_run_id, logs_dir_hint=logs_dir_hint0)
 
-    # Recent activity should stay high-signal. Prefer showing only per-cycle
-    # progress (Cycle X/Y) and hide noisy worker/job events.
+    # Activity pulse for the topbar (does not attempt cycle counting)
+    pulse_view0 = compute_activity_pulse_view(
+        event_log0 if active_run_id else [],
+        watchdog0,
+        ws0,
+        event_log_src=event_src0,
+    )
+
+    # Recent activity: high-signal events from the event log (no cycle counting)
     narrative_events: List[Dict[str, Any]] = []
+    feed_source_label0: str = ""
 
-    # 1) Prefer real cycle_progress events when available (per-run event log).
     if event_log0:
-        narrative_events = _filter_cycle_only_events(event_log0)
-        if narrative_events and event_src0 and event_src0 != "not found":
-            event_src0 = f"{event_src0} (cycle only)"
-
-
-    # 1b) If the log contains per-cycle events (candidate hypotheses, metrics, etc.) but
-    #     no explicit cycle_progress rows, synthesize a cycle timeline from the `cycle` field.
-    if (not narrative_events) and event_log0:
-        narrative_events = build_cycle_count_events_from_event_log(event_log0)
-        if narrative_events and event_src0 and event_src0 != "not found":
-            event_src0 = f"{event_src0} (inferred from cycle field)"
-
-    # 2) While a run is active, prefer a live cycle timeline built from progress
-    #    counters (run_state/worker_state/progress.json). This avoids the stale
-    #    'from history' behavior during active runs.
-    if (not narrative_events) and active_run_id:
-        narrative_events = build_cycle_count_events_from_progress(
-            progress_view0 if isinstance(progress_view0, dict) else None,
-            run_id=active_run_id,
-            limit=LIVE_EVENTS_LIMIT,
-        )
+        narrative_events = build_high_signal_events_from_event_log(event_log0, limit=LIVE_EVENTS_LIMIT)
         if narrative_events:
-            event_src0 = "cycle count (live from run state/progress)"
-
-    # 3) Only when there is no active run do we synthesize a minimal cycle feed
-    #    from history (useful for completed runs).
-    if (not narrative_events) and (not active_run_id):
-        tot_hint: Optional[int] = None
-        try:
-            _tot0 = progress_view0.get("total")
-            if isinstance(_tot0, int) and _tot0 > 0:
-                tot_hint = int(_tot0)
-        except Exception:
-            tot_hint = None
-
-        narrative_events = build_cycle_count_events_from_history(
-            history_preview,
-            total_cycles=tot_hint,
-            limit=LIVE_EVENTS_LIMIT,
-            current_cycle_hint=(progress_view0.get("current") if isinstance(progress_view0, dict) else None),
-        )
-        if narrative_events:
-            event_src0 = "cycle count (from history)"
-
-    # 4) Last resort: show a single live counter line if available.
-    if not narrative_events:
-        try:
-            cur0 = progress_view0.get("current")
-            tot0 = progress_view0.get("total")
-            if isinstance(cur0, int) and cur0 >= 0:
-                if isinstance(tot0, int) and tot0 > 0:
-                    msg = f"Cycle {cur0}/{tot0}"
+            try:
+                if event_src0 and event_src0 != "not found":
+                    feed_source_label0 = f"{Path(str(event_src0)).name} (high-signal)"
                 else:
-                    msg = f"Cycle {cur0}"
-                narrative_events = [{"ts": "", "kind": "cycle_progress", "message": msg}]
-                event_src0 = "cycle count (from progress)"
+                    feed_source_label0 = "event log (high-signal)"
+            except Exception:
+                feed_source_label0 = "event log (high-signal)"
+
+    # Fallback (active run): if phase progress exists but the event log is quiet.
+    if (not narrative_events) and active_run_id:
+        try:
+            if isinstance(progress_view0, dict) and str(progress_view0.get("kind") or "") == "phase":
+                c = _safe_int(progress_view0.get("current"), None)
+                t = _safe_int(progress_view0.get("total"), None)
+                if isinstance(c, int) and isinstance(t, int) and t > 0:
+                    narrative_events = [{"ts": _now_iso(), "kind": "phase", "message": f"Phase {c}/{t}"}]
+                    feed_source_label0 = "run state (phase)"
         except Exception:
             pass
 
@@ -5466,7 +5677,7 @@ def main() -> None:
         ):
             ws0_for_topbar.pop(_k, None)
 
-    render_topbar(ws0_for_topbar, watchdog0, progress_view0, autonomy_view0)
+    render_topbar(ws0_for_topbar, watchdog0, pulse_view0, autonomy_view0)
 
     # Header: ARA with gradient and powered by pill
     st.markdown(
@@ -5539,7 +5750,7 @@ def main() -> None:
     )
     refresh_seconds = 5
     if auto_refresh:
-        refresh_seconds = st.sidebar.slider("Refresh interval (seconds)", min_value=0.5, max_value=30.0, value=1.0, step=0.25)
+        refresh_seconds = st.sidebar.slider("Refresh interval (seconds)", min_value=2, max_value=30, value=5, step=1)
 
     st.sidebar.markdown("---")
 
@@ -5686,20 +5897,12 @@ def main() -> None:
             for m in messages:
                 st.write(m)
 
-        # Render the narrative feed summarizing recent cycles.  This provides context
-        # for the run even when the event log lacks detailed messages.
-        # When no event log is found but progress counters are available, label the source accordingly.
-        label0 = event_src0
-        try:
-            if label0 == "not found" and progress_src0 not in {"not found", "no run_id"}:
-                label0 = "cycle count (live from progress.json)"
-        except Exception:
-            pass
+        # Render the narrative feed summarizing recent activity (high-signal, human friendly).
+        label0 = feed_source_label0 or ""
         render_narrative_feed(narrative_events, source_label=label0)
 
         # Provide access to the raw event log JSON if available.  Users can expand this
-        # section to inspect low-level event details.  When no event log file exists
-        # this view will synthesise events from cycle history.
+        # section to inspect low-level event details.
         with st.expander("Raw event log JSON (if available)"):
             if event_log0:
                 preview, note = safe_json_preview(event_log0, max_items=120)
@@ -5708,7 +5911,7 @@ def main() -> None:
                     if note:
                         st.caption(note)
             else:
-                st.info("No event log file found. This view is synthesizing events from cycle history.")
+                st.info("No event log file found yet.")
 
     # Discovery cards under live console
     discoveries_live = load_discovery_log(run_id=active_run_id)
