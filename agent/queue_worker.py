@@ -41,6 +41,12 @@ try:
 except Exception:
     MemoryPruner = None  # type: ignore[assignment]
 
+# Preferred structured event logger (append-only JSONL + optional legacy mirrors).
+try:
+    from event_log import log_event  # type: ignore[import]
+except Exception:
+    log_event = None  # type: ignore[assignment]
+
 try:
     from snapshot_manager import take_snapshot  # type: ignore[import]
 except Exception:
@@ -102,20 +108,44 @@ def _write_event_log(run_id: str, events: List[Dict[str, Any]]) -> None:
     """
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Legacy JSON array (easy to load but not tail-friendly)
-    try:
-        path = LOGS_DIR / f"{run_id}_events.json"
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(events, f, ensure_ascii=False, indent=2)
-    except Exception:
-        pass
+    # Preferred path: append via event_log so we do not overwrite earlier events.
+    if callable(log_event):
+        for ev in events:
+            if not isinstance(ev, dict):
+                continue
+            kind = str(ev.get("kind") or ev.get("domain") or "event")
+            msg = str(ev.get("message") or ev.get("msg") or kind)
+            level = str(ev.get("level") or "info")
+            data = ev.get("data") if isinstance(ev.get("data"), dict) else (ev.get("extra") if isinstance(ev.get("extra"), dict) else {})
+            log_event(
+                run_id=str(run_id),
+                kind=kind,
+                message=msg,
+                level=level,
+                data=data,
+                role=str(ev.get("role") or "queue_worker"),
+                domain=str(ev.get("domain") or ev.get("data", {}).get("domain") if isinstance(ev.get("data"), dict) else "queue"),
+                phase_index=ev.get("phase_index"),
+                phase_total=ev.get("phase_total"),
+                phase_name=ev.get("phase_name"),
+                cycle=ev.get("cycle"),
+            )
 
-    # Per-run JSONL (append-only friendly; we overwrite for this worker since we emit once per run)
+        # Also keep a legacy JSON array snapshot for easy inspection.
+        try:
+            path = LOGS_DIR / f"{run_id}_events.json"
+            with path.open("w", encoding="utf-8") as f:
+                json.dump(events, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return
+
+    # Fallback: append raw JSONL without overwriting.
     try:
         run_dir = BASE_DIR / str(run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         jsonl_path = run_dir / "events.jsonl"
-        with jsonl_path.open("w", encoding="utf-8") as f:
+        with jsonl_path.open("a", encoding="utf-8") as f:
             for ev in events:
                 if not isinstance(ev, dict):
                     continue
@@ -128,19 +158,11 @@ def _write_event_log(run_id: str, events: List[Dict[str, Any]]) -> None:
     except Exception:
         pass
 
-    # Global mirror for dashboards that aggregate across runs
+    # Legacy JSON array (best effort)
     try:
-        global_path = LOGS_DIR / "events_global.jsonl"
-        with global_path.open("a", encoding="utf-8") as f:
-            for ev in events:
-                if not isinstance(ev, dict):
-                    continue
-                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-            try:
-                f.flush()
-                os.fsync(f.fileno())
-            except Exception:
-                pass
+        path = LOGS_DIR / f"{run_id}_events.json"
+        with path.open("w", encoding="utf-8") as f:
+            json.dump(events, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 def _default_memory_store() -> Any:
