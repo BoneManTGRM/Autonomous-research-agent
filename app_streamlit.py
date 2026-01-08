@@ -3260,14 +3260,29 @@ def compute_activity_pulse_view(
         except Exception:
             freshness = 0.0
 
-    # Heavier weighting on heartbeat freshness.  In prior builds a lack of recent
-    # events could make the activity pulse appear "Low" even when the worker
-    # was actively running long tasks.  To improve this we weight freshness
-    # (derived from heartbeat age) more heavily than raw event rate.
-    score = (0.35 * activity) + (0.65 * freshness)
+    # Combine event activity and freshness.
+    # Freshness is often driven by watchdog heartbeat even during long compute.
+    score = (0.50 * activity) + (0.50 * freshness)
+
+    status_s = str((worker_state or {}).get("status") or "").lower()
+
+    # If the worker is actively running and heartbeat is very fresh, allow High
+    # even when event output is sparse (common during long model calls).
+    try:
+        if status_s in {"running", "active"} and isinstance(heartbeat_age, (int, float)) and float(heartbeat_age) <= 5.0:
+            score = max(score, 0.80)
+    except Exception:
+        pass
+
+    # If there are no recent events at all and heartbeat is stale, do not
+    # show Medium. This prevents confusing "Pulse Medium" with 0 events.
+    try:
+        if c60 == 0 and c300 == 0 and isinstance(heartbeat_age, (int, float)) and float(heartbeat_age) >= 60.0:
+            score = min(score, 0.19)
+    except Exception:
+        pass
 
     # If the worker is finished/idle, dampen pulse so it doesn't look "alive".
-    status_s = str((worker_state or {}).get("status") or "").lower()
     if status_s in {"finished", "done", "completed", "complete", "success", "idle", "stopped"}:
         score = min(score, 0.12)
 
@@ -7670,15 +7685,8 @@ def main() -> None:
                     st.info("No progress JSON found. If you want smooth 1/3 -> 2/3 updates, have the worker write `<run_id>_progress.json` each phase/cycle.")
 
     with st.expander("Diagnostics discovery (files checked)"):
-        # Move the report inline toggle into this section.  Users expect to
-        # control report rendering where they inspect run diagnostics and
-        # citations.  The checkbox is declared here with the same key
-        # ``show_reports_inline`` to preserve existing session state.
-        st.checkbox(
-            "Show report text inline (can be very long)",
-            key="show_reports_inline",
-            help="When enabled, clicking a report button will render the full text on this page.",
-        )
+        # Inline report rendering is intentionally disabled in this build.
+        # Large reports can freeze mobile browsers and Streamlit reruns.
 
         st.write("These are the standard locations the UI checks for diagnostics artifacts.")
         paths = _candidate_state_paths(run_id=run_id)
@@ -7700,9 +7708,8 @@ def main() -> None:
 
     # Large reports can be thousands of lines. By default, avoid dumping
     # them inline (which forces a ton of scrolling) and encourage downloads.
-    # The inline toggle is now located in the diagnostics discovery section;
-    # retrieve its state from ``st.session_state`` here.
-    show_reports_inline = bool(st.session_state.get("show_reports_inline", False))
+    # Always keep reports out of the main page body to avoid UI freezes.
+    show_reports_inline = False
 
     def _present_report(md: str, preview_label: str = "Preview") -> None:
         if show_reports_inline:
