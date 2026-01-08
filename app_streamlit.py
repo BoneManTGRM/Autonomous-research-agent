@@ -86,29 +86,49 @@ except Exception:  # pragma: no cover
 def tail_lines(path: Path, max_lines: int = 200) -> List[str]:
     """Return the last ``max_lines`` lines from a text file.
 
-    Reads the entire file into memory in order to retrieve the tail
-    efficiently for moderately sized event logs.  Lines are returned
-    without trailing newline characters.  On any error (file missing,
-    decode error, etc.), an empty list is returned.
+    IMPORTANT: This must remain fast even for very large logs.
 
-    Args:
-        path: Filesystem path to the file to tail.
-        max_lines: Maximum number of lines to return. Defaults to 200.
+    The previous implementation used ``readlines()``, which reads the
+    entire file into memory. That becomes unusable after long runs
+    (multi-hour swarms can generate MBs of logs) and can freeze Streamlit.
 
-    Returns:
-        A list of the last ``max_lines`` lines, in order, stripped of
-        trailing newline characters.
+    This implementation reads from the *end* of the file in blocks until
+    enough newlines are collected.
     """
     try:
         if not isinstance(path, Path):
             path = Path(path)
+        if max_lines <= 0:
+            return []
         if not path.exists() or not path.is_file():
             return []
-        with path.open("r", encoding="utf-8", errors="replace") as f:
-            lines = f.readlines()
-        # Strip trailing newlines and take the tail
-        tail = [l.rstrip("\n") for l in lines[-max_lines:]]
-        return tail
+
+        # Read from the end in blocks until we have enough lines.
+        block_size = 8192
+        data = b""
+        with path.open("rb") as f:
+            try:
+                f.seek(0, os.SEEK_END)
+                pos = f.tell()
+            except Exception:
+                pos = 0
+
+            # Keep reading backwards until we have enough newlines.
+            while pos > 0 and data.count(b"\n") <= max_lines:
+                read_size = block_size if pos >= block_size else pos
+                pos -= read_size
+                try:
+                    f.seek(pos)
+                    chunk = f.read(read_size)
+                except Exception:
+                    break
+                data = chunk + data
+                if pos == 0:
+                    break
+
+        # Split and decode only the tail.
+        lines_b = data.splitlines()[-max_lines:]
+        return [lb.decode("utf-8", errors="replace") for lb in lines_b]
     except Exception:
         return []
 
@@ -3260,27 +3280,37 @@ def compute_activity_pulse_view(
         except Exception:
             freshness = 0.0
 
-    # Combine event activity and freshness.
-    # Freshness is often driven by watchdog heartbeat even during long compute.
-    score = (0.50 * activity) + (0.50 * freshness)
+    # Heavier weighting on heartbeat freshness. In prior builds a lack of recent
+    # events could make the activity pulse appear "Low" even when the worker
+    # was actively running long tasks.
+    score = (0.35 * activity) + (0.65 * freshness)
 
-    status_s = str((worker_state or {}).get("status") or "").lower()
+    status_s = str((worker_state or {}).get("status") or "").lower().strip()
 
-    # If the worker is actively running and heartbeat is very fresh, allow High
-    # even when event output is sparse (common during long model calls).
-    try:
-        if status_s in {"running", "active"} and isinstance(heartbeat_age, (int, float)) and float(heartbeat_age) <= 5.0:
-            score = max(score, 0.80)
-    except Exception:
-        pass
-
-    # If there are no recent events at all and heartbeat is stale, do not
-    # show Medium. This prevents confusing "Pulse Medium" with 0 events.
-    try:
-        if c60 == 0 and c300 == 0 and isinstance(heartbeat_age, (int, float)) and float(heartbeat_age) >= 60.0:
-            score = min(score, 0.19)
-    except Exception:
-        pass
+    # If the worker is running and we have a fresh heartbeat, allow the pulse to
+    # reach "High" even when the worker is doing long compute and not emitting
+    # frequent events.
+    running_statuses = {
+        "running",
+        "active",
+        "in_progress",
+        "working",
+        "running_job",
+        "running_cycle",
+        "processing",
+        "busy",
+    }
+    if status_s in running_statuses and isinstance(heartbeat_age, (int, float)):
+        try:
+            hb = float(heartbeat_age)
+            # Typical watchdog check interval is ~5s, but UI refresh and FS sync
+            # can add latency. Use a looser threshold so "High" shows up.
+            if hb <= 20.0:
+                score = max(score, 0.82)
+            elif hb <= 60.0:
+                score = max(score, 0.55)
+        except Exception:
+            pass
 
     # If the worker is finished/idle, dampen pulse so it doesn't look "alive".
     if status_s in {"finished", "done", "completed", "complete", "success", "idle", "stopped"}:
@@ -4683,6 +4713,9 @@ def build_high_signal_events_from_event_log(
         return []
 
     noise_domains = {"progress", "heartbeat", "watchdog"}
+    # "job_claimed" is intentionally *not* treated as noise. It's the first
+    # high-confidence marker that a run has transitioned from *queued* to
+    # *executing*.
     noise_kinds = {
         "cycle_progress",
         "progress",
@@ -4690,7 +4723,6 @@ def build_high_signal_events_from_event_log(
         "heartbeat",
         "watchdog_heartbeat",
         "job_running",
-        "job_claimed",
         "worker_state",
         "run_state",
     }
@@ -4743,7 +4775,51 @@ def build_high_signal_events_from_event_log(
         out.append({"ts": ts_s, "kind": str(kind_raw), "message": msg_s})
 
     if not out:
-        return []
+        # If we filtered everything as "noise", fall back to a small tail of
+        # non-heartbeat events (including progress) so the feed doesn't go blank
+        # right when a job transitions from queued->running.
+        fallback: List[Dict[str, Any]] = []
+        want = 12
+        try:
+            if isinstance(limit, int) and limit > 0:
+                want = max(5, min(12, int(limit)))
+        except Exception:
+            want = 12
+
+        for ev in reversed(events):
+            if not isinstance(ev, dict):
+                continue
+            dom = str(ev.get("domain") or "").strip().lower()
+            kind_raw = ev.get("kind") or ev.get("type") or ev.get("event") or ev.get("domain") or "event"
+            kind_s = str(kind_raw).strip().lower()
+            if dom in {"heartbeat", "watchdog"}:
+                continue
+            if "heartbeat" in kind_s:
+                continue
+
+            msg = ev.get("message") or ev.get("msg") or ev.get("text") or ev.get("summary")
+            if msg is None:
+                data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+                if isinstance(data, dict):
+                    msg = data.get("note") or data.get("message") or data.get("summary")
+
+            msg_s = msg.strip() if isinstance(msg, str) else (str(msg).strip() if msg is not None else "")
+            if not msg_s:
+                continue
+
+            ts_val = _coalesce(ev.get("ts"), ev.get("timestamp"), ev.get("utc"), ev.get("time"))
+            ts_s = _event_ts_to_str(ts_val) if ts_val is not None else ""
+            if not ts_s:
+                ts_s = _now_iso()
+
+            fallback.append({"ts": ts_s, "kind": str(kind_raw), "message": msg_s})
+            if len(fallback) >= want:
+                break
+
+        if fallback:
+            out = list(reversed(fallback))
+        else:
+            return []
 
     if isinstance(limit, int) and limit > 0 and len(out) > limit:
         return out[-limit:]
@@ -7685,8 +7761,10 @@ def main() -> None:
                     st.info("No progress JSON found. If you want smooth 1/3 -> 2/3 updates, have the worker write `<run_id>_progress.json` each phase/cycle.")
 
     with st.expander("Diagnostics discovery (files checked)"):
-        # Inline report rendering is intentionally disabled in this build.
-        # Large reports can freeze mobile browsers and Streamlit reruns.
+        # NOTE: Inline report rendering is intentionally disabled.
+        # Very long runs can generate extremely large markdown reports, and
+        # rendering them inline can freeze Streamlit (especially on mobile).
+        st.caption("Report text is not rendered inline to keep the UI responsive. Use the download buttons below to view reports.")
 
         st.write("These are the standard locations the UI checks for diagnostics artifacts.")
         paths = _candidate_state_paths(run_id=run_id)
@@ -7706,9 +7784,8 @@ def main() -> None:
     st.markdown("---")
     st.subheader("Generate report")
 
-    # Large reports can be thousands of lines. By default, avoid dumping
-    # them inline (which forces a ton of scrolling) and encourage downloads.
-    # Always keep reports out of the main page body to avoid UI freezes.
+    # Large reports can be thousands of lines. Always avoid dumping them inline
+    # (which can freeze Streamlit). We still show a small preview in an expander.
     show_reports_inline = False
 
     def _present_report(md: str, preview_label: str = "Preview") -> None:
@@ -7920,4 +7997,5 @@ def main() -> None:
 
 
 # Streamlit entry point
-if __name_
+if __name__ == "__main__":
+    main()
