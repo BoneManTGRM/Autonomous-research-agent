@@ -36,16 +36,16 @@ from typing import Any, Dict, List, Optional
 from run_state_manager import RunState
 from phase_manager import phases_for_cycles
 
+# Preferred structured event logger (append-only JSONL).
+try:  # pragma: no cover
+    from event_log import log_event  # type: ignore[import]
+except Exception:  # pragma: no cover
+    log_event = None  # type: ignore[assignment]
+
 try:
     from memory_pruner import MemoryPruner  # type: ignore[import]
 except Exception:
     MemoryPruner = None  # type: ignore[assignment]
-
-# Preferred structured event logger (append-only JSONL + optional legacy mirrors).
-try:
-    from event_log import log_event  # type: ignore[import]
-except Exception:
-    log_event = None  # type: ignore[assignment]
 
 try:
     from snapshot_manager import take_snapshot  # type: ignore[import]
@@ -97,59 +97,98 @@ def _load_job_definition(job_path: Path) -> Dict[str, Any]:
 
 
 def _write_event_log(run_id: str, events: List[Dict[str, Any]]) -> None:
-    """Write an event log for the run.
+    """Append events for a run in a unified, tail-friendly format.
 
-    Backwards compatible behavior:
-      - Writes a legacy JSON array file: logs/<run_id>_events.json
+    Key goal: **never overwrite** the run timeline.
 
-    New behavior (preferred for Streamlit tailing and per-run isolation):
-      - Writes per-run JSONL: <runs_root>/<run_id>/events.jsonl
-      - Appends to a global mirror: logs/events_global.jsonl
+    The earlier implementation wrote ``<run_dir>/events.jsonl`` in "w" mode.
+    If another component (e.g. engine_worker) starts writing to the same run,
+    that "w" would wipe the timeline and Streamlit would suddenly show
+    "No events".
+
+    We now:
+      1) Prefer `event_log.log_event` (structured, append-only JSONL, plus
+         optional legacy mirrors).
+      2) Fall back to appending JSONL lines directly (also append-only).
+      3) Keep a small legacy JSON array snapshot for older tooling.
     """
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Preferred path: append via event_log so we do not overwrite earlier events.
+    rid = str(run_id)
+
+    # Preferred: structured append-only writer.
     if callable(log_event):
-        for ev in events:
+        for ev in events or []:
             if not isinstance(ev, dict):
                 continue
-            kind = str(ev.get("kind") or ev.get("domain") or "event")
-            msg = str(ev.get("message") or ev.get("msg") or kind)
-            level = str(ev.get("level") or "info")
-            data = ev.get("data") if isinstance(ev.get("data"), dict) else (ev.get("extra") if isinstance(ev.get("extra"), dict) else {})
-            log_event(
-                run_id=str(run_id),
-                kind=kind,
-                message=msg,
-                level=level,
-                data=data,
-                role=str(ev.get("role") or "queue_worker"),
-                domain=str(ev.get("domain") or ev.get("data", {}).get("domain") if isinstance(ev.get("data"), dict) else "queue"),
-                phase_index=ev.get("phase_index"),
-                phase_total=ev.get("phase_total"),
-                phase_name=ev.get("phase_name"),
-                cycle=ev.get("cycle"),
-            )
 
-        # Also keep a legacy JSON array snapshot for easy inspection.
-        try:
-            path = LOGS_DIR / f"{run_id}_events.json"
-            with path.open("w", encoding="utf-8") as f:
-                json.dump(events, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+            kind = str(ev.get("kind") or ev.get("event") or ev.get("type") or ev.get("domain") or "event")
+            level = str(ev.get("level") or "info")
+            role = ev.get("role")
+            domain = ev.get("domain")
+            data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+
+            phase_index = ev.get("phase_index")
+            phase_total = ev.get("phase_total")
+            phase_name = ev.get("phase_name")
+            cycle = ev.get("cycle")
+
+            # Best-effort message synthesis.
+            msg = ev.get("message") or ev.get("msg") or ev.get("text") or ev.get("summary")
+            if not isinstance(msg, str) or not msg.strip():
+                try:
+                    if kind == "phase_start":
+                        pi = phase_index if phase_index is not None else data.get("phase_index")
+                        pt = phase_total if phase_total is not None else data.get("phase_total")
+                        pn = phase_name if phase_name is not None else data.get("phase_name")
+                        # Display phase index as 1-based when possible.
+                        pi_disp = None
+                        try:
+                            if pi is not None:
+                                pi_disp = int(pi) + 1
+                        except Exception:
+                            pi_disp = pi
+                        if pi_disp is not None and pt is not None:
+                            msg = f"Phase {pi_disp}/{pt}: {pn or ''}".strip()
+                        elif pn:
+                            msg = f"Phase: {pn}"
+                        else:
+                            msg = "Phase started"
+                    elif kind in {"run_finished", "job_finished", "finished"}:
+                        msg = "Run finished"
+                    else:
+                        msg = kind
+                except Exception:
+                    msg = kind
+
+            try:
+                log_event(
+                    run_id=rid,
+                    kind=kind,
+                    message=str(msg),
+                    level=level,
+                    data=data,
+                    role=str(role) if role is not None else None,
+                    domain=str(domain) if domain is not None else None,
+                    phase_index=phase_index,
+                    phase_total=phase_total,
+                    phase_name=str(phase_name) if phase_name is not None else None,
+                    cycle=cycle,
+                    logs_dir=LOGS_DIR,
+                )
+            except Exception:
+                continue
         return
 
-    # Fallback: append raw JSONL without overwriting.
+    # Fallback: append JSONL lines to the per-run file and the global mirror.
     try:
-        run_dir = BASE_DIR / str(run_id)
+        run_dir = BASE_DIR / rid
         run_dir.mkdir(parents=True, exist_ok=True)
         jsonl_path = run_dir / "events.jsonl"
         with jsonl_path.open("a", encoding="utf-8") as f:
-            for ev in events:
-                if not isinstance(ev, dict):
-                    continue
-                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            for ev in events or []:
+                if isinstance(ev, dict):
+                    f.write(json.dumps(ev, ensure_ascii=False) + "\n")
             try:
                 f.flush()
                 os.fsync(f.fileno())
@@ -158,11 +197,27 @@ def _write_event_log(run_id: str, events: List[Dict[str, Any]]) -> None:
     except Exception:
         pass
 
-    # Legacy JSON array (best effort)
     try:
-        path = LOGS_DIR / f"{run_id}_events.json"
-        with path.open("w", encoding="utf-8") as f:
-            json.dump(events, f, ensure_ascii=False, indent=2)
+        global_path = LOGS_DIR / "events_global.jsonl"
+        with global_path.open("a", encoding="utf-8") as f:
+            for ev in events or []:
+                if isinstance(ev, dict):
+                    f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+            try:
+                f.flush()
+                os.fsync(f.fileno())
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Small legacy snapshot (bounded). This is not used for tailing.
+    try:
+        legacy_path = LOGS_DIR / f"{rid}_events.json"
+        # Keep only a bounded tail to avoid massive JSON arrays.
+        snap = [e for e in (events or []) if isinstance(e, dict)][-2000:]
+        with legacy_path.open("w", encoding="utf-8") as f:
+            json.dump(snap, f, ensure_ascii=False, indent=2)
     except Exception:
         pass
 def _default_memory_store() -> Any:
