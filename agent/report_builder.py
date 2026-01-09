@@ -97,7 +97,7 @@ def _format_source(src: Any) -> str:
         title = _safe_str(src.get("title") or src.get("name") or src.get("source") or src.get("url") or "")
         url = _safe_str(src.get("url") or "")
         if url and title and title != url:
-            return f"{title} Ã¢ÂÂ {url}"
+            return f"{title} - {url}"
         return title or url or _safe_str(src)
     return _safe_str(src)
 
@@ -435,7 +435,7 @@ def build_agent_report(
     if not cycle_metrics:
         out.append("_No rye_update events were found._")
     else:
-        out.append("| Cycle | RYE_avg | ÃÂR_sum | E_sum |")
+        out.append("| Cycle | RYE_avg | delta_R_sum | E_sum |")
         out.append("|---:|---:|---:|---:|")
         for c in (highlight_cycles or ranked_cycles):
             m = cycle_metrics.get(c, {})
@@ -488,7 +488,7 @@ def build_agent_report(
                 role = ev.get("role") or "agent"
                 cycle = _cycle_int(ev)
                 cite = _format_source_refs(ev, source_index)
-                out.append(f"- (cycle {cycle}, role {role}){cite} Ã¢ÂÂ **passed={passed}**")
+                out.append(f"- (cycle {cycle}, role {role}){cite} - **passed={passed}**")
                 if rationale:
                     out.append(f"  - {rationale}")
     out.append("")
@@ -512,7 +512,9 @@ def build_agent_report(
                     out.append(f"**Funnel stage:** {stage_name}")
         m = cycle_metrics.get(c, {})
         if m:
-            out.append(f"- RYE_avg: `{m.get('RYE_avg')}`; ÃÂR_sum: `{m.get('delta_R_sum')}`; E_sum: `{m.get('E_sum')}`")
+            out.append(
+                f"- RYE_avg: `{m.get('RYE_avg')}`; delta_R_sum: `{m.get('delta_R_sum')}`; E_sum: `{m.get('E_sum')}`"
+            )
         # discoveries/hyp/ver for this cycle
         disc_c = by_cycle_discoveries.get(c, [])
         hyp_c = by_cycle_hyp.get(c, [])
@@ -595,8 +597,8 @@ def build_agent_report(
             out.append("")
 
     # Global sources / citations index
+    out.append("## Sources")
     if source_index:
-        out.append("## Sources")
         # Invert index to keep stable order
         inv = {v: k for k, v in source_index.items()}
         for i in range(1, len(inv) + 1):
@@ -613,6 +615,8 @@ def build_agent_report(
                 if src_obj is not None:
                     break
             out.append(f"{i}. {_format_source(src_obj) if src_obj is not None else k}")
+    else:
+        out.append("_No sources or citations were logged for this run. The output may be unverified._")
 
     return "\n".join(out)
 
