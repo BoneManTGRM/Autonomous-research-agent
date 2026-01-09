@@ -136,7 +136,7 @@ def tail_lines(path: Path, max_lines: int = 200) -> List[str]:
 # (cached decorators count as Streamlit commands). Keep this at module top level.
 # (comment trimmed to keep this file renderable in GitHub)
 # (comment trimmed to keep this file renderable in GitHub)
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂÃÂÃÂÃÂ°ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ§ÃÂÃÂÃÂÃÂ ", layout="wide")
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ð§ ", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -228,6 +228,129 @@ def _load_event_dicts_tail(path: Union[str, Path], *, max_lines: int = 4000) -> 
             continue
         events.extend(_normalize_event_container(obj))
     return events
+
+
+def _load_event_dicts_jsonl_cached(
+    path: Union[str, Path],
+    run_id: str,
+    *,
+    keep_last: int = 2500,
+    max_backlog_bytes: int = 2_000_000,
+) -> List[Dict[str, Any]]:
+    """Incrementally load JSONL events for a run using Streamlit session_state.
+
+    Why:
+      Streamlit reruns can be frequent. Re-reading/parsing thousands of JSONL
+      lines on every rerun causes UI lag/freeze. This keeps a ring buffer of
+      recent events and only parses newly appended bytes.
+
+    Behavior:
+      - First call seeds the cache with a tail read (keep_last lines)
+      - Subsequent calls read only new bytes since last offset
+      - If the backlog grows too large (e.g. tab was inactive), we re-seed via
+        tail to avoid a large parse spike.
+      - If the file is truncated/rotated, we reset.
+    """
+
+    try:
+        p = Path(path)
+    except Exception:
+        return []
+    if not p.exists() or not p.is_file():
+        return []
+
+    # Non-Streamlit contexts fall back to a tail read.
+    try:
+        ss = st.session_state
+    except Exception:
+        return _load_event_dicts_tail(p, max_lines=keep_last)
+
+    rid = str(run_id or "global")
+    cache_key = f"_ara_jsonl_cache::{rid}::{str(p)}"
+    state_key = f"_ara_jsonl_state::{rid}::{str(p)}"
+
+    try:
+        size = p.stat().st_size
+    except Exception:
+        size = None
+
+    cache = ss.get(cache_key)
+    state = ss.get(state_key)
+
+    if not isinstance(cache, list) or not isinstance(state, dict) or size is None:
+        seed = _load_event_dicts_tail(p, max_lines=keep_last)
+        ss[cache_key] = seed
+        # After seeding, we consider ourselves "caught up".
+        ss[state_key] = {"offset": size or 0, "remainder": b""}
+        return seed
+
+    offset = int(state.get("offset") or 0)
+    if size < offset:
+        # File truncated or rotated.
+        seed = _load_event_dicts_tail(p, max_lines=keep_last)
+        ss[cache_key] = seed
+        ss[state_key] = {"offset": size, "remainder": b""}
+        return seed
+
+    backlog = size - offset
+    if backlog <= 0:
+        return cache
+
+    if backlog > max_backlog_bytes:
+        # Avoid a big parse spike; just re-seed from tail.
+        seed = _load_event_dicts_tail(p, max_lines=keep_last)
+        ss[cache_key] = seed
+        ss[state_key] = {"offset": size, "remainder": b""}
+        return seed
+
+    try:
+        with p.open("rb") as f:
+            f.seek(offset)
+            chunk = f.read()
+    except Exception:
+        return cache
+
+    remainder = state.get("remainder")
+    if isinstance(remainder, str):
+        remainder_b = remainder.encode("utf-8", errors="ignore")
+    elif isinstance(remainder, (bytes, bytearray)):
+        remainder_b = bytes(remainder)
+    else:
+        remainder_b = b""
+
+    data = remainder_b + (chunk or b"")
+
+    if not data:
+        ss[state_key] = {"offset": size, "remainder": b""}
+        return cache
+
+    parts = data.split(b"\n")
+    if data.endswith(b"\n"):
+        new_lines = parts[:-1]
+        new_remainder = b""
+    else:
+        new_lines = parts[:-1]
+        new_remainder = parts[-1]
+
+    # Parse newly appended events.
+    for raw in new_lines:
+        s = raw.strip()
+        if not s:
+            continue
+        if s[:1] not in (b"{", b"["):
+            continue
+        try:
+            obj = json.loads(s.decode("utf-8", errors="replace"))
+        except Exception:
+            continue
+        cache.extend(_normalize_event_container(obj))
+
+    if keep_last and len(cache) > keep_last:
+        cache = cache[-keep_last:]
+        ss[cache_key] = cache
+
+    ss[state_key] = {"offset": size, "remainder": new_remainder}
+    return cache
 
 
 def _infer_cycle_progress_from_events(
@@ -3339,6 +3462,43 @@ def compute_activity_pulse_view(
     }
 
 
+def _pulse_label_to_progress(pulse_label: str, fallback: float = 0.25) -> float:
+    """Map pulse label to a deterministic 0..1 value.
+
+    The backend pulse *score* is a continuous heuristic, but the UI bar should
+    be unambiguous: if the label is High, it should visually hit 100%.
+    """
+    p = (pulse_label or "").strip().lower()
+    if p == "high":
+        return 1.0
+    if p == "medium":
+        return 0.6
+    if p == "low":
+        return 0.2
+    if p == "idle":
+        return 0.0
+    try:
+        v = float(fallback)
+        return max(0.0, min(1.0, v))
+    except Exception:
+        return 0.25
+
+
+def _friendly_job_status_text(status: Any) -> str:
+    """Human-friendly, UI-safe status text for job/runs."""
+    s = str(status or "").strip().lower()
+    if s in {"finished", "done", "completed", "complete", "success", "succeeded"}:
+        return "Job finished"
+    if s in {"error", "failed", "fail"}:
+        return "Job error"
+    if s in {"queued", "pending", "waiting"}:
+        return "Job pending"
+    if s in {"running", "active", "in_progress", "working", "busy", "processing"}:
+        return "Job running"
+    # Default: treat unknown as running to avoid showing raw 0/960 progress.
+    return "Job running"
+
+
 def derive_health_class(
     worker_state: Optional[Dict[str, Any]],
     watchdog: Optional[Dict[str, Any]],
@@ -3591,14 +3751,16 @@ def render_topbar(
 
     # Activity pulse (event-driven; does not attempt cycle counting)
     pv = pulse_view if isinstance(pulse_view, dict) else {}
-    pulse_score = _maybe_float(pv.get("score")) or 0.0
+    raw_pulse_score = _maybe_float(pv.get("score")) or 0.0
     try:
-        pulse_score = max(0.0, min(1.0, float(pulse_score)))
+        raw_pulse_score = max(0.0, min(1.0, float(raw_pulse_score)))
     except Exception:
-        pulse_score = 0.0
-    width_pct = pulse_score * 100.0
+        raw_pulse_score = 0.0
 
     pulse_label = str(pv.get("label") or "-").strip() or "-"
+    # Deterministic UI mapping: High should render as 100%.
+    pulse_score = _pulse_label_to_progress(pulse_label, raw_pulse_score)
+    width_pct = pulse_score * 100.0
     right_txt = f"Pulse {pulse_label}" if pulse_label != "-" else "-"
 
     # Detail line (kept short)
@@ -4205,11 +4367,16 @@ def load_event_log_unified(run_id: Optional[str], logs_dir_hint: Optional[Path] 
     else:
         global_paths = paths
 
-    def _load_events_from_file(pth: Path, max_lines: int = 4000) -> List[Dict[str, Any]]:
+    def _load_events_from_file(pth: Path, max_lines: int = 2500) -> List[Dict[str, Any]]:
         """Return a list of event dicts from either JSONL or legacy JSON."""
         try:
             if str(pth).lower().endswith(".jsonl"):
-                return _load_event_dicts_tail(pth, max_lines=max_lines)
+                return _load_event_dicts_jsonl_cached(
+                    pth,
+                    str(run_id or "global"),
+                    keep_last=max_lines,
+                    max_backlog_bytes=int(os.getenv("UI_EVENTLOG_MAX_BACKLOG_BYTES", "2000000")),
+                )
         except Exception:
             pass
 
@@ -4806,6 +4973,22 @@ def build_high_signal_events_from_event_log(
             msg_s = msg.strip() if isinstance(msg, str) else (str(msg).strip() if msg is not None else "")
             if not msg_s:
                 continue
+
+            # User request: avoid showing raw counters like "Progress 0/960" in the
+            # high-signal feed. If this is a progress-style event, rewrite the
+            # message to a simple status.
+            if "progress" in kind_s or msg_s.lower().startswith("progress "):
+                try:
+                    data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
+                    status_hint = (
+                        ev.get("status")
+                        or ev.get("state")
+                        or (data.get("status") if isinstance(data, dict) else None)
+                        or (data.get("state") if isinstance(data, dict) else None)
+                    )
+                except Exception:
+                    status_hint = None
+                msg_s = _friendly_job_status_text(status_hint)
 
             ts_val = _coalesce(ev.get("ts"), ev.get("timestamp"), ev.get("utc"), ev.get("time"))
             ts_s = _event_ts_to_str(ts_val) if ts_val is not None else ""
@@ -5841,7 +6024,7 @@ def main() -> None:
     auto_refresh = st.sidebar.checkbox(
         "Auto-refresh while worker is running",
         value=True,
-        help="Enables live dashboard updates so progress can show 1/3 -> 2/3 -> 3/3 during runs.",
+        help="Enables live dashboard updates while a run is active.",
     )
     refresh_seconds = 5
     if auto_refresh:
@@ -5849,7 +6032,7 @@ def main() -> None:
 
     st.sidebar.markdown("---")
 
-    # Small always visible sidebar progress (unified + normalized)
+    # Small always visible sidebar status/progress (unified + normalized)
     if ws0:
         pv = progress_view0
         cur = pv.get("current")
@@ -5857,27 +6040,8 @@ def main() -> None:
         frac = pv.get("fraction")
         label = pv.get("label") or ""
         if isinstance(cur, int) and isinstance(tot, int) and tot > 0:
-            # Display progress differently when total count is one or unknown.
-            status_cur = str((ws0.get("status") or "")).lower()
-            running_like = status_cur in {
-                "running",
-                "active",
-                "in_progress",
-                "working",
-                "running_job",
-                "running_cycle",
-                "processing",
-                "busy",
-            }
-            if tot > 1:
-                st.sidebar.caption(f"Progress: {cur}/{tot} {label}".strip())
-            else:
-                if cur:
-                    st.sidebar.caption(f"Progress: {cur} {label}".strip())
-                elif running_like:
-                    st.sidebar.caption("Progress: running")
-                else:
-                    st.sidebar.caption(f"Progress: {cur} {label}".strip())
+            # User request: avoid showing raw counters like 0/960; show a simple status.
+            st.sidebar.caption(_friendly_job_status_text(ws0.get("status")))
             if isinstance(frac, (int, float)):
                 try:
                     st.sidebar.progress(min(max(float(frac), 0.0), 1.0))
@@ -5885,7 +6049,7 @@ def main() -> None:
                     pass
         else:
             # Show the worker status when no progress is available
-            st.sidebar.caption(f"Worker status: {(ws0.get('status') or 'unknown')}")
+            st.sidebar.caption(_friendly_job_status_text(ws0.get("status")))
 
     # ------------------------------------------------------------------
     # Live Console (visual upgrade set)
@@ -5927,9 +6091,8 @@ def main() -> None:
                 "running_cycle",
                 "processing",
             }
-            if run_active and run_id_feed:
-                # Refresh periodically to keep the console up to date.
-                st_autorefresh(interval=750, key=f"console_refresh_{run_id_feed}")  # type: ignore[misc]
+            # Note: we rely on the single global st_autorefresh at the bottom of the app.
+            # Having multiple autorefresh components can cause double reruns and UI "freezes".
 
         # Live events feed controls: fixed number of messages to show.
         # This keeps the UI clean and avoids an extra slider on mobile.
@@ -6254,7 +6417,10 @@ def main() -> None:
             ("Blood Lipids (HDL, LDL, Triglycerides)", "Cardiometabolic risk indicators; patterns matter more than a single value."),
             ("Uric Acid", "At high levels can contribute to gout and cardiometabolic risk; also acts as an antioxidant at physiological levels."),
             ("Klotho", "Hormone-like protein linked to kidney and cardiovascular health; lower levels are associated with aging and disease risk."),
-            ("Inflammation Markers (hs-CRP, IL-6, TNF-ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ±)", "Chronic low-grade inflammation (ÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂinflammagingÃÂÃÂÃÂÃÂ¢ÃÂÃÂÃÂÃÂÃÂÃÂÃÂÃÂ) correlates with higher disease and mortality risk."),
+            (
+                "Inflammation Markers (hs-CRP, IL-6, TNF-alpha)",
+                'Chronic low-grade inflammation ("inflammaging") correlates with higher disease and mortality risk.',
+            ),
             ("Senescence-Associated Markers (SASP)", "Signals related to senescent-cell burden and secreted inflammatory factors; elevated markers can indicate higher senescence activity."),
         ]
         # Render each biomarker item as a bullet point.
@@ -7734,10 +7900,10 @@ def main() -> None:
                 cur_p = progress_view.get("current")
                 tot_p = progress_view.get("total")
                 if isinstance(cur_p, int) and isinstance(tot_p, int) and tot_p > 0:
-                    pct = (cur_p / tot_p) * 100.0
-                    st.write(f"Progress: {cur_p}/{tot_p} ({pct:.1f}%)")
-                else:
-                    st.write("Progress: n/a")
+                    frac = float(cur_p) / float(tot_p)
+                    frac = max(0.0, min(1.0, frac))
+                    st.progress(frac)
+                st.write(_friendly_job_status_text(status_val))
 
             if goal_ws:
                 st.caption(f"Worker goal: {str(goal_ws)[:140]}")
