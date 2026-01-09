@@ -4,7 +4,7 @@ live_console.py
 
 This module defines helpers for the live console component of the
 Streamlit UI.  The purpose of these helpers is to translate internal
-state into human‑readable summaries for display: autonomy levels,
+state into human-readable summaries for display: autonomy levels,
 agent presence chips and a basic narrative timeline derived from event
 logs.  They do not depend on Streamlit directly and can therefore be
 unit tested in isolation.
@@ -25,7 +25,7 @@ def compute_autonomy_level(current: Optional[int], total: int) -> Tuple[str, int
     Parameters
     ----------
     current:
-        The zero‑based index of the current phase.  If ``None`` then
+        The zero-based index of the current phase.  If ``None`` then
         the run has not started.
     total:
         The total number of phases.
@@ -34,8 +34,8 @@ def compute_autonomy_level(current: Optional[int], total: int) -> Tuple[str, int
     -------
     tuple
         A triple ``(label, numerator, denominator)`` where ``label`` is
-        one of ``"not started"``, ``"self‑monitoring"``, ``"cross‑monitoring"`` or
-        ``"co‑pilot"``, ``numerator`` equals ``current + 1`` (for display), and
+        one of ``"not started"``, ``"self-monitoring"``, ``"cross-monitoring"`` or
+        ``"co-pilot"``, ``numerator`` equals ``current + 1`` (for display), and
         ``denominator`` is ``total``.
     """
     if total <= 0:
@@ -46,11 +46,11 @@ def compute_autonomy_level(current: Optional[int], total: int) -> Tuple[str, int
     if fraction < 0.25:
         label = "observing"
     elif fraction < 0.50:
-        label = "self‑monitoring"
+        label = "self-monitoring"
     elif fraction < 0.75:
-        label = "cross‑monitoring"
+        label = "cross-monitoring"
     else:
-        label = "co‑pilot"
+        label = "co-pilot"
     return (label, current + 1, total)
 
 
@@ -143,7 +143,7 @@ def build_narrative_timeline(events: Iterable[Dict[str, Any]]) -> List[str]:
             role = ev.get("role") or data.get("role") or "agent"
             text = data.get("text") or data.get("output") or data.get("message") or ""
             text_s = str(text) if text is not None else ""
-            snippet = (text_s[:120] + "…") if len(text_s) > 120 else text_s
+            snippet = (text_s[:120] + "...") if len(text_s) > 120 else text_s
             if idx_i is not None:
                 narrative.append(f"Cycle {idx_i + 1}: {role} produced output: {snippet}")
             else:
