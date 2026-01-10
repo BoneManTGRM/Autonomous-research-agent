@@ -618,7 +618,15 @@ def build_agent_report(
     else:
         out.append("_No sources or citations were logged for this run. The output may be unverified._")
 
-    return "\n".join(out)
+    # Assemble the report string
+    report_text = "\n".join(out)
+    # Normalize any misâdecoded UTFâ8 characters (e.g., bullets appearing as Ã¢â¬Â¢)
+    try:
+        from .citation_utils import normalize_text  # type: ignore
+        report_text = normalize_text(report_text)
+    except Exception:
+        pass
+    return report_text
 
 
 __all__ = ["build_agent_report"]
