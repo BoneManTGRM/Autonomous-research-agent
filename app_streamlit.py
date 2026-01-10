@@ -67,48 +67,6 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-
-# -----------------------------------------------------------------------------
-# Citation display controls and text repair helpers
-# -----------------------------------------------------------------------------
-# Limit the number of citations shown inline to avoid UI freezes on very long
-# runs. This limit can be configured via the CITATIONS_INLINE_LIMIT environment
-# variable; it defaults to 50 if unset.
-try:
-    _citations_inline_limit_env = os.getenv("CITATIONS_INLINE_LIMIT")
-    CITATIONS_INLINE_LIMIT: int = (
-        int(_citations_inline_limit_env) if _citations_inline_limit_env else 50
-    )
-except Exception:
-    CITATIONS_INLINE_LIMIT = 50
-
-
-def fix_mojibake(s: Any) -> Any:
-    """Attempt to repair common mojibake text encoding issues.
-
-    When UTF-8 text is incorrectly decoded as Latin-1 (or similar), you can
-    end up with sequences like "ÃÂ©" or "Ã¢â¬Â¢" instead of proper characters. This
-    helper tries to round-trip the string through Latin-1 back to UTF-8 to
-    recover the original characters. If the round-trip fails or does not
-    significantly reduce the number of mojibake markers, the original string
-    is returned. Non-string inputs are returned as-is.
-    """
-    if not isinstance(s, str) or not s:
-        return s
-    # Quick check: only attempt repair if common mojibake markers are present
-    if not any(marker in s for marker in ("Ã", "Ã¢", "Ã", "Ã¢Â", "Ã¢Â")):
-        return s
-    try:
-        repaired = s.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
-        # Only use the repaired string if it reduces the number of mojibake markers
-        def count_markers(text: str) -> int:
-            return sum(text.count(ch) for ch in ("Ã", "Ã¢", "Ã"))
-
-        if repaired and count_markers(repaired) < count_markers(s):
-            return repaired
-    except Exception:
-        pass
-    return s
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pandas as pd
@@ -214,6 +172,58 @@ RUNS_PENDING_DIR: Optional[Path] = None
 RUNS_ACTIVE_DIR: Optional[Path] = None
 RUNS_FINISHED_DIR: Optional[Path] = None
 RUNS_ERROR_DIR: Optional[Path] = None
+
+# -----------------------------------------------------------------------------
+# Display limits and text repair helpers for long-running sessions
+#
+# Running the Autonomous Research Agent for weeks or months can produce very
+# large histories and citation lists. Rendering these in full will freeze the
+# Streamlit UI. The following constants and helper function provide safe
+# defaults and repair mojibake (broken Unicode) in citation metadata. You can
+# override these values via environment variables.
+
+# Limit the number of citations shown inline.  Defaults to 50.  Set
+# CITATIONS_INLINE_LIMIT environment variable to override.
+try:
+    _citations_inline_limit_env = os.getenv("CITATIONS_INLINE_LIMIT")
+    CITATIONS_INLINE_LIMIT: int = int(_citations_inline_limit_env) if _citations_inline_limit_env else 50
+except Exception:
+    CITATIONS_INLINE_LIMIT = 50
+
+# Limit the number of per-cycle details rendered in the UI.  Defaults to 50.  Set
+# CYCLE_DETAIL_LIMIT environment variable to override.  Only the most recent
+# cycles are shown; earlier cycles remain accessible via download.
+try:
+    _cycle_detail_limit_env = os.getenv("CYCLE_DETAIL_LIMIT")
+    CYCLE_DETAIL_LIMIT: int = int(_cycle_detail_limit_env) if _cycle_detail_limit_env else 50
+except Exception:
+    CYCLE_DETAIL_LIMIT = 50
+
+def fix_mojibake(s: Any) -> Any:
+    """Attempt to repair common mojibake text encoding issues.
+
+    When UTF-8 text is incorrectly decoded as Latin-1 (or similar), you can end
+    up with sequences like "ÃÂ©" or "Ã¢â¬Â¢" instead of proper characters. This
+    helper tries to round-trip the string through Latin-1 back to UTF-8 to
+    recover the original characters. If the round-trip fails or does not
+    significantly reduce the number of mojibake markers, the original string
+    is returned. Non-string inputs are returned as-is.
+    """
+    if not isinstance(s, str) or not s:
+        return s
+    # Only attempt repair if common mojibake markers are present
+    if not any(marker in s for marker in ("Ã", "Ã¢", "Ã", "Ã¢\u0080", "Ã¢\u0094")):
+        return s
+    try:
+        repaired = s.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
+        # Use repaired string only if it reduces the count of known mojibake markers
+        def count_markers(text: str) -> int:
+            return sum(text.count(ch) for ch in ("Ã", "Ã¢", "Ã"))
+        if repaired and count_markers(repaired) < count_markers(s):
+            return repaired
+    except Exception:
+        pass
+    return s
 
 
 def _normalize_event_container(obj: Any) -> List[Dict[str, Any]]:
@@ -1921,8 +1931,21 @@ def render_result_details(result: Dict[str, Any]) -> None:
             st.caption("Timeline of delta_R, energy, and RYE per cycle.")
 
         with st.expander("Per cycle details"):
-            for c in cycles:
+            # Render only a limited number of cycle summaries to avoid freezing the UI.
+            max_details = CYCLE_DETAIL_LIMIT
+            if isinstance(cycles, list) and len(cycles) > max_details:
+                display_cycles = cycles[-max_details:]
+                truncated_cycles = True
+            else:
+                display_cycles = cycles
+                truncated_cycles = False
+            for c in display_cycles:
                 render_cycle_summary(c)
+            if truncated_cycles:
+                st.caption(
+                    f"Only the last {max_details} of {len(cycles)} cycles are shown here. "
+                    f"Earlier cycles have been omitted from the UI."
+                )
 
     sources = base.get("sources") or base.get("citations") or base.get("source_list")
     if not sources and cycles:
@@ -1953,7 +1976,6 @@ def render_result_details(result: Dict[str, Any]) -> None:
             deduped_sources: List[Any] = []
             seen: Set[Any] = set()
             for s in sources:
-                # Skip any sources that clearly represent an error entry (e.g. Tavily errors)
                 if isinstance(s, dict):
                     provider_val = str(s.get("source") or s.get("provider") or "").strip().lower()
                     title_val = str(s.get("title") or "").strip().lower()
@@ -1965,8 +1987,8 @@ def render_result_details(result: Dict[str, Any]) -> None:
                     provider = str(s.get("source") or s.get("provider") or "").strip()
                     key: Any = (url or title, provider)
                 else:
-                    # Skip simple strings that are error messages
                     simple_val = str(s).strip()
+                    # Skip simple strings that are error messages
                     if "error" in simple_val.lower():
                         continue
                     key = simple_val
@@ -1976,7 +1998,9 @@ def render_result_details(result: Dict[str, Any]) -> None:
                 deduped_sources.append(s)
 
             if len(deduped_sources) != len(sources):
-                st.caption(f"De-duplicated sources: showing {len(deduped_sources)} unique of {len(sources)} total.")
+                st.caption(
+                    f"De-duplicated sources: showing {len(deduped_sources)} unique of {len(sources)} total."
+                )
 
             # Apply a hard cap on the number of citations rendered inline. If there are
             # more than the limit, render only the first CITATIONS_INLINE_LIMIT and
@@ -1999,12 +2023,11 @@ def render_result_details(result: Dict[str, Any]) -> None:
                 title = fix_mojibake(str(raw_title))
                 snippet = fix_mojibake(str(raw_snippet)) if raw_snippet else ""
                 provider = fix_mojibake(str(raw_provider)) if raw_provider else ""
-
                 line = ""
                 if provider:
                     line += f"[{provider}] "
                 if url:
-                    # Escape any markdown special characters in title
+                    # Escape brackets in the title to avoid Markdown parsing issues
                     safe_title = title.replace("[", "\\[").replace("]", "\\]")
                     line += f"[{safe_title}]({url})"
                 else:
@@ -2016,8 +2039,8 @@ def render_result_details(result: Dict[str, Any]) -> None:
             if truncated:
                 omitted = len(deduped_sources) - max_show
                 st.caption(
-                    f"Only the first {max_show} sources are shown above."
-                    f" {omitted} additional source{'s' if omitted != 1 else ''} omitted."
+                    f"Only the first {max_show} sources are shown above. "
+                    f"{omitted} additional source{'s' if omitted != 1 else ''} omitted."
                 )
         else:
             # When citations are hidden, do not render the section or caption at all.
