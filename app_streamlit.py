@@ -67,6 +67,29 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+
+def fix_mojibake(text: Any) -> Any:
+    """Attempt to repair mojibake artifacts in strings.
+
+    If the input is a string and contains common mojibake markers (e.g., 'Ã', 'Ã', 'Ã¢'),
+    attempt to decode it by interpreting the original bytes as latin-1 and re-decoding
+    as utf-8.  This helps repair strings where UTF-8 was inadvertently decoded as
+    ISO-8859-1 or vice versa.  If the repair fails or the input is not a string,
+    return the input unchanged.
+    """
+    try:
+        if isinstance(text, str):
+            if any(ch in text for ch in ("\uFFFD", "Ã", "Ã", "Ã¢")):
+                try:
+                    # Encode as latin-1 to get back to bytes, then decode as utf-8
+                    repaired = text.encode("latin1", errors="ignore").decode("utf8", errors="ignore")
+                    if repaired:
+                        return repaired
+                except Exception:
+                    pass
+        return text
+    except Exception:
+        return text
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pandas as pd
@@ -1931,14 +1954,50 @@ def render_result_details(result: Dict[str, Any]) -> None:
             if len(deduped_sources) != len(sources):
                 st.caption(f"De-duplicated sources: showing {len(deduped_sources)} unique of {len(sources)} total.")
 
+            # Define simple keyword lists to filter out irrelevant sources.  Sources
+            # that do not contain any of the allowed keywords in their title or
+            # snippet are skipped.  This prevents unrelated links (e.g. about
+            # surfing inclusion) from being shown in longevity reports.
+            allowed_keywords = [
+                "age", "aging", "ageing", "longevity", "health", "mechanism", "anti-aging",
+                "biomarker", "senescent", "senescence", "cell", "disease", "repair",
+                "stem", "caloric", "mitochond", "restriction", "lifespan", "hallmark",
+            ]
+            disallowed_keywords = ["surf ", "surfing", "inclusion", "tourism"]
             for s in deduped_sources:
+                # Handle non-dict sources
                 if not isinstance(s, dict):
-                    st.markdown(f"- {s}")
+                    try:
+                        simple_text = fix_mojibake(str(s))
+                    except Exception:
+                        simple_text = str(s)
+                    if simple_text:
+                        # Skip clearly irrelevant simple strings
+                        lower_text = simple_text.lower()
+                        if any(bad in lower_text for bad in disallowed_keywords):
+                            continue
+                        st.markdown(f"- {simple_text}")
                     continue
-                title = s.get("title", "Source")
+                # Extract fields with mojibake repair
+                title = fix_mojibake(s.get("title", "Source"))
                 url = s.get("url") or s.get("link")
-                snippet = s.get("snippet") or s.get("summary") or ""
-                provider = s.get("source") or s.get("provider") or ""
+                snippet = fix_mojibake(s.get("snippet") or s.get("summary") or "")
+                provider = fix_mojibake(s.get("source") or s.get("provider") or "")
+
+                # Filter out sources whose combined title and snippet do not
+                # reference any allowed longevity-related keywords or contain
+                # explicitly disallowed terms.
+                try:
+                    combined_lower = (str(title) + " " + str(snippet)).lower()
+                    # Skip if any disallowed keyword appears
+                    if any(bad in combined_lower for bad in disallowed_keywords):
+                        continue
+                    # If none of the allowed keywords appear, skip it
+                    if not any(word in combined_lower for word in allowed_keywords):
+                        continue
+                except Exception:
+                    pass
+
                 line = ""
                 if provider:
                     line += f"[{provider}] "
