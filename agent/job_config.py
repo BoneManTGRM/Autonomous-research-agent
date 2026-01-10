@@ -53,6 +53,28 @@ class JobConfig:
     goal: str = ""
     run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
+    # Extended configuration options for autonomous runs
+    # Enable convergence check after a minimum number of cycles
+    convergence_check: bool = True
+    # Control critic verbosity (e.g. 'low', 'medium', 'high')
+    critic_verbosity: str = "low"
+    # Auto resolve TODO items during runs
+    handle_unresolved_todos: bool = True
+    # Method used to resolve TODOs
+    todo_resolution_method: str = "recursive search + integrator handoff"
+    # Explorer tool batching and retries
+    explorer_batch_size: int = 5
+    semantic_scholar_retries: int = 3
+    # External validation toggles
+    tavily_enabled: bool = True
+    crossref_validation: bool = True
+    # Consensus voting parameters
+    consensus_check_interval: int = 3
+    consensus_threshold: float = 0.65
+    # Snapshotting and visualization
+    autosave_snapshots: bool = True
+    visualize_concept_graph: bool = True
+
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         # Flatten roles tuples to lists for JSON compatibility
