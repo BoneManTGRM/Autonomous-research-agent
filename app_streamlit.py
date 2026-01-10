@@ -68,28 +68,47 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-def fix_mojibake(text: Any) -> Any:
-    """Attempt to repair mojibake artifacts in strings.
+# -----------------------------------------------------------------------------
+# Citation display controls and text repair helpers
+# -----------------------------------------------------------------------------
+# Limit the number of citations shown inline to avoid UI freezes on very long
+# runs. This limit can be configured via the CITATIONS_INLINE_LIMIT environment
+# variable; it defaults to 50 if unset.
+try:
+    _citations_inline_limit_env = os.getenv("CITATIONS_INLINE_LIMIT")
+    CITATIONS_INLINE_LIMIT: int = (
+        int(_citations_inline_limit_env) if _citations_inline_limit_env else 50
+    )
+except Exception:
+    CITATIONS_INLINE_LIMIT = 50
 
-    If the input is a string and contains common mojibake markers (e.g., 'Ã', 'Ã', 'Ã¢'),
-    attempt to decode it by interpreting the original bytes as latin-1 and re-decoding
-    as utf-8.  This helps repair strings where UTF-8 was inadvertently decoded as
-    ISO-8859-1 or vice versa.  If the repair fails or the input is not a string,
-    return the input unchanged.
+
+def fix_mojibake(s: Any) -> Any:
+    """Attempt to repair common mojibake text encoding issues.
+
+    When UTF-8 text is incorrectly decoded as Latin-1 (or similar), you can
+    end up with sequences like "ÃÂ©" or "Ã¢â¬Â¢" instead of proper characters. This
+    helper tries to round-trip the string through Latin-1 back to UTF-8 to
+    recover the original characters. If the round-trip fails or does not
+    significantly reduce the number of mojibake markers, the original string
+    is returned. Non-string inputs are returned as-is.
     """
+    if not isinstance(s, str) or not s:
+        return s
+    # Quick check: only attempt repair if common mojibake markers are present
+    if not any(marker in s for marker in ("Ã", "Ã¢", "Ã", "Ã¢Â", "Ã¢Â")):
+        return s
     try:
-        if isinstance(text, str):
-            if any(ch in text for ch in ("\uFFFD", "Ã", "Ã", "Ã¢")):
-                try:
-                    # Encode as latin-1 to get back to bytes, then decode as utf-8
-                    repaired = text.encode("latin1", errors="ignore").decode("utf8", errors="ignore")
-                    if repaired:
-                        return repaired
-                except Exception:
-                    pass
-        return text
+        repaired = s.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
+        # Only use the repaired string if it reduces the number of mojibake markers
+        def count_markers(text: str) -> int:
+            return sum(text.count(ch) for ch in ("Ã", "Ã¢", "Ã"))
+
+        if repaired and count_markers(repaired) < count_markers(s):
+            return repaired
     except Exception:
-        return text
+        pass
+    return s
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pandas as pd
@@ -1923,9 +1942,14 @@ def render_result_details(result: Dict[str, Any]) -> None:
         )
 
         if show_sources_inline:
+            # Only process and render citations when the inline toggle is enabled. This avoids
+            # unnecessary work on large lists when citations are hidden. Apply de-duplication
+            # and mojibake fixes on demand, then limit the number of rendered entries to
+            # CITATIONS_INLINE_LIMIT to prevent UI freezes.
             st.markdown("#### Sources and citations")
 
-            # De-dupe sources (Tavily errors and repeated URLs are common)
+            # De-duplicate sources (Tavily errors and repeated URLs are common). Build
+            # a normalized key for each source to avoid showing duplicates.
             deduped_sources: List[Any] = []
             seen: Set[Any] = set()
             for s in sources:
@@ -1939,7 +1963,7 @@ def render_result_details(result: Dict[str, Any]) -> None:
                     url = str(s.get("url") or s.get("link") or "").strip()
                     title = str(s.get("title") or "Source").strip()
                     provider = str(s.get("source") or s.get("provider") or "").strip()
-                    key = (url or title, provider)
+                    key: Any = (url or title, provider)
                 else:
                     # Skip simple strings that are error messages
                     simple_val = str(s).strip()
@@ -1954,60 +1978,47 @@ def render_result_details(result: Dict[str, Any]) -> None:
             if len(deduped_sources) != len(sources):
                 st.caption(f"De-duplicated sources: showing {len(deduped_sources)} unique of {len(sources)} total.")
 
-            # Define simple keyword lists to filter out irrelevant sources.  Sources
-            # that do not contain any of the allowed keywords in their title or
-            # snippet are skipped.  This prevents unrelated links (e.g. about
-            # surfing inclusion) from being shown in longevity reports.
-            allowed_keywords = [
-                "age", "aging", "ageing", "longevity", "health", "mechanism", "anti-aging",
-                "biomarker", "senescent", "senescence", "cell", "disease", "repair",
-                "stem", "caloric", "mitochond", "restriction", "lifespan", "hallmark",
-            ]
-            disallowed_keywords = ["surf ", "surfing", "inclusion", "tourism"]
-            for s in deduped_sources:
-                # Handle non-dict sources
-                if not isinstance(s, dict):
-                    try:
-                        simple_text = fix_mojibake(str(s))
-                    except Exception:
-                        simple_text = str(s)
-                    if simple_text:
-                        # Skip clearly irrelevant simple strings
-                        lower_text = simple_text.lower()
-                        if any(bad in lower_text for bad in disallowed_keywords):
-                            continue
-                        st.markdown(f"- {simple_text}")
-                    continue
-                # Extract fields with mojibake repair
-                title = fix_mojibake(s.get("title", "Source"))
-                url = s.get("url") or s.get("link")
-                snippet = fix_mojibake(s.get("snippet") or s.get("summary") or "")
-                provider = fix_mojibake(s.get("source") or s.get("provider") or "")
+            # Apply a hard cap on the number of citations rendered inline. If there are
+            # more than the limit, render only the first CITATIONS_INLINE_LIMIT and
+            # append a caption indicating how many were omitted. This prevents the
+            # markdown renderer from freezing on very long lists.
+            max_show = CITATIONS_INLINE_LIMIT
+            display_sources = deduped_sources[:max_show]
+            truncated = len(deduped_sources) > max_show
 
-                # Filter out sources whose combined title and snippet do not
-                # reference any allowed longevity-related keywords or contain
-                # explicitly disallowed terms.
-                try:
-                    combined_lower = (str(title) + " " + str(snippet)).lower()
-                    # Skip if any disallowed keyword appears
-                    if any(bad in combined_lower for bad in disallowed_keywords):
-                        continue
-                    # If none of the allowed keywords appear, skip it
-                    if not any(word in combined_lower for word in allowed_keywords):
-                        continue
-                except Exception:
-                    pass
+            for s in display_sources:
+                if not isinstance(s, dict):
+                    val = fix_mojibake(str(s))
+                    st.markdown(f"- {val}")
+                    continue
+                raw_title = s.get("title", "Source")
+                raw_snippet = s.get("snippet") or s.get("summary") or ""
+                raw_provider = s.get("source") or s.get("provider") or ""
+                url = s.get("url") or s.get("link")
+                # Repair mojibake in all text fields
+                title = fix_mojibake(str(raw_title))
+                snippet = fix_mojibake(str(raw_snippet)) if raw_snippet else ""
+                provider = fix_mojibake(str(raw_provider)) if raw_provider else ""
 
                 line = ""
                 if provider:
                     line += f"[{provider}] "
                 if url:
-                    line += f"[{title}]({url})"
+                    # Escape any markdown special characters in title
+                    safe_title = title.replace("[", "\\[").replace("]", "\\]")
+                    line += f"[{safe_title}]({url})"
                 else:
                     line += title
                 if snippet:
                     line += f"  \n  {snippet}"
                 st.markdown(f"- {line}")
+
+            if truncated:
+                omitted = len(deduped_sources) - max_show
+                st.caption(
+                    f"Only the first {max_show} sources are shown above."
+                    f" {omitted} additional source{'s' if omitted != 1 else ''} omitted."
+                )
         else:
             # When citations are hidden, do not render the section or caption at all.
             pass
