@@ -5,7 +5,8 @@
 https://autonomous-research-agent-6tqt.onrender.com
 
 **Important**  
-Add your Tavily API key in the sidebar. Without it, search runs in offline stub mode.
+Tavily is **optional**. If you provide a Tavily API key in the sidebar, ARA can use real web search.  
+If you leave it blank, web search falls back to **offline/stub mode**, and you can still run with other enabled sources (e.g., PubMed, Semantic Scholar, and PDF ingestion).
 
 ---
 
@@ -39,7 +40,7 @@ Powered by:
 - **RYE v3** – efficiency-driven learning laws  
 - **MSIL v2** – Meta Stability Intelligence Layer  
 - **Stability Kernel v2** – equilibrium and oscillation analysis  
-- **Ultra Swarm Engine** – 5 to 32 autonomous agents  
+- **Ultra Swarm Engine** – 5 to 64 autonomous agents (tested)  
 - **Discovery Engine v3** – breakthrough-tier detection  
 - **MemoryStore v3** – persistent learning substrate  
 
@@ -85,7 +86,7 @@ This forms a **self-repairing scientific intelligence loop** rather than a promp
 
 ---
 
-## ⭐ Swarm Intelligence (5 to 32 Agents)
+## ⭐ Swarm Intelligence (5 to 64 Agents — tested)
 
 Role-based swarm architecture:
 
@@ -95,7 +96,7 @@ Role-based swarm architecture:
 - Integrator  
 - Planner  
 - Synthesis Agent  
-- agent_01 through agent_32  
+- agent_01 through agent_64  
 
 Each swarm cycle produces:
 
