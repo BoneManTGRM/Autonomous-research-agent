@@ -354,6 +354,34 @@ def normalize_citation_list(
             out.append(norm)
     return out
 
+# ---------------------------------------------------------------------------
+# Text normalization
+# ---------------------------------------------------------------------------
+
+def normalize_text(text: str) -> str:
+    """
+    Normalize a potentially mis-encoded string so that UTF-8 bullets and other characters
+    display correctly. Some downstream components inadvertently decode UTF-8 strings
+    using Latinâ1, resulting in mojibake such as 'Ã¢â¬Â¢' in place of 'â¢'.
+
+    This helper attempts to reverse that encoding mistake by reâencoding the string
+    as Latinâ1 and decoding it back to UTF-8. If any exception occurs, the original
+    text is returned unchanged. This function can safely be applied to any string.
+
+    Args:
+        text: A string that may contain mojibake from incorrect decoding.
+
+    Returns:
+        A normalized string with proper UTFâ8 characters, or the original string if
+        normalization fails.
+    """
+    if not isinstance(text, str):
+        return text
+    try:
+        return text.encode("latin1").decode("utf-8")
+    except Exception:
+        return text
+
 
 # ---------------------------------------------------------------------------
 # Extraction from cycles, tool events, and memory store
