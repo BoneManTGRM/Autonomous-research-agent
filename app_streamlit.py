@@ -3861,12 +3861,18 @@ def render_topbar(
     last_age = _maybe_float(pv.get("last_event_age_s"))
     if last_age is not None:
         detail_parts.append(f"Last event {_humanize_seconds(last_age)}")
-    ev1m = _safe_int(pv.get("events_last_60s"), None)
-    ev5m = _safe_int(pv.get("events_last_5m"), None)
-    if isinstance(ev1m, int):
-        detail_parts.append(f"1m {ev1m}")
-    if isinstance(ev5m, int):
-        detail_parts.append(f"5m {ev5m}")
+    # NOTE: Previously we displayed shortâterm pulse metrics (1âminute and 5âminute
+    # event counts) in the top bar. These metrics created noise in the UI and
+    # provided little insight, so they have been removed. If you need to
+    # monitor shortâterm events, please refer to the detailed worker logs.
+    # The following lines intentionally omit appending the 1m/5m counts to
+    # detail_parts.
+    # ev1m = _safe_int(pv.get("events_last_60s"), None)
+    # ev5m = _safe_int(pv.get("events_last_5m"), None)
+    # if isinstance(ev1m, int):
+    #     detail_parts.append(f"1m {ev1m}")
+    # if isinstance(ev5m, int):
+    #     detail_parts.append(f"5m {ev5m}")
     detail_txt = " | ".join(detail_parts)
 
     # Sanitize dynamic text to avoid stray mojibake
