@@ -4054,12 +4054,15 @@ def render_topbar(
     last_age = _maybe_float(pv.get("last_event_age_s"))
     if last_age is not None:
         detail_parts.append(f"Last event {_humanize_seconds(last_age)}")
-    ev1m = _safe_int(pv.get("events_last_60s"), None)
-    ev5m = _safe_int(pv.get("events_last_5m"), None)
-    if isinstance(ev1m, int):
-        detail_parts.append(f"1m {ev1m}")
-    if isinstance(ev5m, int):
-        detail_parts.append(f"5m {ev5m}")
+    # Previously the pulse detail line displayed event counts over the past
+    # minute and five-minute windows (e.g. "1m 3 | 5m 12"). These short-term
+    # counts clutter the display and do not add actionable insight for
+    # long-running research jobs. To keep the top bar concise, we no
+    # longer include these per-minute metrics in the detail line. We still
+    # retrieve the values to avoid unused-variable warnings, but we do not
+    # append them to the detail_parts list.
+    _ = _safe_int(pv.get("events_last_60s"), None)
+    _ = _safe_int(pv.get("events_last_5m"), None)
     detail_txt = " | ".join(detail_parts)
 
     # Sanitize dynamic text to avoid stray mojibake
