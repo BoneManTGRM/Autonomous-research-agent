@@ -80,10 +80,27 @@ def _read_jsonl(path: Path) -> List[JsonObj]:
 
 
 def _safe_str(x: Any) -> str:
+    """
+    Convert an arbitrary value to string, applying a bestâeffort mojibake repair.
+
+    This helper wraps ``str()`` in a try/except and then attempts to normalize
+    the resulting text using the ``citation_utils.normalize_text`` helper if
+    available.  If normalization fails or the helper cannot be imported,
+    the original string is returned unchanged.
+    """
     try:
-        return str(x)
+        s = str(x)
     except Exception:
         return ""
+    # Normalize common mis-decoded UTF-8 sequences if possible
+    try:
+        from .citation_utils import normalize_text as _norm  # type: ignore
+        fixed = _norm(s)
+        if isinstance(fixed, str):
+            s = fixed
+    except Exception:
+        pass
+    return s
 
 
 def _source_key(src: Any) -> str:
