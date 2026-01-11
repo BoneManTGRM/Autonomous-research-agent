@@ -153,20 +153,12 @@ class PaperTool:
 
         results: List[Dict[str, str]] = []
         for p in data.get("data", []):
-            # Filter out entries that lack key peer-reviewed indicators (year and venue)
-            year = p.get("year")
-            venue = p.get("venue")
-            # Skip entries without a year or venue (likely low quality) and known preprint venues
-            venue_lower = str(venue or "").lower()
-            if not year or not venue:
-                continue
-            if any(preprint in venue_lower for preprint in ("arxiv", "biorxiv", "medrxiv", "preprint")):
-                continue
-
             snippet_parts = []
-            snippet_parts.append(f"Year: {year}")
-            if venue:
-                snippet_parts.append(f"Venue: {venue}")
+            if p.get("year"):
+                snippet_parts.append(f"Year: {p.get('year')}")
+            if p.get("venue"):
+                snippet_parts.append(f"Venue: {p.get('venue')}")
+
             snippet = " | ".join(snippet_parts)
 
             results.append(
@@ -174,43 +166,21 @@ class PaperTool:
                     "title": p.get("title", "No title"),
                     "url": p.get("url", ""),
                     "snippet": snippet,
-                    "year": str(year),
-                    "venue": str(venue),
+                    "year": p.get("year", ""),
+                    "venue": p.get("venue", ""),
                 }
             )
 
-        # If filtering yields no results, fall back to include the unfiltered data to avoid empty results
         if not results:
-            for p in data.get("data", []):
-                title = p.get("title", "No title")
-                url = p.get("url", "")
-                year = p.get("year", "")
-                venue = p.get("venue", "")
-                snippet_parts = []
-                if year:
-                    snippet_parts.append(f"Year: {year}")
-                if venue:
-                    snippet_parts.append(f"Venue: {venue}")
-                snippet = " | ".join(snippet_parts)
-                results.append({
-                    "title": title,
-                    "url": url,
-                    "snippet": snippet,
-                    "year": str(year),
-                    "venue": str(venue),
-                })
-            if not results:
-                results = [{
-                    "title": "No Semantic Scholar results found",
-                    "url": "",
-                    "snippet": "",
-                    "year": "",
-                    "venue": "",
-                }]
+            results = [{
+                "title": "No Semantic Scholar results found",
+                "url": "",
+                "snippet": "",
+                "year": "",
+                "venue": "",
+            }]
 
-        # Cache the results for this query (unfiltered results stored)
         self._sem_cache[cache_key] = results
-        # Tag results with swarm metadata when returning
         return self._tag_sem_results(results, agent_role, swarm_id)
 
     def _tag_sem_results(
