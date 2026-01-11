@@ -304,6 +304,7 @@ class VerificationPipeline:
                 "mean_age_days": None,
                 "redundancy_ratio": None,
                 "history_overlap_ratio": None,
+                "peer_reviewed_ratio": None,
             }
 
         # Unique sources and urls
@@ -321,6 +322,41 @@ class VerificationPipeline:
 
         unique_sources = len(source_pairs)
         unique_urls = len(urls)
+
+        # Determine peer-reviewed ratio based on citation source and metadata
+        def _is_peer_reviewed_cite(c: Dict[str, Any]) -> bool:
+            """
+            Heuristic to infer if a citation likely refers to a peer-reviewed source.
+
+            Returns True for citations from PubMed, Semantic Scholar, or other
+            structured paper sources with a DOI or non-empty venue/year.
+            """
+            try:
+                src = str(c.get("source") or "").lower()
+                # Common peer-reviewed tool identifiers
+                if any(key in src for key in ("pubmed", "semantic", "semanticscholar", "paper")):
+                    return True
+                # Presence of a DOI often implies a published paper
+                doi = c.get("doi") or c.get("DOI")
+                if doi and "10." in str(doi):
+                    return True
+                # Venue and year hint at journal or conference publication
+                venue = c.get("venue") or ""
+                year = c.get("year") or ""
+                if venue and year:
+                    venue_l = str(venue).lower()
+                    # Exclude known preprint venues
+                    if any(pre in venue_l for pre in ("arxiv", "biorxiv", "medrxiv", "preprint")):
+                        return False
+                    return True
+            except Exception:
+                pass
+            return False
+
+        peer_reviewed_count = sum(1 for cite in citations_list if _is_peer_reviewed_cite(cite))
+        peer_ratio: Optional[float] = None
+        if total > 0:
+            peer_ratio = peer_reviewed_count / float(total)
 
         # Redundancy ratio
         redundancy_ratio = 0.0
@@ -350,6 +386,7 @@ class VerificationPipeline:
             "mean_age_days": mean_age_days,
             "redundancy_ratio": redundancy_ratio,
             "history_overlap_ratio": history_overlap_ratio,
+            "peer_reviewed_ratio": peer_ratio,
         }
 
     # ------------------------------------------------------------------
@@ -555,6 +592,7 @@ class VerificationPipeline:
         unique_sources = citation_profile.get("unique_sources") or 0
         redundancy = citation_profile.get("redundancy_ratio")
         overlap = citation_profile.get("history_overlap_ratio")
+        peer_ratio = citation_profile.get("peer_reviewed_ratio")
 
         if total_cites == 0:
             cite_term = 0.1
@@ -568,6 +606,20 @@ class VerificationPipeline:
             if overlap is not None and overlap > 0.8:
                 cite_term *= 0.85
                 flags.append("historical_citation_reuse")
+
+            # Adjust citation term by quality of sources (peer review ratio)
+            try:
+                if peer_ratio is not None:
+                    # If less than half of citations are peer-reviewed, penalize
+                    if peer_ratio < 0.5:
+                        cite_term *= 0.7
+                        flags.append("low_peer_reviewed_ratio")
+                    # If majority are peer-reviewed but not overwhelming
+                    elif peer_ratio < 0.8:
+                        cite_term *= 0.9
+                    # Else, minimal adjustment for high-quality citations
+            except Exception:
+                pass
 
         cite_term = max(0.0, min(1.0, cite_term))
 
