@@ -210,9 +210,11 @@ def fix_mojibake(s: Any) -> Any:
     markers, the original string is returned unchanged.  Non-string inputs
     are returned as-is.
     """
+    # Return early for non-strings or empty inputs.
     if not isinstance(s, str) or not s:
         return s
-    # Only attempt repair if common mojibake markers are present
+    # If the string does not contain any common mojibake marker characters,
+    # return it unchanged to avoid unnecessary work.
     if not any(marker in s for marker in ("Ã", "Ã¢", "Ã")):
         return s
 
@@ -220,25 +222,45 @@ def fix_mojibake(s: Any) -> Any:
         """Count the number of known mojibake marker characters in a string."""
         return sum(text.count(ch) for ch in ("Ã", "Ã¢", "Ã"))
 
-    before = count_markers(s)
-    # Try a couple of candidate encodings that frequently appear in mis-decoded text.
+    # Start with the original string as the current best candidate and record
+    # the baseline count of mojibake markers.
+    result = s
+    best_count = count_markers(s)
+    # Attempt to repair the string by roundâtripping through common singleâbyte
+    # encodings.  If the candidate reduces the number of marker characters,
+    # adopt it as the new best result.
     for enc in ("cp1252", "latin1"):
         try:
-            fixed = s.encode(enc, errors="ignore").decode("utf-8", errors="ignore")
+            candidate = s.encode(enc, errors="ignore").decode("utf-8", errors="ignore")
         except Exception:
             continue
-        if fixed and count_markers(fixed) < before:
-            return fixed
-    # Fallback: fix bullet if no better repair succeeded
-    if "Ã¢â¬Â¢" in s:
-        return s.replace("Ã¢â¬Â¢", "â¢")
-    # Normalize middle-dot sequences: if the string contains "ÃÂ·" or a
-    # standalone middle dot, replace the two-character sequence "ÃÂ·" with a
-    # single middle dot first, then replace all middle dots with a hyphen.
-    if "ÃÂ·" in s or "Â·" in s:
-        repaired = s.replace("ÃÂ·", "Â·").replace("Â·", "-")
-        return repaired
-    return s
+        cnt = count_markers(candidate)
+        if candidate and cnt < best_count:
+            result = candidate
+            best_count = cnt
+
+    # Apply microâfixes to the repaired string.  These handle residual
+    # misâdecoded sequences that remain after the roundâtrip conversion.
+    # Replace common misâdecoded bullet "Ã¢â¬Â¢" with the actual bullet character.
+    if "Ã¢â¬Â¢" in result:
+        result = result.replace("Ã¢â¬Â¢", "â¢")
+    # Normalize middleâdot sequences: collapse "ÃÂ·" to a single middle dot,
+    # then convert all middle dots to hyphens.
+    if "ÃÂ·" in result or "Â·" in result:
+        result = result.replace("ÃÂ·", "Â·").replace("Â·", "-")
+    # Additional microâfixes for other twoâbyte mojibake patterns.  We
+    # sometimes observe "ÃÂ¢" or "ÃÂ¤" (and their singleâbyte forms) where a
+    # bullet or dot was intended.  Replace these with hyphens.  Genuine
+    # currency symbols are extremely rare in citation metadata, so this is a
+    # safe substitution.
+    if any(ch in result for ch in ("ÃÂ¢", "Â¢", "ÃÂ¤", "Â¤")):
+        result = (
+            result.replace("ÃÂ¢", "-")
+                  .replace("Â¢", "-")
+                  .replace("ÃÂ¤", "-")
+                  .replace("Â¤", "-")
+        )
+    return result
 
 
 def _normalize_event_container(obj: Any) -> List[Dict[str, Any]]:
