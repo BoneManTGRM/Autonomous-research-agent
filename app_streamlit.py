@@ -3593,14 +3593,15 @@ def compute_activity_pulse_view(
     This intentionally does **not** try to count cycles. Instead it derives a
     liveness / activity signal from:
       - how recently the event log produced entries
-      - how many events occurred recently (1m + 5m windows)
+      - how many events occurred recently (rolling window)
       - watchdog heartbeat freshness
 
     Returns a dict with stable keys:
       - score: 0..1
       - label: High | Medium | Low | Idle
-      - events_last_60s / events_last_5m
       - last_event_age_s / last_event_ts (best effort)
+      - heartbeat_age_s
+      - event_rate_per_min
     """
     evs: List[Dict[str, Any]] = []
     if isinstance(events, list):
@@ -3750,11 +3751,11 @@ def compute_activity_pulse_view(
     else:
         label = "Idle"
 
+    # Do not expose shortâwindow event counts (1m / 5m) in the returned dict.
+    # Keeping only core metrics prevents the UI from showing "1m 0 | 5m 0" again.
     return {
         "score": score,
         "label": label,
-        "events_last_60s": int(c60),
-        "events_last_5m": int(c300),
         "last_event_age_s": last_event_age,
         "last_event_ts": last_event_ts,
         "heartbeat_age_s": heartbeat_age,
@@ -4068,12 +4069,9 @@ def render_topbar(
     last_age = _maybe_float(pv.get("last_event_age_s"))
     if last_age is not None:
         detail_parts.append(f"Last event {_humanize_seconds(last_age)}")
-    ev1m = _safe_int(pv.get("events_last_60s"), None)
-    ev5m = _safe_int(pv.get("events_last_5m"), None)
-    if isinstance(ev1m, int):
-        detail_parts.append(f"1m {ev1m}")
-    if isinstance(ev5m, int):
-        detail_parts.append(f"5m {ev5m}")
+    # Shortâwindow event counts (1m and 5m) are intentionally omitted from the
+    # pulse detail line to avoid cluttering the UI. These metrics are no longer
+    # returned by compute_activity_pulse_view, so nothing is appended here.
     detail_txt = " | ".join(detail_parts)
 
     # Sanitize dynamic text to avoid stray mojibake
