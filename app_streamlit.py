@@ -202,27 +202,36 @@ except Exception:
 def fix_mojibake(s: Any) -> Any:
     """Attempt to repair common mojibake text encoding issues.
 
-    When UTF-8 text is incorrectly decoded as Latin-1 (or similar), you can end
-    up with sequences like "ÃÂ©" or "Ã¢â¬Â¢" instead of proper characters. This
-    helper tries to round-trip the string through Latin-1 back to UTF-8 to
-    recover the original characters. If the round-trip fails or does not
-    significantly reduce the number of mojibake markers, the original string
-    is returned. Non-string inputs are returned as-is.
+    When UTF-8 text is incorrectly decoded as a single-byte encoding (Latinâ1 or
+    Windowsâ1252), multibyte characters (such as dashes, bullets and smart
+    quotes) appear as sequences like "Ã", "Ã¢" or "Ã".  This helper tries to
+    round-trip the string through a couple of common encodings to recover
+    the original UTFâ8.  If the repair does not reduce the number of mojibake
+    markers, the original string is returned unchanged.  Non-string inputs
+    are returned as-is.
     """
     if not isinstance(s, str) or not s:
         return s
     # Only attempt repair if common mojibake markers are present
-    if not any(marker in s for marker in ("Ã", "Ã¢", "Ã", "Ã¢\u0080", "Ã¢\u0094")):
+    if not any(marker in s for marker in ("Ã", "Ã¢", "Ã")):
         return s
-    try:
-        repaired = s.encode("latin1", errors="ignore").decode("utf-8", errors="ignore")
-        # Use repaired string only if it reduces the count of known mojibake markers
-        def count_markers(text: str) -> int:
-            return sum(text.count(ch) for ch in ("Ã", "Ã¢", "Ã"))
-        if repaired and count_markers(repaired) < count_markers(s):
-            return repaired
-    except Exception:
-        pass
+
+    def count_markers(text: str) -> int:
+        """Count the number of known mojibake marker characters in a string."""
+        return sum(text.count(ch) for ch in ("Ã", "Ã¢", "Ã"))
+
+    before = count_markers(s)
+    # Try a couple of candidate encodings that frequently appear in mis-decoded text.
+    for enc in ("cp1252", "latin1"):
+        try:
+            fixed = s.encode(enc, errors="ignore").decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+        if fixed and count_markers(fixed) < before:
+            return fixed
+    # Fallback: fix bullet if no better repair succeeded
+    if "Ã¢â¬Â¢" in s:
+        return s.replace("Ã¢â¬Â¢", "â¢")
     return s
 
 
@@ -2078,18 +2087,23 @@ def build_outcome_summary(
         return "# Autonomous research report\n\nNo cycles have been recorded yet."
 
     def _normalize_text(text: Any) -> str:
+        # Normalize arbitrary input to string
         if text is None:
             return ""
         if not isinstance(text, str):
             text = str(text)
         if not text:
             return text
-        # Fix common mojibake (UTF-8 decoded as latin-1)
-        if any(tok in text for tok in ("Ã¢â¬", "Ã¢â¬Â¢", "Ã", "Ã")):
-            try:
-                return text.encode("latin1").decode("utf-8")
-            except Exception:
-                return text.replace("Ã¢â¬Â¢", "â¢")
+        # Delegate mojibake repair to the shared fix_mojibake helper.  This
+        # attempts to recover UTF-8 from mistakenly decoded Windows-1252 or
+        # Latin-1 sequences.  If the helper returns a non-string (e.g. None),
+        # fall back to the original text.
+        try:
+            fixed = fix_mojibake(text)
+            if isinstance(fixed, str):
+                return fixed
+        except Exception:
+            pass
         return text
 
     def _clean_line(text: Any) -> str:
@@ -4054,15 +4068,12 @@ def render_topbar(
     last_age = _maybe_float(pv.get("last_event_age_s"))
     if last_age is not None:
         detail_parts.append(f"Last event {_humanize_seconds(last_age)}")
-    # Previously the pulse detail line displayed event counts over the past
-    # minute and five-minute windows (e.g. "1m 3 | 5m 12"). These short-term
-    # counts clutter the display and do not add actionable insight for
-    # long-running research jobs. To keep the top bar concise, we no
-    # longer include these per-minute metrics in the detail line. We still
-    # retrieve the values to avoid unused-variable warnings, but we do not
-    # append them to the detail_parts list.
-    _ = _safe_int(pv.get("events_last_60s"), None)
-    _ = _safe_int(pv.get("events_last_5m"), None)
+    ev1m = _safe_int(pv.get("events_last_60s"), None)
+    ev5m = _safe_int(pv.get("events_last_5m"), None)
+    if isinstance(ev1m, int):
+        detail_parts.append(f"1m {ev1m}")
+    if isinstance(ev5m, int):
+        detail_parts.append(f"5m {ev5m}")
     detail_txt = " | ".join(detail_parts)
 
     # Sanitize dynamic text to avoid stray mojibake
