@@ -85,6 +85,54 @@ def _safe_str(x: Any) -> str:
     except Exception:
         return ""
 
+# ---------------------------------------------------------------------------
+# Placeholder detection
+# ---------------------------------------------------------------------------
+
+_PLACEHOLDER_PATTERNS = [
+    "todo",
+    "tbd",
+    "placeholder",
+    "lorem ipsum",
+    "dummy text",
+    "sample text",
+    "insert here",
+    "no content",
+    "to be added",
+    "??",
+    "...",
+    # Additional patterns for low-quality or stub discoveries/hypotheses.  These
+    # often originate from tool fallbacks (e.g. "No title", "No Semantic Scholar
+    # results found") or generic error placeholders.  Detecting them here
+    # prevents them from polluting the report narrative.
+    "no title",
+    "no results",
+    "no semantic scholar results",
+    "no semantic scholar results found",
+    "no pubmed results",
+    "untitled",
+    "stub",
+]
+
+
+def _is_placeholder_text(text: Any) -> bool:
+    """Heuristically detect if a string is a placeholder rather than substantive content.
+
+    Returns True for empty strings or if the text contains common placeholder
+    patterns (case insensitive). False otherwise.
+    """
+    s = _safe_str(text).strip().lower()
+    if not s:
+        return True
+    # Very short strings with no alphanumeric content
+    if len(s) <= 2:
+        return True
+    # Check placeholder phrases
+    for pat in _PLACEHOLDER_PATTERNS:
+        if pat in s:
+            return True
+    return False
+
 
 def _source_key(src: Any) -> str:
     if isinstance(src, dict):
@@ -158,34 +206,16 @@ def _load_events_for_run(run_id: str, *, runs_root: Optional[Path] = None) -> Li
 
 
 def _extract_text_from_event(ev: JsonObj) -> str:
-    """Extract the primary text content from an event.
-
-    This helper searches common keys in the event's data payload and
-    topâlevel for a text string.  It also filters out placeholder or
-    incomplete messages (e.g. 'TODO', 'TBD', 'placeholder') which should
-    not appear in final reports.  If no valid text is found the empty
-    string is returned.
-    """
     data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
-    # Candidate keys in order of precedence
-    for key in ("text", "output", "content", "message"):
-        v = data.get(key)
+    for k in ("text", "output", "content", "message"):
+        v = data.get(k)
         if isinstance(v, str) and v.strip():
-            text = v.strip()
-            # Filter out placeholders; skip if common placeholder keywords appear
-            low = text.lower()
-            if any(p in low for p in ("todo", "tbd", "placeholder", "insert research here")):
-                return ""
-            return text
+            return v
     # Some writers store the text at top-level
-    for key in ("message", "msg", "text"):
-        v = ev.get(key)
+    for k in ("message", "msg", "text"):
+        v = ev.get(k)
         if isinstance(v, str) and v.strip():
-            text = v.strip()
-            low = text.lower()
-            if any(p in low for p in ("todo", "tbd", "placeholder", "insert research here")):
-                return ""
-            return text
+            return v
     return ""
 
 
@@ -472,11 +502,14 @@ def build_agent_report(
             data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
             title = data.get("title") or data.get("name") or ev.get("message") or "discovery"
             desc = data.get("description") or data.get("details") or data.get("text") or ""
+            # Skip entries that are placeholders or have placeholder fields
+            if _is_placeholder_text(title) or _is_placeholder_text(desc):
+                continue
             role = ev.get("role") or data.get("role") or "agent"
             cycle = _cycle_int(ev)
             cite = _format_source_refs(ev, source_index)
             out.append(f"- **{title}** (cycle {cycle}, role {role}){cite}")
-            if desc:
+            if desc and not _is_placeholder_text(desc):
                 out.append(f"  - {desc}")
     out.append("")
 
@@ -493,9 +526,11 @@ def build_agent_report(
                 role = ev.get("role") or "agent"
                 cycle = _cycle_int(ev)
                 cite = _format_source_refs(ev, source_index)
-                if text:
-                    out.append(f"- (cycle {cycle}, role {role}){cite}")
-                    out.append(f"  - {text}")
+                # Skip placeholder or empty hypothesis text
+                if not text or _is_placeholder_text(text):
+                    continue
+                out.append(f"- (cycle {cycle}, role {role}){cite}")
+                out.append(f"  - {text}")
         if verifications:
             out.append("")
             out.append("### Verification results")
@@ -507,7 +542,7 @@ def build_agent_report(
                 cycle = _cycle_int(ev)
                 cite = _format_source_refs(ev, source_index)
                 out.append(f"- (cycle {cycle}, role {role}){cite} - **passed={passed}**")
-                if rationale:
+                if rationale and not _is_placeholder_text(rationale):
                     out.append(f"  - {rationale}")
     out.append("")
 
