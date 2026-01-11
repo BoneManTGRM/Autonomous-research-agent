@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,30 @@ from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Tuple, Unio
 
 
 JsonObj = Dict[str, Any]
+
+
+def normalize_text(text: Any) -> str:
+    """Best-effort fix for common mojibake sequences.
+
+    The most common case we see is UTF-8 being decoded as latin-1, producing
+    strings like "Ã¢â¬Â¢" instead of "â¢". This helper is intentionally conservative:
+    it only attempts a re-decode when the string *looks* like mojibake.
+    """
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    if not text:
+        return text
+
+    # Fast path: only try re-decode when we see typical mojibake markers.
+    if any(tok in text for tok in ("Ã¢â¬", "Ã¢â¬Â¢", "Ã", "Ã")):
+        try:
+            return text.encode("latin1").decode("utf-8")
+        except Exception:
+            # Fallback: replace the most common bullet case.
+            return text.replace("Ã¢â¬Â¢", "â¢")
+    return text
 
 
 def _utc_iso() -> str:
@@ -293,6 +318,8 @@ def build_agent_report(
     run_id: Optional[str] = None,
     runs_root: Optional[Path] = None,
     top_cycles: int = 5,
+    include_appendix: bool = False,
+    strip_todos: bool = True,
 ) -> str:
     """Build a narrative Markdown report for a run.
 
@@ -304,8 +331,12 @@ def build_agent_report(
         If provided, uses the event stream for that run_id. If not provided, we will
         attempt to infer it from diagnostics or history entries.
     top_cycles:
-        Number of cycles to highlight (ranked by RYE signals). The appendix includes
-        full agent outputs for *all* cycles present in the event stream.
+        Number of cycles to highlight (ranked by RYE signals).
+    include_appendix:
+        When True, include the full raw agent outputs appendix. For external
+        sharing or LLM scoring, keep this False so the report remains high-signal.
+    strip_todos:
+        When True, remove obvious TODO markers from rendered text blocks.
 
     Returns
     -------
@@ -352,6 +383,22 @@ def build_agent_report(
                 except Exception:
                     lines.append(str(h))
         return "\n".join(lines)
+
+    def _clean_block(text: Any) -> str:
+        s = normalize_text(text)
+        if not isinstance(s, str):
+            s = str(s)
+        if strip_todos:
+            # Drop lines that contain TODO markers so the report remains
+            # publishable by default.
+            s = "\n".join(
+                ln for ln in s.splitlines() if not re.search(r"\bTODO\b", ln, re.IGNORECASE)
+            )
+        return s.strip()
+
+    def _clean_inline(text: Any) -> str:
+        s = _clean_block(text).replace("\n", " ").strip()
+        return re.sub(r"\s+", " ", s)
 
     # Organize events
     agent_outputs = [e for e in events if str(e.get("kind") or "") == "agent_output"]
@@ -404,7 +451,7 @@ def build_agent_report(
     out.append("")
 
     out.append("## Goal")
-    out.append(goal or "")
+    out.append(_clean_block(goal))
     out.append("")
 
     # Executive summary driven by discoveries/hypotheses/verifications
@@ -452,8 +499,8 @@ def build_agent_report(
         # Show up to 15 most recent discoveries with citations
         for ev in discoveries[-15:]:
             data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
-            title = data.get("title") or data.get("name") or ev.get("message") or "discovery"
-            desc = data.get("description") or data.get("details") or data.get("text") or ""
+            title = _clean_inline(data.get("title") or data.get("name") or ev.get("message") or "discovery")
+            desc = _clean_block(data.get("description") or data.get("details") or data.get("text") or "")
             role = ev.get("role") or data.get("role") or "agent"
             cycle = _cycle_int(ev)
             cite = _format_source_refs(ev, source_index)
@@ -471,7 +518,7 @@ def build_agent_report(
             out.append("### Candidate hypotheses")
             for ev in hypotheses[-15:]:
                 data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
-                text = data.get("text") or data.get("hypothesis") or _extract_text_from_event(ev)
+                text = _clean_block(data.get("text") or data.get("hypothesis") or _extract_text_from_event(ev))
                 role = ev.get("role") or "agent"
                 cycle = _cycle_int(ev)
                 cite = _format_source_refs(ev, source_index)
@@ -484,7 +531,9 @@ def build_agent_report(
             for ev in verifications[-20:]:
                 data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
                 passed = data.get("passed")
-                rationale = data.get("rationale") or data.get("reason") or data.get("notes") or ""
+                rationale = _clean_block(
+                    data.get("rationale") or data.get("reason") or data.get("notes") or ""
+                )
                 role = ev.get("role") or "agent"
                 cycle = _cycle_int(ev)
                 cite = _format_source_refs(ev, source_index)
@@ -561,40 +610,41 @@ def build_agent_report(
                 text = _extract_text_from_event(ev)
                 if not text:
                     continue
-                first_line = text.strip().splitlines()[0]
+                first_line = _clean_inline(text.strip().splitlines()[0])
                 cite = _format_source_refs(ev, source_index)
                 out.append(f"- {role}: {first_line}{cite}")
         out.append("")
 
     # Appendix with full agent outputs (no truncation)
-    out.append("## Appendix: full agent outputs (no truncation)")
-    # Determine sorted cycles encountered in outputs
-    all_cycles = sorted([c for c in by_cycle_outputs.keys() if c is not None])
-    for c in all_cycles:
-        out.append(f"### Cycle {c}")
-        outs = by_cycle_outputs.get(c, [])
-        if not outs:
-            out.append("_No agent_output events for this cycle._")
-            out.append("")
-            continue
+    if include_appendix:
+        out.append("## Appendix: full agent outputs (no truncation)")
+        # Determine sorted cycles encountered in outputs
+        all_cycles = sorted([c for c in by_cycle_outputs.keys() if c is not None])
+        for c in all_cycles:
+            out.append(f"### Cycle {c}")
+            outs = by_cycle_outputs.get(c, [])
+            if not outs:
+                out.append("_No agent_output events for this cycle._")
+                out.append("")
+                continue
 
-        # Group by role for readability
-        by_role: DefaultDict[str, List[JsonObj]] = defaultdict(list)
-        for ev in outs:
-            r = _safe_str(ev.get("role") or "agent")
-            by_role[r].append(ev)
+            # Group by role for readability
+            by_role: DefaultDict[str, List[JsonObj]] = defaultdict(list)
+            for ev in outs:
+                r = _safe_str(ev.get("role") or "agent")
+                by_role[r].append(ev)
 
-        for role, evs in sorted(by_role.items(), key=lambda kv: kv[0]):
-            out.append(f"#### Role: {role}")
-            for ev in evs:
-                ts = ev.get("timestamp")
-                cite = _format_source_refs(ev, source_index)
-                out.append(f"- timestamp: `{ts}`{cite}")
-                text = _extract_text_from_event(ev)
-                out.append("```")
-                out.append(text or "")
-                out.append("```")
-            out.append("")
+            for role, evs in sorted(by_role.items(), key=lambda kv: kv[0]):
+                out.append(f"#### Role: {role}")
+                for ev in evs:
+                    ts = ev.get("timestamp")
+                    cite = _format_source_refs(ev, source_index)
+                    out.append(f"- timestamp: `{ts}`{cite}")
+                    text = _clean_block(_extract_text_from_event(ev))
+                    out.append("```")
+                    out.append(text or "")
+                    out.append("```")
+                out.append("")
 
     # Global sources / citations index
     out.append("## Sources")
@@ -614,19 +664,13 @@ def build_agent_report(
                         break
                 if src_obj is not None:
                     break
-            out.append(f"{i}. {_format_source(src_obj) if src_obj is not None else k}")
+            out.append(
+                f"{i}. {_clean_inline(_format_source(src_obj) if src_obj is not None else k)}"
+            )
     else:
         out.append("_No sources or citations were logged for this run. The output may be unverified._")
 
-    # Assemble the report string
-    report_text = "\n".join(out)
-    # Normalize any misâdecoded UTFâ8 characters (e.g., bullets appearing as Ã¢â¬Â¢)
-    try:
-        from .citation_utils import normalize_text  # type: ignore
-        report_text = normalize_text(report_text)
-    except Exception:
-        pass
-    return report_text
+    return normalize_text("\n".join(out))
 
 
 __all__ = ["build_agent_report"]
