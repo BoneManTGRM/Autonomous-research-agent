@@ -535,12 +535,7 @@ def _markdown_to_plain_lines(text: str, width: int = 90) -> List[str]:
     for raw in text.splitlines():
         s = raw.lstrip()
         # strip some simple markdown markers
-        # Strip common markdown markers.  The bullet prefix must be the actual
-        # Unicode bullet rather than a mojibake sequence (e.g. "Ã¢ÂÂ¢ "), which
-        # can appear if the source file was mis-encoded.  Using "â¢ " here
-        # ensures that list items are detected and the bullet itself is removed
-        # before wrapping.
-        for prefix in ("#", "* ", "- ", "â¢ ", "> "):
+        for prefix in ("#", "* ", "- ", "Ã¢ÂÂ¢ ", "> "):
             if s.startswith(prefix):
                 s = s[len(prefix):].lstrip()
                 break
