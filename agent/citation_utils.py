@@ -316,6 +316,23 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
     snippet = _normalize_snippet(meta)
     score = _normalize_score(meta)
 
+    # -------------------------------------------------------------------
+    # Filter out stub or placeholder citations.  Many tool adapters return
+    # placeholder records such as "[STUB] Foo error", "No title", or
+    # "No Semantic Scholar results found" when the upstream search fails.
+    # These placeholders pollute the report and provide no evidence, so
+    # detect them early and drop such entries entirely.  The heuristics
+    # below are conservative: they only drop clearly invalid citations and
+    # preserve genuine records even if they are missing some fields.
+    if title:
+        lt = title.lower().strip()
+        if any(p in lt for p in ["[stub]", "no title", "no semantic scholar results found", "error downloading", "error for", "stub] semantic scholar", "stub] pubmed", "could not ingest", "request failed"]):
+            return None
+    if snippet:
+        ls = snippet.lower().strip()
+        if any(p in ls for p in ["[stub]", "no title", "no semantic scholar results found", "error downloading", "error for", "stub] semantic scholar", "stub] pubmed", "could not ingest", "request failed"]):
+            return None
+
     # Drop tool/API error messages that can accidentally be recorded as citations.
     # (Common when a provider quota is exceeded, e.g. Tavily.)
     try:
