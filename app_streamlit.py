@@ -232,6 +232,13 @@ def fix_mojibake(s: Any) -> Any:
     # Fallback: fix bullet if no better repair succeeded
     if "Ã¢â¬Â¢" in s:
         return s.replace("Ã¢â¬Â¢", "â¢")
+    # Fix middle-dot mojibake.  When UTF-8 middle dots (Â·) are decoded as
+    # cp1252/latin1, they appear as "ÃÂ·".  Normalize both "ÃÂ·" and standalone
+    # middle dots by replacing the sequence with a single ASCII hyphen.  This
+    # avoids further mojibake in downstream renderers.
+    if "ÃÂ·" in s or "Â·" in s:
+        repaired = s.replace("ÃÂ·", "Â·").replace("Â·", "-")
+        return repaired
     return s
 
 
