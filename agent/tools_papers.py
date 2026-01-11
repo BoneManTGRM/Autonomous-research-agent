@@ -153,12 +153,20 @@ class PaperTool:
 
         results: List[Dict[str, str]] = []
         for p in data.get("data", []):
-            snippet_parts = []
-            if p.get("year"):
-                snippet_parts.append(f"Year: {p.get('year')}")
-            if p.get("venue"):
-                snippet_parts.append(f"Venue: {p.get('venue')}")
+            # Filter out entries that lack key peer-reviewed indicators (year and venue)
+            year = p.get("year")
+            venue = p.get("venue")
+            # Skip entries without a year or venue (likely low quality) and known preprint venues
+            venue_lower = str(venue or "").lower()
+            if not year or not venue:
+                continue
+            if any(preprint in venue_lower for preprint in ("arxiv", "biorxiv", "medrxiv", "preprint")):
+                continue
 
+            snippet_parts = []
+            snippet_parts.append(f"Year: {year}")
+            if venue:
+                snippet_parts.append(f"Venue: {venue}")
             snippet = " | ".join(snippet_parts)
 
             results.append(
@@ -166,21 +174,43 @@ class PaperTool:
                     "title": p.get("title", "No title"),
                     "url": p.get("url", ""),
                     "snippet": snippet,
-                    "year": p.get("year", ""),
-                    "venue": p.get("venue", ""),
+                    "year": str(year),
+                    "venue": str(venue),
                 }
             )
 
+        # If filtering yields no results, fall back to include the unfiltered data to avoid empty results
         if not results:
-            results = [{
-                "title": "No Semantic Scholar results found",
-                "url": "",
-                "snippet": "",
-                "year": "",
-                "venue": "",
-            }]
+            for p in data.get("data", []):
+                title = p.get("title", "No title")
+                url = p.get("url", "")
+                year = p.get("year", "")
+                venue = p.get("venue", "")
+                snippet_parts = []
+                if year:
+                    snippet_parts.append(f"Year: {year}")
+                if venue:
+                    snippet_parts.append(f"Venue: {venue}")
+                snippet = " | ".join(snippet_parts)
+                results.append({
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet,
+                    "year": str(year),
+                    "venue": str(venue),
+                })
+            if not results:
+                results = [{
+                    "title": "No Semantic Scholar results found",
+                    "url": "",
+                    "snippet": "",
+                    "year": "",
+                    "venue": "",
+                }]
 
+        # Cache the results for this query (unfiltered results stored)
         self._sem_cache[cache_key] = results
+        # Tag results with swarm metadata when returning
         return self._tag_sem_results(results, agent_role, swarm_id)
 
     def _tag_sem_results(
@@ -199,6 +229,18 @@ class PaperTool:
                 rr["agent_role"] = agent_role
             if swarm_id:
                 rr["swarm_id"] = swarm_id
+            # Mark credible Semantic Scholar results with a source tag.
+            # We avoid tagging stub entries (titles beginning with "[STUB]" or
+            # entries that explicitly note no results) so that citation
+            # normalization can filter them out as untrusted.  Titles may
+            # include variations like "No Semantic Scholar results found".
+            title_val = rr.get("title") or ""
+            try:
+                title_low = title_val.strip().lower()
+            except Exception:
+                title_low = ""
+            if title_low and not title_low.startswith("[stub]") and "no semantic scholar" not in title_low:
+                rr["source"] = "semantic_scholar"
             final.append(rr)
 
         return final
