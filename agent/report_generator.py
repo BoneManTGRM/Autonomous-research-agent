@@ -71,9 +71,13 @@ from collections import Counter
 def normalize_text(text: Any) -> str:
     """Best-effort fix for common mojibake sequences.
 
-    This keeps report output clean when UTF-8 text has been decoded as latin-1
-    (e.g., 'Ã¢â¬Â¢' instead of 'â¢'). Only attempts a re-decode when the string
-    looks like mojibake.
+    This keeps report output clean when UTFâ8 text has been incorrectly decoded
+    as a single-byte encoding.  It attempts to recover the original Unicode
+    by round-tripping through Windowsâ1252 first, then Latinâ1, and only
+    applies a repair when it clearly reduces the number of known mojibake
+    marker characters (e.g. sequences beginning with 'Ã', 'Ã¢' or 'Ã').  As a
+    fallback, it replaces bullet markers explicitly if no encoding round-trip
+    succeeds.
     """
     if text is None:
         return ""
@@ -81,11 +85,24 @@ def normalize_text(text: Any) -> str:
         text = str(text)
     if not text:
         return text
-    if any(tok in text for tok in ("Ã¢â¬", "Ã¢â¬Â¢", "Ã", "Ã")):
+    # Only attempt repair when common mojibake markers are present
+    if not any(tok in text for tok in ("Ã", "Ã¢", "Ã")):
+        return text
+
+    def count_markers(val: str) -> int:
+        return sum(val.count(ch) for ch in ("Ã", "Ã¢", "Ã"))
+
+    before = count_markers(text)
+    for enc in ("cp1252", "latin1"):
         try:
-            return text.encode("latin1").decode("utf-8")
+            fixed = text.encode(enc).decode("utf-8")
         except Exception:
-            return text.replace("Ã¢â¬Â¢", "â¢")
+            continue
+        if fixed and count_markers(fixed) < before:
+            return fixed
+    # Fallback: fix bullet
+    if "Ã¢â¬Â¢" in text:
+        return text.replace("Ã¢â¬Â¢", "â¢")
     return text
 
 
