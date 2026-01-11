@@ -300,6 +300,9 @@ class SemanticScholarTool:
             elif p.get("journal"):
                 venue_val = str(p.get("journal")).strip()
 
+            # Attach a source tag to aid downstream filtering.  Without this the
+            # citation_utils treats Semantic Scholar entries as generic web
+            # content and may drop them unless a DOI is present.
             raw_results.append(
                 {
                     "title": title,
@@ -307,8 +310,6 @@ class SemanticScholarTool:
                     "snippet": snippet,
                     "year": year_val or "",
                     "venue": venue_val or "",
-                    # Tag the source so downstream citation filtering knows
-                    # this comes from Semantic Scholar (a credible search).
                     "source": "semantic_scholar",
                 }
             )
