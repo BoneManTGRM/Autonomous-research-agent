@@ -614,7 +614,16 @@ def build_agent_report(
                         break
                 if src_obj is not None:
                     break
-            out.append(f"{i}. {_format_source(src_obj) if src_obj is not None else k}")
+            try:
+                # Use normalized citation formatting when possible
+                from .citation_utils import normalize_citation, format_citation_markdown  # type: ignore
+                norm_cite = normalize_citation(src_obj)
+                if norm_cite:
+                    out.append(f"{i}. {format_citation_markdown(norm_cite)}")
+                else:
+                    out.append(f"{i}. {_format_source(src_obj) if src_obj is not None else k}")
+            except Exception:
+                out.append(f"{i}. {_format_source(src_obj) if src_obj is not None else k}")
     else:
         out.append("_No sources or citations were logged for this run. The output may be unverified._")
 
