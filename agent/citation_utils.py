@@ -53,7 +53,14 @@ def _safe_str(value: Any) -> str:
     try:
         if value is None:
             return ""
-        return str(value).strip()
+        s = str(value)
+        # Repair common mojibake (UTF-8 bytes that were decoded as cp1252/latin1).
+        # Safe to call on any string; will no-op if no marker characters exist.
+        try:
+            s = normalize_text(s)
+        except Exception:
+            pass
+        return s.strip()
     except Exception:
         return ""
 
@@ -94,7 +101,7 @@ def _normalize_author_list(value: Any) -> Optional[str]:
 
     # Already a simple string
     if isinstance(value, str):
-        text = value.strip()
+        text = _safe_str(value)
         if not text:
             return None
         if len(text) > 300:
@@ -309,6 +316,31 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
     snippet = _normalize_snippet(meta)
     score = _normalize_score(meta)
 
+    # Drop tool/API error messages that can accidentally be recorded as citations.
+    # (Common when a provider quota is exceeded, e.g. Tavily.)
+    try:
+        blob = f"{title or ''} {snippet or ''}".strip().lower()
+    except Exception:
+        blob = ""
+
+    if blob and not (url or doi):
+        src_l = _safe_str(source).lower()
+        quota_err = (
+            "tavily api error" in blob
+            or "exceeds your plan" in blob
+            or "set usage limit" in blob
+            or "request exceeds" in blob
+        )
+        generic_api_err = ("api error" in blob or "rate limit" in blob) and len(blob) < 300
+
+        # If it looks like a provider error and there's no URL/DOI, it's not a real citation.
+        if quota_err:
+            return None
+        if src_l == "tavily" and "error" in blob:
+            return None
+        if generic_api_err:
+            return None
+
     # If we still have nothing meaningful, drop it unless there is at least URL or DOI
     if not any([title, url, doi, snippet]):
         if url or doi:
@@ -359,28 +391,46 @@ def normalize_citation_list(
 # ---------------------------------------------------------------------------
 
 def normalize_text(text: str) -> str:
-    """
-    Normalize a potentially mis-encoded string so that UTF-8 bullets and other characters
-    display correctly. Some downstream components inadvertently decode UTF-8 strings
-    using Latinâ1, resulting in mojibake such as 'Ã¢â¬Â¢' in place of 'â¢'.
+    """Repair common mojibake sequences.
 
-    This helper attempts to reverse that encoding mistake by reâencoding the string
-    as Latinâ1 and decoding it back to UTF-8. If any exception occurs, the original
-    text is returned unchanged. This function can safely be applied to any string.
+    The most common failure mode we see in citations and report text is:
+    UTF-8 bytes being decoded as cp1252 or latin1, producing marker characters like
+    "Ã", "Ã¢", "Ã" (e.g. "ÃÂ·" instead of "Â·", or "Ã¢â¬Â¢" instead of "â¢").
 
-    Args:
-        text: A string that may contain mojibake from incorrect decoding.
+    This function performs a best-effort reverse transform:
+      1) Try cp1252 -> utf-8
+      2) Try latin1 -> utf-8
 
-    Returns:
-        A normalized string with proper UTFâ8 characters, or the original string if
-        normalization fails.
+    It only attempts repairs when marker characters are present, and only keeps a
+    candidate repair when it reduces the number of marker characters.
     """
     if not isinstance(text, str):
         return text
-    try:
-        return text.encode("latin1").decode("utf-8")
-    except Exception:
+
+    markers = ("Ã", "Ã¢", "Ã", "\uFFFD")
+    if not any(m in text for m in markers):
         return text
+
+    def _count_markers(s: str) -> int:
+        return sum(s.count(m) for m in markers)
+
+    best = text
+    best_count = _count_markers(text)
+
+    for enc in ("cp1252", "latin1"):
+        try:
+            fixed = text.encode(enc).decode("utf-8")
+        except Exception:
+            continue
+        cnt = _count_markers(fixed)
+        if fixed and cnt < best_count:
+            best = fixed
+            best_count = cnt
+
+    # Extra micro-fixes for a few stubborn sequences we sometimes see after partial repairs.
+    if "Ã¢â¬Â¢" in best:
+        best = best.replace("Ã¢â¬Â¢", "â¢")
+    return best
 
 
 # ---------------------------------------------------------------------------
@@ -615,14 +665,6 @@ def merge_citation_lists(
     """
     norm_primary = normalize_citation_list(primary or [])
     norm_secondary = normalize_citation_list(secondary or [])
-    # Sort citations by descending score to prioritize higher quality sources.
-    def _score_key(c: Dict[str, Any]) -> float:
-        try:
-            return float(c.get("score") or 0.0)
-        except Exception:
-            return 0.0
-    norm_primary.sort(key=_score_key, reverse=True)
-    norm_secondary.sort(key=_score_key, reverse=True)
 
     seen = set()
     merged: List[Dict[str, Any]] = []
@@ -700,13 +742,6 @@ def build_bibliography_markdown(
         return "No citations recorded."
 
     norm = normalize_citation_list(citations)
-    # Sort by descending score so that higher quality citations are listed first.
-    def _score_key(c: Dict[str, Any]) -> float:
-        try:
-            return float(c.get("score") or 0.0)
-        except Exception:
-            return 0.0
-    norm.sort(key=_score_key, reverse=True)
     # Simple dedup for safety
     seen = set()
     unique: List[Dict[str, Any]] = []
