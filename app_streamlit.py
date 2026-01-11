@@ -2209,9 +2209,8 @@ def build_outcome_summary(
     rye_summary = "RYE not available"
     if rye_vals:
         avg_rye = sum(rye_vals) / len(rye_vals)
-        # Replace the Unicode middle dot separators with commas to avoid mojibake
-        # artifacts (e.g. "ÃÂ·") in environments that mishandle UTF-8.  Commas
-        # are ASCII and therefore safe.
+        # Use ASCII separators to avoid mojibake artifacts (e.g. "ÃÂ·") in
+        # environments that mishandle UTF-8.
         rye_summary = f"Min {min(rye_vals):.3f}, Max {max(rye_vals):.3f}, Avg {avg_rye:.3f}"
 
     # Citations (if not supplied, attempt extraction from history)
@@ -5558,16 +5557,52 @@ def extract_hypotheses_from_history(history: List[Dict[str, Any]]) -> List[Dict[
 def extract_citation_rows_from_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Flatten citations across all cycles into rows with cycle info for the citation viewer."""
     results: List[Dict[str, Any]] = []
+
+    def _norm(val: Any) -> str:
+        """Normalize a text field and repair common mojibake."""
+        if val is None:
+            return ""
+        try:
+            s = str(val)
+        except Exception:
+            return ""
+        if not s:
+            return ""
+        try:
+            fixed = fix_mojibake(s)
+            if isinstance(fixed, str) and fixed:
+                s = fixed
+        except Exception:
+            pass
+        return s.strip()
+
+    def _looks_like_tool_error(source: str, title: str, snippet: str, url: str) -> bool:
+        """Filter out tool/API error messages that can be mistakenly stored as citations."""
+        blob = f"{title} {snippet}".strip().lower()
+        if not blob:
+            return False
+        if "tavily api error" in blob:
+            return True
+        if "exceeds your plan" in blob or "set usage limit" in blob:
+            return True
+        if "api error" in blob and not url:
+            return True
+        # Extra guard: Tavily errors often come through without a URL.
+        if (source or "").strip().lower() == "tavily" and "error" in blob and not url:
+            return True
+        return False
     for entry in history:
         cycle_idx = entry.get("cycle")
-        role = entry.get("role", "agent")
-        domain = entry.get("domain", "general")
+        role = _norm(entry.get("role", "agent")) or "agent"
+        domain = _norm(entry.get("domain", "general")) or "general"
         ts = entry.get("timestamp")
 
         raw_cites = entry.get("citations") or entry.get("sources") or entry.get("source_list") or []
         for c in raw_cites:
             if not isinstance(c, dict):
-                url = str(c)
+                url = _norm(c)
+                if _looks_like_tool_error("", url, "", url if url.startswith("http") else ""):
+                    continue
                 results.append(
                     {
                         "cycle": cycle_idx,
@@ -5582,10 +5617,12 @@ def extract_citation_rows_from_history(history: List[Dict[str, Any]]) -> List[Di
                 )
                 continue
 
-            source = c.get("source") or c.get("provider") or ""
-            title = c.get("title") or ""
-            url = c.get("url") or c.get("link") or ""
-            snippet = c.get("snippet") or c.get("summary") or ""
+            source = _norm(c.get("source") or c.get("provider") or "")
+            title = _norm(c.get("title") or "")
+            url = _norm(c.get("url") or c.get("link") or "")
+            snippet = _norm(c.get("snippet") or c.get("summary") or "")
+            if _looks_like_tool_error(source, title, snippet, url):
+                continue
             results.append(
                 {
                     "cycle": cycle_idx,
@@ -5902,6 +5939,38 @@ def build_breakthrough_report(history: List[Dict[str, Any]], discoveries: List[D
 
 def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, Any]]:
     """Extract citations from finished run JSONs as a fallback for the citation viewer."""
+
+    def _norm(val: Any) -> str:
+        """Normalize a text field and repair common mojibake."""
+        if val is None:
+            return ""
+        try:
+            s = str(val)
+        except Exception:
+            return ""
+        if not s:
+            return ""
+        try:
+            fixed = fix_mojibake(s)
+            if isinstance(fixed, str) and fixed:
+                s = fixed
+        except Exception:
+            pass
+        return s.strip()
+
+    def _looks_like_tool_error(source: str, title: str, snippet: str, url: str) -> bool:
+        blob = f"{title} {snippet}".strip().lower()
+        if not blob:
+            return False
+        if "tavily api error" in blob:
+            return True
+        if "exceeds your plan" in blob or "set usage limit" in blob:
+            return True
+        if "api error" in blob and not url:
+            return True
+        if (source or "").strip().lower() == "tavily" and "error" in blob and not url:
+            return True
+        return False
     jobs = _list_jobs_by_status_candidates(["finished", "done", "completed", "complete", "success"])
     if not jobs:
         return []
@@ -5947,12 +6016,14 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
         if isinstance(cites, list):
             for c in cites:
                 if not isinstance(c, dict):
-                    url = str(c)
+                    url = _norm(c)
+                    if _looks_like_tool_error("", url, "", url if url.startswith("http") else ""):
+                        continue
                     top_level_citations.append(
                         {
                             "cycle": None,
                             "role": "run",
-                            "domain": base.get("domain") or "general",
+                            "domain": _norm(base.get("domain") or "general") or "general",
                             "timestamp": default_ts,
                             "source": "",
                             "title": url,
@@ -5962,10 +6033,12 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
                     )
                     continue
 
-                source = c.get("source") or c.get("provider") or ""
-                title = c.get("title") or ""
-                url = c.get("url") or c.get("link") or ""
-                snippet = c.get("snippet") or c.get("summary") or ""
+                source = _norm(c.get("source") or c.get("provider") or "")
+                title = _norm(c.get("title") or "")
+                url = _norm(c.get("url") or c.get("link") or "")
+                snippet = _norm(c.get("snippet") or c.get("summary") or "")
+                if _looks_like_tool_error(source, title, snippet, url):
+                    continue
 
                 ts_val = base.get("timestamp") or result.get("timestamp") or default_ts
                 if isinstance(ts_val, (int, float)):
@@ -5977,8 +6050,8 @@ def load_citations_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, An
                 top_level_citations.append(
                     {
                         "cycle": None,
-                        "role": c.get("role") or "run",
-                        "domain": c.get("domain") or base.get("domain") or "general",
+                        "role": _norm(c.get("role") or "run") or "run",
+                        "domain": _norm(c.get("domain") or base.get("domain") or "general") or "general",
                         "timestamp": ts_val,
                         "source": source,
                         "title": title,
@@ -7602,6 +7675,37 @@ def main() -> None:
                 for col in expected_cols:
                     if col not in citations_df.columns:
                         citations_df[col] = None
+
+                # Repair common mojibake in citation fields (e.g. "ÃÂ·", "Ã¢â¬Â¢").
+                # Do this *before* building filter option lists so filters are clean.
+                for _col in ("role", "domain", "source", "title", "snippet"):
+                    try:
+                        citations_df[_col] = citations_df[_col].apply(
+                            lambda v: fix_mojibake(str(v)).strip() if v is not None else ""
+                        )
+                    except Exception:
+                        pass
+
+                # Remove tool/API error rows that sometimes get mis-recorded as citations
+                # (especially when Tavily quota is exceeded).
+                try:
+                    url_empty = citations_df["url"].fillna("").astype(str).str.strip().eq("")
+                    title_l = citations_df["title"].fillna("").astype(str).str.lower()
+                    snip_l = citations_df["snippet"].fillna("").astype(str).str.lower()
+                    err = (
+                        title_l.str.contains("tavily api error", na=False)
+                        | snip_l.str.contains("tavily api error", na=False)
+                        | title_l.str.contains("exceeds your plan", na=False)
+                        | snip_l.str.contains("exceeds your plan", na=False)
+                        | title_l.str.contains("set usage limit", na=False)
+                        | snip_l.str.contains("set usage limit", na=False)
+                        | title_l.str.contains("api error", na=False)
+                        | snip_l.str.contains("api error", na=False)
+                    )
+                    # Only drop when it isn't a real citation link.
+                    citations_df = citations_df[~(err & url_empty)].copy()
+                except Exception:
+                    pass
 
                 total_cites = len(citations_df)
                 unique_sources = sorted({s for s in citations_df["source"].dropna().astype(str).unique() if s})
