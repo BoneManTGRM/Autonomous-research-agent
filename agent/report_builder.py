@@ -101,10 +101,7 @@ _PLACEHOLDER_PATTERNS = [
     "to be added",
     "??",
     "...",
-    # Additional patterns for low-quality or stub discoveries/hypotheses.  These
-    # often originate from tool fallbacks (e.g. "No title", "No Semantic Scholar
-    # results found") or generic error placeholders.  Detecting them here
-    # prevents them from polluting the report narrative.
+    # Additional patterns for low-quality or stub content
     "no title",
     "no results",
     "no semantic scholar results",
@@ -614,7 +611,11 @@ def build_agent_report(
                 text = _extract_text_from_event(ev)
                 if not text:
                     continue
-                first_line = text.strip().splitlines()[0]
+                # Take the first substantive line (ignore placeholder-like content)
+                lines = [ln for ln in text.strip().splitlines() if ln and not _is_placeholder_text(ln)]
+                if not lines:
+                    continue
+                first_line = lines[0]
                 cite = _format_source_refs(ev, source_index)
                 out.append(f"- {role}: {first_line}{cite}")
         out.append("")
@@ -644,8 +645,16 @@ def build_agent_report(
                 cite = _format_source_refs(ev, source_index)
                 out.append(f"- timestamp: `{ts}`{cite}")
                 text = _extract_text_from_event(ev)
+                # Filter out placeholder lines from agent output to reduce noise
+                lines_raw = str(text or "").splitlines()
+                sanitized_lines: List[str] = []
+                for ln in lines_raw:
+                    # Skip lines that look like placeholders or stub messages
+                    if not _is_placeholder_text(ln):
+                        sanitized_lines.append(ln)
+                sanitized_text = "\n".join(sanitized_lines).rstrip()
                 out.append("```")
-                out.append(text or "")
+                out.append(sanitized_text)
                 out.append("```")
             out.append("")
 
