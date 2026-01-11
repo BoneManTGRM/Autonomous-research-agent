@@ -31,15 +31,14 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-# Bring in citation normalization from citation_utils to filter low-quality
-# or placeholder citations.  This avoids counting stubbed results in
-# citation analysis.
+# Import citation normalization utility.  We guard with try/except so the
+# pipeline remains functional even if citation_utils is unavailable (e.g.,
+# during unit tests or isolated deployments).  The normalize_citation
+# function canonicalizes citation dicts and filters out stub/error entries.
 try:
     from .citation_utils import normalize_citation  # type: ignore
 except Exception:
-    # Fallback: define a no-op normalize_citation if import fails.
-    def normalize_citation(x: Any) -> Optional[Dict[str, Any]]:  # type: ignore
-        return x if isinstance(x, dict) else None
+    normalize_citation = None  # type: ignore
 
 # Optional event stream integration (append-only JSONL via agent/event_log.py).
 try:  # pragma: no cover
@@ -282,55 +281,96 @@ class VerificationPipeline:
     # Citation analysis
     # ------------------------------------------------------------------
     def _normalize_citation_list(self, raw: Any) -> List[Dict[str, Any]]:
-        """Normalize citation structures from mixed types into list of dicts."""
+        """Normalize citation structures from mixed types into list of dicts.
+
+        In earlier versions this helper merely coerced arbitrary inputs into
+        dict-like objects.  It now integrates with citation_utils.normalize_citation
+        when available, returning only properly structured citation dicts and
+        discarding stub/error placeholders.  If normalize_citation is not
+        available, this falls back to the legacy behaviour.
+        """
         if raw is None:
             return []
+        items: List[Any]
         if isinstance(raw, list):
-            out: List[Dict[str, Any]] = []
-            for item in raw:
-                if isinstance(item, dict):
-                    out.append(item)
-                elif isinstance(item, str):
-                    out.append({"raw": item})
-            return out
-        if isinstance(raw, dict):
-            return [raw]
-        return [{"raw": str(raw)}]
+            items = list(raw)
+        else:
+            items = [raw]
+
+        out: List[Dict[str, Any]] = []
+        for item in items:
+            try:
+                # When normalize_citation is available, use it to filter and
+                # canonicalize citations.  Only append if normalization
+                # returned a non-None dict.
+                if normalize_citation:
+                    if isinstance(item, dict):
+                        norm = normalize_citation(item)
+                        if norm:
+                            out.append(norm)
+                    elif isinstance(item, str):
+                        # Construct a minimal dict and normalize
+                        norm = normalize_citation({"title": item})
+                        if norm:
+                            out.append(norm)
+                    else:
+                        # Fallback for other types: convert to string and normalize
+                        norm = normalize_citation({"title": str(item)})
+                        if norm:
+                            out.append(norm)
+                else:
+                    # Legacy fallback: preserve dicts or wrap strings as raw
+                    if isinstance(item, dict):
+                        out.append(item)
+                    elif isinstance(item, str):
+                        out.append({"raw": item})
+                    else:
+                        out.append({"raw": str(item)})
+            except Exception:
+                # Swallow any normalization error and skip the item
+                continue
+        return out
 
     def _analyze_citations(
         self,
         citations: Any,
         history: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Compute citation quality and redundancy profile."""
-        # Normalize and filter citations via citation_utils.normalize_citation.
-        raw_list = self._normalize_citation_list(citations)
-        normalized: List[Dict[str, Any]] = []
-        for c in raw_list:
-            try:
-                nc = normalize_citation(c)  # type: ignore[misc]
-            except Exception:
-                nc = None
-            if nc:
-                normalized.append(nc)
+        """Compute citation quality and redundancy profile.
 
-        total = len(normalized)
+        This implementation uses the canonical citation normalization from
+        citation_utils (via _normalize_citation_list) to filter out stub
+        entries and to standardize fields (source, url, doi, venue, year).
+        It returns a richer profile including counts of missing URLs, counts
+        of citations with DOIs, counts of entries with both venue and year,
+        and the proportion of citations missing URLs.  These metrics allow
+        the verification score to penalize poorly cited cycles while
+        rewarding diversity and peerâreviewed sources.
+        """
+        citations_list = self._normalize_citation_list(citations)
+        total = len(citations_list)
         if total == 0:
             return {
                 "total": 0,
                 "unique_sources": 0,
                 "unique_urls": 0,
                 "missing_urls": 0,
+                "doi_count": 0,
+                "venue_year_count": 0,
+                "percent_missing_url": 0.0,
                 "mean_age_days": None,
                 "redundancy_ratio": None,
                 "history_overlap_ratio": None,
             }
 
-        # Unique sources and urls
-        source_pairs: set = set()
-        urls: set = set()
-        missing_urls: int = 0
-        for c in normalized:
+        # Unique (source, url) pairs and unique urls
+        source_pairs = set()
+        urls = set()
+        missing_urls = 0
+        doi_count = 0
+        venue_year_count = 0
+
+        for c in citations_list:
             src = c.get("source")
             url = c.get("url")
             source_pairs.add((src, url))
@@ -338,41 +378,53 @@ class VerificationPipeline:
                 urls.add(url)
             else:
                 missing_urls += 1
+            # DOI or PubMed ID counts: treat DOI-like strings or pmid in raw
+            doi_val = c.get("doi")
+            if doi_val:
+                doi_count += 1
+            # Venue/year count: count citations with both venue and year
+            v = c.get("venue")
+            y = c.get("year")
+            if v and y:
+                venue_year_count += 1
 
         unique_sources = len(source_pairs)
         unique_urls = len(urls)
 
-        # Redundancy ratio
-        redundancy_ratio = 0.0
-        if unique_urls > 0:
-            redundancy_ratio = max(0.0, 1.0 - (unique_urls / float(total)))
+        # Redundancy ratio: measures how many citations share the same URL
+        redundancy_ratio = None
+        if total > 0:
+            if unique_urls > 0:
+                redundancy_ratio = max(0.0, 1.0 - (unique_urls / float(total)))
+            else:
+                redundancy_ratio = 1.0
 
-        # Overlap with historical urls (normalize and filter history citations)
-        hist_urls: set = set()
+        # Overlap with historical urls: compute using normalized citations
+        hist_urls = set()
         for row in history:
-            row_cites_raw = self._normalize_citation_list(row.get("citations", []))
-            for rc in row_cites_raw:
-                try:
-                    nc = normalize_citation(rc)  # type: ignore[misc]
-                except Exception:
-                    nc = None
-                if not nc:
-                    continue
-                url = nc.get("url")
-                if url:
-                    hist_urls.add(url)
-
+            row_cites = self._normalize_citation_list(row.get("citations", []))
+            for c in row_cites:
+                u = c.get("url")
+                if u:
+                    hist_urls.add(u)
         overlap = len(urls.intersection(hist_urls)) if hist_urls else 0
-        history_overlap_ratio = (overlap / float(unique_urls)) if unique_urls > 0 else None
+        history_overlap_ratio = None
+        if unique_urls > 0:
+            history_overlap_ratio = overlap / float(unique_urls)
 
-        # Publication age is optional and depends on fields, so we do not compute
+        # Publication age is optional and depends on fields; not computed
         mean_age_days = None
+
+        percent_missing_url = missing_urls / float(total) if total > 0 else 0.0
 
         return {
             "total": total,
             "unique_sources": unique_sources,
             "unique_urls": unique_urls,
             "missing_urls": missing_urls,
+            "doi_count": doi_count,
+            "venue_year_count": venue_year_count,
+            "percent_missing_url": percent_missing_url,
             "mean_age_days": mean_age_days,
             "redundancy_ratio": redundancy_ratio,
             "history_overlap_ratio": history_overlap_ratio,
@@ -581,6 +633,10 @@ class VerificationPipeline:
         unique_sources = citation_profile.get("unique_sources") or 0
         redundancy = citation_profile.get("redundancy_ratio")
         overlap = citation_profile.get("history_overlap_ratio")
+        missing_urls = citation_profile.get("missing_urls") or 0
+        doi_count = citation_profile.get("doi_count") or 0
+        venue_year_count = citation_profile.get("venue_year_count") or 0
+        percent_missing_url = citation_profile.get("percent_missing_url") or 0.0
 
         if total_cites == 0:
             cite_term = 0.1
@@ -588,25 +644,29 @@ class VerificationPipeline:
         else:
             diversity = (unique_sources / float(total_cites)) if total_cites > 0 else 0.0
             cite_term = 0.2 + 0.6 * max(0.0, min(1.0, diversity))
+            # Penalize high redundancy
             if redundancy is not None and redundancy > 0.6:
                 cite_term *= 0.8
                 flags.append("high_citation_redundancy")
+            # Penalize heavy reuse of historical citations
             if overlap is not None and overlap > 0.8:
                 cite_term *= 0.85
                 flags.append("historical_citation_reuse")
-            # Additional penalty for missing URLs: if citations lack stable URLs they
-            # are harder to verify and often lower quality.  Apply a penalty
-            # proportional to the fraction of missing URLs (up to 50% reduction).
-            missing_urls = citation_profile.get("missing_urls") or 0
-            if missing_urls and total_cites > 0:
-                try:
-                    ratio = float(missing_urls) / float(total_cites)
-                except Exception:
-                    ratio = 0.0
-                penalty = min(0.5, max(0.0, ratio))
-                cite_term *= max(0.0, 1.0 - penalty)
-                flags.append("missing_citation_urls")
-
+            # Penalize if many citations lack URLs (suggesting incomplete metadata)
+            if percent_missing_url > 0.4:
+                cite_term *= 0.85
+                flags.append("missing_urls_high")
+            # Penalize if too few citations have DOI/PMID (peer reviewed indicators)
+            if total_cites > 0:
+                min_peer = max(1, int(total_cites * 0.3))
+                if doi_count < min_peer:
+                    cite_term *= 0.90
+                    flags.append("few_peer_reviewed")
+                # Penalize if too few have venue and year (suggesting non-peer sources)
+                min_meta = max(1, int(total_cites * 0.5))
+                if venue_year_count < min_meta:
+                    cite_term *= 0.95
+                    flags.append("low_peer_metadata")
         cite_term = max(0.0, min(1.0, cite_term))
 
         # Hypothesis structure
