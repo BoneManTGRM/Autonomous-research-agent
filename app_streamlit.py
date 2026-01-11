@@ -620,10 +620,12 @@ try:
             generate_findings_report,
             generate_findings_report_pdf,
             generate_report,
+            generate_publishable_report,
             generate_report_pdf,
         )
     except Exception:  # pragma: no cover
         generate_report = None  # type: ignore[assignment]
+        generate_publishable_report = None  # type: ignore[assignment]
         generate_report_pdf = None  # type: ignore[assignment]
         generate_findings_report = None  # type: ignore[assignment]
         generate_findings_report_pdf = None  # type: ignore[assignment]
@@ -739,10 +741,12 @@ except ModuleNotFoundError as e:
             generate_findings_report,
             generate_findings_report_pdf,
             generate_report,
+            generate_publishable_report,
             generate_report_pdf,
         )
     except Exception:  # pragma: no cover
         generate_report = None  # type: ignore[assignment]
+        generate_publishable_report = None  # type: ignore[assignment]
         generate_report_pdf = None  # type: ignore[assignment]
         generate_findings_report = None  # type: ignore[assignment]
         generate_findings_report_pdf = None  # type: ignore[assignment]
@@ -2055,15 +2059,114 @@ def render_result_details(result: Dict[str, Any]) -> None:
 # -------------------------------------------------------------------
 # Outcome focused summary helper
 # -------------------------------------------------------------------
-def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
-    """Create a markdown summary focused on outcomes and run time."""
+def build_outcome_summary(
+    history: List[Dict[str, Any]],
+    discoveries: Optional[List[Dict[str, Any]]] = None,
+    citations: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    """Create a high-signal, publishable markdown report from cycle history.
+
+    This is used when reviewing finished runs where the in-memory history may not
+    be available. The prior implementation dumped a long, raw list of notes and
+    TODOs; this version intentionally:
+      - de-duplicates and ranks candidate findings
+      - removes prompt/diagnostic boilerplate
+      - keeps the narrative *coherent* (what was asked, what was found, evidence)
+    """
+
     if not history:
-        return "# Outcome summary\n\nNo cycles have been recorded yet."
+        return "# Autonomous research report\n\nNo cycles have been recorded yet."
+
+    def _normalize_text(text: Any) -> str:
+        if text is None:
+            return ""
+        if not isinstance(text, str):
+            text = str(text)
+        if not text:
+            return text
+        # Fix common mojibake (UTF-8 decoded as latin-1)
+        if any(tok in text for tok in ("Ã¢â¬", "Ã¢â¬Â¢", "Ã", "Ã")):
+            try:
+                return text.encode("latin1").decode("utf-8")
+            except Exception:
+                return text.replace("Ã¢â¬Â¢", "â¢")
+        return text
+
+    def _clean_line(text: Any) -> str:
+        s = _normalize_text(text).strip()
+        # Remove role prefixes like "[researcher_3]"
+        s = re.sub(r"^\[[^\]]+\]\s*", "", s)
+        # Collapse whitespace
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
+    def _is_noise(text: str) -> bool:
+        if not text:
+            return True
+        tl = text.lower()
+        # Boilerplate patterns commonly found in agent prompts/logging
+        noise_markers = [
+            "tools confirmed",
+            "hard constraints",
+            "operating intent",
+            "this is a raw list",
+            "not medical advice",
+            "system prompt",
+            "you are",
+        ]
+        if any(m in tl for m in noise_markers):
+            return True
+        # Drop obvious TODO markers (they tank external eval scores)
+        if re.search(r"\btodo\b", tl):
+            return True
+        # Overlong blocks are usually copied prompts; keep the report tight
+        if len(text) > 1200:
+            return True
+        return False
+
+    def _score(text: str, cycle_idx: int) -> float:
+        """Heuristic score to prioritize concrete, evidence-oriented findings."""
+        tl = text.lower()
+        s = 0.0
+        # Prefer later-cycle discoveries (more converged)
+        if total_cycles > 1:
+            s += 0.75 * (cycle_idx / max(1, total_cycles - 1))
+        # Reward concreteness
+        if re.search(r"\b\d{2,}\b", tl):
+            s += 0.5
+        if any(k in tl for k in ("mechanism", "pathway", "biomarker", "target")):
+            s += 1.0
+        if any(k in tl for k in ("dose", "mg", "protocol", "intervention", "treatment")):
+            s += 0.8
+        if any(k in tl for k in ("doi", "pmid", "http", "arxiv")):
+            s += 0.6
+        # Penalize generic/hedgy phrasing
+        if any(k in tl for k in ("maybe", "could be", "might", "unclear", "unknown")):
+            s -= 0.3
+        # Prefer moderate length (not too short, not too long)
+        if 80 <= len(text) <= 320:
+            s += 0.4
+        elif len(text) < 40:
+            s -= 0.2
+        return s
+
+    def _bucket(text: str) -> str:
+        tl = text.lower()
+        if any(k in tl for k in ("mechanism", "pathway", "signaling", "mtor", "autophagy", "senescence")):
+            return "Mechanisms"
+        if any(k in tl for k in ("intervention", "treatment", "therapy", "protocol", "dose", "mg", "drug", "compound")):
+            return "Interventions"
+        if any(k in tl for k in ("biomarker", "marker", "crp", "ldl", "a1c", "igf", "epigenetic")):
+            return "Biomarkers"
+        return "Other"
 
     total_cycles = len(history)
+    run_id = str(history[-1].get("run_id") or history[0].get("run_id") or "")
+    goal = _normalize_text(history[-1].get("goal") or history[0].get("goal") or "").strip()
     roles = sorted({str(e.get("role", "agent")) for e in history})
-    domains = sorted({str(e.get("domain", "general")) for e in history})
+    domains = sorted({str(e.get("domain", "general")) for e in history if e.get("domain") is not None})
 
+    # Runtime
     timestamps: List[datetime] = []
     for e in history:
         ts = e.get("timestamp")
@@ -2071,7 +2174,6 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
             dt = _parse_timestamp_str(ts)
             if dt is not None:
                 timestamps.append(dt)
-
     runtime_text = "Runtime not available"
     if len(timestamps) >= 2:
         start = min(timestamps)
@@ -2080,8 +2182,9 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
         total_seconds = int(delta.total_seconds())
         hours = total_seconds // 3600
         minutes = (total_seconds % 3600) // 60
-        runtime_text = f"Approx runtime: {hours} hours {minutes} minutes (from first to last cycle)."
+        runtime_text = f"Approx runtime: {hours}h {minutes}m (first to last cycle timestamp)."
 
+    # RYE summary
     rye_vals: List[float] = []
     for e in history:
         v = e.get("RYE")
@@ -2089,62 +2192,152 @@ def build_outcome_summary(history: List[Dict[str, Any]]) -> str:
             v = e.get("rye")
         if isinstance(v, (int, float)):
             rye_vals.append(float(v))
-
-    rye_text = "RYE statistics not available."
+    rye_summary = "RYE not available"
     if rye_vals:
         avg_rye = sum(rye_vals) / len(rye_vals)
-        rye_text = (
-            "RYE statistics:\n"
-            f"- Min RYE: {min(rye_vals):.3f}\n"
-            f"- Max RYE: {max(rye_vals):.3f}\n"
-            f"- Average RYE: {avg_rye:.3f}"
-        )
+        rye_summary = f"Min {min(rye_vals):.3f} Â· Max {max(rye_vals):.3f} Â· Avg {avg_rye:.3f}"
 
-    findings: List[str] = []
-    for e in history:
-        for n in (e.get("notes_added") or []):
-            findings.append(str(n))
-        for r in e.get("repairs") or []:
-            findings.append(str(r))
-        for h in e.get("hypotheses") or []:
-            txt = h.get("text", "") if isinstance(h, dict) else str(h)
-            if txt:
-                findings.append(txt)
+    # Citations (if not supplied, attempt extraction from history)
+    if citations is None:
+        try:
+            citations = extract_unique_citations_from_history(history)
+        except Exception:
+            citations = []
 
+    # Candidate findings from history + optional discovery log
+    candidates: List[Tuple[float, str, int]] = []
     seen: Set[str] = set()
-    unique_findings: List[str] = []
-    for f in findings:
-        f_clean = f.strip()
-        if not f_clean:
-            continue
-        if f_clean in seen:
-            continue
-        seen.add(f_clean)
-        unique_findings.append(f_clean)
-        if len(unique_findings) >= 80:
-            break
 
+    def _add_candidate(raw: Any, cycle_idx: int) -> None:
+        text = _clean_line(raw)
+        if _is_noise(text):
+            return
+        key = text.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append((_score(text, cycle_idx), text, cycle_idx))
+
+    for idx, e in enumerate(history):
+        # Notes / repairs / hypotheses
+        for n in (e.get("notes_added") or []):
+            _add_candidate(n, idx)
+        for r in (e.get("repairs") or []):
+            _add_candidate(r, idx)
+        for h in (e.get("hypotheses") or []):
+            txt = h.get("text", "") if isinstance(h, dict) else h
+            _add_candidate(txt, idx)
+        # Some builds include structured discoveries embedded per cycle
+        for dk in ("discoveries", "candidate_discoveries", "discovery_events"):
+            for d in (e.get(dk) or []):
+                if isinstance(d, dict):
+                    _add_candidate(d.get("title") or d.get("label") or d.get("text") or "", idx)
+                    _add_candidate(d.get("description") or d.get("summary") or "", idx)
+                else:
+                    _add_candidate(d, idx)
+
+    if discoveries:
+        # Discovery log items tend to be higher signal; add with a small bonus
+        for d in discoveries:
+            if not isinstance(d, dict):
+                continue
+            title = _clean_line(d.get("title") or d.get("label") or d.get("text") or "")
+            desc = _clean_line(d.get("description") or d.get("summary") or "")
+            if title:
+                _add_candidate(title, total_cycles - 1)
+            if desc:
+                _add_candidate(desc, total_cycles - 1)
+
+    # Select top findings
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    top = candidates[:16]
+    buckets: Dict[str, List[str]] = {"Mechanisms": [], "Interventions": [], "Biomarkers": [], "Other": []}
+    for _, text, _idx in top:
+        buckets[_bucket(text)].append(text)
+
+    # Sources: compact list (top-N)
+    sources: List[Dict[str, Any]] = []
+    if isinstance(citations, list):
+        for c in citations:
+            if isinstance(c, dict):
+                sources.append(c)
+
+    def _format_source(src: Dict[str, Any]) -> str:
+        title = _normalize_text(src.get("title") or src.get("source") or src.get("provider") or "").strip()
+        url = _normalize_text(src.get("url") or "").strip()
+        if title and url:
+            return f"{title} ({url})"
+        return title or url or "(unknown source)"
+
+    # Basic keyword-to-source linking (best-effort)
+    def _inline_refs(text: str) -> str:
+        if not sources:
+            return ""
+        tl = text.lower()
+        words = [w for w in re.findall(r"[a-zA-Z]{6,}", tl)][:6]
+        hit: List[int] = []
+        for i, s in enumerate(sources[:40], start=1):
+            st = _normalize_text(s.get("title") or "").lower()
+            if any(w in st for w in words):
+                hit.append(i)
+            if len(hit) >= 2:
+                break
+        return f" [{' ,'.join(str(x) for x in hit)}]".replace(" ,", ",") if hit else ""
+
+    # Render markdown
     lines: List[str] = []
-    lines.append("# Outcome summary\n")
+    lines.append("# Autonomous research report\n")
     lines.append("## Run overview\n")
+    if run_id:
+        lines.append(f"- Run ID: `{run_id}`")
+    if domains:
+        lines.append(f"- Domain: {', '.join(domains)}")
     lines.append(f"- Total cycles: {total_cycles}")
-    lines.append(f"- Roles used: {', '.join(roles) if roles else 'None recorded'}")
-    lines.append(f"- Domains used: {', '.join(domains) if domains else 'None recorded'}")
-    lines.append(f"- {runtime_text}\n")
-    lines.append("## RYE and efficiency\n")
-    lines.append(rye_text + "\n")
-    lines.append("## Candidate findings\n")
-    if not unique_findings:
-        lines.append("No candidate findings extracted from notes, repairs, or hypotheses.")
+    lines.append(f"- Runtime: {runtime_text}")
+    lines.append(f"- RYE: {rye_summary}")
+    lines.append(f"- Roles: {len(roles)} unique (top: {', '.join(roles[:10])}{' ...' if len(roles)>10 else ''})\n")
+
+    if goal:
+        lines.append("## Research goal\n")
+        lines.append(textwrap.fill(goal, width=100) + "\n")
+
+    # Abstract: build from the best items
+    lines.append("## Abstract\n")
+    abstract_bits: List[str] = []
+    if buckets["Interventions"]:
+        abstract_bits.append("Key candidate interventions and protocols were identified and distilled from the run outputs.")
+    if buckets["Mechanisms"]:
+        abstract_bits.append("Mechanistic hypotheses were extracted and grouped into coherent themes for follow-up validation.")
+    if sources:
+        abstract_bits.append(f"The evidence base includes {len(sources)} unique sources (PubMed/Semantic Scholar/web/PDF where enabled).")
+    if not abstract_bits:
+        abstract_bits.append("This report summarizes the highest-signal outputs from the run and lists supporting sources.")
+    lines.append(" ".join(abstract_bits) + "\n")
+
+    lines.append("## Key findings\n")
+    for section_name in ("Interventions", "Mechanisms", "Biomarkers", "Other"):
+        items = buckets.get(section_name) or []
+        if not items:
+            continue
+        lines.append(f"### {section_name}\n")
+        for item in items[:8]:
+            trimmed = item if len(item) <= 420 else item[:417] + "..."
+            lines.append(f"- {trimmed}{_inline_refs(trimmed)}")
+        lines.append("")
+
+    lines.append("## Evidence base\n")
+    if not sources:
+        lines.append("No citations were captured in the history for this run.")
     else:
-        lines.append(
-            "Below are candidate interventions, mechanisms, treatments, or key ideas extracted "
-            "from notes, repairs, and hypotheses. This is a raw list to review, not medical advice."
-        )
-        for f in unique_findings:
-            if len(f) > 400:
-                f = f[:400] + "..."
-            lines.append(f"- {f}")
+        lines.append(f"Unique sources captured: **{len(sources)}**\n")
+        for i, src in enumerate(sources[:25], start=1):
+            lines.append(f"{i}. {_format_source(src)}")
+        if len(sources) > 25:
+            lines.append(f"... and {len(sources) - 25} more sources not shown")
+
+    lines.append("\n## Limitations and next steps\n")
+    lines.append("- Automated synthesis can contain errors; validate high-impact claims with primary sources.")
+    lines.append("- Consider a longer run (15â20 cycles) and enable cross-validation (Tavily/CrossRef) for stronger citation closure.")
 
     return "\n".join(lines)
 
@@ -3861,18 +4054,12 @@ def render_topbar(
     last_age = _maybe_float(pv.get("last_event_age_s"))
     if last_age is not None:
         detail_parts.append(f"Last event {_humanize_seconds(last_age)}")
-    # NOTE: Previously we displayed shortâterm pulse metrics (1âminute and 5âminute
-    # event counts) in the top bar. These metrics created noise in the UI and
-    # provided little insight, so they have been removed. If you need to
-    # monitor shortâterm events, please refer to the detailed worker logs.
-    # The following lines intentionally omit appending the 1m/5m counts to
-    # detail_parts.
-    # ev1m = _safe_int(pv.get("events_last_60s"), None)
-    # ev5m = _safe_int(pv.get("events_last_5m"), None)
-    # if isinstance(ev1m, int):
-    #     detail_parts.append(f"1m {ev1m}")
-    # if isinstance(ev5m, int):
-    #     detail_parts.append(f"5m {ev5m}")
+    ev1m = _safe_int(pv.get("events_last_60s"), None)
+    ev5m = _safe_int(pv.get("events_last_5m"), None)
+    if isinstance(ev1m, int):
+        detail_parts.append(f"1m {ev1m}")
+    if isinstance(ev5m, int):
+        detail_parts.append(f"5m {ev5m}")
     detail_txt = " | ".join(detail_parts)
 
     # Sanitize dynamic text to avoid stray mojibake
@@ -8105,9 +8292,24 @@ def main() -> None:
                 st.info("No cycles logged yet, nothing to report.")
             else:
                 if used_fallback_history or not callable(generate_report):
-                    report_md = build_outcome_summary(history_for_reports)
+                    report_md = build_outcome_summary(
+                        history_for_reports,
+                        discoveries=discoveries_for_reports,
+                    )
                 else:
-                    report_md = generate_report(memory_store=memory, goal=None)  # type: ignore[misc]
+                    # Prefer the publishable (high-signal) report if available.
+                    if callable(generate_publishable_report):
+                        report_md = generate_publishable_report(
+                            memory_store=memory,
+                            goal=None,
+                            run_id=active_run_id,
+                        )  # type: ignore[misc]
+                    else:
+                        report_md = generate_report(
+                            memory_store=memory,
+                            goal=None,
+                            run_id=active_run_id,
+                        )  # type: ignore[misc]
                 _present_report(report_md, "Full history report preview")
                 st.download_button("Download full report (Markdown)", data=report_md, file_name="autonomous_research_report.md", mime="text/markdown")
 
@@ -8128,7 +8330,12 @@ def main() -> None:
                 st.info("No cycles logged yet, Option C learning report is empty.")
             else:
                 parts: List[str] = []
-                parts.append(build_outcome_summary(history_for_reports))
+                parts.append(
+                    build_outcome_summary(
+                        history_for_reports,
+                        discoveries=discoveries_for_reports,
+                    )
+                )
                 parts.append("\n\n---\n\n")
                 parts.append(build_breakthrough_report(history_for_reports, discoveries_for_reports))
 
