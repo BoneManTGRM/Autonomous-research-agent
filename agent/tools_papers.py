@@ -20,6 +20,7 @@ from typing import Dict, List, Tuple, Optional
 
 import requests
 from PyPDF2 import PdfReader
+import re
 
 
 class PaperTool:
@@ -121,17 +122,39 @@ class PaperTool:
         swarm_id: Optional[str] = None,
     ) -> List[Dict[str, str]]:
         """Swarm-aware Semantic Scholar search."""
+        # Normalize and shrink the query to avoid sending full prompts to the API.
+        def _shrink_query(q: str, max_chars: int = 240) -> str:
+            q = (q or "").strip()
+            if not q:
+                return ""
+            # Drop code blocks which sometimes appear in prompts
+            q = re.sub(r"```.*?```", " ", q, flags=re.S)
+            # If the prompt contains explicit sections like TOPIC:, Query:, Goal: extract trailing part
+            for key in ("TOPIC:", "Topic:", "QUERY:", "Query:", "GOAL:", "Goal:"):
+                m = re.search(re.escape(key) + r"\s*(.+)", q)
+                if m:
+                    q = m.group(1).strip()
+                    break
+            # Collapse whitespace
+            q = re.sub(r"\s+", " ", q).strip()
+            # Truncate to max_chars and cut on word boundary
+            if len(q) > max_chars:
+                q = q[:max_chars]
+                if " " in q:
+                    q = q.rsplit(" ", 1)[0].strip() or q.strip()
+            return q
 
-        if not query:
+        clean_query = _shrink_query(query)
+        if not clean_query:
             return []
 
-        cache_key = (query, limit)
+        cache_key = (clean_query, limit)
         if cache_key in self._sem_cache:
             return self._tag_sem_results(self._sem_cache[cache_key], agent_role, swarm_id)
 
         url = self.SEM_URL
         params = {
-            "query": query,
+            "query": clean_query,
             "limit": limit,
             "fields": "title,url,year,venue,abstract"
         }
@@ -176,6 +199,10 @@ class PaperTool:
                     "snippet": snippet,
                     "year": str(year),
                     "venue": str(venue),
+                    # Provide a source tag for downstream normalization.  We
+                    # deliberately omit source on fallback entries to avoid
+                    # counting stub results as credible.
+                    "source": "semantic_scholar",
                 }
             )
 
@@ -229,18 +256,18 @@ class PaperTool:
                 rr["agent_role"] = agent_role
             if swarm_id:
                 rr["swarm_id"] = swarm_id
-            # Mark credible Semantic Scholar results with a source tag.
-            # We avoid tagging stub entries (titles beginning with "[STUB]" or
-            # entries that explicitly note no results) so that citation
-            # normalization can filter them out as untrusted.  Titles may
-            # include variations like "No Semantic Scholar results found".
+            # Preserve or attach source tag for credible results.  Skip
+            # adding a source for stub or no-result entries so citation
+            # normalization can filter them appropriately.
             title_val = rr.get("title") or ""
             try:
                 title_low = title_val.strip().lower()
             except Exception:
                 title_low = ""
-            if title_low and not title_low.startswith("[stub]") and "no semantic scholar" not in title_low:
-                rr["source"] = "semantic_scholar"
+            if "source" not in rr:
+                # Only tag if it's not a stub and looks like a real title
+                if title_low and not title_low.startswith("[stub]") and "no semantic scholar" not in title_low:
+                    rr["source"] = "semantic_scholar"
             final.append(rr)
 
         return final
