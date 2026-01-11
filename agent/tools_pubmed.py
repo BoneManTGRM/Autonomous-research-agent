@@ -22,6 +22,8 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
+import re
+
 import requests
 
 
@@ -104,6 +106,12 @@ class PubMedTool:
         # ------------------------------------------------------------------
         # Collapse newlines and excessive whitespace
         sanitized = " ".join(str(query).strip().split())
+        # Extract main query from structured prompts (e.g., TOPIC: ...)
+        for key in ("TOPIC:", "Topic:", "QUERY:", "Query:", "GOAL:", "Goal:"):
+            idx = sanitized.lower().find(key.lower())
+            if idx != -1:
+                sanitized = sanitized[idx + len(key):].strip()
+                break
         # Truncate to a reasonable length to avoid hitting URL limits or
         # triggering PubMed errors (200 chars is often sufficient)
         sanitized = sanitized[:200]
@@ -131,12 +139,43 @@ class PubMedTool:
             result_dict = data2.get("result", {})
 
             results: List[Dict[str, str]] = []
+
             for pmid in id_list:
-                rec: Dict[str, Any] = result_dict.get(pmid, {})
+                rec: Dict[str, Any] = result_dict.get(str(pmid), {})
+                # Title (fall back to placeholder if missing)
                 title = rec.get("title", "") or "No title"
 
-                # Use a compact snippet field: first author or source journal
-                snippet = rec.get("sortfirstauthor", "") or rec.get("source", "") or ""
+                # Extract publication metadata
+                authors_val = rec.get("sortfirstauthor") or ""
+                # Fallback: if rec.get("authors") is a list of dicts with 'name'
+                if not authors_val:
+                    auths = rec.get("authors")
+                    try:
+                        if isinstance(auths, list) and auths:
+                            first_author = auths[0]
+                            if isinstance(first_author, dict):
+                                authors_val = first_author.get("name", "") or ""
+                    except Exception:
+                        pass
+                venue_val = rec.get("fulljournalname") or rec.get("source") or ""
+                pubdate = rec.get("pubdate", "") or ""
+                year_val = ""
+                if pubdate:
+                    # Extract first 4-digit year from pubdate
+                    m = re.search(r"(\d{4})", str(pubdate))
+                    if m:
+                        year_val = m.group(1)
+
+                # Build a richer snippet: include author, year, venue
+                snippet_parts: List[str] = []
+                if authors_val:
+                    snippet_parts.append(str(authors_val))
+                if year_val:
+                    snippet_parts.append(str(year_val))
+                if venue_val:
+                    snippet_parts.append(str(venue_val))
+                snippet = " | ".join(snippet_parts)
+
                 url = f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
 
                 results.append(
@@ -146,6 +185,9 @@ class PubMedTool:
                         "url": str(url),
                         "source": "pubmed",
                         "pmid": str(pmid),
+                        "year": year_val,
+                        "venue": venue_val,
+                        "authors": authors_val,
                     }
                 )
 
