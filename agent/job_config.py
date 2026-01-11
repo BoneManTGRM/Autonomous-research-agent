@@ -53,27 +53,29 @@ class JobConfig:
     goal: str = ""
     run_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
-    # Extended configuration options for autonomous runs
-    # Enable convergence check after a minimum number of cycles
-    convergence_check: bool = True
-    # Control critic verbosity (e.g. 'low', 'medium', 'high')
-    critic_verbosity: str = "low"
-    # Auto resolve TODO items during runs
-    handle_unresolved_todos: bool = True
-    # Method used to resolve TODOs
-    todo_resolution_method: str = "recursive search + integrator handoff"
-    # Explorer tool batching and retries
+    # --- Quality + long run tuning knobs (all optional) ---
+    # These fields are read by RunConfig.from_job_config via the `extra` mapping
+    # and propagated down into CoreAgent/TGRM when RunManager merges RunConfig.extra.
+    convergence_check: bool = False
+    critic_verbosity: str = "standard"  # "low" | "standard" | "high"
+    handle_unresolved_todos: bool = False
+    todo_resolution_method: str = "targeted_research"
+
+    # Explorer / evidence expansion controls
     explorer_batch_size: int = 5
     semantic_scholar_retries: int = 3
-    # External validation toggles
+
+    # Data validation switches (tools must support these; harmless if ignored)
     tavily_enabled: bool = True
-    crossref_validation: bool = True
-    # Consensus voting parameters
+    crossref_validation: bool = False
+
+    # Consensus / synthesis controls (future-facing; ignored unless supported)
     consensus_check_interval: int = 3
     consensus_threshold: float = 0.65
-    # Snapshotting and visualization
-    autosave_snapshots: bool = True
-    visualize_concept_graph: bool = True
+
+    # QoL / observability
+    autosave_snapshots: bool = False
+    visualize_concept_graph: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
