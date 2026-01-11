@@ -31,6 +31,16 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+# Bring in citation normalization from citation_utils to filter low-quality
+# or placeholder citations.  This avoids counting stubbed results in
+# citation analysis.
+try:
+    from .citation_utils import normalize_citation  # type: ignore
+except Exception:
+    # Fallback: define a no-op normalize_citation if import fails.
+    def normalize_citation(x: Any) -> Optional[Dict[str, Any]]:  # type: ignore
+        return x if isinstance(x, dict) else None
+
 # Optional event stream integration (append-only JSONL via agent/event_log.py).
 try:  # pragma: no cover
     from .event_log import log_event as _log_event  # type: ignore
@@ -293,8 +303,18 @@ class VerificationPipeline:
         history: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
         """Compute citation quality and redundancy profile."""
-        citations_list = self._normalize_citation_list(citations)
-        total = len(citations_list)
+        # Normalize and filter citations via citation_utils.normalize_citation.
+        raw_list = self._normalize_citation_list(citations)
+        normalized: List[Dict[str, Any]] = []
+        for c in raw_list:
+            try:
+                nc = normalize_citation(c)  # type: ignore[misc]
+            except Exception:
+                nc = None
+            if nc:
+                normalized.append(nc)
+
+        total = len(normalized)
         if total == 0:
             return {
                 "total": 0,
@@ -307,10 +327,10 @@ class VerificationPipeline:
             }
 
         # Unique sources and urls
-        source_pairs = set()
-        urls = set()
-        missing_urls = 0
-        for c in citations_list:
+        source_pairs: set = set()
+        urls: set = set()
+        missing_urls: int = 0
+        for c in normalized:
             src = c.get("source")
             url = c.get("url")
             source_pairs.add((src, url))
@@ -327,12 +347,18 @@ class VerificationPipeline:
         if unique_urls > 0:
             redundancy_ratio = max(0.0, 1.0 - (unique_urls / float(total)))
 
-        # Overlap with historical urls
-        hist_urls = set()
+        # Overlap with historical urls (normalize and filter history citations)
+        hist_urls: set = set()
         for row in history:
-            row_cites = self._normalize_citation_list(row.get("citations", []))
-            for c in row_cites:
-                url = c.get("url")
+            row_cites_raw = self._normalize_citation_list(row.get("citations", []))
+            for rc in row_cites_raw:
+                try:
+                    nc = normalize_citation(rc)  # type: ignore[misc]
+                except Exception:
+                    nc = None
+                if not nc:
+                    continue
+                url = nc.get("url")
                 if url:
                     hist_urls.add(url)
 
@@ -568,6 +594,18 @@ class VerificationPipeline:
             if overlap is not None and overlap > 0.8:
                 cite_term *= 0.85
                 flags.append("historical_citation_reuse")
+            # Additional penalty for missing URLs: if citations lack stable URLs they
+            # are harder to verify and often lower quality.  Apply a penalty
+            # proportional to the fraction of missing URLs (up to 50% reduction).
+            missing_urls = citation_profile.get("missing_urls") or 0
+            if missing_urls and total_cites > 0:
+                try:
+                    ratio = float(missing_urls) / float(total_cites)
+                except Exception:
+                    ratio = 0.0
+                penalty = min(0.5, max(0.0, ratio))
+                cite_term *= max(0.0, 1.0 - penalty)
+                flags.append("missing_citation_urls")
 
         cite_term = max(0.0, min(1.0, cite_term))
 
