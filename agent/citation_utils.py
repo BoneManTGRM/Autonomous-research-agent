@@ -317,6 +317,41 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
     score = _normalize_score(meta)
 
     # -----------------------------------------------------------------
+    # Additional stub/placeholder filtering
+    #
+    # Drop citations that look like stubbed results, no-result notices, or
+    # provider error messages.  These often come from API failures or
+    # empty search hits (e.g. "No Semantic Scholar results found" or
+    # "[STUB] PubMed error...").  Keeping them in the bibliography
+    # dilutes report quality and lowers verification scores.  We examine
+    # the normalized title and snippet (lowercased) for telltale markers.
+    try:
+        t_low = (title or "").strip().lower()
+    except Exception:
+        t_low = ""
+    try:
+        s_low = (snippet or "").strip().lower()
+    except Exception:
+        s_low = ""
+
+    # Patterns indicating non-substantive or error citations
+    if t_low:
+        if t_low.startswith("[stub]"):
+            return None
+        if t_low.startswith("no title"):
+            return None
+        if "no results" in t_low:
+            return None
+        if "no semantic scholar" in t_low:
+            return None
+        if "error" in t_low and ("semantic scholar" in t_low or "pubmed" in t_low or "api" in t_low):
+            return None
+    if s_low:
+        if "semantic scholar error" in s_low or "pubmed request failed" in s_low:
+            return None
+
+
+    # -----------------------------------------------------------------
     # Credibility filtering
     #
     # Only include citations from trusted sources or those with a DOI.  The
