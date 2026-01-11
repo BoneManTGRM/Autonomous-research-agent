@@ -49,6 +49,7 @@ except Exception:  # pragma: no cover
     except Exception:
         _log_event = None  # type: ignore
 import statistics
+import re  # Used for simple keyword extraction in support ratio computation
 from datetime import datetime
 
 
@@ -173,6 +174,19 @@ class VerificationPipeline:
             history=history,
             domain=domain,
         )
+
+        # 3a) Compute hypothesis support ratio: fraction of hypotheses with at least
+        # one citation whose title or snippet contains any keyword from the
+        # hypothesis text.  This helps detect placeholder hypotheses or
+        # unsupported claims.  A support_ratio of 1.0 indicates every
+        # hypothesis has at least one matching citation; 0.0 indicates none.
+        try:
+            cites_for_support = self._normalize_citation_list(citations)
+            support_ratio = self._compute_support_ratio(hypotheses, cites_for_support)
+        except Exception:
+            support_ratio = None
+        if isinstance(hypothesis_profile, dict):
+            hypothesis_profile["support_ratio"] = support_ratio
 
         # 4) Motifs from hypotheses, citations, and candidate interventions
         motifs = self._build_motifs(
@@ -533,6 +547,77 @@ class VerificationPipeline:
 
         return flags
 
+    # ------------------------------------------------------------------
+    # Hypothesis support computation
+    # ------------------------------------------------------------------
+    def _compute_support_ratio(
+        self,
+        hypotheses: List[Dict[str, Any]],
+        citations_list: List[Dict[str, Any]],
+        *,
+        min_keyword_len: int = 3,
+    ) -> float:
+        """
+        Estimate what fraction of hypotheses have at least one supporting citation.
+
+        A hypothesis is considered supported if any keyword extracted from its
+        title or text appears in the title or snippet of a citation.
+
+        Parameters
+        ----------
+        hypotheses:
+            List of hypothesis dicts (with 'title' or 'text').
+        citations_list:
+            List of normalized citation dicts (from _normalize_citation_list).
+        min_keyword_len:
+            Minimum length of a token to be considered a keyword (default 3).
+
+        Returns
+        -------
+        float
+            Fraction of hypotheses with at least one supporting citation.
+            Returns 1.0 when there are no hypotheses. Returns 0.0 when
+            hypotheses exist but citations_list is empty.
+        """
+        if not hypotheses:
+            return 1.0
+        if not citations_list:
+            return 0.0
+
+        def extract_keywords(text: str) -> List[str]:
+            # Lowercase and split on whitespace and punctuation, skipping short tokens
+            raw_tokens = re.split(r"[\s,;:\.\(\)\[\]\{\}\-\_\/]+", text.lower())
+            return [tok for tok in raw_tokens if len(tok) >= min_keyword_len]
+
+        supported_count = 0
+        for h in hypotheses:
+            try:
+                text = (h.get("title") or h.get("text") or "").strip()
+            except Exception:
+                text = ""
+            if not text:
+                continue
+            keywords = extract_keywords(text)
+            if not keywords:
+                continue
+            supported = False
+            for cite in citations_list:
+                try:
+                    ct = (cite.get("title") or "").lower()
+                    cs = (cite.get("snippet") or "").lower()
+                except Exception:
+                    ct = ""
+                    cs = ""
+                for kw in keywords:
+                    if kw and (kw in ct or kw in cs):
+                        supported = True
+                        break
+                if supported:
+                    break
+            if supported:
+                supported_count += 1
+        return supported_count / float(len(hypotheses))
+
     def _same_target(self, a: str, b: str) -> bool:
         """Heuristic target matching."""
         a_low = a.lower()
@@ -669,10 +754,11 @@ class VerificationPipeline:
                     flags.append("low_peer_metadata")
         cite_term = max(0.0, min(1.0, cite_term))
 
-        # Hypothesis structure
+        # Hypothesis structure and support
         hyp_count = hypothesis_profile.get("count") or 0
         focused = bool(hypothesis_profile.get("focused"))
         conflict_flags = hypothesis_profile.get("conflict_flags") or []
+        support_ratio = hypothesis_profile.get("support_ratio")
         hyp_term = 0.0
 
         if hyp_count == 0:
@@ -689,6 +775,26 @@ class VerificationPipeline:
             if conflict_flags:
                 hyp_term *= 0.7
                 flags.extend(conflict_flags)
+
+        # Evidence support penalties: degrade cite_term and hyp_term when
+        # hypotheses are poorly supported by citations.  A low support_ratio
+        # indicates that many hypotheses do not align with any citation
+        # metadata (title or snippet).  This helps flag runs that generate
+        # speculative or off-topic statements.
+        if support_ratio is not None and hyp_count > 0 and total_cites > 0:
+            try:
+                sr = float(support_ratio)
+            except Exception:
+                sr = None
+            if sr is not None:
+                if sr < 0.25:
+                    cite_term *= 0.7
+                    hyp_term *= 0.5
+                    flags.append("unsupported_hypotheses")
+                elif sr < 0.5:
+                    cite_term *= 0.85
+                    hyp_term *= 0.8
+                    flags.append("weak_hypothesis_evidence")
 
         hyp_term = max(0.0, min(1.0, hyp_term))
 
