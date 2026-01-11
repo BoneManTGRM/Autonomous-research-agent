@@ -430,6 +430,17 @@ def normalize_text(text: str) -> str:
     # Extra micro-fixes for a few stubborn sequences we sometimes see after partial repairs.
     if "Ã¢â¬Â¢" in best:
         best = best.replace("Ã¢â¬Â¢", "â¢")
+    # Normalize mis-decoded middle dot sequences.  If the original text contained
+    # a Unicode middle dot (U+00B7) and it was incorrectly decoded as cp1252/latin1,
+    # it may appear as the two-character sequence "ÃÂ·".  Replace that with a
+    # plain middle dot first, then convert all remaining middle dots to hyphens.
+    if "ÃÂ·" in best:
+        best = best.replace("ÃÂ·", "Â·")
+    # Convert middle dots (Â·) to ASCII hyphens to avoid re-encoding issues in
+    # downstream renderers.  Hyphens are safer for transport across UTF-8/latin1
+    # boundaries and avoid further mojibake.
+    if "Â·" in best:
+        best = best.replace("Â·", "-")
     return best
 
 
