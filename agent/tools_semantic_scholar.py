@@ -32,8 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 SEMANTIC_SCHOLAR_API_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
-# Include venue field to obtain journal/conference names for filtering peer-reviewed works.
-DEFAULT_FIELDS = "title,abstract,url,citationCount,year,venue"
+DEFAULT_FIELDS = "title,abstract,url,citationCount,year"
 
 
 def _sha256(text: str) -> str:
@@ -277,53 +276,15 @@ class SemanticScholarTool:
         data = resp.json()
         papers = data.get("data", []) or []
 
-        # Build raw results with year and venue fields when available
-        raw_results: List[Dict[str, Any]] = []
+        results: List[Dict[str, Any]] = []
         for p in papers:
             title = (p.get("title") or "").strip()
-            if not title:
-                continue
             url = (p.get("url") or "").strip()
             abstract = (p.get("abstract") or "").strip()
             snippet = abstract[:800] if abstract else ""
-            year_val: Optional[str] = None
-            # Semantic Scholar may provide 'year' as int; normalize to str
-            if "year" in p and p.get("year"):
-                try:
-                    year_val = str(p.get("year"))
-                except Exception:
-                    year_val = None
-            venue_val: Optional[str] = None
-            # The API may return either 'venue' or 'journal' as the publication venue
-            if p.get("venue"):
-                venue_val = str(p.get("venue")).strip()
-            elif p.get("journal"):
-                venue_val = str(p.get("journal")).strip()
-
-            raw_results.append(
-                {
-                    "title": title,
-                    "url": url,
-                    "snippet": snippet,
-                    "year": year_val or "",
-                    "venue": venue_val or "",
-                }
-            )
-
-        # Filter out results lacking peer-reviewed metadata or from preprint sources
-        filtered: List[Dict[str, Any]] = []
-        preprint_terms = ("arxiv", "biorxiv", "bioRxiv", "medrxiv", "ssrn", "preprint")
-        for r in raw_results:
-            v = (r.get("venue") or "").lower()
-            y = r.get("year") or ""
-            # Require both year and venue
-            if not y or not v:
-                continue
-            if any(term in v for term in preprint_terms):
-                continue
-            filtered.append(r)
-
-        return filtered if filtered else raw_results
+            if title:
+                results.append({"title": title, "url": url, "snippet": snippet})
+        return results
 
     def search(
         self,
