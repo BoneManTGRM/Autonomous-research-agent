@@ -615,6 +615,14 @@ def merge_citation_lists(
     """
     norm_primary = normalize_citation_list(primary or [])
     norm_secondary = normalize_citation_list(secondary or [])
+    # Sort citations by descending score to prioritize higher quality sources.
+    def _score_key(c: Dict[str, Any]) -> float:
+        try:
+            return float(c.get("score") or 0.0)
+        except Exception:
+            return 0.0
+    norm_primary.sort(key=_score_key, reverse=True)
+    norm_secondary.sort(key=_score_key, reverse=True)
 
     seen = set()
     merged: List[Dict[str, Any]] = []
@@ -692,6 +700,13 @@ def build_bibliography_markdown(
         return "No citations recorded."
 
     norm = normalize_citation_list(citations)
+    # Sort by descending score so that higher quality citations are listed first.
+    def _score_key(c: Dict[str, Any]) -> float:
+        try:
+            return float(c.get("score") or 0.0)
+        except Exception:
+            return 0.0
+    norm.sort(key=_score_key, reverse=True)
     # Simple dedup for safety
     seen = set()
     unique: List[Dict[str, Any]] = []
