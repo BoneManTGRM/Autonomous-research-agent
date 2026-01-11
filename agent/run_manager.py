@@ -314,6 +314,11 @@ class RunManager:
     ) -> CoreAgent:
         """Create a CoreAgent configured for a given role and run."""
         cfg = dict(self.base_config)
+        # New: propagate any extra job config fields down into the CoreAgent/TGRM
+        # loop. This lets you add knobs (e.g., semantic_scholar_retries,
+        # handle_unresolved_todos, etc.) without needing to edit the engine
+        # worker and run manager every time.
+        cfg.update(run_config.extra or {})
         cfg.update(extra_config or {})
         cfg.setdefault("role", role)
         cfg.setdefault("domain", run_config.domain)
