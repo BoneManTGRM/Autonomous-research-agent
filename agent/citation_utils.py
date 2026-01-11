@@ -136,8 +136,7 @@ def _normalize_author_list(value: Any) -> Optional[str]:
 
 def _normalize_year(meta: Dict[str, Any]) -> Optional[str]:
     """Try to extract a publication year from any plausible field."""
-    # Include 'pubdate' used by PubMed summaries
-    for key in ("year", "publication_year", "pub_year", "date", "published", "pubdate"):
+    for key in ("year", "publication_year", "pub_year", "date", "published"):
         val = meta.get(key)
         if isinstance(val, int):
             if 1800 <= val <= 2100:
@@ -317,6 +316,40 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
     snippet = _normalize_snippet(meta)
     score = _normalize_score(meta)
 
+    # -----------------------------------------------------------------
+    # Credibility filtering
+    #
+    # Only include citations from trusted sources or those with a DOI.  The
+    # original implementation accepted anything with a title or URL which
+    # resulted in mixedâquality sources leaking into reports.  To improve
+    # citation quality and relevance we drop entries from unknown sources
+    # unless a DOI is present.  Known credible sources include:
+    #   - pubmed, semantic_scholar, tavily (scientific search)
+    #   - papers (internal PDF ingestion)
+    #   - file/sandbox/pdf (local files)
+    #
+    # Any citation coming from a generic web search without a DOI is
+    # discarded.  This prevents lowâquality blogs or anonymous pages from
+    # diluting the bibliography.
+
+    def _is_credible_source(src: str) -> bool:
+        if not src:
+            return False
+        src_l = src.lower()
+        credible = {
+            "pubmed",
+            "semantic_scholar",
+            "papers",
+            "file",
+            "sandbox",
+            "pdf",
+            "tavily",
+        }
+        # Accept Tavily only if the caller wants general search.  The RYE
+        # pipeline filters these further during verification.  Without a
+        # DOI we mark Tavily as less credible and will drop below.
+        return src_l in credible
+
     # Drop tool/API error messages that can accidentally be recorded as citations.
     # (Common when a provider quota is exceeded, e.g. Tavily.)
     try:
@@ -342,20 +375,13 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
         if generic_api_err:
             return None
 
-    # Additional filters to drop stubbed or error results from upstream tools.
-    # We treat entries with titles or snippets containing '[stub]' or 'error' as non-citations.
-    try:
-        tclean = (title or "").strip().lower() if 'title' in locals() else ""
-        sclean = (snippet or "").strip().lower() if 'snippet' in locals() else ""
-    except Exception:
-        tclean = ""
-        sclean = ""
-    # If both the title and snippet contain stub/error patterns and no URL/DOI, drop.
-    stub_patterns = ["[stub]", "pubmed error", "semantic scholar error", "error for query", "no semantic scholar results", "no results found"]
-    def _has_stub(val: str) -> bool:
-        return any(pat in val for pat in stub_patterns)
-    if (tclean and _has_stub(tclean)) or (sclean and _has_stub(sclean)):
-        if not url and not doi:
+    # Drop untrusted sources without DOI.  This must happen before
+    # constructing the final dict to avoid including lowâquality citations
+    # downstream.  Without this filter, references from random web pages
+    # (source "web" with no DOI) clutter reports and reduce relevance.
+    if not doi:
+        # If the source is not in our credible list, skip it entirely
+        if not _is_credible_source(source):
             return None
 
     # If we still have nothing meaningful, drop it unless there is at least URL or DOI
