@@ -136,7 +136,8 @@ def _normalize_author_list(value: Any) -> Optional[str]:
 
 def _normalize_year(meta: Dict[str, Any]) -> Optional[str]:
     """Try to extract a publication year from any plausible field."""
-    for key in ("year", "publication_year", "pub_year", "date", "published"):
+    # Include 'pubdate' used by PubMed summaries
+    for key in ("year", "publication_year", "pub_year", "date", "published", "pubdate"):
         val = meta.get(key)
         if isinstance(val, int):
             if 1800 <= val <= 2100:
@@ -316,23 +317,6 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
     snippet = _normalize_snippet(meta)
     score = _normalize_score(meta)
 
-    # -------------------------------------------------------------------
-    # Filter out stub or placeholder citations.  Many tool adapters return
-    # placeholder records such as "[STUB] Foo error", "No title", or
-    # "No Semantic Scholar results found" when the upstream search fails.
-    # These placeholders pollute the report and provide no evidence, so
-    # detect them early and drop such entries entirely.  The heuristics
-    # below are conservative: they only drop clearly invalid citations and
-    # preserve genuine records even if they are missing some fields.
-    if title:
-        lt = title.lower().strip()
-        if any(p in lt for p in ["[stub]", "no title", "no semantic scholar results found", "error downloading", "error for", "stub] semantic scholar", "stub] pubmed", "could not ingest", "request failed"]):
-            return None
-    if snippet:
-        ls = snippet.lower().strip()
-        if any(p in ls for p in ["[stub]", "no title", "no semantic scholar results found", "error downloading", "error for", "stub] semantic scholar", "stub] pubmed", "could not ingest", "request failed"]):
-            return None
-
     # Drop tool/API error messages that can accidentally be recorded as citations.
     # (Common when a provider quota is exceeded, e.g. Tavily.)
     try:
@@ -356,6 +340,22 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
         if src_l == "tavily" and "error" in blob:
             return None
         if generic_api_err:
+            return None
+
+    # Additional filters to drop stubbed or error results from upstream tools.
+    # We treat entries with titles or snippets containing '[stub]' or 'error' as non-citations.
+    try:
+        tclean = (title or "").strip().lower() if 'title' in locals() else ""
+        sclean = (snippet or "").strip().lower() if 'snippet' in locals() else ""
+    except Exception:
+        tclean = ""
+        sclean = ""
+    # If both the title and snippet contain stub/error patterns and no URL/DOI, drop.
+    stub_patterns = ["[stub]", "pubmed error", "semantic scholar error", "error for query", "no semantic scholar results", "no results found"]
+    def _has_stub(val: str) -> bool:
+        return any(pat in val for pat in stub_patterns)
+    if (tclean and _has_stub(tclean)) or (sclean and _has_stub(sclean)):
+        if not url and not doi:
             return None
 
     # If we still have nothing meaningful, drop it unless there is at least URL or DOI
