@@ -438,6 +438,21 @@ def normalize_text(text: str) -> str:
         best = best.replace("ÃÂ·", "Â·")
     if "Â·" in best:
         best = best.replace("Â·", "-")
+
+    # Additional micro-fixes for other two-byte mojibake patterns.  In some
+    # citations we observe sequences like "ÃÂ¢" or "ÃÂ¤" which are typically
+    # remnants of mis-decoded UTFâ8 punctuation (for example bullet or dot
+    # characters).  Replace these and their single-character forms with
+    # hyphens to improve readability.  These currency symbols rarely occur
+    # legitimately in citation metadata, so this is a reasonable tradeoff.
+    if "ÃÂ¢" in best:
+        best = best.replace("ÃÂ¢", "-")
+    if "Â¢" in best:
+        best = best.replace("Â¢", "-")
+    if "ÃÂ¤" in best:
+        best = best.replace("ÃÂ¤", "-")
+    if "Â¤" in best:
+        best = best.replace("Â¤", "-")
     return best
 
 
