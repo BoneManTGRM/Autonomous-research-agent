@@ -785,11 +785,69 @@ class TGRMLoop:
         # Per cycle value updated inside run_cycle.
         self.search_energy: float = self.search_energy_base
 
+        # ------------------------------------------------------------------
+        # Tunable knobs (quality + long run stability)
+        # ------------------------------------------------------------------
+        # Explorer batch sizing for citation graph expansion (Semantic Scholar / PubMed).
+        try:
+            self.explorer_batch_size = int(self.config.get("explorer_batch_size", 5))
+        except Exception:
+            self.explorer_batch_size = 5
+        self.explorer_batch_size = max(1, min(self.explorer_batch_size, 50))
+
+        # Retry policy for Semantic Scholar calls (helps avoid mid-cycle stalls).
+        try:
+            self.semantic_scholar_retries = int(self.config.get("semantic_scholar_retries", 3))
+        except Exception:
+            self.semantic_scholar_retries = 3
+        self.semantic_scholar_retries = max(0, min(self.semantic_scholar_retries, 10))
+
+        # When enabled, allow non-research roles (e.g., critic/integrator) to
+        # run low-energy targeted research for TODO/question issues instead of
+        # emitting new TODO markers.
+        self.handle_unresolved_todos = bool(self.config.get("handle_unresolved_todos", False))
+        self.todo_resolution_method = str(self.config.get("todo_resolution_method", "targeted_research"))
+
+        # Optional verbosity hint. Primarily used to cap critic note bodies.
+        self.critic_verbosity = str(self.config.get("critic_verbosity", "standard")).strip().lower()
+
     # ------------------------------------------------------------------
     # Small helpers
     # ------------------------------------------------------------------
     def _deadline_hit(self, deadline_ts: Optional[float]) -> bool:
         return deadline_ts is not None and time.time() >= deadline_ts
+
+    def _semantic_search_with_retries(self, query: str, max_results: int = 5) -> List[Dict[str, Any]]:
+        """Semantic Scholar search with bounded retries + exponential backoff.
+
+        We keep this conservative: failures return an empty list so a single
+        flaky provider does not crash a long run.
+        """
+        q = (query or "").strip()
+        if not q:
+            return []
+
+        # A retry count of 0 means "try once".
+        retries = int(getattr(self, "semantic_scholar_retries", 0) or 0)
+        max_results_i = int(max_results or 5)
+        max_results_i = max(1, min(max_results_i, 50))
+
+        last_err: Optional[Exception] = None
+        for attempt in range(retries + 1):
+            try:
+                return self.semantic_tool.search(q, max_results=max_results_i)
+            except Exception as e:
+                last_err = e
+                if attempt >= retries:
+                    break
+                # Exponential backoff, capped.
+                sleep_s = min(2.0, 0.25 * (2 ** attempt))
+                try:
+                    time.sleep(sleep_s)
+                except Exception:
+                    pass
+        # Failure: return [] and let the caller log a note.
+        return []
 
     def _cap_note_text(self, note_text: str) -> str:
         """Cap note size so long runs do not accumulate unbounded note bodies."""
@@ -2345,7 +2403,16 @@ class TGRMLoop:
                 if issue_stats.get("interrupted"):
                     break
 
-            elif is_research_role and issue != "under_cited":
+            elif (issue != "under_cited") and (
+                is_research_role
+                or (
+                    self.handle_unresolved_todos
+                    and issue in {"question_mark", "todo_item"}
+                )
+            ):
+                # When enabled, let non-research roles (critic/integrator) do a
+                # low-energy targeted research pass for TODO/question issues
+                # rather than emitting new TODO markers.
                 questions = self._extract_questions(goal, issue_type=issue)
 
                 sc_for_issue = source_controls
@@ -2366,7 +2433,9 @@ class TGRMLoop:
                     issue_description=desc,
                     source_controls=sc_for_issue,
                     questions=questions,
-                    maintenance_mode=maintenance_mode,
+                    # Non-research roles should stay lightweight even when
+                    # permitted to resolve TODOs.
+                    maintenance_mode=(maintenance_mode or (not is_research_role)),
                     domain=domain,
                     tool_usage=tool_usage,
                     deadline_ts=deadline_ts,
@@ -2499,10 +2568,14 @@ class TGRMLoop:
                     # In citation-hunt runs, do not create TODO issues for question marks.
                     continue
 
-                note = (
-                    f"[{role}] Encountered issue '{issue}' with description: {desc}. "
-                    "This issue type is not yet fully handled; marking as TODO for future cycles."
-                )
+                # Avoid emitting new "TODO" markers when configured to keep
+                # reports cleaner. This is still logged for developer visibility.
+                if self.handle_unresolved_todos:
+                    tail = "This issue type is not yet fully handled; added to backlog for future improvement."
+                else:
+                    tail = "This issue type is not yet fully handled; marking as TODO for future cycles."
+
+                note = f"[{role}] Encountered issue '{issue}' with description: {desc}. {tail}"
                 note = self._cap_note_text(note)
                 try:
                     self.memory_store.add_note(goal, note, role=role)
@@ -3032,7 +3105,10 @@ class TGRMLoop:
 
         if source_controls.get("pubmed", False) and not self._deadline_hit(deadline_ts):
             try:
-                pubmed_results = self.pubmed_tool.search(self._goal_to_search_query(goal, domain=domain), max_results=5)
+                pubmed_results = self.pubmed_tool.search(
+                    self._goal_to_search_query(goal, domain=domain),
+                    max_results=self.explorer_batch_size,
+                )
             except Exception:
                 pubmed_results = []
                 note_lines.append("PubMed search failed for initial research; continuing without PubMed results.")
@@ -3059,9 +3135,14 @@ class TGRMLoop:
 
         if source_controls.get("semantic", False) and not self._deadline_hit(deadline_ts):
             try:
-                sem_results = self.semantic_tool.search(self._goal_to_search_query(goal, domain=domain), max_results=5)
+                sem_results = self._semantic_search_with_retries(
+                    self._goal_to_search_query(goal, domain=domain),
+                    max_results=self.explorer_batch_size,
+                )
             except Exception:
                 sem_results = []
+
+            if not sem_results:
                 note_lines.append(
                     "Semantic Scholar search failed for initial research; continuing without Semantic Scholar results."
                 )
@@ -3521,7 +3602,7 @@ class TGRMLoop:
 
             if source_controls.get("pubmed", False):
                 try:
-                    pubmed_results = self.pubmed_tool.search(q, max_results=5)
+                    pubmed_results = self.pubmed_tool.search(q, max_results=self.explorer_batch_size)
                 except Exception:
                     pubmed_results = []
                     note_lines.append(
@@ -3549,10 +3630,12 @@ class TGRMLoop:
                     note_lines.append("")
 
             if source_controls.get("semantic", False):
-                try:
-                    sem_results = self.semantic_tool.search(q, max_results=5)
-                except Exception:
-                    sem_results = []
+                sem_results = self._semantic_search_with_retries(
+                    q,
+                    max_results=self.explorer_batch_size,
+                )
+
+                if not sem_results:
                     note_lines.append(
                         "Semantic Scholar search failed for this question; continuing without Semantic Scholar results for this item."
                     )
@@ -3695,10 +3778,12 @@ class TGRMLoop:
                 note_lines.append("")
 
         if source_controls.get("semantic", False):
-            try:
-                sem_results = self.semantic_tool.search(query, max_results=10)
-            except Exception:
-                sem_results = []
+            sem_results = self._semantic_search_with_retries(
+                query,
+                max_results=max(10, self.explorer_batch_size),
+            )
+
+            if not sem_results:
                 note_lines.append(
                     "Semantic Scholar search failed while strengthening citations; continuing without Semantic Scholar results."
                 )
@@ -3861,10 +3946,12 @@ class TGRMLoop:
                 note_lines.append("")
 
         if source_controls.get("semantic", False):
-            try:
-                sem_results = self.semantic_tool.search(query, max_results=10)
-            except Exception:
-                sem_results = []
+            sem_results = self._semantic_search_with_retries(
+                query,
+                max_results=max(10, self.explorer_batch_size),
+            )
+
+            if not sem_results:
                 note_lines.append(
                     "Semantic Scholar search failed during gap repair; continuing without Semantic Scholar results."
                 )
