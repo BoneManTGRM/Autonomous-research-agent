@@ -2209,7 +2209,10 @@ def build_outcome_summary(
     rye_summary = "RYE not available"
     if rye_vals:
         avg_rye = sum(rye_vals) / len(rye_vals)
-        rye_summary = f"Min {min(rye_vals):.3f} Â· Max {max(rye_vals):.3f} Â· Avg {avg_rye:.3f}"
+        # Replace the Unicode middle dot separators with commas to avoid mojibake
+        # artifacts (e.g. "ÃÂ·") in environments that mishandle UTF-8.  Commas
+        # are ASCII and therefore safe.
+        rye_summary = f"Min {min(rye_vals):.3f}, Max {max(rye_vals):.3f}, Avg {avg_rye:.3f}"
 
     # Citations (if not supplied, attempt extraction from history)
     if citations is None:
