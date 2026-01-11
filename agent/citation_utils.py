@@ -317,14 +317,12 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
     score = _normalize_score(meta)
 
     # -----------------------------------------------------------------
-    # Additional stub/placeholder filtering
+    # Stub and placeholder filtering
     #
-    # Drop citations that look like stubbed results, no-result notices, or
-    # provider error messages.  These often come from API failures or
-    # empty search hits (e.g. "No Semantic Scholar results found" or
-    # "[STUB] PubMed error...").  Keeping them in the bibliography
-    # dilutes report quality and lowers verification scores.  We examine
-    # the normalized title and snippet (lowercased) for telltale markers.
+    # Remove citations that are clearly non-substantive. These may arise
+    # from errors (e.g. API failures), empty search results, or generic
+    # placeholder messages like "No Semantic Scholar results found".  Such
+    # entries dilute report quality and should not count toward evidence.
     try:
         t_low = (title or "").strip().lower()
     except Exception:
@@ -333,8 +331,7 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
         s_low = (snippet or "").strip().lower()
     except Exception:
         s_low = ""
-
-    # Patterns indicating non-substantive or error citations
+    # Drop titles that start with [STUB] or indicate no results
     if t_low:
         if t_low.startswith("[stub]"):
             return None
@@ -349,7 +346,6 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
     if s_low:
         if "semantic scholar error" in s_low or "pubmed request failed" in s_low:
             return None
-
 
     # -----------------------------------------------------------------
     # Credibility filtering
@@ -415,9 +411,36 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
     # downstream.  Without this filter, references from random web pages
     # (source "web" with no DOI) clutter reports and reduce relevance.
     if not doi:
-        # If the source is not in our credible list, skip it entirely
+        # If the source is not in our credible list, consult domain whitelist.
+        # This allows keeping high-quality publishers even when a DOI is missing.
+        # Known credible domains include NIH/NCBI, major journals (Nature, Science,
+        # Cell, NEJM, Lancet, BMJ), and large open-access publishers.
+        credible_domains = {
+            "nih.gov",
+            "ncbi.nlm.nih.gov",
+            "nature.com",
+            "sciencemag.org",
+            "science.org",
+            "cell.com",
+            "nejm.org",
+            "thelancet.com",
+            "lancet.com",
+            "bmj.com",
+            "plos.org",
+            "frontiersin.org",
+        }
+        from urllib.parse import urlparse  # type: ignore
+        domain = ""
+        if url:
+            try:
+                parsed = urlparse(url)
+                domain = parsed.netloc.lower()
+            except Exception:
+                domain = ""
         if not _is_credible_source(source):
-            return None
+            # Keep only if domain ends with one of the credible domains
+            if not (domain and any(domain.endswith(d) for d in credible_domains)):
+                return None
 
     # If we still have nothing meaningful, drop it unless there is at least URL or DOI
     if not any([title, url, doi, snippet]):
