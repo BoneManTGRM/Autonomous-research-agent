@@ -1526,6 +1526,16 @@ class TGRMLoop:
 
         # DETECT phase
         issues, issue_descriptions = self._detect(status_report, domain=domain_tag)
+
+        # ------------------------------------------------------------------
+        # Single-axis focus: restrict to one primary issue per cycle
+        # To promote deep investigation instead of broad, we only repair
+        # the first detected issue. Subsequent issues will remain for
+        # later cycles. This helps maintain a single research axis per run.
+        if isinstance(issues, list) and len(issues) > 1:
+            primary_issues: List[str] = [issues[0]]
+        else:
+            primary_issues = issues
         phases["detect_before"] = {
             "issue_codes": issues,
             "issue_descriptions": issue_descriptions,
@@ -1614,9 +1624,10 @@ class TGRMLoop:
 
         else:
             # REPAIR phase
+            # Use only the primary issue(s) for repair to focus the run
             repair_actions, notes_added, citations, stats = self._repair(
                 goal=goal,
-                issues=issues,
+                issues=primary_issues,
                 descriptions=issue_descriptions,
                 role=role,
                 source_controls=src_ctrl,
