@@ -607,12 +607,21 @@ def build_agent_report(
             out.append("")
             out.append("**Agent contributions (preview):**")
             for ev in outs_c:
+                # Skip preview lines for events without citations to avoid
+                # presenting unsupported or speculative statements.  This
+                # encourages writers to produce evidence-backed outputs.
+                if not ev.get("citations"):
+                    continue
                 role = ev.get("role") or "agent"
                 text = _extract_text_from_event(ev)
                 if not text:
                     continue
                 # Take the first substantive line (ignore placeholder-like content)
-                lines = [ln for ln in text.strip().splitlines() if ln and not _is_placeholder_text(ln)]
+                lines = [
+                    ln
+                    for ln in text.strip().splitlines()
+                    if ln and not _is_placeholder_text(ln)
+                ]
                 if not lines:
                     continue
                 first_line = lines[0]
