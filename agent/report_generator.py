@@ -63,8 +63,30 @@ from .rye_metrics import (
 import textwrap
 import json
 import os
+import re
 from pathlib import Path
 from collections import Counter
+
+
+def normalize_text(text: Any) -> str:
+    """Best-effort fix for common mojibake sequences.
+
+    This keeps report output clean when UTF-8 text has been decoded as latin-1
+    (e.g., 'Ã¢â¬Â¢' instead of 'â¢'). Only attempts a re-decode when the string
+    looks like mojibake.
+    """
+    if text is None:
+        return ""
+    if not isinstance(text, str):
+        text = str(text)
+    if not text:
+        return text
+    if any(tok in text for tok in ("Ã¢â¬", "Ã¢â¬Â¢", "Ã", "Ã")):
+        try:
+            return text.encode("latin1").decode("utf-8")
+        except Exception:
+            return text.replace("Ã¢â¬Â¢", "â¢")
+    return text
 
 
 # ---------------------------------------------------------
@@ -496,7 +518,7 @@ def _markdown_to_plain_lines(text: str, width: int = 90) -> List[str]:
     for raw in text.splitlines():
         s = raw.lstrip()
         # strip some simple markdown markers
-        for prefix in ("#", "* ", "- ", "â¢ ", "> "):
+        for prefix in ("#", "* ", "- ", "Ã¢ÂÂ¢ ", "> "):
             if s.startswith(prefix):
                 s = s[len(prefix):].lstrip()
                 break
@@ -1268,7 +1290,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
     lines.append(f"- Total cycles: **{n_cycles}**")
     lines.append(f"- Domains: **{', '.join(sorted(str(d) for d in domains))}**")
     lines.append(f"- Avg RYE: **{avg_rye:.3f}**")
-    lines.append(f"- Avg ÎR: **{avg_delta:.3f}**")
+    lines.append(f"- Avg ÃÂR: **{avg_delta:.3f}**")
     lines.append(f"- Avg Energy: **{avg_energy:.3f}**")
 
     if cycles_per_hour is not None:
@@ -1648,17 +1670,208 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
     # Interpretation
     lines.append("## Reparodynamics interpretation\n")
     lines.append(
-        "This session reflects a sequence of TGRM cycles (Test â Detect â Repair â Verify). "
-        "RYE quantifies how much verified improvement (ÎR) occurred per unit energy (E). "
+        "This session reflects a sequence of TGRM cycles (Test -> Detect -> Repair -> Verify). "
+        "RYE quantifies how much verified improvement (delta R) occurred per unit energy (E). "
         "The stability index, momentum, trend, oscillation level, Option C safety envelope, "
         "and MSIL snapshot together indicate whether the system is moving toward a stable high "
         "repair yield equilibrium or oscillating in a more exploratory regime. Run tier, learning "
         "speed grade, discovery tiers, breakthrough likelihood, and citation coverage give a fast, "
-        "human friendly summary of where this experiment sits in the Reparodynamics landscape and "
+        "human-friendly summary of where this experiment sits in the Reparodynamics landscape and "
         "how aggressively it is learning without leaving its safety envelope."
     )
 
-    return "\n".join(lines)
+    return normalize_text("\n".join(lines))
+
+
+def generate_publishable_report(
+    memory_store: Any,
+    goal: Optional[str] = None,
+    run_id: Optional[str] = None,
+    max_findings: int = 12,
+    max_sources: int = 25,
+) -> str:
+    """Generate a *high-signal* report intended for external readers.
+
+    Unlike `generate_report`, this mode avoids per-cycle diagnostics and raw dumps.
+    It aims to be suitable for sharing, grading, or investor review.
+    """
+    cycles_all = _safe_get_cycle_history(memory_store)
+    if goal:
+        cycles_all = [c for c in cycles_all if (c.get("goal") or "") == goal]
+    if run_id:
+        cycles_all = [c for c in cycles_all if str(c.get("run_id") or "") == str(run_id)]
+    cycles = list(cycles_all)
+
+    if not cycles:
+        # Fall back to the full diagnostic report if we have no cycle history.
+        try:
+            return generate_report(memory_store=memory_store, goal=goal, run_id=run_id)
+        except Exception:
+            return "# Autonomous research report\n\nNo cycle history available."
+
+    inferred_run_id = run_id or cycles[-1].get("run_id") or cycles[0].get("run_id")
+    inferred_domain = cycles[-1].get("domain") or cycles[0].get("domain") or "general"
+    inferred_goal = goal or cycles[-1].get("goal") or cycles[0].get("goal") or ""
+
+    timestamps = [str(c.get("timestamp")) for c in cycles if c.get("timestamp")]
+    runtime = _extract_session_runtime(timestamps) or "(runtime unavailable)"
+
+    # Pull structured discoveries from events.jsonl if possible.
+    structured: List[Dict[str, Any]] = []
+    try:
+        events = _load_run_events(str(inferred_run_id) if inferred_run_id else "")
+        structured = _events_to_structured_discoveries(events, goal=inferred_goal)
+    except Exception:
+        structured = []
+
+    # Extract citations from the cycle history (best-effort).
+    citations: List[Dict[str, Any]] = []
+    seen_cite: set = set()
+
+    def _cite_key(obj: Any) -> Optional[str]:
+        if not isinstance(obj, dict):
+            return None
+        url = str(obj.get("url") or obj.get("link") or "").strip()
+        doi = str(obj.get("doi") or "").strip()
+        title = str(obj.get("title") or "").strip()
+        key = url or doi or title
+        key = key.strip().lower()
+        return key or None
+
+    def _ingest_cites(cite_list: Any) -> None:
+        if not isinstance(cite_list, list):
+            return
+        for c in cite_list:
+            if not isinstance(c, dict):
+                continue
+            k = _cite_key(c)
+            if not k or k in seen_cite:
+                continue
+            seen_cite.add(k)
+            citations.append(c)
+
+    for c in cycles:
+        _ingest_cites(c.get("citations"))
+        _ingest_cites(c.get("sources"))
+        summ = c.get("summary") if isinstance(c.get("summary"), dict) else {}
+        if isinstance(summ, dict):
+            _ingest_cites(summ.get("citations"))
+            _ingest_cites(summ.get("sources"))
+
+    # Heuristic citation matching for inline refs.
+    def _match_citations(text: str, max_refs: int = 2) -> List[int]:
+        if not citations:
+            return []
+        t = (text or "").lower()
+        # Extract a few meaningful tokens
+        tokens = [w for w in re.findall(r"[a-zA-Z]{6,}", t) if w not in {"because", "within", "across", "system", "effect", "effects", "during"}]
+        if not tokens:
+            return []
+        tokens = tokens[:8]
+        matches: List[int] = []
+        for idx, c in enumerate(citations, start=1):
+            title = str(c.get("title") or "").lower()
+            if not title:
+                continue
+            if any(tok in title for tok in tokens):
+                matches.append(idx)
+            if len(matches) >= max_refs:
+                break
+        return matches
+
+    # Rank findings: prefer higher score/tier and later timestamps.
+    def _finding_score(d: Dict[str, Any]) -> float:
+        base = float(d.get("score") or 0.0) if isinstance(d.get("score"), (int, float)) else 0.0
+        tier = d.get("tier") or d.get("discovery_tier")
+        try:
+            if tier is not None:
+                base += float(tier) * 0.5
+        except Exception:
+            pass
+        return base
+
+    findings = sorted(structured, key=_finding_score, reverse=True)
+    findings = findings[: max(0, int(max_findings))]
+
+    # Group findings by kind for readability.
+    buckets: Dict[str, List[Dict[str, Any]]] = {}
+    for d in findings:
+        kind = str(d.get("kind") or "other")
+        buckets.setdefault(kind, []).append(d)
+
+    lines: List[str] = []
+    lines.append("# Autonomous research report\n")
+    lines.append("## Run overview")
+    lines.append(f"- Run id: `{inferred_run_id}`" if inferred_run_id else "- Run id: (unavailable)")
+    lines.append(f"- Domain: **{inferred_domain}**")
+    lines.append(f"- Cycles captured: **{len(cycles)}**")
+    lines.append(f"- Runtime: **{runtime}**")
+    if inferred_goal:
+        lines.append("- Goal:")
+        lines.append(f"  > {normalize_text(inferred_goal).strip()}")
+    lines.append("")
+
+    # Abstract
+    lines.append("## Abstract")
+    if findings:
+        top_labels = [str(f.get("label") or "").strip() for f in findings[:3] if str(f.get("label") or "").strip()]
+    else:
+        top_labels = []
+    lines.append(
+        "This document is an automated synthesis of an ARA run. It summarizes the highest-signal "
+        "discoveries/hypotheses extracted from the run artifacts (cycle history and, when available, "
+        "structured discovery events)."
+    )
+    if top_labels:
+        lines.append("")
+        lines.append("Key outputs include:")
+        for lbl in top_labels:
+            refs = _match_citations(lbl)
+            ref_txt = f" [{', '.join(str(r) for r in refs)}]" if refs else ""
+            lines.append(f"- {normalize_text(lbl)}{ref_txt}")
+    lines.append("")
+
+    # Findings
+    lines.append("## Key findings")
+    if not findings:
+        lines.append("No structured findings were available for this run.")
+    else:
+        kind_order = ["mechanism", "intervention", "biomarker", "causal", "other"]
+        for kind in kind_order:
+            if kind not in buckets:
+                continue
+            lines.append(f"### {kind.capitalize()}")
+            for d in buckets.get(kind, []):
+                label = str(d.get("label") or "").strip()
+                if not label:
+                    continue
+                refs = _match_citations(label)
+                ref_txt = f" [{', '.join(str(r) for r in refs)}]" if refs else ""
+                lines.append(f"- {normalize_text(label)}{ref_txt}")
+            lines.append("")
+
+    # Evidence base
+    lines.append("## Sources")
+    if not citations:
+        lines.append("No citations were captured in cycle history.")
+    else:
+        use = citations[: max(0, int(max_sources))]
+        for i, c in enumerate(use, start=1):
+            title = normalize_text(c.get("title") or c.get("raw") or "(untitled)").strip()
+            url = str(c.get("url") or c.get("link") or "").strip()
+            if url:
+                lines.append(f"{i}. {title} â {url}")
+            else:
+                lines.append(f"{i}. {title}")
+
+    # Limitations
+    lines.append("\n## Limitations")
+    lines.append(
+        "- This is an automated synthesis; verify important claims against the primary sources.\n"
+        "- If the run produced few structured discovery events or citations, the report may underrepresent useful details from raw notes."
+    )
+
+    return normalize_text("\n".join(lines))
 
 
 # ---------------------------------------------------------
