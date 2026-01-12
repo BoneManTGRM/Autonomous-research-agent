@@ -164,10 +164,18 @@ class PaperTool:
             resp.raise_for_status()
             data = resp.json()
         except Exception as e:
+            # Normalize rate limit errors. When the API quota is exceeded it
+            # often raises HTTPError with messages like '429 Too Many Requests (retry_after=..)' which
+            # we don't want to store verbatim. Replace such messages with a generic indicator.
+            err_msg = str(e)
+            if err_msg:
+                msg_low = err_msg.lower()
+                if "too many requests" in msg_low or "retry_after" in msg_low or "429" in msg_low:
+                    err_msg = "Semantic Scholar rate limit exceeded"
             stub = [{
                 "title": f"[STUB] Semantic Scholar error for '{query}'",
                 "url": "",
-                "snippet": str(e),
+                "snippet": err_msg,
                 "year": "",
                 "venue": "",
             }]
