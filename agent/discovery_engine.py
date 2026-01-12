@@ -48,6 +48,42 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+# ---------------------------------------------------------------------------
+# Placeholder and template detection
+#
+# DiscoveryEngine should never emit internal template entries, maintenance logs,
+# or example placeholders.  BANNED_DISCOVERY_PATTERNS matches strings that
+# indicate these artifacts.  _contains_banned_pattern is used to skip
+# candidates that match any of these patterns.
+BANNED_DISCOVERY_PATTERNS: List[str] = [
+    "maintenance_mode",
+    "maintenance mode",
+    "discovery_log",
+    "discovery log",
+    "placeholder discovery",
+    "template entry",
+    "template",
+    "example",
+    "inconclusive verification",
+    "rejected hypothesis",
+    "performed targeted research",
+    "initial discovery_log.json",
+    "initial discovery log",
+    "used only to show",
+    "shows how an",
+]
+
+
+def _contains_banned_pattern(text: str) -> bool:
+    """Return True if the given text contains any banned placeholder pattern."""
+    if not text:
+        return False
+    lower = text.lower()
+    for pat in BANNED_DISCOVERY_PATTERNS:
+        if pat in lower:
+            return True
+    return False
+
 try:
     # Optional imports, only used if passed in via __init__
     from .hypothesis_manager import HypothesisManager  # type: ignore
@@ -609,12 +645,13 @@ class DiscoveryEngine:
 
             for n in notes:
                 txt = str(n).strip()
-                if txt:
+                # Skip internal/template artifacts
+                if txt and not _contains_banned_pattern(txt):
                     candidates.append(("note", txt))
 
             for r in repairs:
                 txt = str(r).strip()
-                if txt:
+                if txt and not _contains_banned_pattern(txt):
                     candidates.append(("repair", txt))
 
             for h in hyps:
@@ -622,7 +659,7 @@ class DiscoveryEngine:
                     txt = str(h.get("text", "")).strip()
                 else:
                     txt = str(h).strip()
-                if txt:
+                if txt and not _contains_banned_pattern(txt):
                     candidates.append(("hypothesis", txt))
 
             if not candidates:
