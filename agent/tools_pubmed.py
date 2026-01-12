@@ -67,6 +67,21 @@ class PubMedTool:
             params.setdefault("api_key", self.api_key)
 
         resp = requests.get(url, params=params, timeout=timeout)
+        # Explicitly handle PubMed rate limiting. NCBI returns HTTP 429 when
+        # requests exceed the allowed quota. Provide a descriptive error with
+        # the retry interval so callers can back off gracefully.
+        if resp.status_code == 429:
+            retry_after = resp.headers.get("Retry-After", "")
+            wait_s = 0.0
+            try:
+                if retry_after:
+                    wait_s = float(retry_after)
+            except Exception:
+                wait_s = 0.0
+            raise requests.HTTPError(
+                f"PubMed 429 Too Many Requests (retry_after={wait_s})",
+                response=resp,
+            )
         resp.raise_for_status()
         return resp.json()
 
