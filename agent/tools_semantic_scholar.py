@@ -388,9 +388,23 @@ class SemanticScholarTool:
                     time.sleep(backoff)
 
             return [
+                # Normalize rate limit errors to a generic message. This prevents raw
+                # HTTP 429 error strings from leaking into the citation snippets. If the
+                # last error indicates a quota issue, replace the snippet accordingly.
                 {
                     "title": f"[STUB] Semantic Scholar error for query='{normalized}'",
                     "url": "",
-                    "snippet": last_err or "Unknown error",
+                    "snippet": (
+                        "Semantic Scholar rate limit exceeded"
+                        if (
+                            isinstance(last_err, str)
+                            and (
+                                "too many requests" in last_err.lower()
+                                or "retry_after" in last_err.lower()
+                                or "429" in last_err.lower()
+                            )
+                        )
+                        else (last_err or "Unknown error")
+                    ),
                 }
             ]
