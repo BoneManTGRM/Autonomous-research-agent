@@ -18,6 +18,7 @@ with earlier callers that pass (goal, domain, diagnostics, history).
 from __future__ import annotations
 
 import json
+import re
 import os
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -742,6 +743,19 @@ def build_agent_report(
             # Also replace bullet sequences if still present
             if "Ã¢â¬Â¢" in report_text:
                 report_text = report_text.replace("Ã¢â¬Â¢", "â¢")
+    except Exception:
+        pass
+    # -----------------------------------------------------------------------
+    # Normalize dash/minus variants between digits
+    #
+    # Numeric ranges may contain en dashes or misdecoded sequences (e.g.,
+    # "15Ã¢ï¿½ï¿½20").  Replace any such dash variants appearing between digits
+    # with a simple ASCII hyphen.  This runs at the very end so it applies
+    # to the fully assembled report.
+    try:
+        for seq in ("Ã¢ï¿½ï¿½", "Ã¢??", "Ã¢â¬â", "Ã¢\u0080\u0093"):
+            report_text = re.sub(rf"(?<=\d){re.escape(seq)}(?=\d)", "-", report_text)
+        report_text = re.sub(r"(?<=\d)\s*[âââââï¹ï¹£ï¼]\s*(?=\d)", "-", report_text)
     except Exception:
         pass
     return report_text
