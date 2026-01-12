@@ -343,8 +343,17 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
             return None
         if "error" in t_low and ("semantic scholar" in t_low or "pubmed" in t_low or "api" in t_low):
             return None
+        # Filter out obvious rate limit errors. These may appear as "429 Too Many Requests"
+        # or include a "retry_after" hint in the title. Such entries are quota errors and
+        # should never count as evidence.
+        if "too many requests" in t_low or "retry_after" in t_low or "429" in t_low:
+            return None
     if s_low:
         if "semantic scholar error" in s_low or "pubmed request failed" in s_low:
+            return None
+        # Similarly drop citations whose snippets indicate a rate limit error.
+        # We include checks for the common phrases returned by upstream APIs.
+        if "too many requests" in s_low or "retry_after" in s_low or "429" in s_low:
             return None
 
     # -----------------------------------------------------------------
