@@ -144,29 +144,39 @@ def _contains_banned_pattern(text: str) -> bool:
 
 
 def normalize_text(text: Any) -> str:
-    """Best-effort fix for common mojibake sequences.
+    """Best-effort fix for common mojibake sequences and numeric range dashes.
 
-    This keeps report output clean when UTFâ8 text has been incorrectly decoded
-    as a single-byte encoding.  It attempts to recover the original Unicode
-    by round-tripping through Windowsâ1252 first, then Latinâ1, and only
-    applies a repair when it clearly reduces the number of known mojibake
-    marker characters (e.g. sequences beginning with 'Ã', 'Ã¢' or 'Ã').  As a
-    fallback, it replaces bullet markers explicitly if no encoding round-trip
-    succeeds.
+    This function cleans up mojibake artifacts that commonly appear when UTFâ8
+    text has been decoded using a single-byte encoding such as Windows-1252.
+    It also ensures that any dash or minus sign occurring between two digits
+    (for example, in numeric ranges like "15â20" or misdecoded forms like
+    "15Ã¢ï¿½ï¿½20") is replaced with a plain ASCII hyphen ('-').  This range
+    normalization happens even if no mojibake markers are detected, so that
+    genuine en dashes in ranges don't leak into downstream outputs.
     """
     if text is None:
         return ""
+    # Coerce non-strings to strings
     if not isinstance(text, str):
         text = str(text)
     if not text:
         return text
-    # Only attempt repair when common mojibake markers are present
+    # Always normalize dash/minus variants between digits.  By performing
+    # this step before checking for mojibake markers, we ensure ranges like
+    # "15â20" are canonicalized to "15-20" even when no mojibake markers
+    # are present.  We also handle common misdecoded sequences.
+    try:
+        for seq in ("Ã¢ï¿½ï¿½", "Ã¢??", "Ã¢â¬â", "Ã¢\u0080\u0093"):
+            text = re.sub(rf"(?<=\d){re.escape(seq)}(?=\d)", "-", text)
+        text = re.sub(r"(?<=\d)\s*[âââââï¹ï¹£ï¼]\s*(?=\d)", "-", text)
+    except Exception:
+        pass
+    # Only attempt mojibake repair when common markers are present
     if not any(tok in text for tok in ("Ã", "Ã¢", "Ã")):
         return text
-
+    # Count markers helper
     def count_markers(val: str) -> int:
         return sum(val.count(ch) for ch in ("Ã", "Ã¢", "Ã"))
-
     before = count_markers(text)
     for enc in ("cp1252", "latin1"):
         try:
@@ -174,10 +184,24 @@ def normalize_text(text: Any) -> str:
         except Exception:
             continue
         if fixed and count_markers(fixed) < before:
+            # Normalize numeric ranges again on the fixed string
+            try:
+                for seq in ("Ã¢ï¿½ï¿½", "Ã¢??", "Ã¢â¬â", "Ã¢\u0080\u0093"):
+                    fixed = re.sub(rf"(?<=\d){re.escape(seq)}(?=\d)", "-", fixed)
+                fixed = re.sub(r"(?<=\d)\s*[âââââï¹ï¹£ï¼]\s*(?=\d)", "-", fixed)
+            except Exception:
+                pass
             return fixed
-    # Fallback: fix bullet
+    # Fallback: convert misdecoded bullet if present
     if "Ã¢â¬Â¢" in text:
-        return text.replace("Ã¢â¬Â¢", "â¢")
+        text = text.replace("Ã¢â¬Â¢", "â¢")
+    # Final pass: ensure any remaining dash variants between digits are normalized
+    try:
+        for seq in ("Ã¢ï¿½ï¿½", "Ã¢??", "Ã¢â¬â", "Ã¢\u0080\u0093"):
+            text = re.sub(rf"(?<=\d){re.escape(seq)}(?=\d)", "-", text)
+        text = re.sub(r"(?<=\d)\s*[âââââï¹ï¹£ï¼]\s*(?=\d)", "-", text)
+    except Exception:
+        pass
     return text
 
 
