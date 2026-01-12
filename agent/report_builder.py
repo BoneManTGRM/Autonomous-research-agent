@@ -234,18 +234,52 @@ def _extract_text_from_event(ev: JsonObj) -> str:
 
 
 def _extract_sources_from_event(ev: JsonObj) -> List[Any]:
+    """Extract source or citation objects from a raw event.
+
+    Upstream event schemas are not always consistent: sources or citations may
+    be attached at ``data.sources`` or ``data.citations`` as either a list or a
+    single dict, or present at the top level under ``sources`` or ``citations``.
+    Historically this helper only returned a list if the field was already a
+    list. However, recent agent updates sometimes emit a single dict for
+    citations or sources. If we return an empty list in that case, the
+    corresponding citation is silently dropped from the report. To restore
+    citation visibility, we coerce single dicts into a list before
+    returning.
+
+    Parameters
+    ----------
+    ev : JsonObj
+        Raw event dictionary.
+
+    Returns
+    -------
+    list
+        A list of source/citation objects (may be dicts or strings). Empty if
+        no sources are present.
+    """
     data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
     sources = data.get("sources")
+    # Normalize dict or single entry to list
+    if isinstance(sources, dict):
+        sources = [sources]
     if isinstance(sources, list):
-        return sources
+        return list(sources)
     citations = data.get("citations")
+    if isinstance(citations, dict):
+        citations = [citations]
     if isinstance(citations, list):
-        return citations
+        return list(citations)
     # top-level fallbacks
-    if isinstance(ev.get("sources"), list):
-        return ev.get("sources")  # type: ignore[return-value]
-    if isinstance(ev.get("citations"), list):
-        return ev.get("citations")  # type: ignore[return-value]
+    top_sources = ev.get("sources")
+    if isinstance(top_sources, dict):
+        top_sources = [top_sources]
+    if isinstance(top_sources, list):
+        return list(top_sources)  # type: ignore[return-value]
+    top_citations = ev.get("citations")
+    if isinstance(top_citations, dict):
+        top_citations = [top_citations]
+    if isinstance(top_citations, list):
+        return list(top_citations)  # type: ignore[return-value]
     return []
 
 
@@ -429,6 +463,39 @@ def build_agent_report(
 
     # Sources index (global, stable)
     source_index = _collect_source_index(events)
+    # ---------------------------------------------------------------------
+    # Fallback citation extraction
+    #
+    # In some deployments the event stream may not include explicit
+    # ``sources`` or ``citations`` fields on each event, even when the
+    # underlying cycles carry citation information. If we fail to collect
+    # any sources from the event logs, try to recover citation references
+    # directly from the provided cycle history. This helps populate the
+    # "Sources" section of the report when events omit citation metadata.
+    if not source_index and history:
+        try:
+            for cyc in history:
+                if not isinstance(cyc, dict):
+                    continue
+                # Check both 'citations' and 'sources' fields on the cycle
+                for key in ("citations", "sources"):
+                    cites = cyc.get(key)
+                    if not cites:
+                        continue
+                    # Normalize single dict to list for uniform processing
+                    if isinstance(cites, dict):
+                        cites_iter = [cites]
+                    elif isinstance(cites, (list, tuple)):
+                        cites_iter = list(cites)
+                    else:
+                        continue
+                    for src in cites_iter:
+                        k = _source_key(src)
+                        if k and k not in source_index:
+                            source_index[k] = len(source_index) + 1
+        except Exception:
+            # If anything goes wrong with fallback, we simply leave source_index empty
+            pass
 
     # Group by cycle for narrative sections
     by_cycle_outputs: DefaultDict[int, List[JsonObj]] = defaultdict(list)
