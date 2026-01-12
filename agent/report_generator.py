@@ -1705,6 +1705,38 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
     return normalize_text("\n".join(lines))
 
 
+HEDGING_PATTERNS = [
+    r"\bmay\b",
+    r"\bmight\b",
+    r"\bcould\b",
+    r"\bcan\b",
+    r"\bwould\b",
+    r"\bshould\b",
+    r"\bsuggests?\b",
+    r"\bpossible\b",
+    r"\bpossibly\b",
+    r"\bpotential\b",
+    r"\bimplications?\b",
+    r"\bfurther\b",
+    r"\bfuture\b",
+    r"\bappears\b",
+    r"\bindicates?\b",
+    r"\bunclear\b",
+    r"\blikely\b",
+    r"\bunlikly\b",
+]
+
+def _is_vague(text: str) -> bool:
+    """Return True if the sentence contains hedging language that weakens the claim."""
+    s = normalize_text(text or "").lower()
+    for pat in HEDGING_PATTERNS:
+        try:
+            if re.search(pat, s):
+                return True
+        except Exception:
+            continue
+    return False
+
 def generate_publishable_report(
     memory_store: Any,
     goal: Optional[str] = None,
@@ -1845,12 +1877,25 @@ def generate_publishable_report(
         "structured discovery events)."
     )
     if top_labels:
-        lines.append("")
-        lines.append("Key outputs include:")
+        # Filter top labels: require at least one citation and avoid vague phrasing
+        filtered_labels = []
         for lbl in top_labels:
+            if not lbl:
+                continue
+            # Skip hedging language
+            if _is_vague(lbl):
+                continue
             refs = _match_citations(lbl)
-            ref_txt = f" [{', '.join(str(r) for r in refs)}]" if refs else ""
-            lines.append(f"- {normalize_text(lbl)}{ref_txt}")
+            # Only keep if there is at least one citation match
+            if not refs:
+                continue
+            filtered_labels.append((lbl, refs))
+        if filtered_labels:
+            lines.append("")
+            lines.append("Key outputs include:")
+            for lbl, refs in filtered_labels:
+                ref_txt = f" [{', '.join(str(r) for r in refs)}]" if refs else ""
+                lines.append(f"- {normalize_text(lbl)}{ref_txt}")
     lines.append("")
 
     # Findings
@@ -1862,12 +1907,24 @@ def generate_publishable_report(
         for kind in kind_order:
             if kind not in buckets:
                 continue
-            lines.append(f"### {kind.capitalize()}")
+            # Collect and filter findings by kind
+            valid_entries: List[Tuple[str, List[int]]] = []
             for d in buckets.get(kind, []):
                 label = str(d.get("label") or "").strip()
                 if not label:
                     continue
+                # Skip vague labels
+                if _is_vague(label):
+                    continue
                 refs = _match_citations(label)
+                # Only include findings with at least one citation
+                if not refs:
+                    continue
+                valid_entries.append((label, refs))
+            if not valid_entries:
+                continue
+            lines.append(f"### {kind.capitalize()}")
+            for label, refs in valid_entries:
                 ref_txt = f" [{', '.join(str(r) for r in refs)}]" if refs else ""
                 lines.append(f"- {normalize_text(label)}{ref_txt}")
             lines.append("")
