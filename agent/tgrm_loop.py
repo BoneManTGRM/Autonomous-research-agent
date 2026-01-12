@@ -1692,6 +1692,51 @@ class TGRMLoop:
         max_h = 3 if self.tgrm_level == 1 else 5
         raw_hypotheses = generate_hypotheses(goal, new_notes, citations, max_hypotheses=max_h)
 
+        # ------------------------------------------------------------------
+        # Evidence gating: drop hypotheses that lack citation support
+        #
+        # To improve report quality and avoid unsupported or placeholder
+        # hypotheses, we require that each generated hypothesis be supported
+        # by at least one citation.  A hypothesis is considered supported
+        # when any keyword (length >= 3) extracted from its text appears in
+        # the title or snippet of a citation.  If citations are absent,
+        # we keep all hypotheses so that the loop does not stall during
+        # early cycles.  Otherwise, unsupported hypotheses are removed.
+        if citations:
+            supported_hypotheses: List[Dict[str, Any]] = []
+            for h in raw_hypotheses:
+                # Hypotheses may be dicts or strings; extract text
+                try:
+                    h_text = (h.get("text") or h.get("title") or "").strip()  # type: ignore
+                except Exception:
+                    h_text = str(h).strip() if h is not None else ""
+                if not h_text:
+                    continue
+                # Extract keywords: lowercase tokens of length >= 3
+                raw_tokens = re.split(r"[\s,;:\.\(\)\[\]\{\}\-_/]+", h_text.lower())
+                keywords = [tok for tok in raw_tokens if len(tok) >= 3]
+                if not keywords:
+                    continue
+                supported = False
+                for cite in citations:
+                    try:
+                        ct = (cite.get("title") or "").lower()  # type: ignore
+                        cs = (cite.get("snippet") or "").lower()  # type: ignore
+                    except Exception:
+                        ct = ""
+                        cs = ""
+                    for kw in keywords:
+                        if kw and (kw in ct or kw in cs):
+                            supported = True
+                            break
+                    if supported:
+                        break
+                if supported:
+                    supported_hypotheses.append(h)
+            # Only override if we found at least one supported hypothesis
+            if supported_hypotheses:
+                raw_hypotheses = supported_hypotheses
+
         hypotheses: List[Dict[str, Any]] = []
         candidate_hypotheses: List[Dict[str, Any]] = []
 
