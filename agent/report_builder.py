@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import os
 from collections import defaultdict
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Tuple, Union
@@ -110,6 +109,22 @@ _PLACEHOLDER_PATTERNS = [
     "no pubmed results",
     "untitled",
     "stub",
+    # Internal log and template patterns that should never appear in a report
+    "maintenance_mode",
+    "maintenance mode",
+    "discovery_log",
+    "discovery log",
+    "placeholder discovery",
+    "template entry",
+    "template",
+    "example",
+    "inconclusive verification",
+    "rejected hypothesis",
+    "performed targeted research",
+    "initial discovery_log.json",
+    "initial discovery log",
+    "used only to show",
+    "shows how an",
 ]
 
 
@@ -136,49 +151,6 @@ def _source_key(src: Any) -> str:
     if isinstance(src, dict):
         return _safe_str(src.get("url") or src.get("id") or src.get("title") or json.dumps(src, sort_keys=True, ensure_ascii=False))
     return _safe_str(src)
-
-# ---------------------------------------------------------------------------
-# Hedging detection for strict results filtering
-# ---------------------------------------------------------------------------
-
-# Patterns to detect hedging or vague language that weakens a claim
-_HEDGING_PATTERNS: List[str] = [
-    r"\bmay\b",
-    r"\bmight\b",
-    r"\bcould\b",
-    r"\bcan\b",
-    r"\bwould\b",
-    r"\bshould\b",
-    r"\bsuggests?\b",
-    r"\bpossible\b",
-    r"\bpossibly\b",
-    r"\bpotential\b",
-    r"\bimplications?\b",
-    r"\bfurther\b",
-    r"\bfuture\b",
-    r"\bappears\b",
-    r"\bindicates?\b",
-    r"\bunclear\b",
-    r"\blikely\b",
-    r"\bunlikly\b",
-]
-
-def _is_vague_line(s: str) -> bool:
-    """Detect if a line contains hedging language or is otherwise vague.
-
-    This is used to filter out summary bullet points that do not make strong claims.
-    """
-    try:
-        text = s.lower()
-    except Exception:
-        text = str(s).lower() if s else ""
-    for pat in _HEDGING_PATTERNS:
-        try:
-            if re.search(pat, text):
-                return True
-        except Exception:
-            continue
-    return False
 
 
 def _format_source(src: Any) -> str:
@@ -742,31 +714,8 @@ def build_agent_report(
     else:
         out.append("_No sources or citations were logged for this run. The output may be unverified._")
 
-    # Optionally filter narrative lines to enforce strict results.
-    # Remove bullet lines that contain hedging language or lack citation-like markers.
-    filtered_out: List[str] = []
-    for ln in out:
-        stripped = ln.strip()
-        # Only consider bullet-like lines for filtering
-        if stripped.startswith("- "):
-            # Preserve metadata bullets and bold bullets
-            if (stripped.startswith("- **") or
-                stripped.startswith("- run_id") or
-                stripped.startswith("- generated_at") or
-                stripped.startswith("- domain") or
-                stripped.startswith("- total_")):
-                filtered_out.append(ln)
-                continue
-            # Skip if the line is vague or hedged
-            if _is_vague_line(stripped):
-                continue
-            # Skip if there are no inline citation markers (square brackets) or cycle/role markers
-            # A citation marker often appears as [1], [2], etc.; cycle markers appear as (cycle X,
-            if "[" not in stripped and ")" not in stripped:
-                continue
-        filtered_out.append(ln)
     # Assemble the report string
-    report_text = "\n".join(filtered_out)
+    report_text = "\n".join(out)
     # Normalize any misâdecoded UTFâ8 characters (e.g., bullets appearing as Ã¢â¬Â¢).
     # First attempt to use the citation_utils.normalize_text helper if available.
     try:
