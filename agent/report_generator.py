@@ -67,6 +67,81 @@ import re
 from pathlib import Path
 from collections import Counter
 
+# -----------------------------------------------------------------------
+# Vague and placeholder detection helpers
+#
+# HEDGING_PATTERNS captures hedging words/phrases that weaken claims.
+HEDGING_PATTERNS = [
+    r"\bmay\b",
+    r"\bmight\b",
+    r"\bcould\b",
+    r"\bcan\b",
+    r"\bwould\b",
+    r"\bshould\b",
+    r"\bsuggests?\b",
+    r"\bpossible\b",
+    r"\bpossibly\b",
+    r"\bpotential\b",
+    r"\bimplications?\b",
+    r"\bfurther\b",
+    r"\bfuture\b",
+    r"\bappears\b",
+    r"\bindicates?\b",
+    r"\bunclear\b",
+    r"\blikely\b",
+    r"\bunlikly\b",
+]
+
+def _is_vague(text: str) -> bool:
+    """Return True if the sentence contains hedging language that weakens the claim."""
+    if not text:
+        return False
+    # Normalize to lowercase and repair any mojibake
+    try:
+        s = normalize_text(text).lower()
+    except Exception:
+        s = str(text).lower() if text else ""
+    for pat in HEDGING_PATTERNS:
+        try:
+            if re.search(pat, s):
+                return True
+        except Exception:
+            continue
+    return False
+
+# Patterns to detect and exclude internal or template-like discovery entries.
+# These match fragments of placeholder entries (maintenance modes, templates, logs).
+BANNED_DISCOVERY_PATTERNS = [
+    "maintenance_mode",
+    "maintenance mode",
+    "discovery_log",
+    "discovery log",
+    "placeholder discovery",
+    "template entry",
+    "template",
+    "example",
+    "inconclusive verification",
+    "rejected hypothesis",
+    "performed targeted research",
+    "initial discovery_log.json",
+    "initial discovery log",
+    "used only to show",
+    "shows how an",
+]
+
+def _contains_banned_pattern(text: str) -> bool:
+    """Return True if the string contains any banned placeholder pattern."""
+    if not text:
+        return False
+    try:
+        lower = normalize_text(text).lower()
+    except Exception:
+        lower = str(text).lower() if text else ""
+    for pat in BANNED_DISCOVERY_PATTERNS:
+        if pat in lower:
+            return True
+    return False
+
 
 def normalize_text(text: Any) -> str:
     """Best-effort fix for common mojibake sequences.
@@ -1705,38 +1780,6 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
     return normalize_text("\n".join(lines))
 
 
-HEDGING_PATTERNS = [
-    r"\bmay\b",
-    r"\bmight\b",
-    r"\bcould\b",
-    r"\bcan\b",
-    r"\bwould\b",
-    r"\bshould\b",
-    r"\bsuggests?\b",
-    r"\bpossible\b",
-    r"\bpossibly\b",
-    r"\bpotential\b",
-    r"\bimplications?\b",
-    r"\bfurther\b",
-    r"\bfuture\b",
-    r"\bappears\b",
-    r"\bindicates?\b",
-    r"\bunclear\b",
-    r"\blikely\b",
-    r"\bunlikly\b",
-]
-
-def _is_vague(text: str) -> bool:
-    """Return True if the sentence contains hedging language that weakens the claim."""
-    s = normalize_text(text or "").lower()
-    for pat in HEDGING_PATTERNS:
-        try:
-            if re.search(pat, s):
-                return True
-        except Exception:
-            continue
-    return False
-
 def generate_publishable_report(
     memory_store: Any,
     goal: Optional[str] = None,
@@ -1847,6 +1890,27 @@ def generate_publishable_report(
     findings = sorted(structured, key=_finding_score, reverse=True)
     findings = findings[: max(0, int(max_findings))]
 
+    # Filter out low-quality or placeholder-like discoveries.  We drop any
+    # finding whose label contains internal logs, templates, or hedging
+    # language, or that lacks any matching citation in the current run.
+    filtered_findings: List[Dict[str, Any]] = []
+    for d in findings:
+        label = str(d.get("label") or "").strip()
+        if not label:
+            continue
+        # Skip internal or template entries (e.g. maintenance logs, examples)
+        if _contains_banned_pattern(label) or _is_vague(label):
+            continue
+        # Only keep findings that can be matched to at least one citation
+        try:
+            matched = _match_citations(label)
+        except Exception:
+            matched = []
+        if not matched:
+            continue
+        filtered_findings.append(d)
+    findings = filtered_findings
+
     # Group findings by kind for readability.
     buckets: Dict[str, List[Dict[str, Any]]] = {}
     for d in findings:
@@ -1877,25 +1941,12 @@ def generate_publishable_report(
         "structured discovery events)."
     )
     if top_labels:
-        # Filter top labels: require at least one citation and avoid vague phrasing
-        filtered_labels = []
+        lines.append("")
+        lines.append("Key outputs include:")
         for lbl in top_labels:
-            if not lbl:
-                continue
-            # Skip hedging language
-            if _is_vague(lbl):
-                continue
             refs = _match_citations(lbl)
-            # Only keep if there is at least one citation match
-            if not refs:
-                continue
-            filtered_labels.append((lbl, refs))
-        if filtered_labels:
-            lines.append("")
-            lines.append("Key outputs include:")
-            for lbl, refs in filtered_labels:
-                ref_txt = f" [{', '.join(str(r) for r in refs)}]" if refs else ""
-                lines.append(f"- {normalize_text(lbl)}{ref_txt}")
+            ref_txt = f" [{', '.join(str(r) for r in refs)}]" if refs else ""
+            lines.append(f"- {normalize_text(lbl)}{ref_txt}")
     lines.append("")
 
     # Findings
@@ -1907,24 +1958,12 @@ def generate_publishable_report(
         for kind in kind_order:
             if kind not in buckets:
                 continue
-            # Collect and filter findings by kind
-            valid_entries: List[Tuple[str, List[int]]] = []
+            lines.append(f"### {kind.capitalize()}")
             for d in buckets.get(kind, []):
                 label = str(d.get("label") or "").strip()
                 if not label:
                     continue
-                # Skip vague labels
-                if _is_vague(label):
-                    continue
                 refs = _match_citations(label)
-                # Only include findings with at least one citation
-                if not refs:
-                    continue
-                valid_entries.append((label, refs))
-            if not valid_entries:
-                continue
-            lines.append(f"### {kind.capitalize()}")
-            for label, refs in valid_entries:
                 ref_txt = f" [{', '.join(str(r) for r in refs)}]" if refs else ""
                 lines.append(f"- {normalize_text(label)}{ref_txt}")
             lines.append("")
