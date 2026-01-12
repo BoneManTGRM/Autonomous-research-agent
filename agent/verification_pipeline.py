@@ -52,6 +52,38 @@ import statistics
 import re  # Used for simple keyword extraction in support ratio computation
 from datetime import datetime
 
+# Banned patterns used to filter out internal template or maintenance entries.
+# Hypotheses containing any of these substrings will be removed during
+# verification to prevent placeholder-like artifacts from influencing scores.
+BANNED_HYP_PATTERNS: List[str] = [
+    "maintenance_mode",
+    "maintenance mode",
+    "discovery_log",
+    "discovery log",
+    "placeholder discovery",
+    "template entry",
+    "template",
+    "example",
+    "inconclusive verification",
+    "rejected hypothesis",
+    "performed targeted research",
+    "initial discovery_log.json",
+    "initial discovery log",
+    "used only to show",
+    "shows how an",
+]
+
+
+def _contains_banned_pattern(text: str) -> bool:
+    """Return True if the given text contains any banned placeholder pattern."""
+    if not text:
+        return False
+    s = text.lower()
+    for pat in BANNED_HYP_PATTERNS:
+        if pat in s:
+            return True
+    return False
+
 
 class VerificationPipeline:
     """
@@ -228,6 +260,26 @@ class VerificationPipeline:
                 if filtered_hyps:
                     hypotheses = filtered_hyps
                     cycle_log["hypotheses"] = filtered_hyps
+        except Exception:
+            pass
+
+        # Additional gating: drop any hypothesis containing banned patterns.
+        try:
+            if hypotheses:
+                cleaned_hyps: List[Dict[str, Any]] = []
+                for h in hypotheses:
+                    try:
+                        h_text = (h.get("title") or h.get("text") or "").strip()
+                    except Exception:
+                        h_text = str(h).strip() if h is not None else ""
+                    if not h_text:
+                        continue
+                    if _contains_banned_pattern(h_text):
+                        continue
+                    cleaned_hyps.append(h)
+                if cleaned_hyps:
+                    hypotheses = cleaned_hyps
+                    cycle_log["hypotheses"] = cleaned_hyps
         except Exception:
             pass
 
