@@ -188,6 +188,49 @@ class VerificationPipeline:
         if isinstance(hypothesis_profile, dict):
             hypothesis_profile["support_ratio"] = support_ratio
 
+        # Optional gating: drop unsupported hypotheses from further scoring.
+        # When citations exist and the support ratio is less than 1.0, we
+        # filter out any hypothesis that lacks citation support.  This
+        # ensures unsupported claims do not contribute to novelty or
+        # verification scoring and helps suppress placeholder-like text.
+        try:
+            if support_ratio is not None and support_ratio < 1.0 and cites_for_support:
+                filtered_hyps: List[Dict[str, Any]] = []
+                for h in hypotheses:
+                    try:
+                        h_text = (h.get("title") or h.get("text") or "").strip()  # type: ignore
+                    except Exception:
+                        h_text = str(h).strip() if h is not None else ""
+                    if not h_text:
+                        continue
+                    # Extract keywords (min length 3)
+                    raw_tokens = re.split(r"[\s,;:\.\(\)\[\]\{\}\-_/]+", h_text.lower())
+                    keywords = [tok for tok in raw_tokens if len(tok) >= 3]
+                    if not keywords:
+                        continue
+                    supported = False
+                    for cite in cites_for_support:
+                        try:
+                            ct = (cite.get("title") or "").lower()  # type: ignore
+                            cs = (cite.get("snippet") or "").lower()  # type: ignore
+                        except Exception:
+                            ct = ""
+                            cs = ""
+                        for kw in keywords:
+                            if kw and (kw in ct or kw in cs):
+                                supported = True
+                                break
+                        if supported:
+                            break
+                    if supported:
+                        filtered_hyps.append(h)
+                # Only override when some hypotheses remain
+                if filtered_hyps:
+                    hypotheses = filtered_hyps
+                    cycle_log["hypotheses"] = filtered_hyps
+        except Exception:
+            pass
+
         # 4) Motifs from hypotheses, citations, and candidate interventions
         motifs = self._build_motifs(
             goal=goal,
