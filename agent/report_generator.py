@@ -859,15 +859,24 @@ def _citation_stats(
     cycles_with_cites = 0
 
     for c in cycles:
+        # Normalise citation structures to handle single dicts as well as lists.
         cits = c.get("citations") or []
-        if isinstance(cits, list) and cits:
-            cycles_with_cites += 1
-        else:
+        has_cites = False
+        if isinstance(cits, dict):
+            # single citation dict counts as having citations
+            has_cites = True
+        elif isinstance(cits, list) and cits:
+            has_cites = True
+        if not has_cites:
             summary = c.get("summary")
             if isinstance(summary, dict):
                 sc = summary.get("citations") or []
-                if isinstance(sc, list) and sc:
-                    cycles_with_cites += 1
+                if isinstance(sc, dict):
+                    has_cites = True
+                elif isinstance(sc, list) and sc:
+                    has_cites = True
+        if has_cites:
+            cycles_with_cites += 1
 
     total_cites = len(all_citations)
     unique_sources = set()
@@ -1108,13 +1117,28 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
             hyps = hyps or summary.get("hypotheses") or []
             cits = cits or summary.get("citations") or []
 
-        for h in hyps:
+        # Normalize hypotheses and citations to lists to handle single dict entries
+        if isinstance(hyps, dict):
+            hyps_iter = [hyps]
+        elif isinstance(hyps, (list, tuple)):
+            hyps_iter = list(hyps)
+        else:
+            hyps_iter = []
+
+        if isinstance(cits, dict):
+            cits_iter = [cits]
+        elif isinstance(cits, (list, tuple)):
+            cits_iter = list(cits)
+        else:
+            cits_iter = []
+
+        for h in hyps_iter:
             if isinstance(h, dict):
                 all_hypotheses.append(h)
             else:
                 all_hypotheses.append({"text": str(h), "confidence": None})
 
-        for ct in cits:
+        for ct in cits_iter:
             if isinstance(ct, dict):
                 all_citations.append(ct)
 
@@ -2078,7 +2102,14 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None, run_
         cits = c.get("citations") or []
         if isinstance(summary, dict):
             cits = cits or summary.get("citations") or []
-        for ct in cits:
+        # Normalise citations to a list to handle single dicts
+        if isinstance(cits, dict):
+            cits_iter = [cits]
+        elif isinstance(cits, (list, tuple)):
+            cits_iter = list(cits)
+        else:
+            cits_iter = []
+        for ct in cits_iter:
             if isinstance(ct, dict):
                 all_citations.append(ct)
 
