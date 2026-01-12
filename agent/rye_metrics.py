@@ -43,13 +43,13 @@ import math
 # computed.  This meant that short runs (e.g. three cycles) produced
 # ``n/a`` values in the learning dashboards and prevented the autonomy
 # view from showing higher tiers.  To make the diagnostics usable for
-# short, finite runs â which are common when exploring longevity
-# questions â the longevityâonly build lowers the minimum cycles
+# short, finite runs Ã¢ÂÂ which are common when exploring longevity
+# questions Ã¢ÂÂ the longevityÃ¢ÂÂonly build lowers the minimum cycles
 # threshold to 3.  Runs with three or more cycles will now produce
 # full diagnostics instead of being flagged as insufficient.
 # Reduce the cycle threshold to allow diagnostics to appear even for very short
 # runs.  When set to 1 the learning dashboards will compute tiering and other
-# runâlevel signals as soon as a single cycle is available.  This change
+# runÃ¢ÂÂlevel signals as soon as a single cycle is available.  This change
 # avoids "n/a" results when exploring quick, finite runs.
 # To avoid prematurely classifying very short runs, require at least
 # three cycles before tiering heuristics are applied.  Previously this
@@ -228,11 +228,20 @@ def compute_delta_r(
     """
     base = max(issues_before - issues_after, 0)
 
-    contradiction_gain = contradictions_resolved * 0.5
-    hypothesis_gain = hypotheses_generated * 0.2
-    source_gain = min(max(sources_used, 0), 20) * 0.05
+    # Improve delta R weightings to better reward highâvalue actions.
+    # Contradiction resolution and novel hypotheses often signal large
+    # jumps in understanding. Increase their contribution to delta R.
+    contradiction_gain = contradictions_resolved * 1.0
+    hypothesis_gain = hypotheses_generated * 0.3
+    # Encourage incorporating multiple high quality sources by raising
+    # the perâsource contribution. Cap remains at 20 to prevent runaway
+    # delta values.
+    source_gain = min(max(sources_used, 0), 20) * 0.1
 
-    bonus = max(novelty_score * 0.4, 0.0) + max(coherence_gain * 0.3, 0.0)
+    # Reward discovering new mechanisms and improved coherence more
+    # aggressively. Higher multipliers encourage exploration and
+    # synthesis while still capping the bonus at sensible values.
+    bonus = max(novelty_score * 0.6, 0.0) + max(coherence_gain * 0.5, 0.0)
 
     delta = float(base + contradiction_gain + hypothesis_gain + source_gain + bonus)
 
@@ -269,23 +278,35 @@ def compute_energy(
     Unknown keyword arguments are ignored for forward compatibility.
     """
     # Base cost from actions and core calls
-    base_cost = float(len(actions_taken)) if actions_taken else 1.0
+    # Reduce base action cost to encourage judicious use of tools without
+    # disproportionately penalising necessary actions. A small nonâzero
+    # default prevents divideâbyâzero conditions downstream.
+    base_cost = 0.5 * float(len(actions_taken)) if actions_taken else 0.5
 
-    cost_web = max(web_calls, 0) * 1.5
-    cost_pubmed = max(pubmed_calls, 0) * 2.0
-    cost_sem = max(semantic_calls, 0) * 2.0
-    cost_pdf = max(pdf_ingestions, 0) * 2.5
+    # Lower energy multipliers for external calls. Web, PubMed and
+    # Semantic Scholar searches are valuable but should not dominate
+    # energy cost relative to the benefits they can bring. PDFs retain
+    # higher cost due to bandwidth and parsing overhead.
+    cost_web = max(web_calls, 0) * 1.0
+    cost_pubmed = max(pubmed_calls, 0) * 1.0
+    cost_sem = max(semantic_calls, 0) * 1.0
+    cost_pdf = max(pdf_ingestions, 0) * 1.5
 
     total = base_cost + cost_web + cost_pubmed + cost_sem + cost_pdf
 
-    # Soft token costing
+    # Soft token costing: divide by a larger denominator to reduce
+    # token impact on energy. This encourages more complex prompts
+    # where appropriate without excessively inflating energy.
     if tokens_estimate is not None and tokens_estimate > 0:
-        total += float(tokens_estimate) / 1000.0
+        total += float(tokens_estimate) / 2000.0
 
     # Swarm penalty (prevents cheating via infinite agent spawning)
     swarm_size_eff = swarm_size if isinstance(swarm_size, int) and swarm_size > 0 else 1
     swarm_layer_eff = swarm_layer if isinstance(swarm_layer, int) and swarm_layer > 0 else 1
-    swarm_penalty = 1.0 + ((swarm_size_eff - 1) * 0.05) + ((swarm_layer_eff - 1) * 0.1)
+    # Reduce swarm penalties to acknowledge that coordinated agents can
+    # work more efficiently in parallel. Still apply a small incremental
+    # cost to discourage unbounded agent proliferation.
+    swarm_penalty = 1.0 + ((swarm_size_eff - 1) * 0.02) + ((swarm_layer_eff - 1) * 0.05)
     total *= swarm_penalty
 
     # Safety clamps
@@ -454,7 +475,7 @@ def stability_index(history: List[Dict[str, Any]]) -> Optional[float]:
     compute a stability score whenever at least one RYE value exists.
     When only a single value is available the variance is zero and the
     stability is interpreted as fully stable (1.0 if the value is
-    nonânegative, otherwise 0.0).  For two or three values the sample
+    nonÃ¢ÂÂnegative, otherwise 0.0).  For two or three values the sample
     variance provides a coarse estimate of volatility.
 
     Args:
@@ -1152,14 +1173,14 @@ def rye_volatility_signature(
 # required before equilibrium detection could be performed.  For short
 # exploratory runs this prevented the equilibrium detector from ever
 # engaging, resulting in ``n/a`` and ``insufficient_data`` flags.  The
-# longevityâonly build reduces this requirement to three cycles so that
+# longevityÃ¢ÂÂonly build reduces this requirement to three cycles so that
 # the equilibrium heuristics can produce a meaningful result on short
 # runs.  Users should treat these early equilibrium indicators as
 # provisional.
 # Similarly lower the number of RYE observations required before equilibrium
 # detection engages.  By setting this to 1 the equilibrium detector will no
 # longer immediately return 'insufficient_data' on short runs.  It will
-# evaluate the available data and report nonâequilibrium reasons rather
+# evaluate the available data and report nonÃ¢ÂÂequilibrium reasons rather
 # than withholding diagnostics entirely.
 MIN_EQUILIBRIUM_CYCLES: int = 1
 
@@ -1176,25 +1197,25 @@ def detect_rye_equilibrium(
     This function tries to distinguish between a genuine plateau in repair
     efficiency and a degenerate "flatline" where nothing is happening.  In
     addition to the original conditions (regression slope within
-    ``slope_tolerance`` and nonâexcessive volatility), it enforces a few
+    ``slope_tolerance`` and nonÃ¢ÂÂexcessive volatility), it enforces a few
     additional gating criteria:
 
-      * **Minimum data requirement** â at least ``MIN_EQUILIBRIUM_CYCLES``
+      * **Minimum data requirement** Ã¢ÂÂ at least ``MIN_EQUILIBRIUM_CYCLES``
         recent RYE observations are needed before equilibrium can be
         considered.  With fewer points the detector returns
         ``in_equilibrium = False`` and ``reason = 'insufficient_data'``.
 
-      * **Nonâdegenerate volatility** â the recent window must exhibit some
-        range (i.e., max(RYE) â min(RYE) > 0) and a finite volatility
-        score.  A completely flat sequence (volatility range â 0) is
+      * **NonÃ¢ÂÂdegenerate volatility** Ã¢ÂÂ the recent window must exhibit some
+        range (i.e., max(RYE) Ã¢ÂÂ min(RYE) > 0) and a finite volatility
+        score.  A completely flat sequence (volatility range Ã¢ÂÂ 0) is
         treated as stasis rather than equilibrium.  When the range is zero
         or the volatility signature cannot be computed, the detector
         returns ``in_equilibrium = False`` and ``reason = 'no_volatility'``.
 
-      * **Evidence of progress** â the run must show some improvement in
+      * **Evidence of progress** Ã¢ÂÂ the run must show some improvement in
         efficiency.  This is estimated via ``trend_simple``, the difference
         between average RYE in the second half of the history and the first
-        half.  If ``trend_simple`` is not available or is nonâpositive,
+        half.  If ``trend_simple`` is not available or is nonÃ¢ÂÂpositive,
         equilibrium is not declared and the reason will be
         ``'no_progress'``.  Callers that wish to override this gate can
         precompute a custom progress metric and pass it via the
@@ -1262,7 +1283,7 @@ def detect_rye_equilibrium(
                 "progress": progress,
             }
 
-        # Gating: require volatility signature to exist and have nonâzero range
+        # Gating: require volatility signature to exist and have nonÃ¢ÂÂzero range
         if vol_score is None or vol_range is None or vol_range <= 0:
             return {
                 "in_equilibrium": False,
@@ -1343,7 +1364,7 @@ def detect_rye_equilibrium(
             "local_volatility_score": vol_score,
         }
 
-    # Gating: require volatility signature and nonâzero range
+    # Gating: require volatility signature and nonÃ¢ÂÂzero range
     if vol_score is None or vol_range is None or vol_range <= 0:
         return {
             "in_equilibrium": False,
