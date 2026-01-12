@@ -215,9 +215,9 @@ def _estimate_delta_r_hint(
     domain: Optional[str],
     role: Optional[str],
 ) -> float:
-    """Deterministic hint for how much ÎR this hypothesis might deliver if confirmed.
+    """Deterministic hint for how much ÃÂR this hypothesis might deliver if confirmed.
 
-    This is NOT ÎR itself, just a small scalar that can feed into
+    This is NOT ÃÂR itself, just a small scalar that can feed into
     compute_delta_r(...) as an extra signal or be logged with the hypothesis.
     """
     d = (domain or "").lower()
@@ -239,7 +239,7 @@ def _estimate_delta_r_hint(
     elif r == "researcher":
         base *= 1.0
 
-    # Map to a gentle ÎR hint range, for example [0.0, 2.0]
+    # Map to a gentle ÃÂR hint range, for example [0.0, 2.0]
     return max(0.0, min(2.0, 2.0 * base))
 
 
@@ -497,79 +497,81 @@ def _get_templates_for_domain_and_role(
     if d == "longevity":
         if r == "critic":
             return [
-                "Existing claims that changes in {k1} drive {topic} may be overstated if {k2} is not controlled for.",
-                "Heterogeneous outcomes in {topic} might be explained by unmeasured interactions between {k1} and {k2}.",
-                "If {k1}-focused interventions fail when {k2} is dysregulated, then {k1} may be a secondary rather than primary driver in {topic}.",
-                "Reported longevity benefits linked to {k1} might disappear after adjusting for {k2}-related confounders in {topic}.",
+                "Existing claims that changes in {k1} drive {topic} are overstated when {k2} is not controlled for.",
+                "Heterogeneous outcomes in {topic} are explained by unmeasured interactions between {k1} and {k2}.",
+                "If {k1}-focused interventions fail when {k2} is dysregulated, then {k1} is a secondary rather than primary driver in {topic}.",
+                "Reported longevity benefits linked to {k1} disappear after adjusting for {k2}-related confounders in {topic}.",
             ]
         if r == "explorer":
             return [
-                "Mechanisms involving {k1} in non-aging fields could transfer to {topic} via shared {k2}-linked pathways.",
-                "Interventions that modulate {k1} in other chronic conditions may unexpectedly improve {topic} when {k2} is also affected.",
-                "The role of {k1} in stress adaptation suggests cross-domain analogies that could reorganize how {topic} is targeted when {k2} shifts.",
+                "Mechanisms involving {k1} in non-aging fields transfer to {topic} via shared {k2}-linked pathways.",
+                "Interventions that modulate {k1} in other chronic conditions improve {topic} when {k2} is also affected.",
+                "The role of {k1} in stress adaptation suggests cross-domain analogies that reorganize how {topic} is targeted when {k2} shifts.",
             ]
         if r == "integrator":
             return [
-                "A combined model where {k1} tracks upstream stress and {k2} tracks repair response may explain multi-organ outcomes in {topic}.",
-                "Prioritizing interventions that improve both {k1} and {k2} may define a high RYE intervention stack for {topic}.",
-                "Differences in {topic} trajectories across cohorts might be captured by a two-axis frame based on {k1} and {k2}.",
+                "A combined model where {k1} tracks upstream stress and {k2} tracks repair response explains multi-organ outcomes in {topic}.",
+                "Prioritizing interventions that improve both {k1} and {k2} defines a high RYE intervention stack for {topic}.",
+                "Differences in {topic} trajectories across cohorts are captured by a two-axis frame based on {k1} and {k2}.",
             ]
         # default longevity templates (researcher, planner, synthesizer, etc.)
         return [
-            "Changes in {k1} may correlate with improvements in {topic} via modulation of {k2}-linked pathways.",
-            "In {topic}, tracking {k1} as a biomarker alongside {k2} could better predict repair or resilience outcomes.",
-            "Interventions that reduce adverse trends in {k1} while stabilizing {k2} might yield higher RYE in {topic}.",
-            "The interaction between {k1} and {k2} may explain heterogeneous responses to longevity interventions in {topic}.",
-            "Combining {k1}-focused protocols with monitoring of {k2} might identify individuals with superior self-repair capacity in {topic}.",
+            # Assertive templates avoid vague qualifiers like "may", "might", or "could"
+            "Changes in {k1} correlate with improvements in {topic} via modulation of {k2}-linked pathways.",
+            "In {topic}, tracking {k1} as a biomarker alongside {k2} improves prediction of repair or resilience outcomes.",
+            "Interventions that reduce adverse trends in {k1} while stabilizing {k2} yield higher RYE in {topic}.",
+            "The interaction between {k1} and {k2} explains heterogeneous responses to longevity interventions in {topic}.",
+            "Combining {k1}-focused protocols with monitoring of {k2} identifies individuals with superior self-repair capacity in {topic}.",
         ]
 
     # Math domain
     if d == "math":
         if r == "critic":
             return [
-                "If {topic} cannot ensure monotonic change in a functional built from {k1} and {k2}, its claimed stability properties may fail.",
-                "Apparent equivalence between {topic} and a {k1}/{k2}-based model may break when boundary conditions are made explicit.",
-                "Any theorem for {topic} that ignores the coupling between {k1} and {k2} risks missing a critical instability mode.",
-            ]
+            "If {topic} cannot ensure monotonic change in a functional built from {k1} and {k2}, its claimed stability properties fail.",
+            "Apparent equivalence between {topic} and a {k1}/{k2}-based model breaks when boundary conditions are made explicit.",
+            "Any theorem for {topic} that ignores the coupling between {k1} and {k2} risks missing a critical instability mode.",
+        ]
         if r == "integrator":
             return [
-                "A unified formalism where {k1} encodes state and {k2} encodes repair effort could place {topic} within an existing stability theory.",
-                "Expressing {topic} as the evolution of a functional in {k1} and {k2} may reveal hidden conservation or dissipation laws.",
-            ]
+            "A unified formalism where {k1} encodes state and {k2} encodes repair effort places {topic} within an existing stability theory.",
+            "Expressing {topic} as the evolution of a functional in {k1} and {k2} reveals hidden conservation or dissipation laws.",
+        ]
         # default math templates
         return [
-            "A formal definition that links {k1} and {k2} could yield a stability criterion for {topic}.",
-            "Constructing a Lyapunov-like functional using {k1} and {k2} may prove convergence for {topic}.",
-            "Recasting {topic} in terms of {k1} and {k2} could reveal equivalence to an existing stability framework.",
-            "Non-linear coupling between {k1} and {k2} might explain phase transitions or repair plateaus in {topic}.",
-            "An information-theoretic view where {k1} encodes state and {k2} encodes repair signal may formalize RYE in {topic}.",
+            "A formal definition that links {k1} and {k2} yields a stability criterion for {topic}.",
+            "Constructing a Lyapunov-like functional using {k1} and {k2} proves convergence for {topic}.",
+            "Recasting {topic} in terms of {k1} and {k2} reveals equivalence to an existing stability framework.",
+            "Non-linear coupling between {k1} and {k2} explains phase transitions or repair plateaus in {topic}.",
+            "An information-theoretic view where {k1} encodes state and {k2} encodes repair signal formalizes RYE in {topic}.",
         ]
 
     # General / fallback domain
     if r == "critic":
         return [
-            "Claims that {k1} is a primary driver of {topic} may be confounded by unmeasured changes in {k2}.",
-            "Inconsistent findings about {k1} in {topic} suggest that {k2} might be a hidden moderator.",
-            "If interventions on {k1} do not consistently improve {topic} when {k2} is unfavorable, then {k1} may not be a robust repair lever.",
+            "Claims that {k1} is a primary driver of {topic} are confounded by unmeasured changes in {k2}.",
+            "Inconsistent findings about {k1} in {topic} suggest that {k2} is a hidden moderator.",
+            "If interventions on {k1} do not consistently improve {topic} when {k2} is unfavorable, then {k1} is not a robust repair lever.",
         ]
     if r == "explorer":
         return [
-            "Patterns involving {k1} in other domains might transfer to {topic} when similar {k2}-related constraints are present.",
-            "Unexpected correlations between {k1} and {k2} in adjacent fields could inspire alternative models for {topic}.",
+            "Patterns involving {k1} in other domains transfer to {topic} when similar {k2}-related constraints are present.",
+            "Unexpected correlations between {k1} and {k2} in adjacent fields inspire alternative models for {topic}.",
         ]
     if r == "integrator":
         return [
-            "A compact model where {k1} summarizes stress and {k2} summarizes repair could clarify tradeoffs in {topic}.",
-            "Integrating evidence about {k1} and {k2} from multiple sources may resolve contradictions in {topic}.",
+            "A compact model where {k1} summarizes stress and {k2} summarizes repair clarifies tradeoffs in {topic}.",
+            "Integrating evidence about {k1} and {k2} from multiple sources resolves contradictions in {topic}.",
         ]
 
     # Default general templates
     return [
-        "A key driver of {topic} could be the interaction between {k1} and {k2}.",
-        "{topic} may be strongly influenced by changes in {k1} under conditions affecting {k2}.",
-        "Interventions that modify {k1} might increase stability or repair efficiency in {topic}.",
-        "Contradictions in the literature about {k1} and {k2} suggest a non-linear relationship affecting {topic}.",
-        "Combining evidence from multiple sources suggests that {k1} could be an upstream regulator in {topic}.",
+        # Assertive general templates without weak qualifiers
+        "A key driver of {topic} is the interaction between {k1} and {k2}.",
+        "{topic} is strongly influenced by changes in {k1} under conditions affecting {k2}.",
+        "Interventions that modify {k1} increase stability or repair efficiency in {topic}.",
+        "Contradictions in the literature about {k1} and {k2} indicate a non-linear relationship affecting {topic}.",
+        "Combined evidence from multiple sources shows that {k1} is an upstream regulator in {topic}.",
     ]
 
 
@@ -820,7 +822,7 @@ def generate_hypotheses(
               "rye_relevance": 0.0-1.0,
               "priority": 0.0-1.0,
               "score": 0.0-1.0,              # alias of priority for reports/sorting
-              "delta_r_hint": float,         # estimated ÎR contribution if confirmed
+              "delta_r_hint": float,         # estimated ÃÂR contribution if confirmed
               "tier_label": "tier1_candidate" | "tier2_candidate" | "tier3_candidate" | None,
               "classification": {
                   "kind": "...",
@@ -869,6 +871,12 @@ def generate_hypotheses(
     cit_terms = _extract_keywords_from_citations(citations, max_keywords=8)
     keywords = _merge_keywords(note_terms, cit_terms, domain=domain, limit=10)
 
+    # Enforce evidence-driven keyword selection: prioritize terms found in citations
+    # When citation terms exist, bias keywords toward them and ensure pairs include
+    # at least one citation-derived term. This encourages hypotheses to be
+    # anchored to actual evidence rather than speculative combinations.
+    citation_keywords = set(cit_terms)
+
     # Fallback if everything is empty
     if not keywords:
         keywords = ["resilience", "autophagy", "equilibrium", "signal"]
@@ -882,9 +890,28 @@ def generate_hypotheses(
         for j in range(i + 1, len(keywords)):
             if keywords[i] == keywords[j]:
                 continue
+            # Only create pairs where at least one term is in citation_keywords
+            if citation_keywords:
+                if keywords[i] not in citation_keywords and keywords[j] not in citation_keywords:
+                    continue
             pairs.append((keywords[i], keywords[j]))
     if not pairs:
         pairs = [(keywords[0], keywords[0])]
+
+    # Single-axis focus: select top pairs to avoid topic drift
+    # When multiple pairs remain, keep at most max_hypotheses pairs to
+    # concentrate the hypothesis space. Prioritize pairs where both terms
+    # appear in citations (citation driven) and then by lexical order.
+    if pairs and len(pairs) > max_hypotheses:
+        # Rank pairs: two citation terms highest, one citation term next
+        def _pair_rank(pair: Tuple[str, str]) -> Tuple[int, str, str]:
+            a, b = pair
+            both_in = int(a in citation_keywords and b in citation_keywords)
+            one_in = int((a in citation_keywords) or (b in citation_keywords))
+            # Sorting descending by both_in, then one_in, then alphabetical for stability
+            return (-both_in, -one_in, a + b)
+
+        pairs = sorted(pairs, key=_pair_rank)[: max_hypotheses]
 
     # 4) Generate hypotheses with basic novelty and echo filtering
     base_goal = _shorten_goal_for_topic(goal) if goal else "the current research topic"
@@ -1013,7 +1040,7 @@ def generate_hypotheses(
                     k1 = cls.get("k1") if isinstance(cls, dict) else None
                     k2 = cls.get("k2") if isinstance(cls, dict) else None
                     if k1 and k2:
-                        title = f"{k1} â {k2} constraint"
+                        title = f"{k1} Ã¢ÂÂ {k2} constraint"
                     else:
                         title = "candidate hypothesis"
                 _log_event(
