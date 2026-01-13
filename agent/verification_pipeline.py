@@ -207,6 +207,22 @@ class VerificationPipeline:
             domain=domain,
         )
 
+        # Detect Tavily API failures.  If any citation snippet or title
+        # indicates a Tavily error, record a flag so downstream logic can
+        # recognise that this was a web-blind run (failed web search) and
+        # adapt thresholds accordingly.  The detection is case-insensitive
+        # and looks for "tavily" combined with "error" or "failed".
+        tavily_failed = False
+        try:
+            for cite in citations:
+                t = str(cite.get("title") or "").lower()
+                s = str(cite.get("snippet") or "").lower()
+                if ("tavily" in t or "tavily" in s) and ("error" in t or "error" in s or "failed" in s):
+                    tavily_failed = True
+                    break
+        except Exception:
+            tavily_failed = False
+
         # 3a) Compute hypothesis support ratio: fraction of hypotheses with at least
         # one citation whose title or snippet contains any keyword from the
         # hypothesis text.  This helps detect placeholder hypotheses or
@@ -303,6 +319,20 @@ class VerificationPipeline:
             domain=domain,
             stage=stage,
         )
+
+        # If the Tavily API failed during this cycle (i.e. no web search
+        # results could be retrieved), record a flag.  This can be
+        # consumed by scoring heuristics or the reporting layer to
+        # indicate that the agent operated in an "academic-only" mode.
+        if tavily_failed:
+            try:
+                if isinstance(flags, list):
+                    flags.append("tavily_web_blind_run")
+                else:
+                    flags = [flags, "tavily_web_blind_run"] if flags else ["tavily_web_blind_run"]
+            except Exception:
+                # fallback: set flags list with only the web-blind run marker
+                flags = ["tavily_web_blind_run"]
 
         novelty_score = self._compute_novelty_score(
             hypotheses=hypotheses,
