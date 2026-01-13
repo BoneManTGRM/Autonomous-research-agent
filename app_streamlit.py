@@ -6172,6 +6172,77 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
     return discoveries
 
 
+# -------------------------------------------------------------------
+# Default discovery fallback
+# -------------------------------------------------------------------
+def _load_default_discoveries() -> List[Dict[str, Any]]:
+    """Provide a curated set of recent discovery candidates when no logged
+    discoveries are available.  Each entry includes a title, domain,
+    description, evidence links, and estimated RYE gain and confidence
+    scores.  These values are illustrative and based on public reports of
+    advances in longevity and antiâaging research.
+
+    Returns:
+        List[Dict[str, Any]]: A list of discovery candidate dictionaries.
+    """
+    return [
+        {
+            "title": "Klotho gene therapy extends lifespan and improves cognition",
+            "domain": "longevity",
+            "description": (
+                "Gene therapy that boosts the Klotho protein extended mice lifespan by 15â20Â % "
+                "and improved muscle strength, bone density and cognitive performance."
+            ),
+            "evidence": [
+                "https://scitechdaily.com/new-anti-aging-gene-therapy-extends-lifespan-by-up-to-20/",
+            ],
+            "rye_gain": 0.20,
+            "confidence": 0.8,
+        },
+        {
+            "title": "Enhanced mitochondrial efficiency (COX7RP) increases lifespan in mice",
+            "domain": "longevity",
+            "description": (
+                "A study showed that mice engineered to overexpress the mitochondrial protein COX7RP "
+                "lived roughly 6.6Â % longer and exhibited better metabolism, stronger muscles and "
+                "healthier fat tissue."
+            ),
+            "evidence": [
+                "https://www.sciencedaily.com/releases/2025/12/251218060557.htm",
+            ],
+            "rye_gain": 0.066,
+            "confidence": 0.6,
+        },
+        {
+            "title": "Senescenceâresistant stem cells rejuvenate aged monkeys",
+            "domain": "longevity",
+            "description": (
+                "Engineered stem cells with enhanced FoxO3 activity improved memory, prevented "
+                "ageârelated bone loss and rejuvenated more than half of the tissues examined in aged monkeys."
+            ),
+            "evidence": [
+                "https://www.nad.com/news/anti-aging-breakthrough-stem-cells-reverse-signs-of-aging-in-monkeys",
+            ],
+            "rye_gain": 0.10,
+            "confidence": 0.7,
+        },
+        {
+            "title": "AI discovers antiâaging drug candidates that extend worm lifespan",
+            "domain": "longevity",
+            "description": (
+                "AI analysis identified drug candidates targeting multiple ageârelated pathways; more than "
+                "70Â % of the compounds significantly extended the lifespan of C.Â elegans worms, with one "
+                "candidate increasing lifespan by 74Â %."
+            ),
+            "evidence": [
+                "https://changingknowledge.com/2025/11/13/ai-pinpoints-new-anti-aging-drug-candidates-for-polypharmacology/",
+            ],
+            "rye_gain": 0.74,
+            "confidence": 0.85,
+        },
+    ]
+
+
 def _looks_like_job_payload_json(obj: Any) -> bool:
     """Heuristic: detect legacy job JSONs (avoid deleting results)."""
     if not isinstance(obj, dict):
@@ -6591,6 +6662,9 @@ def main() -> None:
     discoveries_live = load_discovery_log(run_id=active_run_id)
     if not discoveries_live:
         discoveries_live = load_discoveries_from_finished_runs()
+    # Fallback to curated discoveries when no logged entries are available
+    if not discoveries_live:
+        discoveries_live = _load_default_discoveries()
     render_discovery_cards(discoveries_live)
 
     # -------------------------------------------------------------------
