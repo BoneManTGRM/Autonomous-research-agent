@@ -206,6 +206,51 @@ class PubMedTool:
                     }
                 )
 
+            # ------------------------------------------------------------------
+            # Domain gating: filter results to longevity-related domains.
+            #
+            # In order to reduce "domain drift" (e.g. Roman law or rare
+            # syndromes), we compute a simple relevance score for each result
+            # based on the presence of domain keywords in the title or
+            # snippet.  Only results with a relevance_score >= 0.65 are kept.
+            # If no results meet the threshold, we fall back to returning
+            # the original list so as not to leave the caller empty-handed.
+            # This gate enforces that only metabolism, aging, senescence,
+            # epigenetics, inflammation or longevity papers pass through.
+            DOMAIN_KEYWORDS = [
+                "longevity",
+                "aging",
+                "metabolism",
+                "senescence",
+                "epigenetics",
+                "inflammation",
+            ]
+
+            def _compute_relevance_score(title: str, snippet: str) -> float:
+                """Return a ratio of domain keywords present in the text."""
+                text = f"{title} {snippet}".lower()
+                matches = sum(1 for kw in DOMAIN_KEYWORDS if kw in text)
+                return matches / float(len(DOMAIN_KEYWORDS))
+
+            gated = []
+            for r in results:
+                try:
+                    score = _compute_relevance_score(
+                        str(r.get("title") or ""),
+                        str(r.get("snippet") or ""),
+                    )
+                except Exception:
+                    score = 0.0
+                # Hard reject if clearly outside domain (e.g. law/syndrome) and no keywords
+                text_l = f"{r.get('title','')} {r.get('snippet','')}".lower()
+                unrelated_markers = ["law", "legal", "roman", "syndrome"]
+                contains_unrelated = any(m in text_l for m in unrelated_markers)
+                if contains_unrelated and score == 0.0:
+                    continue
+                if score >= 0.65:
+                    gated.append(r)
+            if gated:
+                return gated
             return results
 
         except Exception as e:
