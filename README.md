@@ -5,8 +5,7 @@
 https://autonomous-research-agent-6tqt.onrender.com
 
 **Important**  
-Tavily is **optional**. If you provide a Tavily API key in the sidebar, ARA can use real web search.  
-If you leave it blank, web search falls back to **offline/stub mode**, and you can still run with other enabled sources (e.g., PubMed, Semantic Scholar, and PDF ingestion).
+Add your Tavily API key in the sidebar. Without it, search runs in offline stub mode.
 
 ---
 
@@ -40,7 +39,7 @@ Powered by:
 - **RYE v3** – efficiency-driven learning laws  
 - **MSIL v2** – Meta Stability Intelligence Layer  
 - **Stability Kernel v2** – equilibrium and oscillation analysis  
-- **Ultra Swarm Engine** – 5 to 64 autonomous agents (tested)  
+- **Ultra Swarm Engine** – 5 to 32 autonomous agents  
 - **Discovery Engine v3** – breakthrough-tier detection  
 - **MemoryStore v3** – persistent learning substrate  
 
@@ -84,9 +83,30 @@ This forms a **self-repairing scientific intelligence loop** rather than a promp
 - Automatic continuity across finite runs  
 - Ultra Fast Learning Mode (10× throughput)  
 
+### 🧬 Longevity Domain Gate & Evidence Filtering
+
+To ensure that the agent remains focused on the biology of ageing and avoids “domain drift” into irrelevant material (e.g. Roman law, unrelated syndromes or legal history), **all evidence ingestion tools now enforce a Longevity Domain Gate**.  Each citation retrieved from PubMed, Semantic Scholar or PDF searches is scored against a small set of biological keywords:
+
+- `longevity`
+- `aging`
+- `metabolism`
+- `senescence`
+- `epigenetics`
+- `inflammation`
+
+The relevance score is simply the fraction of these keywords that appear in the title and snippet of a candidate citation.  Only citations with a relevance score ≥ 0.65 are admitted to the evidence base.  Items containing unrelated terms such as “law”, “legal”, “Roman” or “syndrome” without any of the keywords are hard‑rejected.  When no results pass the gate, the ingestion tool falls back to returning the raw results to avoid empty responses, but downstream scoring will down‑weight them accordingly.
+
+### 🌐 Web‑Blind Runs and Tavily Failure Handling
+
+If the Tavily API fails during a cycle (for example, because the user did not provide an API key or the service is temporarily unavailable), the agent automatically switches into **academic‑only, high‑rigor mode**.  Citations returned with messages like “Tavily API error” are detected and a `tavily_web_blind_run` flag is recorded in the verification cycle.  This flag alerts the verification and reporting layers that the run relied solely on peer‑reviewed sources (PubMed, Semantic Scholar, PDF ingestion) and that no general web search was available.  In this mode the system raises evidence grade thresholds and tightens relevance filters to maintain scientific rigour.
+
+### 🛠 Maintenance Mode Enforcement
+
+When a cycle enters maintenance mode (detected via the `maintenance_mode` flag in the discovery log), exploration agents are disabled, the critic ratio is increased, citation‑backed gap closure is required, and new hypothesis creation is frozen.  This encourages the swarm to converge on high‑confidence results rather than wandering.  Maintenance logs and template entries are automatically filtered from hypothesis lists and discovery reports to prevent placeholder content from influencing verification or narrative summaries.
+
 ---
 
-## ⭐ Swarm Intelligence (5 to 64 Agents — tested)
+## ⭐ Swarm Intelligence (5 to 64 Agents)
 
 Role-based swarm architecture:
 
