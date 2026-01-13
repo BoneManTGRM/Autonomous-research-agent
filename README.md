@@ -39,7 +39,7 @@ Powered by:
 - **RYE v3** – efficiency-driven learning laws  
 - **MSIL v2** – Meta Stability Intelligence Layer  
 - **Stability Kernel v2** – equilibrium and oscillation analysis  
-- **Ultra Swarm Engine** – 5 to 32 autonomous agents  
+- **Ultra Swarm Engine** – 5 to 64 autonomous agents  
 - **Discovery Engine v3** – breakthrough-tier detection  
 - **MemoryStore v3** – persistent learning substrate  
 
