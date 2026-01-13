@@ -4211,10 +4211,21 @@ def compute_autonomy_view(
     # may reflect internal step counts rather than macro cycles; this
     # fallback triggers when current >= total, which corresponds to a
     # completed run.
-    # Treat "stopped" as a finished-like state in addition to other finished statuses.  Some
-    # workers emit a status of "stopped" after completing a finite run.  Including it here
-    # ensures the autonomy score advances to 4/4 instead of remaining at 3/4.
-    finished_like_labels = {"finished", "done", "completed", "complete", "success", "stopped"}
+    # Treat additional statuses such as "stopped" and "idle" as terminal run states.
+    # Some engine implementations reset the worker status to "stopped" or "idle" upon
+    # completion of a finite run instead of using "finished". If these values are
+    # not included here, the autonomy score may remain stuck at 3/4 (selfâmonitoring)
+    # even after a run has fully completed.  Including these variants ensures that
+    # the selfâstabilizing level (4/4) is reached when the run is truly done.
+    finished_like_labels = {
+        "finished",
+        "done",
+        "completed",
+        "complete",
+        "success",
+        "stopped",
+        "idle",
+    }
     if not stable_signal:
         try:
             # Compute progress fraction from worker_state if possible
