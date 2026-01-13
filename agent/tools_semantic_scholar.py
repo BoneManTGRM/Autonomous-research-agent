@@ -351,7 +351,8 @@ class SemanticScholarTool:
 
         cached = self._cache_get(cache_key)
         if cached is not None:
-            return cached
+            # Apply domain gating on cached results before returning
+            return self._apply_domain_gating(cached)
 
         with self._semaphore:
             last_err: Optional[str] = None
@@ -364,8 +365,12 @@ class SemanticScholarTool:
                         fields=fields_str,
                         year_range=year_range,
                     )
+                    # Apply longevity domain gating on the results before caching.
+                    gated_results = self._apply_domain_gating(results)
+                    # Cache the *pre-gated* results so subsequent calls have access
+                    # to the full set, but return the gated list to the caller.
                     self._cache_set(cache_key, results)
-                    return results
+                    return gated_results
                 except Exception as e:
                     last_err = str(e)
                     # Determine backoff time
@@ -408,3 +413,48 @@ class SemanticScholarTool:
                     ),
                 }
             ]
+
+    # ------------------------------------------------------------------
+    # Domain gating helper
+    # ------------------------------------------------------------------
+    def _apply_domain_gating(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Filter a list of Semantic Scholar results to enforce a longevity
+        domain gate.  Each result is assigned a simple relevance score based
+        on keyword matches.  Only results with a score >= 0.65 are kept.
+        If the filter yields no results, the original list is returned.
+
+        A small set of unrelated markers (law, legal, roman, syndrome) are
+        used to hard reject entries when no domain keywords are present.
+        """
+        DOMAIN_KEYWORDS = [
+            "longevity",
+            "aging",
+            "metabolism",
+            "senescence",
+            "epigenetics",
+            "inflammation",
+        ]
+
+        def _compute_relevance_score(title: str, snippet: str) -> float:
+            text = f"{title} {snippet}".lower()
+            matches = sum(1 for kw in DOMAIN_KEYWORDS if kw in text)
+            return matches / float(len(DOMAIN_KEYWORDS))
+
+        gated: List[Dict[str, Any]] = []
+        for r in results:
+            try:
+                title = str(r.get("title") or "")
+                snippet = str(r.get("snippet") or "")
+                score = _compute_relevance_score(title, snippet)
+            except Exception:
+                score = 0.0
+            # Hard reject unrelated topics if no domain keywords
+            text_l = f"{r.get('title','')} {r.get('snippet','')}".lower()
+            unrelated_markers = ["law", "legal", "roman", "syndrome"]
+            contains_unrelated = any(m in text_l for m in unrelated_markers)
+            if contains_unrelated and score == 0.0:
+                continue
+            if score >= 0.65:
+                gated.append(r)
+        return gated if gated else results
