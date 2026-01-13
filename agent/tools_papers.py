@@ -243,10 +243,42 @@ class PaperTool:
                     "venue": "",
                 }]
 
+        # Apply longevity domain gating.  We filter results based on
+        # keyword relevance and remove unrelated law or syndrome topics.  If
+        # no results meet the threshold, we fall back to the original list.
+        DOMAIN_KEYWORDS = [
+            "longevity",
+            "aging",
+            "metabolism",
+            "senescence",
+            "epigenetics",
+            "inflammation",
+        ]
+        def _compute_relevance_score(title: str, snippet: str) -> float:
+            text = f"{title} {snippet}".lower()
+            matches = sum(1 for kw in DOMAIN_KEYWORDS if kw in text)
+            return matches / float(len(DOMAIN_KEYWORDS))
+
+        gated: List[Dict[str, str]] = []
+        for r in results:
+            try:
+                title = str(r.get("title") or "")
+                snippet = str(r.get("snippet") or "")
+                score = _compute_relevance_score(title, snippet)
+            except Exception:
+                score = 0.0
+            text_l = f"{title} {snippet}".lower()
+            unrelated_markers = ["law", "legal", "roman", "syndrome"]
+            contains_unrelated = any(m in text_l for m in unrelated_markers)
+            if contains_unrelated and score == 0.0:
+                continue
+            if score >= 0.65:
+                gated.append(r)
         # Cache the results for this query (unfiltered results stored)
         self._sem_cache[cache_key] = results
-        # Tag results with swarm metadata when returning
-        return self._tag_sem_results(results, agent_role, swarm_id)
+        # Tag and return the gated results (or original if gating empties)
+        final_results = gated if gated else results
+        return self._tag_sem_results(final_results, agent_role, swarm_id)
 
     def _tag_sem_results(
         self,
