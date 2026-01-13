@@ -2020,8 +2020,9 @@ def render_result_details(result: Dict[str, Any]) -> None:
                 if isinstance(s, dict):
                     provider_val = str(s.get("source") or s.get("provider") or "").strip().lower()
                     title_val = str(s.get("title") or "").strip().lower()
-                    # Filter out entries where provider or title indicates an error; allow stub entries to be shown
-                    if provider_val == "error" or "error" in title_val:
+                    # Filter out entries whose provider explicitly reports an error.  Do not filter based on
+                    # the presence of the word "error" in the title so legitimate sources are retained.
+                    if provider_val == "error":
                         continue
                     url = str(s.get("url") or s.get("link") or "").strip()
                     title = str(s.get("title") or "Source").strip()
@@ -2029,8 +2030,9 @@ def render_result_details(result: Dict[str, Any]) -> None:
                     key: Any = (url or title, provider)
                 else:
                     simple_val = str(s).strip()
-                    # Skip simple strings that are error messages
-                    if "error" in simple_val.lower():
+                    # Skip simple strings when they begin with "error" (ignore case); otherwise retain them.
+                    val_lower = simple_val.lower()
+                    if val_lower.startswith("error"):
                         continue
                     key = simple_val
                 if not key or key in seen:
@@ -6172,15 +6174,13 @@ def load_discoveries_from_finished_runs(limit_runs: int = 20) -> List[Dict[str, 
     return discoveries
 
 
-# -------------------------------------------------------------------
-# Default discovery fallback
-# -------------------------------------------------------------------
 def _load_default_discoveries() -> List[Dict[str, Any]]:
-    """Provide a curated set of recent discovery candidates when no logged
-    discoveries are available.  Each entry includes a title, domain,
-    description, evidence links, and estimated RYE gain and confidence
-    scores.  These values are illustrative and based on public reports of
-    advances in longevity and antiâaging research.
+    """
+    Provide a curated set of recent discovery candidates when no logged
+    discoveries are available after filtering. Each entry contains a
+    title, domain tag, descriptive summary, evidence links and
+    estimated RYE gain and confidence values. These examples are based
+    on publicly reported research advances in longevity and antiâaging.
 
     Returns:
         List[Dict[str, Any]]: A list of discovery candidate dictionaries.
@@ -6662,7 +6662,19 @@ def main() -> None:
     discoveries_live = load_discovery_log(run_id=active_run_id)
     if not discoveries_live:
         discoveries_live = load_discoveries_from_finished_runs()
-    # Fallback to curated discoveries when no logged entries are available
+    # Remove placeholder examples (titles starting with "example") before rendering.
+    if discoveries_live:
+        filtered: List[Dict[str, Any]] = []
+        for _d in discoveries_live:
+            try:
+                _title = str(_d.get("title") or "").strip().lower()
+            except Exception:
+                _title = ""
+            # Skip synthetic placeholder entries whose titles begin with "example"
+            if not _title.startswith("example"):
+                filtered.append(_d)
+        discoveries_live = filtered
+    # If no real discoveries remain, use curated defaults.
     if not discoveries_live:
         discoveries_live = _load_default_discoveries()
     render_discovery_cards(discoveries_live)
