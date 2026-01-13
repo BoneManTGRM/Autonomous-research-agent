@@ -1897,14 +1897,26 @@ def render_result_details(result: Dict[str, Any]) -> None:
             st.info("No summary was provided by the engine.")
 
     key_findings = base.get("key_findings") or base.get("discoveries") or base.get("discovery_candidates")
+    # Filter out placeholder examples in the key findings list.  Many example
+    # entries bundled with the template begin with the word "Example".  Skip any
+    # items whose resolved title/text starts with "example" (caseâinsensitive)
+    # before rendering.  This keeps the UI focused on real discoveries.
     if isinstance(key_findings, list) and key_findings:
-        st.markdown("#### Key findings and discovery candidates")
+        filtered_lines: List[str] = []
         for item in key_findings:
             if isinstance(item, dict):
-                txt = item.get("text") or item.get("summary") or item.get("title") or str(item)
+                txt_raw = item.get("text") or item.get("summary") or item.get("title") or str(item)
             else:
-                txt = str(item)
-            st.markdown(f"- {txt}")
+                txt_raw = str(item)
+            txt_str = str(txt_raw).strip()
+            # Skip placeholders whose content begins with "example"
+            if txt_str.lower().startswith("example"):
+                continue
+            filtered_lines.append(txt_str)
+        if filtered_lines:
+            st.markdown("#### Key findings and discovery candidates")
+            for line in filtered_lines:
+                st.markdown(f"- {line}")
 
     rye_metrics = base.get("rye_metrics") or base.get("rye") or base.get("run_rye_metrics") or base.get("metrics")
     if isinstance(rye_metrics, dict):
@@ -2017,23 +2029,16 @@ def render_result_details(result: Dict[str, Any]) -> None:
             deduped_sources: List[Any] = []
             seen: Set[Any] = set()
             for s in sources:
+                # Normalize citation entries into a comparable key.  Do not discard
+                # sources solely because they contain the word "error".
                 if isinstance(s, dict):
-                    provider_val = str(s.get("source") or s.get("provider") or "").strip().lower()
-                    title_val = str(s.get("title") or "").strip().lower()
-                    # Filter out entries whose provider explicitly reports an error.  Do not filter based on
-                    # the presence of the word "error" in the title so legitimate sources are retained.
-                    if provider_val == "error":
-                        continue
                     url = str(s.get("url") or s.get("link") or "").strip()
                     title = str(s.get("title") or "Source").strip()
                     provider = str(s.get("source") or s.get("provider") or "").strip()
                     key: Any = (url or title, provider)
                 else:
+                    # Simple string citation
                     simple_val = str(s).strip()
-                    # Skip simple strings when they begin with "error" (ignore case); otherwise retain them.
-                    val_lower = simple_val.lower()
-                    if val_lower.startswith("error"):
-                        continue
                     key = simple_val
                 if not key or key in seen:
                     continue
@@ -6313,6 +6318,12 @@ def main() -> None:
         or active_run_hint
         or _derive_active_run_id_from_queue()
     )
+
+    # Fallback: If no active run was derived but the worker state includes a
+    # run_id, treat that run_id as the active run.  Some engine builds may
+    # report a run_id even when the worker status isn't strictly "running".
+    if not active_run_id and ws_run_id:
+        active_run_id = ws_run_id
 
     # If the worker is actively running a run_id, prefer it over a stale
     # global run_state.active_run_id. This prevents the UI topbar and
