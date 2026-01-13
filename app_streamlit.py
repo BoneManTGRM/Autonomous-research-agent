@@ -2383,7 +2383,8 @@ def build_outcome_summary(
 
     lines.append("\n## Limitations and next steps\n")
     lines.append("- Automated synthesis can contain errors; validate high-impact claims with primary sources.")
-    lines.append("- Consider a longer run (15â20 cycles) and enable cross-validation (Tavily/CrossRef) for stronger citation closure.")
+    # Use an ASCII hyphen between digits to avoid encoding issues (e.g. enâdash misdecoding).
+    lines.append("- Consider a longer run (15-20 cycles) and enable cross-validation (Tavily/CrossRef) for stronger citation closure.")
 
     return "\n".join(lines)
 
@@ -6190,7 +6191,8 @@ def _load_default_discoveries() -> List[Dict[str, Any]]:
             "title": "Klotho gene therapy extends lifespan and improves cognition",
             "domain": "longevity",
             "description": (
-                "Gene therapy that boosts the Klotho protein extended mice lifespan by 15â20Â % "
+                # Use an ASCII hyphen in numeric ranges to prevent mojibake (en-dash misdecoding)
+                "Gene therapy that boosts the Klotho protein extended mice lifespan by 15-20 % "
                 "and improved muscle strength, bone density and cognitive performance."
             ),
             "evidence": [
