@@ -3333,6 +3333,14 @@ def compute_progress_view(
     status = _coalesce(ws.get("status"), ps.get("status"), "unknown")
     status_s = str(status).lower()
 
+    # Flag to indicate if the run is currently executing (running-like).  This
+    # preliminary assignment is needed before finished detection and fallback logic,
+    # as the fallback may reference running_like.  It will be recomputed later
+    # after the watchdog/heartbeat logic to ensure accuracy but must be defined
+    # here to avoid UnboundLocalError when referenced in the unrecognized
+    # status fallback below.
+    running_like = status_s in {"running", "active", "in_progress", "working"}
+
     if run_id is None:
         run_id_val = _coalesce(ws.get("run_id"), ps.get("run_id"), ws.get("job_id"), ps.get("job_id"))
         if run_id_val is not None:
