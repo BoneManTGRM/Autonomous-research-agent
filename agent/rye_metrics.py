@@ -229,19 +229,23 @@ def compute_delta_r(
     base = max(issues_before - issues_after, 0)
 
     # Improve delta R weightings to better reward highâvalue actions.
-    # Contradiction resolution and novel hypotheses often signal large
-    # jumps in understanding. Increase their contribution to delta R.
-    contradiction_gain = contradictions_resolved * 1.0
-    hypothesis_gain = hypotheses_generated * 0.3
+    # Contradiction resolution and novelty/coherence gains are key signals of
+    # genuine progress. Increase their contribution to delta R.  Hypothesis
+    # generation still adds value but with a moderate weight to discourage
+    # uncontrolled idea spamming.  Sources provide evidence and thus scale
+    # the improvement more strongly than before.  Bonus terms reward
+    # novelty and coherence more aggressively.
+    contradiction_gain = contradictions_resolved * 1.5
+    hypothesis_gain = hypotheses_generated * 0.4
     # Encourage incorporating multiple high quality sources by raising
     # the perâsource contribution. Cap remains at 20 to prevent runaway
     # delta values.
-    source_gain = min(max(sources_used, 0), 20) * 0.1
+    source_gain = min(max(sources_used, 0), 20) * 0.2
 
     # Reward discovering new mechanisms and improved coherence more
     # aggressively. Higher multipliers encourage exploration and
     # synthesis while still capping the bonus at sensible values.
-    bonus = max(novelty_score * 0.6, 0.0) + max(coherence_gain * 0.5, 0.0)
+    bonus = max(novelty_score * 1.0, 0.0) + max(coherence_gain * 0.8, 0.0)
 
     delta = float(base + contradiction_gain + hypothesis_gain + source_gain + bonus)
 
@@ -278,18 +282,18 @@ def compute_energy(
     Unknown keyword arguments are ignored for forward compatibility.
     """
     # Base cost from actions and core calls
-    # Reduce base action cost to encourage judicious use of tools without
-    # disproportionately penalising necessary actions. A small nonâzero
-    # default prevents divideâbyâzero conditions downstream.
-    base_cost = 0.5 * float(len(actions_taken)) if actions_taken else 0.5
+    # Reduce base action cost further to encourage judicious use of tools
+    # without disproportionately penalising necessary actions. A small
+    # nonâzero default prevents divideâbyâzero conditions downstream.
+    base_cost = 0.3 * float(len(actions_taken)) if actions_taken else 0.3
 
     # Lower energy multipliers for external calls. Web, PubMed and
     # Semantic Scholar searches are valuable but should not dominate
     # energy cost relative to the benefits they can bring. PDFs retain
     # higher cost due to bandwidth and parsing overhead.
-    cost_web = max(web_calls, 0) * 1.0
-    cost_pubmed = max(pubmed_calls, 0) * 1.0
-    cost_sem = max(semantic_calls, 0) * 1.0
+    cost_web = max(web_calls, 0) * 0.8
+    cost_pubmed = max(pubmed_calls, 0) * 0.8
+    cost_sem = max(semantic_calls, 0) * 0.8
     cost_pdf = max(pdf_ingestions, 0) * 1.5
 
     total = base_cost + cost_web + cost_pubmed + cost_sem + cost_pdf
@@ -303,10 +307,10 @@ def compute_energy(
     # Swarm penalty (prevents cheating via infinite agent spawning)
     swarm_size_eff = swarm_size if isinstance(swarm_size, int) and swarm_size > 0 else 1
     swarm_layer_eff = swarm_layer if isinstance(swarm_layer, int) and swarm_layer > 0 else 1
-    # Reduce swarm penalties to acknowledge that coordinated agents can
-    # work more efficiently in parallel. Still apply a small incremental
-    # cost to discourage unbounded agent proliferation.
-    swarm_penalty = 1.0 + ((swarm_size_eff - 1) * 0.02) + ((swarm_layer_eff - 1) * 0.05)
+    # Reduce swarm penalties further to acknowledge that coordinated agents
+    # can work more efficiently in parallel. Still apply a small
+    # incremental cost to discourage unbounded agent proliferation.
+    swarm_penalty = 1.0 + ((swarm_size_eff - 1) * 0.015) + ((swarm_layer_eff - 1) * 0.03)
     total *= swarm_penalty
 
     # Safety clamps
