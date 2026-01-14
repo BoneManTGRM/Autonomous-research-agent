@@ -4,10 +4,11 @@ quality_gates.py
 
 This module centralizes quality checks used throughout the Autonomous Research
 Agent.  By collecting placeholder detection, domain banning, citation
-validation, and discovery/hypothesis gating into one file, we ensure
-consistent behavior across the engine, verification pipeline, report
-generation, web search, and tool ingestion layers.  Any changes to these
-quality rules should be made here so that all components benefit.
+validation, discovery/hypothesis gating, and cycle quality gating into one
+file, we ensure consistent behavior across the engine, verification
+pipeline, report generation, web search, and tool ingestion layers.  Any
+changes to these quality rules should be made here so that all components
+benefit.
 
 Functions provided:
 
@@ -39,14 +40,25 @@ Functions provided:
     contains unresolved placeholders or is empty.  Hypotheses must be
     non-empty and non-template strings to be considered.
 
-This module depends only on ``citation_utils.normalize_citation``.  If
-``normalize_citation`` cannot be imported, the functions will conservatively
-accept citations rather than raise exceptions.
+* ``evaluate_cycle_gate(cycle: Dict[str, Any], history: List[Dict[str, Any]], config: Optional[Dict[str, Any]] = None) -> Tuple[bool, List[str]]``
+    Decide whether the improvements of a cycle should be accepted or
+    rejected relative to recent history.  If rejected, return False and a
+    list of reasons.  The gate compares the current cycleâs delta_R,
+    RYE, energy usage, and citation presence against the mean values of
+    the given history slice.  Configurable parameters can adjust window
+    length and threshold behaviours.  See the function docstring for
+    details.
+
+This module depends only on ``citation_utils.normalize_citation`` and the
+``statistics`` module.  If ``normalize_citation`` cannot be imported, the
+functions will conservatively accept citations rather than raise exceptions.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+import statistics
 
 try:
     # Import normalization from citation_utils.  If unavailable, provide a
@@ -203,3 +215,116 @@ def is_valid_hypothesis(text: Any) -> bool:
     if not s:
         return False
     return not contains_placeholder(s)
+
+
+def evaluate_cycle_gate(
+    cycle: Dict[str, Any],
+    history: Iterable[Dict[str, Any]],
+    *,
+    config: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, List[str]]:
+    """Return (accept, reasons) for whether a cycle should contribute to scoring.
+
+    This gate compares the current cycleâs performance against recent history.
+    The cycle dict should contain keys ``delta_R`` (float), ``energy_E`` (float),
+    ``citations`` (list), and ``hypotheses`` (list).  The history iterable
+    should contain past cycles with the same keys.  A cycle is rejected if:
+
+    * ``delta_R`` is non-positive or below the mean of the history window.
+    * Its RYE (delta_R / energy_E) is below the mean RYE of the window.
+    * It has no citations.
+
+    Additional checks (e.g. excessive energy usage, duplicate hypotheses) can
+    be added here.  The ``config`` dict may include ``window`` to specify
+    history length; other keys are ignored for now.
+
+    Parameters
+    ----------
+    cycle : Dict[str, Any]
+        Current cycle metrics and artifacts.  Expected keys: ``delta_R``,
+        ``energy_E``, ``citations``, ``hypotheses``.
+    history : Iterable[Dict[str, Any]]
+        Sequence of recent cycle summaries.  Only numeric fields are
+        considered.
+    config : Optional[Dict[str, Any]]
+        Optional tuning parameters.  Supports:
+            - ``window``: int, length of history to consider.
+
+    Returns
+    -------
+    Tuple[bool, List[str]]
+        A tuple ``(accept, reasons)`` where ``accept`` is True if the
+        cycle meets all thresholds, otherwise False.  ``reasons`` gives
+        human-readable codes for rejection conditions.
+    """
+    reasons: List[str] = []
+    if cycle is None or not isinstance(cycle, dict):
+        return False, ["invalid_cycle"]
+    cfg = config or {}
+    # Extract cycle values with safe defaults
+    try:
+        delta_r = float(cycle.get("delta_R", 0.0) or 0.0)
+    except Exception:
+        delta_r = 0.0
+    try:
+        energy_e = float(cycle.get("energy_E", 0.0) or 0.0)
+    except Exception:
+        energy_e = 0.0
+    citations = cycle.get("citations") or []
+    # Quick rejection for non-positive improvements
+    if delta_r <= 0:
+        reasons.append("non_positive_delta")
+    # Build history lists for baseline computation
+    delta_history: List[float] = []
+    energy_history: List[float] = []
+    for h in history:
+        try:
+            dr = h.get("delta_R")
+            if isinstance(dr, (int, float)):
+                delta_history.append(float(dr))
+        except Exception:
+            continue
+        try:
+            en = h.get("energy_E")
+            if isinstance(en, (int, float)):
+                energy_history.append(float(en))
+        except Exception:
+            continue
+    # Compute baselines from history if available
+    baseline_delta = 0.0
+    baseline_rye = 0.0
+    if delta_history:
+        try:
+            baseline_delta = statistics.mean(delta_history)
+        except Exception:
+            baseline_delta = 0.0
+    if delta_history and energy_history:
+        # Use paired means to avoid division by zero
+        try:
+            mean_energy = statistics.mean(energy_history)
+            if mean_energy > 0:
+                baseline_rye = (baseline_delta / mean_energy) if baseline_delta > 0 else 0.0
+        except Exception:
+            baseline_rye = 0.0
+    # Compute current rye; avoid division by zero
+    current_rye = 0.0
+    if energy_e > 0:
+        try:
+            current_rye = delta_r / energy_e
+        except Exception:
+            current_rye = 0.0
+    # Compare delta and rye against baselines
+    # Accept if improvements exceed or match baseline; otherwise reject
+    if baseline_delta > 0 and delta_r < baseline_delta:
+        reasons.append("delta_below_baseline")
+    if baseline_rye > 0 and current_rye < baseline_rye:
+        reasons.append("rye_below_baseline")
+    # Check for citations presence
+    try:
+        if not citations or not isinstance(citations, (list, tuple)) or len(citations) == 0:
+            reasons.append("no_citations")
+    except Exception:
+        reasons.append("no_citations")
+    # Accept only if no reasons collected
+    accept = len(reasons) == 0
+    return accept, reasons
