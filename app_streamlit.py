@@ -3355,38 +3355,46 @@ def compute_progress_view(
     # appearing to be stuck mid-cycle.  When a run stops due to a user
     # request or an error, the worker may not provide final cycle counts.
     # Treating these statuses as terminal improves the UI experience.
-    # Determine whether the run is in a finished-like state.  We treat a wide range of
-    # statuses as terminal so that the progress bar shows completion rather than
-    # appearing stuck (e.g. 3/4).  Any status that is not considered "running-like"
-    # or clearly queued/pending is treated as finished.  Explicitly include
-    # common finished/error states (finished, done, stopped, error, failure, etc.),
-    # while excluding states like running, active, in_progress, working, claimed,
-    # pending, queued, and retrying.  Unknown statuses default to finished-like.
-    running_statuses = {"running", "active", "in_progress", "working", "claimed", "retrying", "queued", "pending", "waiting", "running_job"}
-    finished_statuses = {
-        "finished",
-        "done",
-        "completed",
-        "complete",
-        "success",
-        "idle",
-        "stopped",
-        "error",
-        "failed",
-        "failure",
-        "canceled",
-        "cancelled",
-        "abort",
-        "aborted",
-        "stopping",
-        "stopped_by_user",
+    # Determine if the run should be considered "finished" for UI purposes.
+    # Many job engines report a wide variety of status strings when a run
+    # completes, fails or is cancelled.  If we do not treat these as final,
+    # the progress bar may remain partially filled (e.g. 3/4) even after
+    # work has stopped.  Extend the set of finished-like statuses to cover
+    # common variants such as "stopping", "stopped_by_user", "stop_requested",
+    # "canceling", "terminating", "terminated", "timeout" and similar.  All
+    # values are compared lowercased for robustness.
+    # Determine if the run should be considered "finished" for UI purposes.
+    # Many job engines report a wide variety of status strings when a run
+    # completes, fails or is cancelled.  If we do not treat these as final,
+    # the progress bar may remain partially filled (e.g. 3/4) even after
+    # work has stopped.  Extend the set of finished-like statuses to cover
+    # common variants such as "stopping", "stopped_by_user", "stop_requested",
+    # "canceling", "terminating", "terminated", "timeout" and similar.
+    # All values are compared lowercased for robustness.
+    finished_like = status_s in {
+        # Normal termination
+        "finished", "done", "completed", "complete", "success",
+        # Worker idle after completion
+        "idle", "stopped",
+        # Cancellation and aborts
+        "canceled", "cancelled", "abort", "aborted",
+        # Errors
+        "error", "failed", "failure",
+        # Extended cancellation/stop variants
+        "stopping", "stopped_by_user", "stopped by user", "stop_requested",
+        "canceling", "cancelling", "cancelled by user", "aborting",
+        "terminated", "terminating", "terminated_by_user", "timeout",
+        "timed out", "killed", "exited", "shutdown", "shutdown_complete",
+        "shutting_down", "exception", "panic",
     }
-    if status_s in finished_statuses:
-        finished_like = True
-    elif status_s in running_statuses:
-        finished_like = False
-    else:
-        # Unknown or unclassified status: assume finished-like to avoid stuck progress.
+
+    # Treat unrecognized statuses as finished-like unless they clearly
+    # represent an active or queued state.  This prevents the UI from
+    # showing an incomplete progress bar for obscure statuses emitted by
+    # different backends.  If the status is not in the finished set,
+    # running-like set or known queued states, assume the run is done.
+    queued_like = status_s in {"queued", "pending", "waiting"}
+    if not running_like and not finished_like and not queued_like:
         finished_like = True
 
     # Signals that the worker has started doing real work (status running OR fresh-ish heartbeat)
@@ -3478,14 +3486,39 @@ def compute_progress_view(
     # If the job is finished but the reported cycle progress has not
     # reached the total, treat it as complete.  This prevents the
     # progress bar from appearing partially filled when the run
-    # terminated early (e.g. in swarm mode where early stopping
-# (comment trimmed to keep this file renderable in GitHub)
-    # configured maximum).  By promoting the current value to
-    # equal the total for finished runs, the UI more clearly
-    # communicates that no more cycles remain.
+    # terminated early (e.g. early stopping or user cancellation).
+    # Promote the current value to equal the total for finished runs.
     try:
-        if finished_like and c2 is not None and t2 is not None and t2 > 0 and c2 < t2:
-            c2 = t2
+        if finished_like:
+            # When both current and total are defined and current < total,
+            # set current to total to show a full bar (e.g. 3/4 -> 4/4).
+            if c2 is not None and t2 is not None and isinstance(t2, (int, float)) and t2 > 0 and c2 < t2:
+                c2 = t2
+            # If the run reports a current but no total, assume the total
+            # equals the current so that the bar completes (e.g. 3/None -> 3/3).
+            elif c2 is not None and (t2 is None or (isinstance(t2, (int, float)) and t2 <= 0)):
+                t2 = c2
+            # If the run reports a total but no current, assume the current
+            # equals the total to show completion (e.g. None/4 -> 4/4).
+            elif t2 is not None and c2 is None:
+                c2 = t2
+            # If both current and total are undefined or non-positive, derive a default.
+            elif (c2 is None or (isinstance(c2, (int, float)) and c2 <= 0)) and (
+                t2 is None or (isinstance(t2, (int, float)) and t2 <= 0)
+            ):
+                # Choose a sensible placeholder value.  If either value is
+                # present and positive, use the maximum of the two; otherwise
+                # default to 1 so that the bar shows as complete (1/1).
+                max_val = 1
+                try:
+                    if isinstance(c2, (int, float)) and c2 > max_val:
+                        max_val = int(c2)
+                    if isinstance(t2, (int, float)) and t2 > max_val:
+                        max_val = int(t2)
+                except Exception:
+                    max_val = 1
+                c2 = max_val
+                t2 = max_val
     except Exception:
         pass
     # Remap internal step-based progress to user cycles when a macro cycle count
@@ -4294,25 +4327,46 @@ def compute_autonomy_view(
     # despite the run being fully complete.  Include these variants so the
     # stability detection logic can advance to selfâstabilizing (4/4).
     finished_like_labels = {
-        "finished",
-        "done",
-        "completed",
-        "complete",
-        "success",
-        "stopped",
-        "idle",
-        "error",
-        "failed",
-        "failure",
-        "canceled",
-        "cancelled",
-        "aborted",
-        "halted",
-        "terminated",
-        "ended",
-        "exited",
-        "unknown",
-    }
+    "finished",
+    "done",
+    "completed",
+    "complete",
+    "success",
+    "stopped",
+    "idle",
+    "error",
+    "failed",
+    "failure",
+    "canceled",
+    "cancelled",
+    "abort",
+    "aborted",
+    "halting",
+    "halted",
+    "terminated",
+    "terminating",
+    "ended",
+    "exit",
+    "exited",
+    "stopping",
+    "stopped_by_user",
+    "stopped by user",
+    "canceling",
+    "cancelling",
+    "cancelled by user",
+    "aborting",
+    "terminated_by_user",
+    "timed out",
+    "timeout",
+    "killed",
+    "exiting",
+    "shutdown",
+    "shutdown_complete",
+    "shutting_down",
+    "exception",
+    "panic",
+    "unknown",
+}
     if not stable_signal:
         try:
             # Compute progress fraction from worker_state if possible
@@ -7472,6 +7526,62 @@ def main() -> None:
                                     candidates.append((Path(os.getcwd()) / "runs").expanduser())
                                 except Exception:
                                     pass
+
+                                # Additional run roots derived from queue directories.  If the
+                                # RUNS_PENDING_DIR or other queue directories are available (via run_jobs
+                                # imports), derive their parent.parent as a candidate runs root.  This
+                                # helps when the queue lives under <runs_root>/queue/pending and no
+                                # other environment variables are set.  Similarly include roots from
+                                # RUNS_QUEUE_ROOT (the queue parent) by taking its parent.
+                                try:
+                                    # Candidate root from RUNS_PENDING_DIR (e.g. runs_root/queue/pending)
+                                    if 'RUNS_PENDING_DIR' in globals() and isinstance(RUNS_PENDING_DIR, Path):
+                                        try:
+                                            _p = RUNS_PENDING_DIR
+                                            # runs_root/queue/pending -> runs_root
+                                            _parent = _p.parent.parent
+                                            if _parent:
+                                                candidates.append(_parent)
+                                        except Exception:
+                                            pass
+                                    # Candidate root from RUNS_ACTIVE_DIR
+                                    if 'RUNS_ACTIVE_DIR' in globals() and isinstance(RUNS_ACTIVE_DIR, Path):
+                                        try:
+                                            _p = RUNS_ACTIVE_DIR
+                                            _parent = _p.parent.parent
+                                            if _parent:
+                                                candidates.append(_parent)
+                                        except Exception:
+                                            pass
+                                    # Candidate root from RUNS_FINISHED_DIR
+                                    if 'RUNS_FINISHED_DIR' in globals() and isinstance(RUNS_FINISHED_DIR, Path):
+                                        try:
+                                            _p = RUNS_FINISHED_DIR
+                                            _parent = _p.parent.parent
+                                            if _parent:
+                                                candidates.append(_parent)
+                                        except Exception:
+                                            pass
+                                    # Candidate root from RUNS_ERROR_DIR
+                                    if 'RUNS_ERROR_DIR' in globals() and isinstance(RUNS_ERROR_DIR, Path):
+                                        try:
+                                            _p = RUNS_ERROR_DIR
+                                            _parent = _p.parent.parent
+                                            if _parent:
+                                                candidates.append(_parent)
+                                        except Exception:
+                                            pass
+                                    # Candidate root from RUNS_QUEUE_ROOT: <runs_root>/queue
+                                    if 'RUNS_QUEUE_ROOT' in globals() and isinstance(RUNS_QUEUE_ROOT, Path):
+                                        try:
+                                            _q = RUNS_QUEUE_ROOT
+                                            _parent = _q.parent
+                                            if _parent:
+                                                candidates.append(_parent)
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
                                 # Deduplicate candidate roots
                                 unique_roots: List[Path] = []
                                 seen_root_strs: Set[str] = set()
@@ -7490,8 +7600,18 @@ def main() -> None:
                                         run_dir = root / jid_str
                                         run_dir.mkdir(parents=True, exist_ok=True)
                                         flag_path = run_dir / "stop.flag"
-                                        flag_path.touch(exist_ok=True)
-                                        any_success = True
+                                        try:
+                                            # Create or truncate the stop flag file.  Writing a byte
+                                            # ensures the file exists on platforms where touch() may
+                                            # silently fail or be buffered.  Use a short string so the
+                                            # presence of the file is sufficient for detection.
+                                            with open(flag_path, "w", encoding="utf-8") as _fp:
+                                                _fp.write("stop\n")
+                                            any_success = True
+                                        except Exception:
+                                            # Fall back to touch if write fails
+                                            flag_path.touch(exist_ok=True)
+                                            any_success = True
                                     except Exception as ee:
                                         errors.append(f"{root}: {ee}")
                                 if any_success:
