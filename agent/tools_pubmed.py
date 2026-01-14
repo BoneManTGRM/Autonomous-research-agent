@@ -131,6 +131,21 @@ class PubMedTool:
         # triggering PubMed errors (200 chars is often sufficient)
         sanitized = sanitized[:200]
 
+        # ------------------------------------------------------------------
+        # Disambiguate RYE metric versus rye grain.  If the query contains
+        # the token "rye" but not our full metric phrase "repair yield", we
+        # append negative keywords to discourage PubMed from returning
+        # agricultural literature (e.g., cereal grains or plant genetics).
+        try:
+            q_low = sanitized.lower()
+            if "rye" in q_low and "repair yield" not in q_low:
+                # Add negative search modifiers.  NCBI E-utilities treat
+                # minus signs as NOT operators.  We include multiple
+                # synonyms to cover a range of irrelevant terms.
+                sanitized += " -seed -seeds -grain -cereal -secale -cultivar"
+        except Exception:
+            pass
+
         try:
             # Step 1: esearch to get PMIDs
             params = {
