@@ -3355,7 +3355,15 @@ def compute_progress_view(
     # appearing to be stuck mid-cycle.  When a run stops due to a user
     # request or an error, the worker may not provide final cycle counts.
     # Treating these statuses as terminal improves the UI experience.
-    finished_like = status_s in {
+    # Determine whether the run is in a finished-like state.  We treat a wide range of
+    # statuses as terminal so that the progress bar shows completion rather than
+    # appearing stuck (e.g. 3/4).  Any status that is not considered "running-like"
+    # or clearly queued/pending is treated as finished.  Explicitly include
+    # common finished/error states (finished, done, stopped, error, failure, etc.),
+    # while excluding states like running, active, in_progress, working, claimed,
+    # pending, queued, and retrying.  Unknown statuses default to finished-like.
+    running_statuses = {"running", "active", "in_progress", "working", "claimed", "retrying", "queued", "pending", "waiting", "running_job"}
+    finished_statuses = {
         "finished",
         "done",
         "completed",
@@ -3370,7 +3378,16 @@ def compute_progress_view(
         "cancelled",
         "abort",
         "aborted",
+        "stopping",
+        "stopped_by_user",
     }
+    if status_s in finished_statuses:
+        finished_like = True
+    elif status_s in running_statuses:
+        finished_like = False
+    else:
+        # Unknown or unclassified status: assume finished-like to avoid stuck progress.
+        finished_like = True
 
     # Signals that the worker has started doing real work (status running OR fresh-ish heartbeat)
     hb_count = _safe_int((watchdog or {}).get("count"), 0) or 0
