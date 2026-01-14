@@ -505,6 +505,64 @@ def regression_rye_slope(history: List[Dict[str, Any]]) -> Optional[float]:
 
 
 # ---------------------------------------------------------------------------
+# Rolling RYE slope (linear regression on recent window)
+# ---------------------------------------------------------------------------
+
+def rolling_rye_slope(history: List[Dict[str, Any]], window: int = 10) -> Optional[float]:
+    """
+    Compute the slope of the RYE series over the most recent ``window`` cycles.
+
+    This helper fits a simple linear regression line y = a + b*x to the
+    last N RYE values (where x is the zero-based index) and returns the
+    slope coefficient ``b``.  If insufficient data exists (fewer than two
+    numeric RYE values) or ``window`` <= 1, it returns ``None``.
+
+    The slope provides a local trend estimate that is less sensitive to
+    the entire run history than the global regression slope.  Positive
+    values indicate increasing efficiency, negative values indicate
+    declining efficiency, and zero indicates flat performance.
+
+    Parameters
+    ----------
+    history:
+        List of cycle dictionaries or raw RYE values.  Mixed types are
+        accepted; non-numeric entries are ignored.
+    window:
+        Number of recent cycles to consider.  Values <= 1 disable the
+        computation and return ``None``.
+
+    Returns
+    -------
+    float or None
+        The slope of the local regression line, or ``None`` if it cannot
+        be computed.
+    """
+    # Defensive checks
+    if not history or window is None or window <= 1:
+        return None
+    vals = _extract_rye_series(history)
+    if not vals:
+        return None
+    recent = vals[-window:]
+    n = len(recent)
+    if n < 2:
+        return None
+    # Compute mean of x indices (0..n-1) and y values
+    mean_x = (n - 1) / 2.0
+    mean_y = sum(recent) / float(n)
+    num = 0.0
+    den = 0.0
+    for i, y in enumerate(recent):
+        dx = i - mean_x
+        dy = y - mean_y
+        num += dx * dy
+        den += dx * dx
+    if den == 0.0:
+        return 0.0
+    return num / den
+
+
+# ---------------------------------------------------------------------------
 # Stability Index (NEW)
 # ---------------------------------------------------------------------------
 
