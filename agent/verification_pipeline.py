@@ -90,6 +90,18 @@ BANNED_HYP_PATTERNS: List[str] = [
     "detected",
     "encountered",
     "fully",
+
+    # Additional patterns to catch leaked run directives and prompt injection
+    # strings.  These phrases rarely belong in a real hypothesis and thus
+    # are treated as banned placeholders.
+    "system directive",
+    "autonomous research swarm",
+    "coordinated cycle",
+    "single coordinated cycle",
+    "64-agent",
+    "64 agent",
+    "you are a 64",
+    "research swarm operating",
 ]
 
 
