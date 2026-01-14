@@ -463,6 +463,22 @@ def web_search_tool(
 
     max_results = max(1, min(max_results, 12))
 
+    # ---------------------------------------------------------------------
+    # Disambiguate RYE metric versus rye grain.  If the query contains the
+    # token "rye" but not the phrase "repair yield", append negative
+    # modifiers to discourage the retrieval of agricultural, cereal, or
+    # plant genetics results.  Do this before computing the cache key so
+    # that the disambiguated queries are cached separately.
+    try:
+        q_low = q.lower()
+        if "rye" in q_low and "repair yield" not in q_low:
+            q = (
+                q
+                + " -seed -seeds -grain -grains -cereal -cereals -secale -cultivar -agronomy"
+            )
+    except Exception:
+        pass
+
     # Cache key MUST include toggles that change the response.
     cache_key: Tuple[Any, ...] = (
         q,
