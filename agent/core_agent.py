@@ -3013,7 +3013,7 @@ class CoreAgent:
                 if len(recent_rye) > 10:
                     recent_rye.pop(0)
 
-            # Update live state after each cycle (fixes Ã¢ÂÂ0 of N then jumpÃ¢ÂÂ behavior in UI)
+            # Update live state after each cycle (fixes ÃÂ¢ÃÂÃÂ0 of N then jumpÃÂ¢ÃÂÃÂ behavior in UI)
             try:
                 self._emit_live_state(
                     {
