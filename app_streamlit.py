@@ -7379,7 +7379,7 @@ def main() -> None:
                                 except Exception:
                                     pass
                                 # Environment-driven runs roots
-                                _env_runs_root = os.getenv("ARA_RUNS_DIR") or os.getenv("RUNS_ROOT")
+                                _env_runs_root = os.getenv("ARA_RUNS_DIR") or os.getenv("RUNS_ROOT") or os.getenv("RUNS_DIR")
                                 if _env_runs_root:
                                     try:
                                         candidates.append(Path(_env_runs_root).expanduser())
@@ -7389,6 +7389,14 @@ def main() -> None:
                                 if "RUNS_BASE_DIR" in globals() and isinstance(RUNS_BASE_DIR, Path):
                                     try:
                                         candidates.append(Path(RUNS_BASE_DIR))
+                                    except Exception:
+                                        pass
+                                # Also include RUNS_BASE_DIR from environment if specified.  Some deployments
+                                # set RUNS_BASE_DIR only via an environment variable rather than importing it.
+                                _env_runs_base_dir = os.getenv("RUNS_BASE_DIR")
+                                if _env_runs_base_dir:
+                                    try:
+                                        candidates.append(Path(_env_runs_base_dir).expanduser())
                                     except Exception:
                                         pass
                                 # Candidate from BASE_DIR environment variable and nested runs
