@@ -134,6 +134,16 @@ try:
     from .quality_gates import evaluate_cycle_gate  # type: ignore
 except Exception:  # pragma: no cover
     evaluate_cycle_gate = None  # type: ignore
+
+# Try to import the hypothesis validator from quality_gates.  If unavailable,
+# define a permissive fallback.  This validator helps filter out
+# placeholder or templated hypothesis strings (e.g. leaked system directives) so
+# that only substantive hypotheses are considered.
+try:
+    from .quality_gates import is_valid_hypothesis  # type: ignore
+except Exception:  # pragma: no cover
+    def is_valid_hypothesis(_: Any) -> bool:  # type: ignore
+        return True
 # ---------------------------------------------------------------------------
 # Global limits and helpers
 # ---------------------------------------------------------------------------
@@ -1766,6 +1776,20 @@ class TGRMLoop:
 
             if not text:
                 continue
+
+            # Apply quality gating to hypotheses.  Hypotheses containing
+            # unresolved template text or system directives (as detected by
+            # quality_gates.is_valid_hypothesis) are skipped.  This prevents
+            # placeholder content (e.g. leaked system directives) from being
+            # logged as candidate hypotheses or discoveries.
+            try:
+                if not is_valid_hypothesis(text):
+                    continue
+            except Exception:
+                # If the validator raises unexpectedly, fall back to accepting
+                # the hypothesis.  We prefer to err on the side of inclusion
+                # rather than crash the loop.
+                pass
 
             hyp_id = f"h_{cycle_index}_{idx}"
             hyp_record: Dict[str, Any] = {
