@@ -148,6 +148,23 @@ class PaperTool:
         if not clean_query:
             return []
 
+        # ------------------------------------------------------------------
+        # Disambiguate RYE metric versus rye grain.  If the search query
+        # contains the token "rye" but not the phrase "repair yield", we
+        # append negative keywords to discourage the retrieval of agricultural
+        # or plant genetics literature.  These negative modifiers are
+        # recognized by Semantic Scholar and reduce the chance of irrelevant
+        # cereal-related results.
+        try:
+            q_low = clean_query.lower()
+            if "rye" in q_low and "repair yield" not in q_low:
+                clean_query = (
+                    clean_query
+                    + " -seed -seeds -grain -grains -cereal -cereals -secale -cultivar -agronomy"
+                )
+        except Exception:
+            pass
+
         cache_key = (clean_query, limit)
         if cache_key in self._sem_cache:
             return self._tag_sem_results(self._sem_cache[cache_key], agent_role, swarm_id)
