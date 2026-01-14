@@ -4,6 +4,9 @@ Enhanced Streamlit interface for the Autonomous Research Agent.
 
 Features:
 - Finite mode only with manual cycle budgets (no timed presets in this build)
+    - Improved stop button reliability: the UI writes a `stop.flag` into all plausible run
+      directories (mirroring the worker's search logic) so user stop requests are more likely
+      to be detected promptly
 - Researcher plus Critic multi agent mode
 - Swarm mode with up to dozens of mini agents
 - Domain presets (General, Longevity, Math)
