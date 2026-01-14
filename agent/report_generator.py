@@ -127,6 +127,13 @@ BANNED_DISCOVERY_PATTERNS = [
     "initial discovery log",
     "used only to show",
     "shows how an",
+    # additional patterns to catch unresolved template variables
+    # and other non-semantic placeholders that have appeared in reports
+    "agent",
+    "description",
+    "detected",
+    "encountered",
+    "fully",
 ]
 
 def _contains_banned_pattern(text: str) -> bool:
@@ -512,8 +519,25 @@ def _compute_session_hours(timestamps: List[str]) -> Optional[float]:
         return None
 
 
-def _safe_get_cycle_history(memory_store: Any) -> List[Dict[str, Any]]:
-    """Defensive wrapper around memory_store.get_cycle_history."""
+def _safe_get_cycle_history(
+    memory_store: Any, run_id: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    Defensive wrapper around ``memory_store.get_cycle_history`` that scopes by run_id
+    when possible. If run_id is provided and the underlying memory store
+    supports a run_id argument, only cycles for that run are returned. If
+    run_id is omitted or unsupported, the full unscoped history is returned.
+    Always returns a list of dictionaries.
+    """
+    # Attempt to get run-scoped history first
+    if run_id:
+        try:
+            hist = memory_store.get_cycle_history(run_id=run_id)  # type: ignore[arg-type]
+            if isinstance(hist, list):
+                return hist
+        except Exception:
+            pass
+    # Fallback to unscoped history
     try:
         hist = memory_store.get_cycle_history()
         if isinstance(hist, list):
@@ -993,7 +1017,8 @@ def _render_generic_optional_dict(
 def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optional[str] = None) -> str:
     """Generate full Reparodynamics markdown report with advanced metrics."""
 
-    all_cycles: List[Dict[str, Any]] = _safe_get_cycle_history(memory_store)
+    # Pull cycle history scoped to the provided run_id when possible
+    all_cycles: List[Dict[str, Any]] = _safe_get_cycle_history(memory_store, run_id=run_id)
 
     if goal:
         cycles = [c for c in all_cycles if (c.get("goal") or "") == goal]
@@ -1840,11 +1865,11 @@ def generate_publishable_report(
     Unlike `generate_report`, this mode avoids per-cycle diagnostics and raw dumps.
     It aims to be suitable for sharing, grading, or investor review.
     """
-    cycles_all = _safe_get_cycle_history(memory_store)
+    # Pull cycle history scoped to this run when possible.  Avoid further
+    # filtering by run_id here because the history call already applied it.
+    cycles_all: List[Dict[str, Any]] = _safe_get_cycle_history(memory_store, run_id=run_id)
     if goal:
         cycles_all = [c for c in cycles_all if (c.get("goal") or "") == goal]
-    if run_id:
-        cycles_all = [c for c in cycles_all if str(c.get("run_id") or "") == str(run_id)]
     cycles = list(cycles_all)
 
     if not cycles:
@@ -1948,6 +1973,12 @@ def generate_publishable_report(
             continue
         # Skip internal or template entries (e.g. maintenance logs, examples)
         if _contains_banned_pattern(label) or _is_vague(label):
+            continue
+        # Skip labels containing unresolved bold markup or template variables.  In previous
+        # runs we observed labels like "**agent**" or "**description**" where the
+        # templating engine failed to substitute real values.  Any label with
+        # leftover markdown bold markers is considered malformed and discarded.
+        if "**" in label:
             continue
         # Only keep findings that can be matched to at least one citation
         try:
@@ -2053,7 +2084,8 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None, run_
     - High value biomarkers or targets
     """
 
-    all_cycles = _safe_get_cycle_history(memory_store)
+    # Pull cycle history scoped to the provided run_id when possible
+    all_cycles = _safe_get_cycle_history(memory_store, run_id=run_id)
 
     if goal:
         cycles = [c for c in all_cycles if (c.get("goal") or "") == goal]
