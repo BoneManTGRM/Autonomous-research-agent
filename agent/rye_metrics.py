@@ -330,6 +330,51 @@ def compute_rye(delta_r: float, energy_e: float) -> float:
         return 0.0
     return float(dr) / float(e)
 
+# ---------------------------------------------------------------------------
+# Qualityâweighted RYE (optional)
+# ---------------------------------------------------------------------------
+
+def compute_effective_rye(delta_r: float, energy_e: float, quality_score: float = 1.0) -> float:
+    """
+    Compute a qualityâweighted RYE.
+
+    Parameters
+    ----------
+    delta_r : float
+        The delta R value for the cycle.
+    energy_e : float
+        The energy cost for the cycle.
+    quality_score : float, optional
+        A quality factor between 0.0 and 1.0 representing evidence strength. A value
+        of 1.0 leaves the RYE unchanged, whereas 0.0 collapses RYE to zero. Values
+        outside the [0, 1] range are clamped.
+
+    Returns
+    -------
+    float
+        The qualityâadjusted RYE value.
+
+    Notes
+    -----
+    The default `compute_rye` remains unchanged to preserve existing behaviour.
+    This helper multiplies the raw RYE by a userâprovided quality factor. It is
+    safe to call even when no quality_score is known; the default of 1.0 yields
+    the unmodified RYE. Callers are expected to derive an appropriate quality
+    factor (e.g. based on citation count, support ratio, or other verification
+    diagnostics) and pass it in.
+    """
+    # Clamp quality_score into [0.0, 1.0]
+    try:
+        q = float(quality_score)
+    except Exception:
+        q = 1.0
+    if q < 0.0:
+        q = 0.0
+    if q > 1.0:
+        q = 1.0
+    raw_rye = compute_rye(delta_r, energy_e)
+    return raw_rye * q
+
 
 # ---------------------------------------------------------------------------
 # Rolling RYE (mean)
