@@ -348,6 +348,32 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
         # should never count as evidence.
         if "too many requests" in t_low or "retry_after" in t_low or "429" in t_low:
             return None
+
+    # -----------------------------------------------------------------
+    # Domain confusion filtering
+    #
+    # Disambiguate between our RYE metric (Repair Yield per Energy) and
+    # unrelated agricultural topics.  If the title or snippet contains
+    # agricultural terms like "rye seed" or other cereal/grain markers,
+    # drop the citation.  This prevents irrelevant plant genetics papers
+    # from polluting longevity reports.
+    try:
+        agri_tokens = [
+            "rye seed",
+            "rye seeds",
+            "grain",
+            "cereal",
+            "secale",
+            "cultivar",
+        ]
+        combined = f"{t_low} {s_low}" if (t_low or s_low) else ""
+        if combined:
+            for term in agri_tokens:
+                if term in combined:
+                    return None
+    except Exception:
+        # If any error occurs during token checking, ignore and proceed
+        pass
     if s_low:
         if "semantic scholar error" in s_low or "pubmed request failed" in s_low:
             return None
@@ -446,6 +472,18 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
                 domain = parsed.netloc.lower()
             except Exception:
                 domain = ""
+
+        # Explicitly drop citations from banned domains such as YouTube and Grantome.
+        # These domains have been observed to leak into the evidence base due to
+        # broad keyword matching but do not represent peerâreviewed literature.
+        banned_domains = {
+            "youtube.com",
+            "youtu.be",
+            "grantome.com",
+        }
+        if domain and any(domain.endswith(bd) or domain == bd for bd in banned_domains):
+            return None
+
         if not _is_credible_source(source):
             # Keep only if domain ends with one of the credible domains
             if not (domain and any(domain.endswith(d) for d in credible_domains)):
