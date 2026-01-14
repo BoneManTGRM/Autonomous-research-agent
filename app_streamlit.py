@@ -4220,6 +4220,12 @@ def compute_autonomy_view(
     # not included here, the autonomy score may remain stuck at 3/4 (selfâmonitoring)
     # even after a run has fully completed.  Including these variants ensures that
     # the selfâstabilizing level (4/4) is reached when the run is truly done.
+    # Recognize a broad set of terminal worker statuses as finishâlike.  Some
+    # engine implementations use alternate labels (e.g., "error", "failed",
+    # "cancelled", "aborted", etc.) when a run terminates.  Without these
+    # entries, the autonomy score can remain stuck at 3/4 (selfâmonitoring)
+    # despite the run being fully complete.  Include these variants so the
+    # stability detection logic can advance to selfâstabilizing (4/4).
     finished_like_labels = {
         "finished",
         "done",
@@ -4228,6 +4234,17 @@ def compute_autonomy_view(
         "success",
         "stopped",
         "idle",
+        "error",
+        "failed",
+        "failure",
+        "canceled",
+        "cancelled",
+        "aborted",
+        "halted",
+        "terminated",
+        "ended",
+        "exited",
+        "unknown",
     }
     if not stable_signal:
         try:
