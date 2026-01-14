@@ -3610,15 +3610,31 @@ def compute_progress_view(
 
     if c2 is None or t2 is None or t2 <= 0:
         # If the run has finished (including stopped or failed) but
-        # progress counts are missing, show a full bar.  Provide a
-        # placeholder 1/1 cycle so that the UI conveys completion.  This
-        # avoids cases where the progress bar appears partially filled
-        # (e.g. 3/4) due to missing final counts when a run aborts.
+        # progress counts are missing, show a full bar.  Derive a
+        # placeholder total/current from whichever values are available
+        # (c2 or t2) so that the UI conveys completion.  For example,
+        # if the last observed cycle was 3 and the run stops without
+        # reporting a total, show 3/3; if a total of 4 is known but
+        # current is missing, show 4/4.  If neither is known, fall back
+        # to 1/1.  This avoids cases where the progress bar appears
+        # partially filled (e.g. 3/4) due to missing final counts.
         if finished_like:
+            placeholder_total = None
+            try:
+                # Use the larger of c2 or t2 if either is an int
+                if isinstance(c2, int) and c2 > 0:
+                    placeholder_total = c2
+                if isinstance(t2, int) and t2 > 0:
+                    if placeholder_total is None or t2 > placeholder_total:
+                        placeholder_total = t2
+            except Exception:
+                placeholder_total = None
+            if placeholder_total is None or placeholder_total <= 0:
+                placeholder_total = 1
             return {
                 "kind": "cycle",
-                "current": 1,
-                "total": 1,
+                "current": placeholder_total,
+                "total": placeholder_total,
                 "fraction": 1.0,
                 "label": "cycles",
             }
@@ -7389,6 +7405,30 @@ def main() -> None:
                                         candidates.append(_ld.parent)
                                     except Exception:
                                         pass
+                                # Additional candidates derived from the engine_worker module.  If available,
+                                # include the worker's computed BASE_DIR (and BASE_DIR/runs) and the
+                                # parent of its RUNS_LOGS_DIR.  These values mirror the engine's own
+                                # stop flag search logic, helping ensure that the UI writes the stop flag
+                                # where the worker will look for it.
+                                try:
+                                    import engine_worker as _ew  # type: ignore
+                                    # Parent of RUNS_LOGS_DIR (runs root)
+                                    try:
+                                        _ew_logs_dir = getattr(_ew, "RUNS_LOGS_DIR", None)
+                                        if _ew_logs_dir:
+                                            candidates.append(Path(_ew_logs_dir).parent)
+                                    except Exception:
+                                        pass
+                                    # Worker BASE_DIR and BASE_DIR/runs
+                                    try:
+                                        _ew_base = getattr(_ew, "BASE_DIR", None)
+                                        if _ew_base:
+                                            candidates.append(Path(_ew_base))
+                                            candidates.append(Path(_ew_base) / "runs")
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
                                 # Script-relative fallbacks: runs directory under this script and its parents
                                 try:
                                     _script_dir = Path(__file__).resolve().parent
