@@ -48,6 +48,14 @@ except Exception:  # pragma: no cover
         from event_log import log_event as _log_event  # type: ignore
     except Exception:
         _log_event = None  # type: ignore
+
+# ---------------------------------------------------------------------------
+# Optional quality gate import.  If unavailable the gate will be skipped.
+# ---------------------------------------------------------------------------
+try:
+    from .quality_gates import cycle_passes_quality  # type: ignore
+except Exception:
+    cycle_passes_quality = None  # type: ignore
 import statistics
 import re  # Used for simple keyword extraction in support ratio computation
 from datetime import datetime
@@ -367,6 +375,48 @@ class VerificationPipeline:
             verification_score=verification_score,
         )
 
+        # ------------------------------------------------------------------
+        # Quality gating: optionally adjust scores based on recent history.
+        # We perform this after all core scoring so that the gate can override
+        # the verification_score and flags.  The gate uses a simple baseline
+        # heuristic defined in quality_gates.cycle_passes_quality.
+        # ------------------------------------------------------------------
+        quality_gate_passed: bool = True
+        try:
+            # Pull gating parameters from config.  Missing entries default to
+            # no gating (window=0).
+            q_window = int(self.config.get("quality_window", 0))
+            q_margin = float(self.config.get("quality_margin", 0.0))
+            q_require_new = bool(self.config.get("require_new_citation", False))
+            # Only attempt gate if function is available and window > 0.
+            if cycle_passes_quality and q_window and q_window > 0:
+                hist: List[Dict[str, Any]] = []
+                try:
+                    if hasattr(self.memory_store, "get_cycle_history_for_goal"):
+                        hist = self.memory_store.get_cycle_history_for_goal(goal, q_window) or []  # type: ignore[attr-defined]
+                except Exception:
+                    hist = []
+                try:
+                    quality_gate_passed = cycle_passes_quality(cycle_log, hist, window=q_window, margin=q_margin, require_new_citation=q_require_new)
+                except Exception:
+                    quality_gate_passed = True
+        except Exception:
+            quality_gate_passed = True
+
+        # Enforce gate: if gate fails set verification_score to 0 and record flag
+        if not quality_gate_passed:
+            try:
+                verification_score = 0.0
+            except Exception:
+                pass
+            try:
+                if isinstance(flags, list):
+                    flags.append("quality_gate_failed")
+                else:
+                    flags = [flags, "quality_gate_failed"] if flags else ["quality_gate_failed"]
+            except Exception:
+                flags = ["quality_gate_failed"]
+
         verification_summary = {
             "cycle": cycle_log.get("cycle"),
             "run_id": run_id,
@@ -384,6 +434,7 @@ class VerificationPipeline:
             "citation_profile": citation_profile,
             "hypothesis_profile": hypothesis_profile,
             "motifs": motifs,
+            "quality_gate_passed": quality_gate_passed,
         }
 
         # 7) Log into memory store if possible
@@ -859,8 +910,10 @@ class VerificationPipeline:
         percent_missing_url = citation_profile.get("percent_missing_url") or 0.0
 
         if total_cites == 0:
-            # When there are no citations, collapse the citation strength to zero
-            # so that uncited outputs cannot earn a high verification score.
+            # When no citations are present, the citation strength should
+            # collapse to zero rather than defaulting to a positive baseline.
+            # This ensures that uncited outputs cannot achieve high
+            # verification scores.  A "no_citations" flag is emitted.
             cite_term = 0.0
             flags.append("no_citations")
         else:
