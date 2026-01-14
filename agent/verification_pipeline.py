@@ -71,6 +71,16 @@ BANNED_HYP_PATTERNS: List[str] = [
     "initial discovery log",
     "used only to show",
     "shows how an",
+
+    # Extra patterns for unresolved template variables.  These terms
+    # indicate that a hypothesis string was generated from a template
+    # without proper substitution and should be filtered out.  See
+    # report_generator.BANNED_DISCOVERY_PATTERNS for similar logic.
+    "agent",
+    "description",
+    "detected",
+    "encountered",
+    "fully",
 ]
 
 
@@ -849,7 +859,9 @@ class VerificationPipeline:
         percent_missing_url = citation_profile.get("percent_missing_url") or 0.0
 
         if total_cites == 0:
-            cite_term = 0.1
+            # When there are no citations, collapse the citation strength to zero
+            # so that uncited outputs cannot earn a high verification score.
+            cite_term = 0.0
             flags.append("no_citations")
         else:
             diversity = (unique_sources / float(total_cites)) if total_cites > 0 else 0.0
