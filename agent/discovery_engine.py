@@ -55,6 +55,10 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 # or example placeholders.  BANNED_DISCOVERY_PATTERNS matches strings that
 # indicate these artifacts.  _contains_banned_pattern is used to skip
 # candidates that match any of these patterns.
+# Expand the banned patterns list to catch more template leakage and
+# promptâdirective artefacts.  This prevents system directives or
+# initialization text from being treated as real discoveries.  The
+# patterns below are all kept lowercase for simple substring checks.
 BANNED_DISCOVERY_PATTERNS: List[str] = [
     "maintenance_mode",
     "maintenance mode",
@@ -71,6 +75,15 @@ BANNED_DISCOVERY_PATTERNS: List[str] = [
     "initial discovery log",
     "used only to show",
     "shows how an",
+    # Additional patterns to filter run directive and prompt injection text
+    "system directive",
+    "autonomous research swarm",
+    "coordinated cycle",
+    "single coordinated cycle",
+    "64-agent",
+    "64 agent",
+    "run summary",
+    "agent autonomous",
 ]
 
 
@@ -166,22 +179,43 @@ def _load_json_file(path: Path) -> Optional[Any]:
 
 def load_discovery_log() -> List[Dict[str, Any]]:
     """
-    Load existing discovery log entries.
+    Load existing discovery log entries, filtering out bootstrapping and
+    example placeholders.
 
-    This is also compatible with the app_streamlit loader which
-    looks for logs/discovery_log.json or logs/discovery/discovery_log.json.
+    This function reads the discovery log from either the primary or
+    mirror locations and then removes entries that are known to be
+    templates or bootstrap examples.  Entries with a ``run_id`` of
+    "default" or any value containing "bootstrap"/"example" are
+    discarded, as are entries whose ``tags`` contain "example",
+    "template", or "bootstrap".  Filtering here prevents these
+    artefacts from polluting discovery summaries and RYE statistics.
     """
     # Prefer the canonical location first
     data = _load_json_file(DISCOVERY_LOG_MAIN)
+    if not isinstance(data, list):
+        data = _load_json_file(DISCOVERY_LOG_MIRROR)
+    entries: List[Dict[str, Any]] = []
     if isinstance(data, list):
-        return [d for d in data if isinstance(d, dict)]
-
-    # Fallback to older flat path
-    data = _load_json_file(DISCOVERY_LOG_MIRROR)
-    if isinstance(data, list):
-        return [d for d in data if isinstance(d, dict)]
-
-    return []
+        for d in data:
+            if not isinstance(d, dict):
+                continue
+            run_id = str(d.get("run_id", ""))
+            # Discard entries from bootstrapping or examples
+            if run_id.lower() in {"default", ""}:
+                continue
+            if any(tok in run_id.lower() for tok in ["bootstrap", "example"]):
+                continue
+            tags = d.get("tags") or []
+            bad_tag = False
+            if isinstance(tags, list):
+                for t in tags:
+                    if isinstance(t, str) and any(x in t.lower() for x in ["example", "template", "bootstrap"]):
+                        bad_tag = True
+                        break
+            if bad_tag:
+                continue
+            entries.append(d)
+    return entries
 
 
 def _save_discovery_log(entries: List[Dict[str, Any]]) -> None:
