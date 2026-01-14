@@ -3341,6 +3341,17 @@ def compute_progress_view(
     # display a partially filled progress bar even though no further
     # cycles will run.  Include "idle" and "stopped" to treat
     # those states as terminal.
+    # Consider additional final statuses as finished-like.  Some job engines
+    # reset the worker status to "idle" or "stopped" after completing a
+    # run.  Without including these in the finished set, the UI may
+    # display a partially filled progress bar even though no further
+    # cycles will run.  Include "idle" and "stopped" to treat
+    # those states as terminal.
+    # Additionally include common error/failure statuses as finished-like
+    # so that aborted or cancelled runs show a full progress bar rather than
+    # appearing to be stuck mid-cycle.  When a run stops due to a user
+    # request or an error, the worker may not provide final cycle counts.
+    # Treating these statuses as terminal improves the UI experience.
     finished_like = status_s in {
         "finished",
         "done",
@@ -3349,6 +3360,13 @@ def compute_progress_view(
         "success",
         "idle",
         "stopped",
+        "error",
+        "failed",
+        "failure",
+        "canceled",
+        "cancelled",
+        "abort",
+        "aborted",
     }
 
     # Signals that the worker has started doing real work (status running OR fresh-ish heartbeat)
@@ -3591,6 +3609,19 @@ def compute_progress_view(
             pass
 
     if c2 is None or t2 is None or t2 <= 0:
+        # If the run has finished (including stopped or failed) but
+        # progress counts are missing, show a full bar.  Provide a
+        # placeholder 1/1 cycle so that the UI conveys completion.  This
+        # avoids cases where the progress bar appears partially filled
+        # (e.g. 3/4) due to missing final counts when a run aborts.
+        if finished_like:
+            return {
+                "kind": "cycle",
+                "current": 1,
+                "total": 1,
+                "fraction": 1.0,
+                "label": "cycles",
+            }
         return {"kind": "none", "current": None, "total": None, "fraction": None, "label": ""}
 
     # If finished, clamp to full
