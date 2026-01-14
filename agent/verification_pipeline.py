@@ -48,17 +48,18 @@ except Exception:  # pragma: no cover
         from event_log import log_event as _log_event  # type: ignore
     except Exception:
         _log_event = None  # type: ignore
-
-# ---------------------------------------------------------------------------
-# Optional quality gate import.  If unavailable the gate will be skipped.
-# ---------------------------------------------------------------------------
-try:
-    from .quality_gates import cycle_passes_quality  # type: ignore
-except Exception:
-    cycle_passes_quality = None  # type: ignore
 import statistics
 import re  # Used for simple keyword extraction in support ratio computation
 from datetime import datetime
+
+# Optional quality gate import.  When available, this is used to decide
+# whether a cycle's improvement should contribute to verification and novelty
+# scores.  If the import fails, the gate variable is set to None and
+# gating checks are skipped.
+try:
+    from .quality_gates import evaluate_cycle_gate  # type: ignore
+except Exception:
+    evaluate_cycle_gate = None  # type: ignore
 
 # Banned patterns used to filter out internal template or maintenance entries.
 # Hypotheses containing any of these substrings will be removed during
@@ -365,7 +366,51 @@ class VerificationPipeline:
             hypothesis_profile=hypothesis_profile,
         )
 
-        # 6) Route motifs into replay buffer if strong enough
+        # 6) Optionally apply the cycle quality gate.  When the gate is
+        # available it compares the current delta_R and energy against
+        # recent history to decide whether this cycleâs improvements are
+        # sufficiently strong and novel.  If rejected, verification and
+        # novelty scores are forced to zero and gating reasons are stored in
+        # the flags.  The gating logic reuses the quality_gate config from
+        # the pipeline config (if present) and the same history window used
+        # for novelty scoring.
+        gating_reasons: List[str] = []
+        if evaluate_cycle_gate is not None:
+            try:
+                qcfg = self.config.get("quality_gate", {}) if hasattr(self, "config") else {}
+            except Exception:
+                qcfg = {}
+            # Build the minimal cycle dict required by the gate
+            cycle_for_gate: Dict[str, Any] = {
+                "delta_R": cycle_log.get("delta_R"),
+                "energy_E": cycle_log.get("energy_E"),
+                "citations": citations,
+                "hypotheses": hypotheses,
+            }
+            try:
+                gate_accept, gate_reasons = evaluate_cycle_gate(cycle_for_gate, history, config=qcfg)
+            except Exception:
+                gate_accept, gate_reasons = True, []
+            if not gate_accept:
+                gating_reasons = gate_reasons or ["quality_gate_rejection"]
+                # Force scores to zero when the gate rejects
+                verification_score = 0.0
+                novelty_score = 0.0
+                disco_confidence = 0.0
+                # Ensure flags is a list and append rejection markers
+                try:
+                    if not flags:
+                        flags = []
+                    elif not isinstance(flags, list):
+                        flags = [flags]
+                    flags.append("quality_gate_rejection")
+                    for reason in gating_reasons:
+                        flags.append(f"gate_{reason}")
+                except Exception:
+                    # Fallback: assign flags to list of rejection markers only
+                    flags = ["quality_gate_rejection"]
+
+        # 6a) Route motifs into replay buffer if strong enough (post-gate)
         self._route_motifs_to_replay(
             motifs=motifs,
             goal=goal,
@@ -374,48 +419,6 @@ class VerificationPipeline:
             rye_value=rye_value,
             verification_score=verification_score,
         )
-
-        # ------------------------------------------------------------------
-        # Quality gating: optionally adjust scores based on recent history.
-        # We perform this after all core scoring so that the gate can override
-        # the verification_score and flags.  The gate uses a simple baseline
-        # heuristic defined in quality_gates.cycle_passes_quality.
-        # ------------------------------------------------------------------
-        quality_gate_passed: bool = True
-        try:
-            # Pull gating parameters from config.  Missing entries default to
-            # no gating (window=0).
-            q_window = int(self.config.get("quality_window", 0))
-            q_margin = float(self.config.get("quality_margin", 0.0))
-            q_require_new = bool(self.config.get("require_new_citation", False))
-            # Only attempt gate if function is available and window > 0.
-            if cycle_passes_quality and q_window and q_window > 0:
-                hist: List[Dict[str, Any]] = []
-                try:
-                    if hasattr(self.memory_store, "get_cycle_history_for_goal"):
-                        hist = self.memory_store.get_cycle_history_for_goal(goal, q_window) or []  # type: ignore[attr-defined]
-                except Exception:
-                    hist = []
-                try:
-                    quality_gate_passed = cycle_passes_quality(cycle_log, hist, window=q_window, margin=q_margin, require_new_citation=q_require_new)
-                except Exception:
-                    quality_gate_passed = True
-        except Exception:
-            quality_gate_passed = True
-
-        # Enforce gate: if gate fails set verification_score to 0 and record flag
-        if not quality_gate_passed:
-            try:
-                verification_score = 0.0
-            except Exception:
-                pass
-            try:
-                if isinstance(flags, list):
-                    flags.append("quality_gate_failed")
-                else:
-                    flags = [flags, "quality_gate_failed"] if flags else ["quality_gate_failed"]
-            except Exception:
-                flags = ["quality_gate_failed"]
 
         verification_summary = {
             "cycle": cycle_log.get("cycle"),
@@ -434,7 +437,10 @@ class VerificationPipeline:
             "citation_profile": citation_profile,
             "hypothesis_profile": hypothesis_profile,
             "motifs": motifs,
-            "quality_gate_passed": quality_gate_passed,
+            # When the quality gate rejects a cycle, gating_reasons lists
+            # the specific codes.  This field is empty when the gate
+            # accepts the cycle or when the gate is unavailable.
+            "gating_reasons": gating_reasons,
         }
 
         # 7) Log into memory store if possible
