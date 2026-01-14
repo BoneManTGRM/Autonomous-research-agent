@@ -126,11 +126,14 @@ except Exception:  # pragma: no cover
         def compute_effective_rye(*args, **kwargs) -> float:
             return 0.0
 
-# Optional quality gating import.  If unavailable gating will be skipped.
+# Optional cycle gate import.  The gate decides whether a cycle's
+# improvements are sufficiently strong and novel relative to recent history
+# to be accepted.  If unavailable (e.g. stripped down environments), the
+# gate function is set to None so that cycles always pass.
 try:
-    from .quality_gates import cycle_passes_quality  # type: ignore
-except Exception:
-    cycle_passes_quality = None  # type: ignore
+    from .quality_gates import evaluate_cycle_gate  # type: ignore
+except Exception:  # pragma: no cover
+    evaluate_cycle_gate = None  # type: ignore
 # ---------------------------------------------------------------------------
 # Global limits and helpers
 # ---------------------------------------------------------------------------
@@ -1830,6 +1833,47 @@ class TGRMLoop:
             swarm_size=(swarm_profile or {}).get("swarm_size"),
             swarm_layer=(swarm_profile or {}).get("layer"),
         )
+        # Initialize gating reasons to an empty list.  This ensures references
+        # to ``gating_reasons`` later in the cycle do not raise an error if
+        # the quality gate is disabled or accepts the cycle.
+        gating_reasons: List[str] = []
+        # ------------------------------------------------------------------
+        # Apply the quality gate to decide if this cycle's improvement should count.
+        # We compare the current delta_R and energy against recent history and
+        # ensure novelty and citation density meet minimum thresholds.  If the
+        # gate rejects this cycle, delta_r is zeroed and gating_reasons is set.
+        if evaluate_cycle_gate is not None:
+            try:
+                qcfg = self.config.get("quality_gate", {}) if hasattr(self, "config") else {}
+            except Exception:
+                qcfg = {}
+            # Gather recent history from the memory store if available.
+            history_slice: List[Dict[str, Any]] = []
+            try:
+                window = int(qcfg.get("window", 10))
+            except Exception:
+                window = 10
+            try:
+                if hasattr(self.memory_store, "get_cycle_history_for_goal"):
+                    try:
+                        history_slice = self.memory_store.get_cycle_history_for_goal(goal=goal, limit=window)  # type: ignore
+                    except TypeError:
+                        history_slice = self.memory_store.get_cycle_history_for_goal(goal)  # type: ignore
+            except Exception:
+                history_slice = []
+            cycle_for_gate: Dict[str, Any] = {
+                "delta_R": delta_r,
+                "energy_E": energy_e,
+                "citations": citations,
+                "hypotheses": hypotheses,
+            }
+            try:
+                gate_accept, gate_reasons = evaluate_cycle_gate(cycle_for_gate, history_slice, config=qcfg)
+            except Exception:
+                gate_accept, gate_reasons = True, []
+            if not gate_accept:
+                delta_r = 0.0
+                gating_reasons = gate_reasons or ["quality_gate_rejection"]
         # Compute raw RYE and a qualityâadjusted RYE.  The raw RYE uses the
         # original compute_rye function, while the qualityâadjusted RYE uses
         # compute_effective_rye with a derived quality factor.  The quality
@@ -1849,6 +1893,9 @@ class TGRMLoop:
             quality_score = 0.5
         else:
             quality_score = 1.0
+        # If the quality gate rejected this cycle, force the quality score to zero.
+        if evaluate_cycle_gate is not None and gating_reasons:
+            quality_score = 0.0
         rye_value = compute_effective_rye(delta_r, energy_e, quality_score)
 
         # Use the raw RYE value for gradient and equilibrium calculations to
@@ -2080,36 +2127,10 @@ class TGRMLoop:
             # Interrupt flags
             "interrupted": interrupted,
             "stop_reason": stop_reason,
+            # Quality gate rejection reasons (if any).  Empty list if gate is
+            # disabled or accepted the cycle.
+            "gating_reasons": gating_reasons,
         }
-
-        # ------------------------------------------------------------------
-        # Quality gating: compute whether this cycle meets the baseline RYE
-        # criteria relative to recent history.  This stores a simple
-        # quality_gate_passed boolean into cycle_summary for downstream
-        # consumers (verification pipeline and UI).  It does not abort the
-        # cycle; enforcement happens in other layers.
-        quality_gate_passed: bool = True
-        try:
-            q_window = int(getattr(self, "config", {}).get("quality_window", 0))
-            q_margin = float(getattr(self, "config", {}).get("quality_margin", 0.0))
-            q_require_new = bool(getattr(self, "config", {}).get("require_new_citation", False))
-            if cycle_passes_quality and q_window and q_window > 0:
-                hist: List[Dict[str, Any]] = []  # type: ignore
-                try:
-                    if hasattr(self.memory_store, "get_cycle_history_for_goal"):
-                        hist = self.memory_store.get_cycle_history_for_goal(goal, q_window) or []  # type: ignore[attr-defined]
-                except Exception:
-                    hist = []
-                try:
-                    quality_gate_passed = cycle_passes_quality(cycle_summary, hist, window=q_window, margin=q_margin, require_new_citation=q_require_new)
-                except Exception:
-                    quality_gate_passed = True
-        except Exception:
-            quality_gate_passed = True
-        try:
-            cycle_summary["quality_gate_passed"] = quality_gate_passed
-        except Exception:
-            pass
 
         replay_item_ids = self._log_replay_candidate(cycle_summary, replay_buffer)
         self._tag_cycle_metadata(
@@ -2174,9 +2195,10 @@ class TGRMLoop:
             "experiment_mode": experiment_mode,
             "msil_mode": msil_mode,
             "msil_track_mode": msil_track_mode,
+            # Quality gate rejection reasons (if any).  Empty list if gate is
+            # disabled or accepted the cycle.
+            "gating_reasons": gating_reasons,
             "rye_mode": rye_mode,
-            # Quality gate outcome for UI and diagnostics
-            "quality_gate_passed": quality_gate_passed,
         }
 
         return {
