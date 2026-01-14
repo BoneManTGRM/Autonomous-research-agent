@@ -71,6 +71,11 @@ except Exception:  # pragma: no cover
 # Placeholder patterns used to detect unresolved template variables.  These
 # patterns are kept in lowercase so that ``contains_placeholder`` can
 # perform a simple lowercase check on the text.
+# Placeholder patterns used to detect unresolved template variables.  These
+# patterns are kept in lowercase so that ``contains_placeholder`` can
+# perform a simple lowercase check on the text.  Additional phrases
+# corresponding to prompt injection artefacts and runâlevel directives
+# have been added below (e.g. "system directive", "autonomous research swarm").
 PLACEHOLDER_PATTERNS: List[str] = [
     "**",  # bold markers often indicate unresolved variables in reports
     "agent",
@@ -80,6 +85,17 @@ PLACEHOLDER_PATTERNS: List[str] = [
     "fully",
     "{{",  # Jinja/format style opening braces
     "}}",  # Jinja/format style closing braces
+
+    # Additional patterns to catch prompt injection or run directive text.  These
+    # phrases are rarely part of a legitimate hypothesis or discovery, but
+    # frequently appear when the system directive leaks into outputs.  By
+    # treating them as placeholders we prevent them from being accepted as
+    # genuine content.
+    "system directive",
+    "autonomous research swarm",
+    "coordinated cycle",
+    "single coordinated cycle",
+    "64-agent",
 ]
 
 # Domains that are disallowed as evidence sources.  Citations from these
