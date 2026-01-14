@@ -1910,11 +1910,11 @@ class TGRMLoop:
             citation_count = len(citations) if citations is not None else 0
         except Exception:
             citation_count = 0
-        # Simple quality score: 0 citations â 0.0, 1 citation â 0.5, â¥2 â 1.0
+        # Simple quality score: 0 citations â 0.0, 1 citation â 0.75, â¥2 â 1.0
         if citation_count <= 0:
             quality_score = 0.0
         elif citation_count == 1:
-            quality_score = 0.5
+            quality_score = 0.75
         else:
             quality_score = 1.0
         # If the quality gate rejected this cycle, force the quality score to zero.
