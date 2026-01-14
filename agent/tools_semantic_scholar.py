@@ -337,6 +337,23 @@ class SemanticScholarTool:
         year_range: Optional[Tuple[int, int]] = None,
     ) -> List[Dict[str, Any]]:
         normalized = _normalize_query(query)
+
+        # ------------------------------------------------------------------
+        # Disambiguate RYE metric versus rye grain.  If the normalized query
+        # contains the token "rye" but not the full metric phrase "repair yield",
+        # append negative keywords to discourage the API from returning
+        # agricultural or plant genetics papers.  This modification must
+        # occur before caching and sending the request so that distinct
+        # disambiguated queries are cached separately.
+        try:
+            q_low = normalized.lower()
+            if "rye" in q_low and "repair yield" not in q_low:
+                normalized = (
+                    normalized
+                    + " -seed -seeds -grain -grains -cereal -cereals -secale -cultivar -agronomy"
+                )
+        except Exception:
+            pass
         if not normalized:
             return [
                 {
