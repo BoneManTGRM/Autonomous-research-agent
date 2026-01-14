@@ -110,7 +110,9 @@ from typing import Any, Dict, List, Optional, Tuple, Sequence
 
 # ---- Metrics import (package-safe) ----
 try:
-    from .rye_metrics import compute_delta_r, compute_rye
+    # Import qualityâadjusted RYE helper alongside the baseline functions.  If the
+    # import fails (e.g. in minimal environments), fall back on the stubs.
+    from .rye_metrics import compute_delta_r, compute_rye, compute_effective_rye  # type: ignore
 except Exception:  # pragma: no cover
     try:
         from rye_metrics import compute_delta_r, compute_rye  # type: ignore
@@ -120,6 +122,8 @@ except Exception:  # pragma: no cover
             return 0.0
 
         def compute_rye(*args, **kwargs) -> float:
+            return 0.0
+        def compute_effective_rye(*args, **kwargs) -> float:
             return 0.0
 # ---------------------------------------------------------------------------
 # Global limits and helpers
@@ -1820,11 +1824,33 @@ class TGRMLoop:
             swarm_size=(swarm_profile or {}).get("swarm_size"),
             swarm_layer=(swarm_profile or {}).get("layer"),
         )
-        rye_value = compute_rye(delta_r, energy_e)
+        # Compute raw RYE and a qualityâadjusted RYE.  The raw RYE uses the
+        # original compute_rye function, while the qualityâadjusted RYE uses
+        # compute_effective_rye with a derived quality factor.  The quality
+        # factor here is a simple proxy derived from the number of citations
+        # collected during this cycle: at least one citation yields a value of
+        # 0.5, two or more citations yields 1.0, and zero citations yields 0.0.
+        rye_raw = compute_rye(delta_r, energy_e)
+        # Determine citations count safely
+        try:
+            citation_count = len(citations) if citations is not None else 0
+        except Exception:
+            citation_count = 0
+        # Simple quality score: 0 citations â 0.0, 1 citation â 0.5, â¥2 â 1.0
+        if citation_count <= 0:
+            quality_score = 0.0
+        elif citation_count == 1:
+            quality_score = 0.5
+        else:
+            quality_score = 1.0
+        rye_value = compute_effective_rye(delta_r, energy_e, quality_score)
 
+        # Use the raw RYE value for gradient and equilibrium calculations to
+        # preserve existing behaviour and stability tuning.  The quality
+        # weighted value is available but not used for control flow.
         equilibrium_info = self._compute_rye_gradient_and_equilibrium(
             goal=goal,
-            current_rye=rye_value,
+            current_rye=rye_raw,
             delta_r=delta_r,
             energy_e=energy_e,
             domain=domain_tag,
@@ -1833,7 +1859,7 @@ class TGRMLoop:
         breakthrough_info = self._compute_breakthrough_score(
             goal=goal,
             domain=domain_tag,
-            current_rye=rye_value,
+            current_rye=rye_raw,
             delta_r=delta_r,
             energy_e=energy_e,
             equilibrium_info=equilibrium_info,
@@ -2009,7 +2035,14 @@ class TGRMLoop:
             "delta_R_components": delta_r_components,
             "energy_E": energy_e,
             "Energy": energy_e,
-            "RYE": rye_value,
+            # RYE fields: raw (unweighted) and qualityâweighted.  The
+            # unweighted RYE is preserved under the key "RYE" for
+            # backward compatibility and existing trend analyses.  The
+            # quality weighted RYE is exposed under "RYE_quality", while
+            # the quality factor itself is available as "quality_score".
+            "RYE": rye_raw,
+            "RYE_quality": rye_value,
+            "quality_score": quality_score,
             "search_energy": self.search_energy,
             # RYE gradient and equilibrium and breakthrough
             "equilibrium": equilibrium_info,
