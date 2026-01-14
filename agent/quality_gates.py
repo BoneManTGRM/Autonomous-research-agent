@@ -96,6 +96,10 @@ PLACEHOLDER_PATTERNS: List[str] = [
     "coordinated cycle",
     "single coordinated cycle",
     "64-agent",
+    # Accept both hyphenated and spaced forms for agent count to catch
+    # template variations.  The unhyphenated version prevents strings like
+    # "64 agent" from passing as valid content.
+    "64 agent",
 ]
 
 # Domains that are disallowed as evidence sources.  Citations from these
