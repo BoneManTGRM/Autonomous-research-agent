@@ -126,6 +126,16 @@ _PLACEHOLDER_PATTERNS = [
     "initial discovery log",
     "used only to show",
     "shows how an",
+
+    # Additional patterns observed in malformed discovery labels.  These
+    # correspond to unresolved template variables that sometimes leak into
+    # agent outputs.  By listing them here, we ensure that any entry
+    # containing these words is treated as a placeholder and skipped.
+    "agent",
+    "description",
+    "detected",
+    "encountered",
+    "fully",
 ]
 
 
@@ -583,8 +593,15 @@ def build_agent_report(
             data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
             title = data.get("title") or data.get("name") or ev.get("message") or "discovery"
             desc = data.get("description") or data.get("details") or data.get("text") or ""
-            # Skip entries that are placeholders or have placeholder fields
-            if _is_placeholder_text(title) or _is_placeholder_text(desc):
+            # Skip entries that are placeholders, contain unresolved template markers,
+            # or have placeholder fields.  Entries with unfinished bold markup
+            # (e.g., "**agent**", "**description**") are considered malformed
+            # and are dropped.  See report_generator for similar logic.
+            if (
+                _is_placeholder_text(title)
+                or _is_placeholder_text(desc)
+                or ("**" in str(title) or "**" in str(desc))
+            ):
                 continue
             role = ev.get("role") or data.get("role") or "agent"
             cycle = _cycle_int(ev)
@@ -607,8 +624,13 @@ def build_agent_report(
                 role = ev.get("role") or "agent"
                 cycle = _cycle_int(ev)
                 cite = _format_source_refs(ev, source_index)
-                # Skip placeholder or empty hypothesis text
-                if not text or _is_placeholder_text(text):
+                # Skip placeholder or empty hypothesis text and any text
+                # containing unresolved bold markup (indicating a template leak).
+                if (
+                    not text
+                    or _is_placeholder_text(text)
+                    or "**" in str(text)
+                ):
                     continue
                 out.append(f"- (cycle {cycle}, role {role}){cite}")
                 out.append(f"  - {text}")
@@ -671,8 +693,14 @@ def build_agent_report(
                 data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
                 text = data.get("text") or data.get("hypothesis") or _extract_text_from_event(ev)
                 cite = _format_source_refs(ev, source_index)
-                if text:
-                    out.append(f"- {text}{cite}")
+                # Skip hypothesis text if it's empty, placeholder-like, or contains unresolved bold markup.
+                if (
+                    not text
+                    or _is_placeholder_text(text)
+                    or "**" in str(text)
+                ):
+                    continue
+                out.append(f"- {text}{cite}")
         if ver_c:
             out.append("")
             out.append("**Verifications:**")
@@ -682,7 +710,7 @@ def build_agent_report(
                 rationale = data.get("rationale") or data.get("reason") or data.get("notes") or ""
                 cite = _format_source_refs(ev, source_index)
                 out.append(f"- passed={passed}{cite}")
-                if rationale:
+                if rationale and not _is_placeholder_text(rationale) and "**" not in str(rationale):
                     out.append(f"  - {rationale}")
 
         # A short narrative paragraph built from agent outputs (roles + first sentences)
@@ -742,8 +770,9 @@ def build_agent_report(
                 lines_raw = str(text or "").splitlines()
                 sanitized_lines: List[str] = []
                 for ln in lines_raw:
-                    # Skip lines that look like placeholders or stub messages
-                    if not _is_placeholder_text(ln):
+                    # Skip lines that look like placeholders, stub messages,
+                    # or contain unresolved bold markup (e.g., "**agent**").
+                    if not _is_placeholder_text(ln) and "**" not in str(ln):
                         sanitized_lines.append(ln)
                 sanitized_text = "\n".join(sanitized_lines).rstrip()
                 out.append("```")
