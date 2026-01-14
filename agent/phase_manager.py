@@ -22,60 +22,72 @@ from typing import List, Optional
 def phases_for_cycles(total_cycles: int) -> List[str]:
     """Return a list of phase names for the given number of cycles.
 
-    This implementation alternates between exploration and exploitation
-    phases in a 4:2 pattern.  Specifically, cycles 0â3 are labelled
-    ``"explore"``, cycles 4â5 are ``"exploit"``, and the pattern repeats
-    every six cycles.  This encourages agents to spend the majority of
-    their time exploring (research, tool usage) while periodically
-    consolidating and exploiting recent discoveries.
+    This implementation uses a simple explore/exploit cadence to expose
+    different behaviours across long runs.  The phase naming follows:
+
+    * Every 10th cycle (1-based index) is labelled ``"explore"`` to signal
+      a highâexploration burst.  These cycles may allocate more tool budget
+      or allow riskier actions.
+    * Every 5th cycle (except those already marked as explore) is labelled
+      ``"exploit"`` to emphasise consolidation and integration of recent
+      findings.
+    * All other cycles are labelled ``"run"``.
 
     Parameters
     ----------
-    total_cycles:
+    total_cycles: int
         Number of cycles requested for the run.
 
     Returns
     -------
-    list of str
-        A list whose length equals ``total_cycles``.  Each element is
-        either ``"explore"`` or ``"exploit"`` according to the
-        repeating 4âexplore / 2âexploit pattern.
+    List[str]
+        A list of humanâreadable phase names, length equal to ``total_cycles``.
     """
-    if total_cycles < 1:
-        return []
-    pattern = ["explore", "explore", "explore", "explore", "exploit", "exploit"]
     phases: List[str] = []
-    for i in range(total_cycles):
-        phases.append(pattern[i % len(pattern)])
+    if total_cycles < 1:
+        return phases
+    for idx in range(total_cycles):
+        # Convert to 1-based index for readability
+        cycle_number = idx + 1
+        if cycle_number % 10 == 0:
+            phases.append("explore")
+        elif cycle_number % 5 == 0:
+            phases.append("exploit")
+        else:
+            phases.append("run")
     return phases
 
 
 def phase_name_for_index(index: int, total_cycles: int) -> Optional[str]:
-    """Return the phase name for a given index.
+    """Return the phase name for a given index using the explore/exploit cadence.
 
-    This helper mirrors :func:`phases_for_cycles` without allocating the full
-    list.  It computes the phase for a single index using the same 4:2
-    explore/exploit pattern.  If ``index`` is out of range, it returns
-    ``None``.
+    Rather than recomputing the full phase list, this convenience wrapper
+    applies the same modulus logic used in :func:`phases_for_cycles` to
+    determine the phase for a specific index.  See that function for a
+    detailed description of the cadence.
 
     Parameters
     ----------
-    index:
-        Zeroâbased cycle index.  Must satisfy ``0 <= index < total_cycles``.
-    total_cycles:
-        Total number of cycles requested for the run.
+    index: int
+        Zeroâbased index of the cycle.  If out of bounds, ``None`` is
+        returned.
+    total_cycles: int
+        Total number of cycles in the run.
 
     Returns
     -------
-    str or None
-        The phase name (``"explore"`` or ``"exploit"``) or ``None`` if
-        ``index`` is invalid.
+    Optional[str]
+        The phase name (``"explore"``, ``"exploit"``, or ``"run"``) for
+        the given index, or ``None`` if the index is invalid.
     """
     if index < 0 or index >= total_cycles:
         return None
-    # 6 cycle repeating pattern: explore (0â3), exploit (4â5)
-    pos = index % 6
-    return "explore" if pos < 4 else "exploit"
+    cycle_number = index + 1
+    if cycle_number % 10 == 0:
+        return "explore"
+    if cycle_number % 5 == 0:
+        return "exploit"
+    return "run"
 
 
 __all__ = ["phases_for_cycles", "phase_name_for_index"]
