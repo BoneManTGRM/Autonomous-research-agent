@@ -7311,47 +7311,54 @@ def main() -> None:
                     # prevent cross-run clashes.
                     try:
                         jid_str = str(jid)
-                        # When the button is clicked, create one or more ``stop.flag`` files
-                        # inside each plausible run directory.  The engine worker may look
-                        # for the stop flag in different roots depending on how it resolves
-                        # ``runs_root``.  To maximize reliability, mirror the logic used by
-                        # the engine worker and write the flag into all candidate directories.
+                        # When the button is clicked, request the run to stop by creating
+                        # stop.flag files in all plausible run directories.  The engine worker may
+                        # resolve the runs root differently, so we mirror its logic to maximize
+                        # the chance that the stop request will be detected.
                         if st.button(
-                            "Stop this run", key=f"stop_run_{jid_str}", help="Gracefully request this active run to stop"
+                            "Stop this run",
+                            key=f"stop_run_{jid_str}",
+                            help="Gracefully request this active run to stop"
                         ):
                             try:
-                                # Build a set of candidate parent directories for this run.
                                 candidates: List[Path] = []
-                                # Primary: runs_root derived from Streamlit via get_runs_root()
+                                # Primary runs root from get_runs_root()
                                 try:
                                     _runs_root = Path(get_runs_root()).expanduser()
                                     candidates.append(_runs_root)
                                 except Exception:
                                     pass
-                                # Environment-driven candidates
+                                # Environment-driven runs roots
                                 _env_runs_root = os.getenv("ARA_RUNS_DIR") or os.getenv("RUNS_ROOT")
                                 if _env_runs_root:
                                     try:
                                         candidates.append(Path(_env_runs_root).expanduser())
                                     except Exception:
                                         pass
-                                # Candidate from RUNS_BASE_DIR if available
-                                if 'RUNS_BASE_DIR' in globals() and isinstance(RUNS_BASE_DIR, Path):
+                                # Include RUNS_BASE_DIR if exposed
+                                if "RUNS_BASE_DIR" in globals() and isinstance(RUNS_BASE_DIR, Path):
                                     try:
                                         candidates.append(Path(RUNS_BASE_DIR))
                                     except Exception:
                                         pass
-                                # Candidate from environment variable BASE_DIR
+                                # Candidate from BASE_DIR environment variable and nested runs
                                 _base_dir_env = os.getenv("BASE_DIR")
                                 if _base_dir_env:
                                     try:
                                         _base_root = Path(_base_dir_env).expanduser()
                                         candidates.append(_base_root)
-                                        # Also consider nested "runs" folder under base_root
                                         candidates.append(_base_root / "runs")
                                     except Exception:
                                         pass
-                                # Script-relative fallbacks: parent directories of this file
+                                # Candidate from logs directory environment variables: parent directory of logs dir
+                                _env_logs_dir = os.getenv("ARA_RUNS_LOGS_DIR") or os.getenv("ARA_RUNS_LOG_DIR") or os.getenv("ARA_LOGS_DIR") or os.getenv("RUNS_LOGS_DIR")
+                                if _env_logs_dir:
+                                    try:
+                                        _ld = Path(_env_logs_dir).expanduser()
+                                        candidates.append(_ld.parent)
+                                    except Exception:
+                                        pass
+                                # Script-relative fallbacks: runs directory under this script and its parents
                                 try:
                                     _script_dir = Path(__file__).resolve().parent
                                     for _cand_dir in [_script_dir, _script_dir.parent, _script_dir.parent.parent]:
@@ -7366,18 +7373,17 @@ def main() -> None:
                                     candidates.append((Path(os.getcwd()) / "runs").expanduser())
                                 except Exception:
                                     pass
-                                # Deduplicate candidate roots while preserving order
+                                # Deduplicate candidate roots
                                 unique_roots: List[Path] = []
                                 seen_root_strs: Set[str] = set()
-                                for c in candidates:
+                                for _c in candidates:
                                     try:
-                                        c_str = str(c)
+                                        c_str = str(_c)
                                     except Exception:
                                         continue
                                     if c_str not in seen_root_strs:
                                         seen_root_strs.add(c_str)
-                                        unique_roots.append(c)
-                                # Create stop.flag in each candidate root
+                                        unique_roots.append(_c)
                                 any_success = False
                                 errors: List[str] = []
                                 for root in unique_roots:
@@ -7390,27 +7396,16 @@ def main() -> None:
                                     except Exception as ee:
                                         errors.append(f"{root}: {ee}")
                                 if any_success:
-                                    st.success(
-                                        f"Stop request sent to run {jid_str}. The run will halt as soon as it reaches a safe checkpoint."
-                                    )
+                                    st.success(f"Stop request sent to run {jid_str}. The run will halt as soon as it reaches a safe checkpoint.")
                                     if errors:
-                                        # Provide debug info in the UI for transparency
                                         err_lines = "\n".join(errors)
-                                        st.info(
-                                            f"Warning: Some stop flag paths could not be written:\n{err_lines}"
-                                        )
+                                        st.info(f"Warning: Some stop flag paths could not be written:\n{err_lines}")
                                 else:
-                                    # If none of the writes succeeded, surface the first error
                                     if errors:
-                                        st.error(
-                                            f"Failed to signal stop for run {jid_str}: {errors[0]}"
-                                        )
+                                        st.error(f"Failed to signal stop for run {jid_str}: {errors[0]}")
                                     else:
-                                        st.error(
-                                            f"Failed to signal stop for run {jid_str}: Unknown error"
-                                        )
+                                        st.error(f"Failed to signal stop for run {jid_str}: Unknown error")
                             except Exception as e:
-                                # Catch any unexpected error and surface it
                                 st.error(f"Failed to signal stop for run {jid_str}: {e}")
                     except Exception:
                         # If run ID extraction fails, silently skip stop button
