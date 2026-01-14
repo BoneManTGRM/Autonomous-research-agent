@@ -125,6 +125,12 @@ except Exception:  # pragma: no cover
             return 0.0
         def compute_effective_rye(*args, **kwargs) -> float:
             return 0.0
+
+# Optional quality gating import.  If unavailable gating will be skipped.
+try:
+    from .quality_gates import cycle_passes_quality  # type: ignore
+except Exception:
+    cycle_passes_quality = None  # type: ignore
 # ---------------------------------------------------------------------------
 # Global limits and helpers
 # ---------------------------------------------------------------------------
@@ -2076,6 +2082,35 @@ class TGRMLoop:
             "stop_reason": stop_reason,
         }
 
+        # ------------------------------------------------------------------
+        # Quality gating: compute whether this cycle meets the baseline RYE
+        # criteria relative to recent history.  This stores a simple
+        # quality_gate_passed boolean into cycle_summary for downstream
+        # consumers (verification pipeline and UI).  It does not abort the
+        # cycle; enforcement happens in other layers.
+        quality_gate_passed: bool = True
+        try:
+            q_window = int(getattr(self, "config", {}).get("quality_window", 0))
+            q_margin = float(getattr(self, "config", {}).get("quality_margin", 0.0))
+            q_require_new = bool(getattr(self, "config", {}).get("require_new_citation", False))
+            if cycle_passes_quality and q_window and q_window > 0:
+                hist: List[Dict[str, Any]] = []  # type: ignore
+                try:
+                    if hasattr(self.memory_store, "get_cycle_history_for_goal"):
+                        hist = self.memory_store.get_cycle_history_for_goal(goal, q_window) or []  # type: ignore[attr-defined]
+                except Exception:
+                    hist = []
+                try:
+                    quality_gate_passed = cycle_passes_quality(cycle_summary, hist, window=q_window, margin=q_margin, require_new_citation=q_require_new)
+                except Exception:
+                    quality_gate_passed = True
+        except Exception:
+            quality_gate_passed = True
+        try:
+            cycle_summary["quality_gate_passed"] = quality_gate_passed
+        except Exception:
+            pass
+
         replay_item_ids = self._log_replay_candidate(cycle_summary, replay_buffer)
         self._tag_cycle_metadata(
             cycle_summary,
@@ -2140,6 +2175,8 @@ class TGRMLoop:
             "msil_mode": msil_mode,
             "msil_track_mode": msil_track_mode,
             "rye_mode": rye_mode,
+            # Quality gate outcome for UI and diagnostics
+            "quality_gate_passed": quality_gate_passed,
         }
 
         return {
