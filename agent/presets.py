@@ -923,8 +923,12 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "and relate them to RYE and reparodynamic stability across organs and systems."
         ),
 
+        # Source controls for longevity should favour highâquality, peerâreviewed sources.
+        # Disable open web search by default to reduce noise from unrelated domains like marketing or podcasts.
+        # PubMed and Semantic Scholar are enabled to prioritise biomedical literature, and PDF ingestion is enabled
+        # for curated uploads. Biomarker pipelines remain enabled to surface structured datasets.
         "source_controls": {
-            "web": True,
+            "web": False,
             "pubmed": True,
             "semantic": True,
             "pdf": True,
@@ -944,6 +948,13 @@ PRESETS: Dict[str, Dict[str, Any]] = {
             "caloric restriction",
             "clinical trial",
             "biomarker",
+            # Emerging interventions and pathways not previously included
+            "glp-1 receptor agonist",
+            "glp-1",
+            "semaglutide",
+            "senolytic",
+            "mitochondrial repair",
+            "autophagy modulator",
         ],
 
         "preferred_sources": ["pubmed", "semantic", "web", "pdf"],
@@ -1822,7 +1833,7 @@ PRESET_ALIASES: Dict[str, str] = {
 # Prune unsupported presets
 # ---------------------------------------------------------------------
 # Remove any presets that are not longevity.  While the UI and
-# get_preset helper override nonâlongevity selections, disabling the
+# get_preset helper override nonÃ¢ÂÂlongevity selections, disabling the
 # unused presets here prevents them from appearing in any list of
 # presets or being accidentally referenced.  This loop iterates over
 # ``PRESETS`` keys and pops those that are not ``"longevity"``.
