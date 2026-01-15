@@ -1093,19 +1093,37 @@ class TGRMLoop:
         self,
         goal: str,
         limit: int = 200,
+        run_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """Return recent history rows for this goal if the store supports it."""
+        """
+        Return recent history rows for this goal.
+
+        When ``run_id`` is provided and the underlying memory store supports run-level
+        retrieval, limit the history to cycles from the same run.  This helps
+        prevent blending cycles from different runs when computing trends,
+        gradients, or gating decisions.
+        """
+        # Try run-specific history first
         try:
             if hasattr(self.memory_store, "get_cycle_history_for_goal"):
-                rows = self.memory_store.get_cycle_history_for_goal(goal, limit=limit)  # type: ignore[attr-defined]
+                try:
+                    # Attempt run_id-aware call (if supported)
+                    rows = self.memory_store.get_cycle_history_for_goal(goal, limit=limit, run_id=run_id)  # type: ignore[attr-defined]
+                except TypeError:
+                    # Fallback to without run_id
+                    rows = self.memory_store.get_cycle_history_for_goal(goal, limit=limit)  # type: ignore[attr-defined]
                 if isinstance(rows, list):
                     return rows
         except Exception:
             pass
 
+        # Fallback: get full history and filter by goal and run_id
         try:
             if hasattr(self.memory_store, "get_cycle_history"):
-                full = self.memory_store.get_cycle_history()  # type: ignore[attr-defined]
+                try:
+                    full = self.memory_store.get_cycle_history(run_id=run_id)  # type: ignore[attr-defined]
+                except TypeError:
+                    full = self.memory_store.get_cycle_history()  # type: ignore[attr-defined]
                 if isinstance(full, list):
                     filtered = [r for r in full if isinstance(r, dict) and r.get("goal") == goal]
                     return filtered[-limit:]
@@ -1880,9 +1898,13 @@ class TGRMLoop:
             try:
                 if hasattr(self.memory_store, "get_cycle_history_for_goal"):
                     try:
-                        history_slice = self.memory_store.get_cycle_history_for_goal(goal=goal, limit=window)  # type: ignore
+                        # Pass run_id when supported to avoid mixing cycles across runs
+                        history_slice = self.memory_store.get_cycle_history_for_goal(goal=goal, limit=window, run_id=run_id)  # type: ignore
                     except TypeError:
-                        history_slice = self.memory_store.get_cycle_history_for_goal(goal)  # type: ignore
+                        # Fallback: call without run_id
+                        history_slice = self.memory_store.get_cycle_history_for_goal(goal, limit=window)  # type: ignore
+                else:
+                    history_slice = []
             except Exception:
                 history_slice = []
             cycle_for_gate: Dict[str, Any] = {
