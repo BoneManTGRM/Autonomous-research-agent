@@ -132,7 +132,10 @@ def _extract_rye_from_entry(entry: Dict[str, Any]) -> Optional[float]:
     if energy is None:
         energy = _safe_float(entry.get("energy"))
 
-    if delta is None or energy is None or energy <= 0:
+    # Only consider improvements that actually reduce the defect count.
+    # Treat cycles with non-positive delta_R as non-contributory. Likewise, skip
+    # if energy is missing or non-positive to avoid skewing averages.
+    if delta is None or delta <= 0 or energy is None or energy <= 0:
         return None
 
     return float(delta) / float(energy)
@@ -491,15 +494,26 @@ def regression_rye_slope(history: List[Dict[str, Any]]) -> Optional[float]:
         slope (float) or None if not enough data.
     """
     vals = _extract_rye_series(history)
-    n = len(vals)
+    # Skip leading zeros or near zero values which often correspond to idle or
+    # preârepair cycles. These can artificially flatten the regression slope.
+    filtered_vals: List[float] = []
+    found_non_zero = False
+    for v in vals:
+        if not found_non_zero and abs(v) < 1e-12:
+            continue
+        found_non_zero = True
+        filtered_vals.append(v)
+    if not filtered_vals:
+        filtered_vals = vals
+    n = len(filtered_vals)
     if n < 2:
         return None
 
     xs: List[float] = [float(i) for i in range(n)]
     mean_x = sum(xs) / n
-    mean_y = sum(vals) / n
+    mean_y = sum(filtered_vals) / n
 
-    num = sum((xs[i] - mean_x) * (vals[i] - mean_y) for i in range(n))
+    num = sum((xs[i] - mean_x) * (filtered_vals[i] - mean_y) for i in range(n))
     den = sum((xs[i] - mean_x) ** 2 for i in range(n))
 
     if den == 0:
@@ -595,18 +609,18 @@ def stability_index(history: List[Dict[str, Any]]) -> Optional[float]:
     vals = _extract_rye_series(history)
     if not vals:
         return None
-
-    # With a single value there is no variance; treat as stable.
-    if len(vals) == 1:
-        return 1.0 if vals[0] >= 0 else 0.0
-
-    # Use population variance for consistency with original implementation.
+    # Require at least three data points for a meaningful stability estimate.
+    # Shorter runs return None to avoid misleading high or low scores.
+    if len(vals) < 3:
+        return None
     mean = sum(vals) / len(vals)
     var = statistics.pvariance(vals)
-
+    # If there is no variance, the sequence is constant; treat as fully stable.
     if var == 0:
-        return 1.0 if mean >= 0 else 0.0
-
+        return 1.0
+    # If the mean is non-positive, the run is not improving; treat as unstable.
+    if mean <= 0:
+        return 0.0
     score = mean / (var + 1e-6)
     score *= 0.25
     return min(max(score, 0.0), 1.0)
