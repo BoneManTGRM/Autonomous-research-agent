@@ -62,7 +62,10 @@ except Exception:
 def _resolve_runs_root() -> Path:
     """Resolve the runs root directory for queue-worker artifacts.
 
-    Uses ARA_RUNS_DIR when set, otherwise falls back to a local ./runs folder.
+    Uses ARA_RUNS_DIR when set, then ARA_RUN_ROOT, RUNS_DIR, or BASE_DIR as
+    fallbacks before falling back to a local ./runs folder.  This allows
+    deployments that specify only a BASE_DIR environment variable to
+    influence where runs and queue artifacts are written.
     """
     env = (
         os.environ.get("ARA_RUNS_DIR")
@@ -74,6 +77,17 @@ def _resolve_runs_root() -> Path:
             return Path(env).expanduser().resolve()
         except Exception:
             return Path(env)
+    # Support BASE_DIR environment variable as a fallback runs root.  Many
+    # deployments set BASE_DIR (e.g. via container environment) and expect
+    # runs to live under that root.  Use BASE_DIR directly rather than
+    # appending an extra "runs" segment; the caller may choose to create
+    # nested dirs as needed.
+    base_env = os.environ.get("BASE_DIR")
+    if base_env:
+        try:
+            return Path(base_env).expanduser().resolve()
+        except Exception:
+            return Path(base_env)
     return Path('runs').resolve()
 
 BASE_DIR = _resolve_runs_root()
