@@ -7636,6 +7636,13 @@ def main() -> None:
                                     candidates.append(_runs_root)
                                 except Exception:
                                     pass
+                                # Also include the canonical queue root. Some deployments may
+                                # write stop flags under <queue_root>/<run_id>/stop.flag.
+                                try:
+                                    _queue_root = Path(get_queue_root()).expanduser()
+                                    candidates.append(_queue_root)
+                                except Exception:
+                                    pass
                                 # Environment-driven runs roots
                                 _env_runs_root = os.getenv("ARA_RUNS_DIR") or os.getenv("RUNS_ROOT") or os.getenv("RUNS_DIR")
                                 if _env_runs_root:
@@ -7738,6 +7745,10 @@ def main() -> None:
                                     if 'RUNS_PENDING_DIR' in globals() and isinstance(RUNS_PENDING_DIR, Path):
                                         try:
                                             _p = RUNS_PENDING_DIR
+                                            # runs_root/queue/pending -> queue root (<runs_root>/queue)
+                                            _queue_root = _p.parent
+                                            if _queue_root:
+                                                candidates.append(_queue_root)
                                             # runs_root/queue/pending -> runs_root
                                             _parent = _p.parent.parent
                                             if _parent:
@@ -7748,6 +7759,11 @@ def main() -> None:
                                     if 'RUNS_ACTIVE_DIR' in globals() and isinstance(RUNS_ACTIVE_DIR, Path):
                                         try:
                                             _p = RUNS_ACTIVE_DIR
+                                            # runs_root/queue/active -> queue root
+                                            _queue_root = _p.parent
+                                            if _queue_root:
+                                                candidates.append(_queue_root)
+                                            # runs_root/queue/active -> runs_root
                                             _parent = _p.parent.parent
                                             if _parent:
                                                 candidates.append(_parent)
@@ -7757,6 +7773,11 @@ def main() -> None:
                                     if 'RUNS_FINISHED_DIR' in globals() and isinstance(RUNS_FINISHED_DIR, Path):
                                         try:
                                             _p = RUNS_FINISHED_DIR
+                                            # runs_root/queue/finished -> queue root
+                                            _queue_root = _p.parent
+                                            if _queue_root:
+                                                candidates.append(_queue_root)
+                                            # runs_root/queue/finished -> runs_root
                                             _parent = _p.parent.parent
                                             if _parent:
                                                 candidates.append(_parent)
@@ -7766,6 +7787,11 @@ def main() -> None:
                                     if 'RUNS_ERROR_DIR' in globals() and isinstance(RUNS_ERROR_DIR, Path):
                                         try:
                                             _p = RUNS_ERROR_DIR
+                                            # runs_root/queue/error -> queue root
+                                            _queue_root = _p.parent
+                                            if _queue_root:
+                                                candidates.append(_queue_root)
+                                            # runs_root/queue/error -> runs_root
                                             _parent = _p.parent.parent
                                             if _parent:
                                                 candidates.append(_parent)
@@ -7775,6 +7801,9 @@ def main() -> None:
                                     if 'RUNS_QUEUE_ROOT' in globals() and isinstance(RUNS_QUEUE_ROOT, Path):
                                         try:
                                             _q = RUNS_QUEUE_ROOT
+                                            # Include the queue root itself (e.g. <runs_root>/queue)
+                                            candidates.append(_q)
+                                            # And its parent (the runs root)
                                             _parent = _q.parent
                                             if _parent:
                                                 candidates.append(_parent)
