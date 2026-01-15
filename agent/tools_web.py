@@ -445,6 +445,46 @@ class WebResearchTool:
 
                 results.append(res)
 
+            # Filter out results from known irrelevant or untrusted domains.
+            # Irrelevant domains include marketing sites, podcasts, and unrelated brands
+            # that do not contribute to scientific evidence.  Filtering here
+            # reduces the need for downstream citation pruning and keeps agent
+            # focus on credible results.
+            if results:
+                banned_domains = {
+                    "youtube.com",
+                    "youtu.be",
+                    "grantome.com",
+                    "landrover.com",
+                    "podcasts.apple.com",
+                    "spotify.com",
+                    "soundcloud.com",
+                    "player.fm",
+                    "cars.com",
+                    "autoblog.com",
+                    "motortrend.com",
+                    "facebook.com",
+                    "instagram.com",
+                }
+                def domain_of(url: str) -> str:
+                    try:
+                        parsed = urlparse(url)
+                        return parsed.netloc.lower()
+                    except Exception:
+                        return ""
+
+                filtered: List[Dict[str, Any]] = []
+                for r in results:
+                    url = r.get("url", "")
+                    dom = domain_of(url)
+                    if dom and any(dom.endswith(bd) or dom == bd for bd in banned_domains):
+                        continue
+                    filtered.append(r)
+                # If filtering removed all results, fall back to original results to
+                # avoid returning an empty list which could break downstream logic.
+                if filtered:
+                    results = filtered
+
             if not results:
                 res2: Dict[str, Any] = {
                     "title": "No results found",
@@ -472,32 +512,36 @@ class WebResearchTool:
             return results
 
         except Exception as e:
-            """
-            Safe fallback on API errors.
-
-            When the Tavily API fails, return a user-friendly error message and
-            cache the result. This mirrors the behaviour of the alternative
-            implementation where error messages are prefixed with a clearer
-            description.
-            """
+            # Safe fallback on API errors
+            #
+            # Historically the tool returned a result with title "Tavily Search Error"
+            # on any exception. This looked like a hard failure in the UI. Instead,
+            # treat API failures the same as stub mode: return a single stub entry
+            # with a descriptive error in the snippet. This preserves agent flow
+            # without causing the critic to abort early. Cache the stub so that
+            # repeated calls with the same query do not repeatedly hit the failing API.
             err_snippet = f"Tavily API error: {e}"
             if truncated:
                 err_snippet += (
-                    f" (query was truncated to {self.max_query_chars} characters "
-                    "before calling Tavily)"
+                    f" (Query was truncated to {self.max_query_chars} characters "
+                    "before calling Tavily.)"
                 )
-            err: Dict[str, Any] = {
-                "title": "Tavily API error",
+
+            stub_err: Dict[str, Any] = {
+                "title": "[ERROR] Tavily API error",
                 "snippet": err_snippet,
                 "url": "",
             }
             if agent_role is not None:
-                err["agent_role"] = agent_role
+                stub_err["agent_role"] = agent_role
             if swarm_id is not None:
-                err["swarm_id"] = swarm_id
-            # Cache the error so subsequent calls don't hit the API repeatedly
-            self._store_in_cache(cache_key, [err])
-            return [err]
+                stub_err["swarm_id"] = swarm_id
+            # Cache the error stub without role/swarm so we don't cache role
+            stub_cache: Dict[str, Any] = dict(stub_err)
+            stub_cache.pop("agent_role", None)
+            stub_cache.pop("swarm_id", None)
+            self._store_in_cache(cache_key, [stub_cache])
+            return [stub_err]
 
     # ------------------------------------------------------------------
     # SUMMARISATION
