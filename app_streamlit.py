@@ -4365,6 +4365,102 @@ def compute_autonomy_view(
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    # Additional fallback using progress JSON status.
+    #
+    # In certain deployments the worker does not emit a run-specific
+    # worker_state.json update when a run is cancelled or completes.
+    # However, the progress JSON (``<run_id>_progress.json``) may include a
+    # "status" field that reflects the run's terminal state (e.g.,
+    # "stopped", "finished", "error").  If stable_signal has not been
+    # detected yet, attempt to load the progress state for the current
+    # run_id and treat finished-like statuses as stable.  Also fall back
+    # to checking the progress counters for completion (current >= total).
+    # This mirrors the logic used when deriving stability from the
+    # worker_state and prevents the autonomy indicator from being stuck
+    # at 3/4 when the run has actually stopped.
+    if not stable_signal:
+        try:
+            # Derive run_id from worker_state or job_payload.  Prefer
+            # worker_state.run_id; fall back to job_payload.id or job_id.
+            run_id_val = None
+            if isinstance(worker_state, dict):
+                run_id_val = worker_state.get("run_id") or worker_state.get("job_id") or worker_state.get("id")
+            if not run_id_val and isinstance(job_payload, dict):
+                # job_payload may embed an id or run identifier at top level
+                run_id_val = job_payload.get("id") or job_payload.get("run_id") or job_payload.get("job_id")
+            run_id_val = str(run_id_val) if run_id_val is not None else None
+            # Load the progress state if a run_id is available
+            if run_id_val:
+                try:
+                    progress_state, _src = load_progress_unified(run_id_val)
+                except Exception:
+                    progress_state = None
+                ps = progress_state or {}
+                # Extract status from progress state
+                ps_status = str(ps.get("status") or "").lower()
+                # Define the same set of finished-like labels as used above.
+                finished_like_labels = {
+                    "finished",
+                    "done",
+                    "completed",
+                    "complete",
+                    "success",
+                    "stopped",
+                    "idle",
+                    "error",
+                    "failed",
+                    "failure",
+                    "canceled",
+                    "cancelled",
+                    "abort",
+                    "aborted",
+                    "stopping",
+                    "stopped_by_user",
+                    "stopped by user",
+                    "stop_requested",
+                    "canceling",
+                    "cancelling",
+                    "cancelled by user",
+                    "aborting",
+                    "terminated",
+                    "terminating",
+                    "terminated_by_user",
+                    "timed out",
+                    "timeout",
+                    "killed",
+                    "exited",
+                    "shutdown",
+                    "shutdown_complete",
+                    "shutting_down",
+                    "exception",
+                    "panic",
+                }
+                # If the progress status is finished-like, mark the run as
+                # stable.  This allows the autonomy indicator to advance to
+                # self-stabilizing even when the worker_state has not yet
+                # been updated.
+                if ps_status and ps_status in finished_like_labels:
+                    stable_signal = True
+                # If still not stable, compute a fraction from progress
+                # counters and mark as stable if the run appears complete.
+                if not stable_signal:
+                    try:
+                        p_current = ps.get("current_cycle") or ps.get("current")
+                        p_total = ps.get("total_cycles") or ps.get("total")
+                        frac_ps = None
+                        if p_current is not None and p_total is not None:
+                            c_val = float(p_current)
+                            t_val = float(p_total)
+                            if t_val > 0:
+                                frac_ps = c_val / t_val
+                        if frac_ps is not None and frac_ps >= 1.0:
+                            stable_signal = True
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     # Elevate to self-stabilizing when the run appears complete.  If no
     # stability signal has been detected but the progress has reached or
     # exceeded its total, or if the worker status is finished-like, then
