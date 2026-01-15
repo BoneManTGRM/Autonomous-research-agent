@@ -239,10 +239,9 @@ def stability_index_from_rye(
     rye_series = _finite_series(rye_series)
     if not rye_series:
         return None
-
+    # Require at least three samples for a reliable stability estimate.
     if len(rye_series) < 3:
-        # Not enough data to say much
-        return 0.5
+        return None
 
     w = max(3, min(window, len(rye_series)))
     tail = rye_series[-w:]
@@ -277,6 +276,9 @@ def stability_index_from_rye(
             jumps += 1
     jump_rate = jumps / max(len(deltas), 1)
 
+    # If the mean is nonâpositive, consider the series unstable.
+    if mean_val <= 0:
+        return 0.0
     # Aggregate penalties into instability score
     instability = 0.0
     instability += min(norm_std, 3.0) / 3.0       # 0 to 1
