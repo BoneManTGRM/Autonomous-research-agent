@@ -2844,11 +2844,17 @@ class TGRMLoop:
         self, source_controls: Optional[Dict[str, bool]]
     ) -> Dict[str, bool]:
         """Provide default source controls if none are given."""
+        # Default source controls favour verified scientific sources.  Disable
+        # general web search by default to reduce noise from marketing,
+        # opinion pieces, and unrelated domains.  Enable PubMed and
+        # Semantic Scholar for peerâreviewed literature and PDF ingestion
+        # for curated uploads.  Biomarkers are disabled by default since
+        # not all domains use them.
         defaults = {
-            "web": True,
-            "pubmed": False,
-            "semantic": False,
-            "pdf": False,
+            "web": False,
+            "pubmed": True,
+            "semantic": True,
+            "pdf": True,
             "biomarkers": False,
         }
         if not source_controls:
