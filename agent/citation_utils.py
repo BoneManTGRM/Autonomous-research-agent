@@ -463,6 +463,21 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
             "bmj.com",
             "plos.org",
             "frontiersin.org",
+            # Additional peerâreviewed publishers and medical journals
+            "jamanetwork.com",
+            "academic.oup.com",
+            "sciencedirect.com",
+            "springer.com",
+            "pnas.org",
+            "elifesciences.org",
+            "aging-us.com",
+            "agingcell.com",
+            "mdpi.com",
+            "naturemedicine.com",
+            "journals.physiology.org",
+            "karger.com",
+            "medrxiv.org",
+            "biorxiv.org",
         }
         from urllib.parse import urlparse  # type: ignore
         domain = ""
@@ -476,10 +491,25 @@ def normalize_citation(raw: Any, default_source: str = "web") -> Optional[Dict[s
         # Explicitly drop citations from banned domains such as YouTube and Grantome.
         # These domains have been observed to leak into the evidence base due to
         # broad keyword matching but do not represent peerâreviewed literature.
+        # Drop citations from banned domains that are known to be irrelevant or nonâacademic.
+        # This list has been expanded beyond the original YouTube and Grantome entries
+        # to include automotive, social media, podcast, and promotional domains observed
+        # to leak into search results.  Keeping this filter here prevents lowâquality
+        # sources from entering the evidence base and improves report credibility.
         banned_domains = {
             "youtube.com",
             "youtu.be",
             "grantome.com",
+            "landrover.com",
+            "podcasts.apple.com",
+            "spotify.com",
+            "soundcloud.com",
+            "player.fm",
+            "cars.com",
+            "autoblog.com",
+            "motortrend.com",
+            "facebook.com",
+            "instagram.com",
         }
         if domain and any(domain.endswith(bd) or domain == bd for bd in banned_domains):
             return None
