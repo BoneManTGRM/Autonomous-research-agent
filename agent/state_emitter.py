@@ -68,6 +68,13 @@ def get_runs_root() -> Path:
     env = os.getenv("ARA_RUNS_DIR")
     if env and env.strip():
         return Path(env.strip())
+    # Support BASE_DIR as an alternative runs root.  Some deployments set
+    # BASE_DIR without ARA_RUNS_DIR; mirror the queue and UI stop flag logic
+    # by treating BASE_DIR as the top-level runs directory.  Do not append
+    # an extra "runs" subfolder here; callers can manage nested structures.
+    base_env = os.getenv("BASE_DIR")
+    if base_env and base_env.strip():
+        return Path(base_env.strip())
 
     return _repo_root() / "runs"
 
