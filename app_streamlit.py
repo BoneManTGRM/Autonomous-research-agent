@@ -139,7 +139,7 @@ def tail_lines(path: Path, max_lines: int = 200) -> List[str]:
 # (cached decorators count as Streamlit commands). Keep this at module top level.
 # (comment trimmed to keep this file renderable in GitHub)
 # (comment trimmed to keep this file renderable in GitHub)
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ð§ ", layout="wide")
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="Ã°ÂÂ§Â ", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -205,11 +205,11 @@ except Exception:
 def fix_mojibake(s: Any) -> Any:
     """Attempt to repair common mojibake text encoding issues.
 
-    When UTF-8 text is incorrectly decoded as a single-byte encoding (Latinâ1 or
-    Windowsâ1252), multibyte characters (such as dashes, bullets and smart
-    quotes) appear as sequences like "Ã", "Ã¢" or "Ã".  This helper tries to
+    When UTF-8 text is incorrectly decoded as a single-byte encoding (LatinÃ¢ÂÂ1 or
+    WindowsÃ¢ÂÂ1252), multibyte characters (such as dashes, bullets and smart
+    quotes) appear as sequences like "ÃÂ", "ÃÂ¢" or "ÃÂ".  This helper tries to
     round-trip the string through a couple of common encodings to recover
-    the original UTFâ8.  If the repair does not reduce the number of mojibake
+    the original UTFÃ¢ÂÂ8.  If the repair does not reduce the number of mojibake
     markers, the original string is returned unchanged.  Non-string inputs
     are returned as-is.
     """
@@ -218,18 +218,18 @@ def fix_mojibake(s: Any) -> Any:
         return s
     # If the string does not contain any common mojibake marker characters,
     # return it unchanged to avoid unnecessary work.
-    if not any(marker in s for marker in ("Ã", "Ã¢", "Ã")):
+    if not any(marker in s for marker in ("ÃÂ", "ÃÂ¢", "ÃÂ")):
         return s
 
     def count_markers(text: str) -> int:
         """Count the number of known mojibake marker characters in a string."""
-        return sum(text.count(ch) for ch in ("Ã", "Ã¢", "Ã"))
+        return sum(text.count(ch) for ch in ("ÃÂ", "ÃÂ¢", "ÃÂ"))
 
     # Start with the original string as the current best candidate and record
     # the baseline count of mojibake markers.
     result = s
     best_count = count_markers(s)
-    # Attempt to repair the string by roundâtripping through common singleâbyte
+    # Attempt to repair the string by roundÃ¢ÂÂtripping through common singleÃ¢ÂÂbyte
     # encodings.  If the candidate reduces the number of marker characters,
     # adopt it as the new best result.
     for enc in ("cp1252", "latin1"):
@@ -242,26 +242,26 @@ def fix_mojibake(s: Any) -> Any:
             result = candidate
             best_count = cnt
 
-    # Apply microâfixes to the repaired string.  These handle residual
-    # misâdecoded sequences that remain after the roundâtrip conversion.
-    # Replace common misâdecoded bullet "Ã¢â¬Â¢" with the actual bullet character.
-    if "Ã¢â¬Â¢" in result:
-        result = result.replace("Ã¢â¬Â¢", "â¢")
-    # Normalize middleâdot sequences: collapse "ÃÂ·" to a single middle dot,
+    # Apply microÃ¢ÂÂfixes to the repaired string.  These handle residual
+    # misÃ¢ÂÂdecoded sequences that remain after the roundÃ¢ÂÂtrip conversion.
+    # Replace common misÃ¢ÂÂdecoded bullet "ÃÂ¢Ã¢ÂÂ¬ÃÂ¢" with the actual bullet character.
+    if "ÃÂ¢Ã¢ÂÂ¬ÃÂ¢" in result:
+        result = result.replace("ÃÂ¢Ã¢ÂÂ¬ÃÂ¢", "Ã¢ÂÂ¢")
+    # Normalize middleÃ¢ÂÂdot sequences: collapse "ÃÂÃÂ·" to a single middle dot,
     # then convert all middle dots to hyphens.
-    if "ÃÂ·" in result or "Â·" in result:
-        result = result.replace("ÃÂ·", "Â·").replace("Â·", "-")
-    # Additional microâfixes for other twoâbyte mojibake patterns.  We
-    # sometimes observe "ÃÂ¢" or "ÃÂ¤" (and their singleâbyte forms) where a
+    if "ÃÂÃÂ·" in result or "ÃÂ·" in result:
+        result = result.replace("ÃÂÃÂ·", "ÃÂ·").replace("ÃÂ·", "-")
+    # Additional microÃ¢ÂÂfixes for other twoÃ¢ÂÂbyte mojibake patterns.  We
+    # sometimes observe "ÃÂÃÂ¢" or "ÃÂÃÂ¤" (and their singleÃ¢ÂÂbyte forms) where a
     # bullet or dot was intended.  Replace these with hyphens.  Genuine
     # currency symbols are extremely rare in citation metadata, so this is a
     # safe substitution.
-    if any(ch in result for ch in ("ÃÂ¢", "Â¢", "ÃÂ¤", "Â¤")):
+    if any(ch in result for ch in ("ÃÂÃÂ¢", "ÃÂ¢", "ÃÂÃÂ¤", "ÃÂ¤")):
         result = (
-            result.replace("ÃÂ¢", "-")
-                  .replace("Â¢", "-")
+            result.replace("ÃÂÃÂ¢", "-")
+                  .replace("ÃÂ¢", "-")
+                  .replace("ÃÂÃÂ¤", "-")
                   .replace("ÃÂ¤", "-")
-                  .replace("Â¤", "-")
         )
     return result
 
@@ -1472,11 +1472,64 @@ def role_specific_goal(base_goal: str, role: str) -> str:
 
 
 def _get_job_id(job: Any) -> str:
-    """Extract a run id or job id from RunJob or legacy dict."""
+    """Extract a run id or job id from RunJob or legacy dict.
+
+    This helper attempts to mirror the engine worker's logic for determining
+    the canonical run identifier.  It prefers a ``run_id`` attribute or key
+    on the job.  If not available, it looks for a ``run_id`` or ``id`` entry
+    inside the job's ``config`` dictionary.  Failing that, it falls back to
+    ``job_id`` or ``id`` on the job itself.  All returned identifiers are
+    sanitized by replacing path separators (``/`` and ``\``) with underscores
+    to avoid unintended directory structures.  If no identifier can be found,
+    "unknown" is returned.
+    """
+    # Prefer an explicit run_id attribute on the job (e.g. from RunJob class).
     if hasattr(job, "run_id"):
-        return str(getattr(job, "run_id"))
+        rid = getattr(job, "run_id")
+        if rid:
+            try:
+                rid_str = str(rid)
+                rid_str = rid_str.replace("/", "_").replace("\\", "_")
+                return rid_str
+            except Exception:
+                return str(rid)
+    # If the job is a dict, inspect its keys for identifiers.
     if isinstance(job, dict):
-        return str(job.get("run_id") or job.get("job_id") or "unknown")
+        # Primary run_id field takes precedence.
+        rid = job.get("run_id")
+        if rid:
+            try:
+                rid_str = str(rid)
+                rid_str = rid_str.replace("/", "_").replace("\\", "_")
+                return rid_str
+            except Exception:
+                return str(rid)
+        # Check for a run_id or id within the config section.  Some job
+        # definitions nest the run identifier in the configuration.  Use
+        # whichever is present so the stop flag matches the worker's internal
+        # run_id.
+        cfg = job.get("config")
+        if isinstance(cfg, dict):
+            rid = cfg.get("run_id") or cfg.get("id")
+            if rid:
+                try:
+                    rid_str = str(rid)
+                    rid_str = rid_str.replace("/", "_").replace("\\", "_")
+                    return rid_str
+                except Exception:
+                    return str(rid)
+        # Fallback to job_id or id on the job dict.
+        jid = job.get("job_id") or job.get("id")
+        if jid:
+            try:
+                jid_str = str(jid)
+                jid_str = jid_str.replace("/", "_").replace("\\", "_")
+                return jid_str
+            except Exception:
+                return str(jid)
+        # No identifier found on the dict
+        return "unknown"
+    # As a last resort, return a constant string for unknown jobs.
     return "unknown"
 
 
@@ -2242,7 +2295,7 @@ def build_outcome_summary(
     rye_summary = "RYE not available"
     if rye_vals:
         avg_rye = sum(rye_vals) / len(rye_vals)
-        # Use ASCII separators to avoid mojibake artifacts (e.g. "ÃÂ·") in
+        # Use ASCII separators to avoid mojibake artifacts (e.g. "ÃÂÃÂ·") in
         # environments that mishandle UTF-8.
         rye_summary = f"Min {min(rye_vals):.3f}, Max {max(rye_vals):.3f}, Avg {avg_rye:.3f}"
 
@@ -3892,7 +3945,7 @@ def compute_activity_pulse_view(
     else:
         label = "Idle"
 
-    # Do not expose shortâwindow event counts (1m / 5m) in the returned dict.
+    # Do not expose shortÃ¢ÂÂwindow event counts (1m / 5m) in the returned dict.
     # Keeping only core metrics prevents the UI from showing "1m 0 | 5m 0" again.
     return {
         "score": score,
@@ -4210,7 +4263,7 @@ def render_topbar(
     last_age = _maybe_float(pv.get("last_event_age_s"))
     if last_age is not None:
         detail_parts.append(f"Last event {_humanize_seconds(last_age)}")
-    # Shortâwindow event counts (1m and 5m) are intentionally omitted from the
+    # ShortÃ¢ÂÂwindow event counts (1m and 5m) are intentionally omitted from the
     # pulse detail line to avoid cluttering the UI. These metrics are no longer
     # returned by compute_activity_pulse_view, so nothing is appended here.
     detail_txt = " | ".join(detail_parts)
@@ -4325,15 +4378,15 @@ def compute_autonomy_view(
     # Treat additional statuses such as "stopped" and "idle" as terminal run states.
     # Some engine implementations reset the worker status to "stopped" or "idle" upon
     # completion of a finite run instead of using "finished". If these values are
-    # not included here, the autonomy score may remain stuck at 3/4 (selfâmonitoring)
+    # not included here, the autonomy score may remain stuck at 3/4 (selfÃ¢ÂÂmonitoring)
     # even after a run has fully completed.  Including these variants ensures that
-    # the selfâstabilizing level (4/4) is reached when the run is truly done.
-    # Recognize a broad set of terminal worker statuses as finishâlike.  Some
+    # the selfÃ¢ÂÂstabilizing level (4/4) is reached when the run is truly done.
+    # Recognize a broad set of terminal worker statuses as finishÃ¢ÂÂlike.  Some
     # engine implementations use alternate labels (e.g., "error", "failed",
     # "cancelled", "aborted", etc.) when a run terminates.  Without these
-    # entries, the autonomy score can remain stuck at 3/4 (selfâmonitoring)
+    # entries, the autonomy score can remain stuck at 3/4 (selfÃ¢ÂÂmonitoring)
     # despite the run being fully complete.  Include these variants so the
-    # stability detection logic can advance to selfâstabilizing (4/4).
+    # stability detection logic can advance to selfÃ¢ÂÂstabilizing (4/4).
     finished_like_labels = {
     "finished",
     "done",
@@ -4397,6 +4450,36 @@ def compute_autonomy_view(
                 stable_signal = True
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Additional stability detection outside of an active context.
+    #
+    # If stable_signal is still false at this point, and we do not have an
+    # active job/config context, we may still want to promote the autonomy
+    # level to Selfâstabilizing.  Some deployments only emit stability
+    # signals via diagnostics or worker_state flags after the run has
+    # completed, when there is no longer an active context.  Check these
+    # flags regardless of has_active_context so that finished runs can
+    # advance from 3/4 to 4/4.
+    if not stable_signal:
+        # Look for stability flags in the diagnostics preview.
+        if isinstance(diagnostics_preview, dict):
+            try:
+                if diagnostics_preview.get("stable_signal") or diagnostics_preview.get("equilibrium_detected") or diagnostics_preview.get("self_stabilizing"):
+                    stable_signal = True
+            except Exception:
+                pass
+        # If still not stable, inspect worker_state.extra.progress for flags.
+        if not stable_signal and isinstance(worker_state, dict):
+            try:
+                extra = worker_state.get("extra") or {}
+                if isinstance(extra, dict):
+                    progress = extra.get("progress") or {}
+                    if isinstance(progress, dict):
+                        if progress.get("stable_signal") or progress.get("equilibrium_detected") or progress.get("self_stabilizing"):
+                            stable_signal = True
+            except Exception:
+                pass
 
     # Features are only credited when config is present.
     has_tools = False
@@ -6327,7 +6410,7 @@ def _load_default_discoveries() -> List[Dict[str, Any]]:
     discoveries are available after filtering. Each entry contains a
     title, domain tag, descriptive summary, evidence links and
     estimated RYE gain and confidence values. These examples are based
-    on publicly reported research advances in longevity and antiâaging.
+    on publicly reported research advances in longevity and antiÃ¢ÂÂaging.
 
     Returns:
         List[Dict[str, Any]]: A list of discovery candidate dictionaries.
@@ -6352,7 +6435,7 @@ def _load_default_discoveries() -> List[Dict[str, Any]]:
             "domain": "longevity",
             "description": (
                 "A study showed that mice engineered to overexpress the mitochondrial protein COX7RP "
-                "lived roughly 6.6Â % longer and exhibited better metabolism, stronger muscles and "
+                "lived roughly 6.6ÃÂ % longer and exhibited better metabolism, stronger muscles and "
                 "healthier fat tissue."
             ),
             "evidence": [
@@ -6362,11 +6445,11 @@ def _load_default_discoveries() -> List[Dict[str, Any]]:
             "confidence": 0.6,
         },
         {
-            "title": "Senescenceâresistant stem cells rejuvenate aged monkeys",
+            "title": "SenescenceÃ¢ÂÂresistant stem cells rejuvenate aged monkeys",
             "domain": "longevity",
             "description": (
                 "Engineered stem cells with enhanced FoxO3 activity improved memory, prevented "
-                "ageârelated bone loss and rejuvenated more than half of the tissues examined in aged monkeys."
+                "ageÃ¢ÂÂrelated bone loss and rejuvenated more than half of the tissues examined in aged monkeys."
             ),
             "evidence": [
                 "https://www.nad.com/news/anti-aging-breakthrough-stem-cells-reverse-signs-of-aging-in-monkeys",
@@ -6375,12 +6458,12 @@ def _load_default_discoveries() -> List[Dict[str, Any]]:
             "confidence": 0.7,
         },
         {
-            "title": "AI discovers antiâaging drug candidates that extend worm lifespan",
+            "title": "AI discovers antiÃ¢ÂÂaging drug candidates that extend worm lifespan",
             "domain": "longevity",
             "description": (
-                "AI analysis identified drug candidates targeting multiple ageârelated pathways; more than "
-                "70Â % of the compounds significantly extended the lifespan of C.Â elegans worms, with one "
-                "candidate increasing lifespan by 74Â %."
+                "AI analysis identified drug candidates targeting multiple ageÃ¢ÂÂrelated pathways; more than "
+                "70ÃÂ % of the compounds significantly extended the lifespan of C.ÃÂ elegans worms, with one "
+                "candidate increasing lifespan by 74ÃÂ %."
             ),
             "evidence": [
                 "https://changingknowledge.com/2025/11/13/ai-pinpoints-new-anti-aging-drug-candidates-for-polypharmacology/",
@@ -8129,7 +8212,7 @@ def main() -> None:
                     if col not in citations_df.columns:
                         citations_df[col] = None
 
-                # Repair common mojibake in citation fields (e.g. "ÃÂ·", "Ã¢â¬Â¢").
+                # Repair common mojibake in citation fields (e.g. "ÃÂÃÂ·", "ÃÂ¢Ã¢ÂÂ¬ÃÂ¢").
                 # Do this *before* building filter option lists so filters are clean.
                 for _col in ("role", "domain", "source", "title", "snippet"):
                     try:
