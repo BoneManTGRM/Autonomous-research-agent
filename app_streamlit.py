@@ -139,7 +139,7 @@ def tail_lines(path: Path, max_lines: int = 200) -> List[str]:
 # (cached decorators count as Streamlit commands). Keep this at module top level.
 # (comment trimmed to keep this file renderable in GitHub)
 # (comment trimmed to keep this file renderable in GitHub)
-st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="Ã°ÂÂ§Â ", layout="wide")
+st.set_page_config(page_title="ARA powered by Reparodynamics", page_icon="ÃÂ°ÃÂÃÂ§ÃÂ ", layout="wide")
 
 # Ensure repository root is on sys.path so imports work on Render and local
 # This is robust whether this file lives in repo root or in a subfolder (for example app/)
@@ -205,11 +205,11 @@ except Exception:
 def fix_mojibake(s: Any) -> Any:
     """Attempt to repair common mojibake text encoding issues.
 
-    When UTF-8 text is incorrectly decoded as a single-byte encoding (LatinÃ¢ÂÂ1 or
-    WindowsÃ¢ÂÂ1252), multibyte characters (such as dashes, bullets and smart
-    quotes) appear as sequences like "ÃÂ", "ÃÂ¢" or "ÃÂ".  This helper tries to
+    When UTF-8 text is incorrectly decoded as a single-byte encoding (LatinÃÂ¢ÃÂÃÂ1 or
+    WindowsÃÂ¢ÃÂÃÂ1252), multibyte characters (such as dashes, bullets and smart
+    quotes) appear as sequences like "ÃÂÃÂ", "ÃÂÃÂ¢" or "ÃÂÃÂ".  This helper tries to
     round-trip the string through a couple of common encodings to recover
-    the original UTFÃ¢ÂÂ8.  If the repair does not reduce the number of mojibake
+    the original UTFÃÂ¢ÃÂÃÂ8.  If the repair does not reduce the number of mojibake
     markers, the original string is returned unchanged.  Non-string inputs
     are returned as-is.
     """
@@ -218,18 +218,18 @@ def fix_mojibake(s: Any) -> Any:
         return s
     # If the string does not contain any common mojibake marker characters,
     # return it unchanged to avoid unnecessary work.
-    if not any(marker in s for marker in ("ÃÂ", "ÃÂ¢", "ÃÂ")):
+    if not any(marker in s for marker in ("ÃÂÃÂ", "ÃÂÃÂ¢", "ÃÂÃÂ")):
         return s
 
     def count_markers(text: str) -> int:
         """Count the number of known mojibake marker characters in a string."""
-        return sum(text.count(ch) for ch in ("ÃÂ", "ÃÂ¢", "ÃÂ"))
+        return sum(text.count(ch) for ch in ("ÃÂÃÂ", "ÃÂÃÂ¢", "ÃÂÃÂ"))
 
     # Start with the original string as the current best candidate and record
     # the baseline count of mojibake markers.
     result = s
     best_count = count_markers(s)
-    # Attempt to repair the string by roundÃ¢ÂÂtripping through common singleÃ¢ÂÂbyte
+    # Attempt to repair the string by roundÃÂ¢ÃÂÃÂtripping through common singleÃÂ¢ÃÂÃÂbyte
     # encodings.  If the candidate reduces the number of marker characters,
     # adopt it as the new best result.
     for enc in ("cp1252", "latin1"):
@@ -242,26 +242,26 @@ def fix_mojibake(s: Any) -> Any:
             result = candidate
             best_count = cnt
 
-    # Apply microÃ¢ÂÂfixes to the repaired string.  These handle residual
-    # misÃ¢ÂÂdecoded sequences that remain after the roundÃ¢ÂÂtrip conversion.
-    # Replace common misÃ¢ÂÂdecoded bullet "ÃÂ¢Ã¢ÂÂ¬ÃÂ¢" with the actual bullet character.
-    if "ÃÂ¢Ã¢ÂÂ¬ÃÂ¢" in result:
-        result = result.replace("ÃÂ¢Ã¢ÂÂ¬ÃÂ¢", "Ã¢ÂÂ¢")
-    # Normalize middleÃ¢ÂÂdot sequences: collapse "ÃÂÃÂ·" to a single middle dot,
+    # Apply microÃÂ¢ÃÂÃÂfixes to the repaired string.  These handle residual
+    # misÃÂ¢ÃÂÃÂdecoded sequences that remain after the roundÃÂ¢ÃÂÃÂtrip conversion.
+    # Replace common misÃÂ¢ÃÂÃÂdecoded bullet "ÃÂÃÂ¢ÃÂ¢ÃÂÃÂ¬ÃÂÃÂ¢" with the actual bullet character.
+    if "ÃÂÃÂ¢ÃÂ¢ÃÂÃÂ¬ÃÂÃÂ¢" in result:
+        result = result.replace("ÃÂÃÂ¢ÃÂ¢ÃÂÃÂ¬ÃÂÃÂ¢", "ÃÂ¢ÃÂÃÂ¢")
+    # Normalize middleÃÂ¢ÃÂÃÂdot sequences: collapse "ÃÂÃÂÃÂÃÂ·" to a single middle dot,
     # then convert all middle dots to hyphens.
-    if "ÃÂÃÂ·" in result or "ÃÂ·" in result:
-        result = result.replace("ÃÂÃÂ·", "ÃÂ·").replace("ÃÂ·", "-")
-    # Additional microÃ¢ÂÂfixes for other twoÃ¢ÂÂbyte mojibake patterns.  We
-    # sometimes observe "ÃÂÃÂ¢" or "ÃÂÃÂ¤" (and their singleÃ¢ÂÂbyte forms) where a
+    if "ÃÂÃÂÃÂÃÂ·" in result or "ÃÂÃÂ·" in result:
+        result = result.replace("ÃÂÃÂÃÂÃÂ·", "ÃÂÃÂ·").replace("ÃÂÃÂ·", "-")
+    # Additional microÃÂ¢ÃÂÃÂfixes for other twoÃÂ¢ÃÂÃÂbyte mojibake patterns.  We
+    # sometimes observe "ÃÂÃÂÃÂÃÂ¢" or "ÃÂÃÂÃÂÃÂ¤" (and their singleÃÂ¢ÃÂÃÂbyte forms) where a
     # bullet or dot was intended.  Replace these with hyphens.  Genuine
     # currency symbols are extremely rare in citation metadata, so this is a
     # safe substitution.
-    if any(ch in result for ch in ("ÃÂÃÂ¢", "ÃÂ¢", "ÃÂÃÂ¤", "ÃÂ¤")):
+    if any(ch in result for ch in ("ÃÂÃÂÃÂÃÂ¢", "ÃÂÃÂ¢", "ÃÂÃÂÃÂÃÂ¤", "ÃÂÃÂ¤")):
         result = (
-            result.replace("ÃÂÃÂ¢", "-")
-                  .replace("ÃÂ¢", "-")
+            result.replace("ÃÂÃÂÃÂÃÂ¢", "-")
+                  .replace("ÃÂÃÂ¢", "-")
+                  .replace("ÃÂÃÂÃÂÃÂ¤", "-")
                   .replace("ÃÂÃÂ¤", "-")
-                  .replace("ÃÂ¤", "-")
         )
     return result
 
@@ -2295,7 +2295,7 @@ def build_outcome_summary(
     rye_summary = "RYE not available"
     if rye_vals:
         avg_rye = sum(rye_vals) / len(rye_vals)
-        # Use ASCII separators to avoid mojibake artifacts (e.g. "ÃÂÃÂ·") in
+        # Use ASCII separators to avoid mojibake artifacts (e.g. "ÃÂÃÂÃÂÃÂ·") in
         # environments that mishandle UTF-8.
         rye_summary = f"Min {min(rye_vals):.3f}, Max {max(rye_vals):.3f}, Avg {avg_rye:.3f}"
 
@@ -3945,7 +3945,7 @@ def compute_activity_pulse_view(
     else:
         label = "Idle"
 
-    # Do not expose shortÃ¢ÂÂwindow event counts (1m / 5m) in the returned dict.
+    # Do not expose shortÃÂ¢ÃÂÃÂwindow event counts (1m / 5m) in the returned dict.
     # Keeping only core metrics prevents the UI from showing "1m 0 | 5m 0" again.
     return {
         "score": score,
@@ -4263,7 +4263,7 @@ def render_topbar(
     last_age = _maybe_float(pv.get("last_event_age_s"))
     if last_age is not None:
         detail_parts.append(f"Last event {_humanize_seconds(last_age)}")
-    # ShortÃ¢ÂÂwindow event counts (1m and 5m) are intentionally omitted from the
+    # ShortÃÂ¢ÃÂÃÂwindow event counts (1m and 5m) are intentionally omitted from the
     # pulse detail line to avoid cluttering the UI. These metrics are no longer
     # returned by compute_activity_pulse_view, so nothing is appended here.
     detail_txt = " | ".join(detail_parts)
@@ -4378,15 +4378,15 @@ def compute_autonomy_view(
     # Treat additional statuses such as "stopped" and "idle" as terminal run states.
     # Some engine implementations reset the worker status to "stopped" or "idle" upon
     # completion of a finite run instead of using "finished". If these values are
-    # not included here, the autonomy score may remain stuck at 3/4 (selfÃ¢ÂÂmonitoring)
+    # not included here, the autonomy score may remain stuck at 3/4 (selfÃÂ¢ÃÂÃÂmonitoring)
     # even after a run has fully completed.  Including these variants ensures that
-    # the selfÃ¢ÂÂstabilizing level (4/4) is reached when the run is truly done.
-    # Recognize a broad set of terminal worker statuses as finishÃ¢ÂÂlike.  Some
+    # the selfÃÂ¢ÃÂÃÂstabilizing level (4/4) is reached when the run is truly done.
+    # Recognize a broad set of terminal worker statuses as finishÃÂ¢ÃÂÃÂlike.  Some
     # engine implementations use alternate labels (e.g., "error", "failed",
     # "cancelled", "aborted", etc.) when a run terminates.  Without these
-    # entries, the autonomy score can remain stuck at 3/4 (selfÃ¢ÂÂmonitoring)
+    # entries, the autonomy score can remain stuck at 3/4 (selfÃÂ¢ÃÂÃÂmonitoring)
     # despite the run being fully complete.  Include these variants so the
-    # stability detection logic can advance to selfÃ¢ÂÂstabilizing (4/4).
+    # stability detection logic can advance to selfÃÂ¢ÃÂÃÂstabilizing (4/4).
     finished_like_labels = {
     "finished",
     "done",
@@ -4456,7 +4456,7 @@ def compute_autonomy_view(
     #
     # If stable_signal is still false at this point, and we do not have an
     # active job/config context, we may still want to promote the autonomy
-    # level to Selfâstabilizing.  Some deployments only emit stability
+    # level to SelfÃ¢ÂÂstabilizing.  Some deployments only emit stability
     # signals via diagnostics or worker_state flags after the run has
     # completed, when there is no longer an active context.  Check these
     # flags regardless of has_active_context so that finished runs can
@@ -6410,7 +6410,7 @@ def _load_default_discoveries() -> List[Dict[str, Any]]:
     discoveries are available after filtering. Each entry contains a
     title, domain tag, descriptive summary, evidence links and
     estimated RYE gain and confidence values. These examples are based
-    on publicly reported research advances in longevity and antiÃ¢ÂÂaging.
+    on publicly reported research advances in longevity and antiÃÂ¢ÃÂÃÂaging.
 
     Returns:
         List[Dict[str, Any]]: A list of discovery candidate dictionaries.
@@ -6435,7 +6435,7 @@ def _load_default_discoveries() -> List[Dict[str, Any]]:
             "domain": "longevity",
             "description": (
                 "A study showed that mice engineered to overexpress the mitochondrial protein COX7RP "
-                "lived roughly 6.6ÃÂ % longer and exhibited better metabolism, stronger muscles and "
+                "lived roughly 6.6ÃÂÃÂ % longer and exhibited better metabolism, stronger muscles and "
                 "healthier fat tissue."
             ),
             "evidence": [
@@ -6445,11 +6445,11 @@ def _load_default_discoveries() -> List[Dict[str, Any]]:
             "confidence": 0.6,
         },
         {
-            "title": "SenescenceÃ¢ÂÂresistant stem cells rejuvenate aged monkeys",
+            "title": "SenescenceÃÂ¢ÃÂÃÂresistant stem cells rejuvenate aged monkeys",
             "domain": "longevity",
             "description": (
                 "Engineered stem cells with enhanced FoxO3 activity improved memory, prevented "
-                "ageÃ¢ÂÂrelated bone loss and rejuvenated more than half of the tissues examined in aged monkeys."
+                "ageÃÂ¢ÃÂÃÂrelated bone loss and rejuvenated more than half of the tissues examined in aged monkeys."
             ),
             "evidence": [
                 "https://www.nad.com/news/anti-aging-breakthrough-stem-cells-reverse-signs-of-aging-in-monkeys",
@@ -6458,12 +6458,12 @@ def _load_default_discoveries() -> List[Dict[str, Any]]:
             "confidence": 0.7,
         },
         {
-            "title": "AI discovers antiÃ¢ÂÂaging drug candidates that extend worm lifespan",
+            "title": "AI discovers antiÃÂ¢ÃÂÃÂaging drug candidates that extend worm lifespan",
             "domain": "longevity",
             "description": (
-                "AI analysis identified drug candidates targeting multiple ageÃ¢ÂÂrelated pathways; more than "
-                "70ÃÂ % of the compounds significantly extended the lifespan of C.ÃÂ elegans worms, with one "
-                "candidate increasing lifespan by 74ÃÂ %."
+                "AI analysis identified drug candidates targeting multiple ageÃÂ¢ÃÂÃÂrelated pathways; more than "
+                "70ÃÂÃÂ % of the compounds significantly extended the lifespan of C.ÃÂÃÂ elegans worms, with one "
+                "candidate increasing lifespan by 74ÃÂÃÂ %."
             ),
             "evidence": [
                 "https://changingknowledge.com/2025/11/13/ai-pinpoints-new-anti-aging-drug-candidates-for-polypharmacology/",
@@ -7570,25 +7570,38 @@ def main() -> None:
                                         candidates.append(_base_root / "runs")
                                     except Exception:
                                         pass
-                                # Candidate from logs directory environment variables: parent directory of logs dir
+                                # Candidate from logs directory environment variables: include both the logs dir
+                                # itself and its parent directory.  The engine worker checks for stop.flag
+                                # under <runs_root>/<run_id> and sometimes under <logs_dir>/<run_id>.  To
+                                # ensure the UI writes a stop flag where the worker will look, append
+                                # both the logs directory and its parent when a logs directory is set via
+                                # environment variables.  Previously only the parent directory was added,
+                                # which could lead to the engine missing the stop request in deployments
+                                # that inspect the logs directory directly.
                                 _env_logs_dir = os.getenv("ARA_RUNS_LOGS_DIR") or os.getenv("ARA_RUNS_LOG_DIR") or os.getenv("ARA_LOGS_DIR") or os.getenv("RUNS_LOGS_DIR")
                                 if _env_logs_dir:
                                     try:
                                         _ld = Path(_env_logs_dir).expanduser()
+                                        # Include the logs directory itself
+                                        candidates.append(_ld)
+                                        # And its parent (the runs root)
                                         candidates.append(_ld.parent)
                                     except Exception:
                                         pass
                                 # Additional candidates derived from the engine_worker module.  If available,
-                                # include the worker's computed BASE_DIR (and BASE_DIR/runs) and the
-                                # parent of its RUNS_LOGS_DIR.  These values mirror the engine's own
-                                # stop flag search logic, helping ensure that the UI writes the stop flag
-                                # where the worker will look for it.
+                                # include both the worker's computed RUNS_LOGS_DIR and its parent (the runs
+                                # root) as well as the worker's BASE_DIR and BASE_DIR/runs.  The engine
+                                # worker may look for stop.flag in either <runs_root>/<run_id> or
+                                # <logs_dir>/<run_id>.  Including the logs directory itself improves
+                                # compatibility with deployments that inspect that location directly.
                                 try:
                                     import engine_worker as _ew  # type: ignore
-                                    # Parent of RUNS_LOGS_DIR (runs root)
                                     try:
                                         _ew_logs_dir = getattr(_ew, "RUNS_LOGS_DIR", None)
                                         if _ew_logs_dir:
+                                            # Add the logs directory itself
+                                            candidates.append(Path(_ew_logs_dir))
+                                            # And its parent (the runs root)
                                             candidates.append(Path(_ew_logs_dir).parent)
                                     except Exception:
                                         pass
@@ -8212,7 +8225,7 @@ def main() -> None:
                     if col not in citations_df.columns:
                         citations_df[col] = None
 
-                # Repair common mojibake in citation fields (e.g. "ÃÂÃÂ·", "ÃÂ¢Ã¢ÂÂ¬ÃÂ¢").
+                # Repair common mojibake in citation fields (e.g. "ÃÂÃÂÃÂÃÂ·", "ÃÂÃÂ¢ÃÂ¢ÃÂÃÂ¬ÃÂÃÂ¢").
                 # Do this *before* building filter option lists so filters are clean.
                 for _col in ("role", "domain", "source", "title", "snippet"):
                     try:
