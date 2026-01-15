@@ -1920,6 +1920,34 @@ class TGRMLoop:
             if not gate_accept:
                 delta_r = 0.0
                 gating_reasons = gate_reasons or ["quality_gate_rejection"]
+        # Additional gating using the high RYE ledger.  After applying the
+        # quality gate, compare the current cycle's efficiency against
+        # previously recorded top cycles for the same goal.  If the current
+        # cycle does not improve upon the best RYE (allowing a small 5% margin),
+        # zero out delta_R so that this cycle does not contribute to run
+        # progress.  This encourages exploitation of prior highâvalue repairs
+        # before exploring new directions.  Any failure to read the ledger is
+        # silently ignored so as not to interrupt the loop.
+        try:
+            if hasattr(self, "memory_store") and hasattr(self.memory_store, "get_top_candidates"):
+                # Compute the candidate RYE using current delta_R and energy_E
+                try:
+                    candidate_rye = compute_rye(delta_r, energy_e)
+                except Exception:
+                    candidate_rye = 0.0
+                ledger_entries = self.memory_store.get_top_candidates(goal=goal, limit=1)  # type: ignore[attr-defined]
+                if ledger_entries:
+                    best_entry = ledger_entries[0]
+                    best_rye = best_entry.get("rye")
+                    if isinstance(best_rye, (int, float)) and best_rye is not None:
+                        # require at least 5% improvement over best RYE to count
+                        threshold = float(best_rye) * 1.05 if best_rye > 0 else 0.0
+                        if candidate_rye <= threshold:
+                            delta_r = 0.0
+                            gating_reasons.append("ledger_insufficient_improvement")
+        except Exception:
+            pass
+
         # Compute raw RYE and a qualityâadjusted RYE.  The raw RYE uses the
         # original compute_rye function, while the qualityâadjusted RYE uses
         # compute_effective_rye with a derived quality factor.  The quality
@@ -2189,6 +2217,21 @@ class TGRMLoop:
         )
 
         self.memory_store.log_cycle(cycle_summary)
+
+        # Update the high RYE ledger with this cycle's summary.  This
+        # facilitates exploitâbeforeâexplore behavior by capturing the best
+        # cycles so far.  Wrapped in a try/except to avoid interrupting the
+        # loop if the ledger update fails.
+        try:
+            if hasattr(self.memory_store, "update_top_candidates"):
+                self.memory_store.update_top_candidates(
+                    goal=goal,
+                    cycle_index=cycle_index,
+                    rye=rye_raw,
+                    summary=cycle_summary,
+                )  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
         human_summary = {
             "cycle": cycle_index,
