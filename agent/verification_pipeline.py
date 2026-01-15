@@ -226,7 +226,8 @@ class VerificationPipeline:
         candidate_interventions = cycle_log.get("candidate_interventions", []) or []
 
         # 1) Fetch history slice for this goal
-        history = self._get_recent_history_for_goal(goal, limit=self.novelty_window)
+        # Pass run_id when available to avoid blending cycles from different runs
+        history = self._get_recent_history_for_goal(goal, limit=self.novelty_window, run_id=run_id)
 
         # 2) Build citation profile
         citation_profile = self._analyze_citations(citations, history)
