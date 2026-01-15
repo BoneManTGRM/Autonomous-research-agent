@@ -4430,8 +4430,10 @@ class CoreAgent:
     ) -> Dict[str, Any]:
         """Compute run diagnostics (robust fallback if rye_metrics/diagnostics module missing)."""
         history = self._get_cycle_history_safe()
-        if run_id:
-            history = [h for h in history if isinstance(h, dict) and h.get("run_id") == run_id]
+        # If no run_id provided, use the current active run context (if set).
+        rid = run_id or self._active_run_context.get("run_id")
+        if rid:
+            history = [h for h in history if isinstance(h, dict) and h.get("run_id") == rid]
 
         if limit is not None and isinstance(limit, int) and limit > 0:
             history = history[-limit:]
