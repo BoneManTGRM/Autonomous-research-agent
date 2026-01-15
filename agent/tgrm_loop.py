@@ -1920,17 +1920,16 @@ class TGRMLoop:
             if not gate_accept:
                 delta_r = 0.0
                 gating_reasons = gate_reasons or ["quality_gate_rejection"]
-        # Additional gating using the high RYE ledger.  After applying the
-        # quality gate, compare the current cycle's efficiency against
-        # previously recorded top cycles for the same goal.  If the current
-        # cycle does not improve upon the best RYE (allowing a small 5% margin),
-        # zero out delta_R so that this cycle does not contribute to run
-        # progress.  This encourages exploitation of prior highâvalue repairs
-        # before exploring new directions.  Any failure to read the ledger is
-        # silently ignored so as not to interrupt the loop.
+        # Additional gating using the high RYE ledger.  After applying
+        # the quality gate, compare the current cycle's repair efficiency
+        # against the best previously recorded cycle for this goal.  If the
+        # current cycle does not beat the best RYE by at least 5%, its
+        # improvement is discarded (delta_r set to zero) and a gating reason
+        # is recorded.  This mechanism encourages exploitation of
+        # highâvalue repairs before exploring new ones.
         try:
             if hasattr(self, "memory_store") and hasattr(self.memory_store, "get_top_candidates"):
-                # Compute the candidate RYE using current delta_R and energy_E
+                # Compute candidate RYE using current delta_R and energy_E.
                 try:
                     candidate_rye = compute_rye(delta_r, energy_e)
                 except Exception:
@@ -1940,7 +1939,6 @@ class TGRMLoop:
                     best_entry = ledger_entries[0]
                     best_rye = best_entry.get("rye")
                     if isinstance(best_rye, (int, float)) and best_rye is not None:
-                        # require at least 5% improvement over best RYE to count
                         threshold = float(best_rye) * 1.05 if best_rye > 0 else 0.0
                         if candidate_rye <= threshold:
                             delta_r = 0.0
@@ -2218,10 +2216,10 @@ class TGRMLoop:
 
         self.memory_store.log_cycle(cycle_summary)
 
-        # Update the high RYE ledger with this cycle's summary.  This
-        # facilitates exploitâbeforeâexplore behavior by capturing the best
-        # cycles so far.  Wrapped in a try/except to avoid interrupting the
-        # loop if the ledger update fails.
+        # Update the high RYE ledger with this cycle's summary.  The ledger
+        # captures the most efficient cycles so that future cycles can
+        # compare against them for progressive improvement gating.  Errors
+        # during the update are ignored to avoid interrupting the run.
         try:
             if hasattr(self.memory_store, "update_top_candidates"):
                 self.memory_store.update_top_candidates(
