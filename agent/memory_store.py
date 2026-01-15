@@ -344,11 +344,6 @@ class MemoryStore:
             os.makedirs(dirpath, exist_ok=True)
 
         # Core JSON backed data
-        # Top level persistent data structure.  In addition to core logs and
-        # artifacts, include a 'top_candidates' ledger used to track high
-        # RYE cycles for exploit/explore gating.  The ledger stores compact
-        # summaries of the most efficient repair events so that future
-        # cycles can reference them and enforce progressive improvement.
         self._data: Dict[str, Any] = {
             "notes": [],
             "cycles": [],
@@ -376,8 +371,9 @@ class MemoryStore:
             "source_index": {},
             "replay_buffer": [],
             "msil_snapshots": [],
-            # Ledger of high RYE cycles to encourage exploitation.  Each entry
-            # is a dict with at least: goal, cycle_index, rye, summary.
+            # Ledger of high RYE cycles. Each entry holds a goal, cycle index,
+            # RYE value, and a summary. This ledger is used by the TGRM loop
+            # to enforce progressive improvement.
             "top_candidates": [],
             "schema_version": MEMORY_SCHEMA_VERSION,
         }
@@ -444,7 +440,7 @@ class MemoryStore:
             "source_index": {},
             "replay_buffer": [],
             "msil_snapshots": [],
-            # High RYE ledger used for progressive improvement gating.
+            # High RYE ledger for progressive improvement gating
             "top_candidates": [],
         }
         for key, default in defaults.items():
@@ -4456,98 +4452,6 @@ class MemoryStore:
         if not goal:
             return []
 
-    # ------------------------------------------------------------------
-    # Top candidates ledger helpers
-    # ------------------------------------------------------------------
-    def update_top_candidates(
-        self,
-        goal: str,
-        cycle_index: int,
-        rye: float,
-        summary: Any,
-        *,
-        max_entries: int = 50,
-    ) -> None:
-        """
-        Update the high RYE ledger with a new cycle summary.
-
-        The ledger is used by the TGRM loop to enforce progressive improvement.
-        Each entry in the ledger includes the goal, cycle index, RYE score,
-        and an opaque summary (typically the full cycle summary or a human
-        summary).  Entries are sorted in descending order by RYE and trimmed
-        to a fixed size.
-
-        Args:
-            goal: Name of the research goal.
-            cycle_index: Sequential cycle number for this goal.
-            rye: Raw RYE value for the cycle (delta_R / energy_E).
-            summary: Arbitrary summary object associated with this cycle.
-            max_entries: Maximum number of entries to retain across all goals.
-        """
-        try:
-            # ensure the ledger exists
-            ledger = self._data.get("top_candidates")
-            if not isinstance(ledger, list):
-                ledger = []
-            # create entry
-            entry = {
-                "goal": goal,
-                "cycle_index": int(cycle_index) if cycle_index is not None else None,
-                "rye": float(rye) if rye is not None else 0.0,
-                "summary": summary,
-            }
-            ledger.append(entry)
-            # sort by RYE descending
-            ledger_sorted = sorted(
-                ledger,
-                key=lambda x: x.get("rye") if isinstance(x.get("rye"), (int, float)) else 0.0,
-                reverse=True,
-            )
-            # trim to max_entries
-            if len(ledger_sorted) > max_entries:
-                ledger_sorted = ledger_sorted[:max_entries]
-            self._data["top_candidates"] = ledger_sorted
-            # persist changes
-            self._save()
-        except Exception:
-            # fail open if anything goes wrong
-            pass
-
-    def get_top_candidates(self, goal: Optional[str] = None, *, limit: int = 10) -> List[Dict[str, Any]]:
-        """
-        Retrieve top RYE cycle summaries.
-
-        If a goal is provided, only entries matching that goal are returned.
-        Otherwise the global ledger is used.  Results are sorted in
-        descending order by RYE.  The returned dictionaries contain the
-        original goal, cycle index, RYE value, and the stored summary.
-
-        Args:
-            goal: Optional goal name to filter by.
-            limit: Maximum number of entries to return.
-
-        Returns:
-            A list of dicts describing the top candidate cycles.
-        """
-        try:
-            ledger = self._data.get("top_candidates")
-            if not isinstance(ledger, list) or not ledger:
-                return []
-            # filter by goal if requested
-            if goal:
-                filtered = [e for e in ledger if e.get("goal") == goal]
-            else:
-                filtered = list(ledger)
-            # sort again just in case
-            filtered_sorted = sorted(
-                filtered,
-                key=lambda x: x.get("rye") if isinstance(x.get("rye"), (int, float)) else 0.0,
-                reverse=True,
-            )
-            return filtered_sorted[: max(1, int(limit))]
-        except Exception:
-            return []
-
         # 1) Prefer explicit replay_buffer if present and non-empty
         buf = self._data.get("replay_buffer", [])
         if prefer_buffer and isinstance(buf, list) and buf:
@@ -4609,6 +4513,97 @@ class MemoryStore:
             if len(out2) >= lim2:
                 break
         return out2
+
+    # ------------------------------------------------------------------
+    # Top candidates ledger helpers
+    # ------------------------------------------------------------------
+    def update_top_candidates(
+        self,
+        goal: str,
+        cycle_index: int,
+        rye: float,
+        summary: Any,
+        *,
+        max_entries: int = 50,
+    ) -> None:
+        """
+        Update the high RYE ledger with a new cycle summary.
+
+        The ledger is used by the TGRM loop to enforce progressive improvement.
+        Each entry in the ledger includes the goal, cycle index, RYE score,
+        and an opaque summary (typically the full cycle summary or a human
+        summary).  Entries are sorted in descending order by RYE and trimmed
+        to a fixed size.
+
+        Args:
+            goal: Name of the research goal.
+            cycle_index: Sequential cycle number for this goal.
+            rye: Raw RYE value for the cycle (delta_R / energy_E).
+            summary: Arbitrary summary object associated with this cycle.
+            max_entries: Maximum number of entries to retain across all goals.
+        """
+        try:
+            ledger = self._data.get("top_candidates")
+            if not isinstance(ledger, list):
+                ledger = []
+            entry = {
+                "goal": goal,
+                "cycle_index": int(cycle_index) if cycle_index is not None else None,
+                "rye": float(rye) if rye is not None else 0.0,
+                "summary": summary,
+            }
+            ledger.append(entry)
+            ledger_sorted = sorted(
+                ledger,
+                key=lambda x: x.get("rye") if isinstance(x.get("rye"), (int, float)) else 0.0,
+                reverse=True,
+            )
+            if len(ledger_sorted) > max_entries:
+                ledger_sorted = ledger_sorted[:max_entries]
+            self._data["top_candidates"] = ledger_sorted
+            self._save()
+        except Exception:
+            # Fail open on ledger update errors
+            pass
+
+    def get_top_candidates(self, goal: Optional[str] = None, *, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Retrieve top RYE cycle summaries.
+
+        If a goal is provided, only entries matching that goal are returned.
+        Otherwise the global ledger is used.  Results are sorted in
+        descending order by RYE.  The returned dictionaries contain the
+        original goal, cycle index, RYE value, and the stored summary.
+
+        Args:
+            goal: Optional goal name to filter by.
+            limit: Maximum number of entries to return.
+
+        Returns:
+            A list of dicts describing the top candidate cycles.
+        """
+        try:
+            ledger = self._data.get("top_candidates")
+            if not isinstance(ledger, list) or not ledger:
+                return []
+            if goal:
+                filtered = [e for e in ledger if e.get("goal") == goal]
+            else:
+                filtered = list(ledger)
+            filtered_sorted = sorted(
+                filtered,
+                key=lambda x: x.get("rye") if isinstance(x.get("rye"), (int, float)) else 0.0,
+                reverse=True,
+            )
+            try:
+                lim = int(limit)
+            except Exception:
+                lim = 10
+            if lim < 1:
+                lim = 1
+            return filtered_sorted[:lim]
+        except Exception:
+            return []
 
     # ------------------------------------------------------------------
     # MSIL snapshots (optional storage for the Meta Skill Intelligence Layer)
