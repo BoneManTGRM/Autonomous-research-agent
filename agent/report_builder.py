@@ -813,7 +813,7 @@ def build_agent_report(
 
     # Assemble the report string
     report_text = "\n".join(out)
-    # Normalize any misâdecoded UTFâ8 characters (e.g., bullets appearing as Ã¢â¬Â¢).
+    # Normalize any mis-decoded UTF-8 characters (e.g., bullets appearing as Ã¢â¬Â¢).
     # First attempt to use the citation_utils.normalize_text helper if available.
     try:
         from .citation_utils import normalize_text  # type: ignore
