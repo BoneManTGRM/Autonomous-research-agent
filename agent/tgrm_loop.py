@@ -1519,7 +1519,7 @@ class TGRMLoop:
         total_cycles_for_goal: int = 0
         try:
             if hasattr(self.memory_store, "get_rye_stats"):
-                avg, _min_rye, _max_rye, count = self.memory_store.get_rye_stats(goal=goal)  # type: ignore[attr-defined]
+                avg, _min_rye, _max_rye, count = self.memory_store.get_rye_stats(goal=goal, run_id=run_id)  # type: ignore[attr-defined]
                 avg_rye = avg
                 total_cycles_for_goal = count
         except Exception:
