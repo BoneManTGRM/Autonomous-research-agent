@@ -110,7 +110,7 @@ from typing import Any, Dict, List, Optional, Tuple, Sequence
 
 # ---- Metrics import (package-safe) ----
 try:
-    # Import qualityâadjusted RYE helper alongside the baseline functions.  If the
+    # Import quality-adjusted RYE helper alongside the baseline functions.  If the
     # import fails (e.g. in minimal environments), fall back on the stubs.
     from .rye_metrics import compute_delta_r, compute_rye, compute_effective_rye  # type: ignore
 except Exception:  # pragma: no cover
@@ -2016,7 +2016,7 @@ class TGRMLoop:
         # current cycle does not beat the best RYE by at least 5%, its
         # improvement is discarded (delta_r set to zero) and a gating reason
         # is recorded.  This mechanism encourages exploitation of
-        # highâvalue repairs before exploring new ones.
+        # high-value repairs before exploring new ones.
         try:
             # Optionally apply a high RYE ledger gate to enforce progressive improvement.
             ledger_cfg: Dict[str, Any] = {}
@@ -2074,8 +2074,8 @@ class TGRMLoop:
         except Exception:
             pass
 
-        # Compute raw RYE and a qualityâadjusted RYE.  The raw RYE uses the
-        # original compute_rye function, while the qualityâadjusted RYE uses
+        # Compute raw RYE and a quality-adjusted RYE.  The raw RYE uses the
+        # original compute_rye function, while the quality-adjusted RYE uses
         # compute_effective_rye with a derived quality factor.  The quality
         # factor here is a simple proxy derived from the number of citations
         # collected during this cycle: at least one citation yields a value of
@@ -2086,7 +2086,7 @@ class TGRMLoop:
             citation_count = len(citations) if citations is not None else 0
         except Exception:
             citation_count = 0
-        # Simple quality score: 0 citations â 0.0, 1 citation â 0.75, â¥2 â 1.0
+        # Simple quality score: 0 citations -> 0.0, 1 citation -> 0.75, >=2 -> 1.0
         if citation_count <= 0:
             quality_score = 0.0
         elif citation_count == 1:
@@ -2288,7 +2288,7 @@ class TGRMLoop:
             "delta_R_components": delta_r_components,
             "energy_E": energy_e,
             "Energy": energy_e,
-            # RYE fields: raw (unweighted) and qualityâweighted.  The
+            # RYE fields: raw (unweighted) and quality-weighted.  The
             # unweighted RYE is preserved under the key "RYE" for
             # backward compatibility and existing trend analyses.  The
             # quality weighted RYE is exposed under "RYE_quality", while
@@ -2983,7 +2983,7 @@ class TGRMLoop:
         # Default source controls favour verified scientific sources.  Disable
         # general web search by default to reduce noise from marketing,
         # opinion pieces, and unrelated domains.  Enable PubMed and
-        # Semantic Scholar for peerâreviewed literature and PDF ingestion
+        # Semantic Scholar for peer-reviewed literature and PDF ingestion
         # for curated uploads.  Biomarkers are disabled by default since
         # not all domains use them.
         defaults = {
