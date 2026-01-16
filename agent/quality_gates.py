@@ -43,7 +43,7 @@ Functions provided:
 * ``evaluate_cycle_gate(cycle: Dict[str, Any], history: List[Dict[str, Any]], config: Optional[Dict[str, Any]] = None) -> Tuple[bool, List[str]]``
     Decide whether the improvements of a cycle should be accepted or
     rejected relative to recent history.  If rejected, return False and a
-    list of reasons.  The gate compares the current cycleâs delta_R,
+    list of reasons.  The gate compares the current cycle's delta_R,
     RYE, energy usage, and citation presence against the mean values of
     the given history slice.  Configurable parameters can adjust window
     length and threshold behaviours.  See the function docstring for
@@ -74,7 +74,7 @@ except Exception:  # pragma: no cover
 # Placeholder patterns used to detect unresolved template variables.  These
 # patterns are kept in lowercase so that ``contains_placeholder`` can
 # perform a simple lowercase check on the text.  Additional phrases
-# corresponding to prompt injection artefacts and runâlevel directives
+# corresponding to prompt injection artefacts and run-level directives
 # have been added below (e.g. "system directive", "autonomous research swarm").
 PLACEHOLDER_PATTERNS: List[str] = [
     "**",  # bold markers often indicate unresolved variables in reports
@@ -245,7 +245,7 @@ def evaluate_cycle_gate(
 ) -> Tuple[bool, List[str]]:
     """Return (accept, reasons) for whether a cycle should contribute to scoring.
 
-    This gate compares the current cycleâs performance against recent history.
+    This gate compares the current cycle's performance against recent history.
     The cycle dict should contain keys ``delta_R`` (float), ``energy_E`` (float),
     ``citations`` (list), and ``hypotheses`` (list).  The history iterable
     should contain past cycles with the same keys.  A cycle is rejected if:
