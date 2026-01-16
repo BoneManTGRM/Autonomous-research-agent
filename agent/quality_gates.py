@@ -334,29 +334,21 @@ def evaluate_cycle_gate(
         except Exception:
             current_rye = 0.0
     # Compare delta and rye against baselines
-    # Previous logic rejected cycles when delta_R or RYE fell below the
-    # historical mean.  This can inadvertently penalise exploratory
-    # cycles and suppress novel discovery.  To support richer
-    # exploration, we remove these baseline comparisons entirely.  As
-    # long as the cycle yields a positive improvement, it is allowed to
-    # contribute to scoring regardless of how it stacks up against
-    # history.  Baselines are still computed above for diagnostic
-    # purposes but not used for gating.
-    # Check for evidence presence.  A cycle is accepted if it includes at
-    # least one citation *or* at least one hypothesis.  Early
-    # exploration cycles may propose hypotheses before citations are
-    # gathered; rejecting them outright stifles discovery.  We only
-    # flag the cycle if both citations and hypotheses are missing.
+    # Only perform baseline comparisons when there is enough history.
+    # Early cycles often lack a stable baseline and should not be penalized for
+    # exploration or scaffolding.  Require at least three prior cycles to
+    # establish a meaningful baseline before applying delta/Rye comparisons.
+    history_len = len(delta_history)
+    if history_len >= 3:
+        if baseline_delta > 0 and delta_r < baseline_delta:
+            reasons.append("delta_below_baseline")
+        if baseline_rye > 0 and current_rye < baseline_rye:
+            reasons.append("rye_below_baseline")
+    # Check for citations presence
     try:
-        has_cite = bool(citations) and isinstance(citations, (list, tuple)) and len(citations) > 0
+        if not citations or not isinstance(citations, (list, tuple)) or len(citations) == 0:
+            reasons.append("no_citations")
     except Exception:
-        has_cite = False
-    try:
-        hyps = cycle.get("hypotheses")
-        has_hyp = bool(hyps) and isinstance(hyps, (list, tuple)) and len(hyps) > 0
-    except Exception:
-        has_hyp = False
-    if not has_cite and not has_hyp:
         reasons.append("no_citations")
     # Accept only if no reasons collected
     accept = len(reasons) == 0
