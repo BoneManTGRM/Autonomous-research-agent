@@ -15,11 +15,11 @@ Features
   can track which role or swarm requested which results.
 - Backoff and retry logic for 24 to 90 day autonomous sessions.
 
-Reparodynamics / TGRM:
+    Reparodynamics / TGRM:
     The Repair phase calls this tool to bring in new information from
     the environment. The quality and efficiency of these calls are
-    reflected in ΔR (issues resolved, contradictions clarified) and E
-    (energy cost) which together define RYE = ΔR / E.
+    reflected in delta_R (issues resolved, contradictions clarified) and E
+    (energy cost) which together define RYE = delta_R / E.
 
 API key model:
     - This file never hardcodes a key.
@@ -355,6 +355,23 @@ class WebResearchTool:
         raw_query = query or ""
         safe_query = self._shrink_query(raw_query)
         truncated = safe_query != " ".join(str(raw_query).split())
+
+        # ------------------------------------------------------------------
+        # Append default negative filters to reduce irrelevant Tavily results.
+        # These filters discourage results related to vehicles, travel, podcasts,
+        # social media, or other non-scientific topics.  Only apply when the
+        # Tavily client is available (real search) and the filters are not
+        # already present in the query.  After appending, clamp again to
+        # respect the maximum query length.
+        negative_filters = "-land rover -car -vehicle -travel -podcast -youtube -news -stock"
+        try:
+            if self.client is not None:
+                if negative_filters not in safe_query:
+                    combined_query = f"{safe_query} {negative_filters}".strip()
+                    safe_query = self._shrink_query(combined_query)
+        except Exception:
+            # If any error occurs while appending filters, fall back to original query.
+            pass
 
         # Adjust behavior per level
         if safe_level == 1:
