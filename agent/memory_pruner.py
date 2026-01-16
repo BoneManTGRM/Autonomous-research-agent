@@ -11,13 +11,13 @@ This pruner is optimized for:
     - anti collapse memory maintenance
 
 Capabilities:
-    ✓ Adaptive scoring using RYE × Recency × Access × Discovery Boost × Predictive Access
-    ✓ Hard protection for verified hypotheses, discoveries, equilibrium notes
-    ✓ Soft clustering of related notes (keeps idea families intact)
-    ✓ Predictive access scoring for the next run segment and domain
-    ✓ Intelligent compression instead of naive deletion
-    ✓ Intelligence profile and diagnostics aware tuning
-    ✓ Discovery log integration for pruning events
+    - Adaptive scoring using RYE x Recency x Access x Discovery Boost x Predictive Access
+    - Hard protection for verified hypotheses, discoveries, equilibrium notes
+    - Soft clustering of related notes (keeps idea families intact)
+    - Predictive access scoring for the next run segment and domain
+    - Intelligent compression instead of naive deletion
+    - Intelligence profile and diagnostics aware tuning
+    - Discovery log integration for pruning events
 """
 
 from __future__ import annotations
