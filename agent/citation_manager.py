@@ -4,12 +4,12 @@ citation_manager.py
 
 This module provides simple utilities for retrieving and formatting
 citations without relying on external AI search APIs.  It implements
-lightweight access to PubMed via the NCBI E‑utilities and basic local
+lightweight access to PubMed via the NCBI E-utilities and basic local
 PDF search.  These helpers can be used by the agent to populate the
 source citation viewer in the Streamlit UI.
 
 The functions here do not perform any heavy parsing of PDFs or
-full‑text retrieval; they aim to provide bibliographic metadata only.
+full-text retrieval; they aim to provide bibliographic metadata only.
 If you require deeper content extraction consider integrating a
 specialised library such as GROBID or spaCy in a separate module.
 
@@ -120,7 +120,7 @@ def search_pubmed(query: str, max_results: int = 5, *, email: Optional[str] = No
 
 
 def format_citation(entry: Dict[str, str]) -> str:
-    """Return a human‑readable citation string from a PubMed summary dict."""
+    """Return a human-readable citation string from a PubMed summary dict."""
     parts = []
     authors = entry.get("authors")
     if authors:
@@ -142,7 +142,7 @@ def format_citation(entry: Dict[str, str]) -> str:
 def search_local_pdfs(directory: Path, query: str, max_results: int = 5) -> List[str]:
     """Search local PDF filenames for a query.
 
-    This helper performs a simple case‑insensitive substring match on
+    This helper performs a simple case-insensitive substring match on
     filenames within ``directory``.  It returns up to ``max_results``
     matching filenames.  It does not parse the contents of the PDF.
 
