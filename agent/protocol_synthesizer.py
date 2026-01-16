@@ -21,13 +21,13 @@ The synthesizer merges:
     - Equilibrium modeling
 
 Outputs:
-    • Formal protocol spec
-    • “Stack sheet” with interventions + evidence + biomarker effects
-    • Safety / risk ladder (low, moderate, high)
-    • Timeline model (acute, 7 day, 30 day, 90 day)
-    • Equilibrium prediction block
-    • UI-compact summary
-    • PDF-ready dictionary for report generator
+    - Formal protocol spec
+    - "Stack sheet" with interventions + evidence + biomarker effects
+    - Safety / risk ladder (low, moderate, high)
+    - Timeline model (acute, 7 day, 30 day, 90 day)
+    - Equilibrium prediction block
+    - UI-compact summary
+    - PDF-ready dictionary for report generator
 
 This module *never* generates real dosing instructions, medical claims,
 or prescribes treatment. It only produces structured research outputs
@@ -117,9 +117,9 @@ class ProtocolSynthesizer:
     Turns DiscoverySummary + StabilitySummary into a structured protocol.
 
     Supports three domains:
-        • longevity  (biomarker heavy)
-        • math       (structural theorems → "proof protocols")
-        • general    (balanced research protocols)
+        - longevity  (biomarker heavy)
+        - math       (structural theorems -> "proof protocols")
+        - general    (balanced research protocols)
     """
 
     # ----------------------------------------------------------------------
@@ -197,7 +197,7 @@ class ProtocolSynthesizer:
     # PROTOCOL ITEM CREATION
     # ----------------------------------------------------------------------
     def _protocol_item_from_candidate(self, c: Any) -> ProtocolItem:
-        """Convert DiscoveryCandidate → ProtocolItem."""
+        """Convert DiscoveryCandidate -> ProtocolItem."""
         return ProtocolItem(
             name=c.label,
             class_label=(c.kind or "discovery"),
@@ -221,16 +221,16 @@ class ProtocolSynthesizer:
         Timeline logic is *domain-aware* but dose-agnostic.
 
         For longevity:
-            acute phase → mechanistic triggers
-            7 day       → biomarker sensitive items
-            30 day      → stability items
-            90 day      → equilibrium stack
+            acute phase -> mechanistic triggers
+            7 day       -> biomarker sensitive items
+            30 day      -> stability items
+            90 day      -> equilibrium stack
 
         For math:
-            acute → definitions
-            7 day → lemmas
-            30 day → theorems
-            90 day → unifying structures
+            acute -> definitions
+            7 day -> lemmas
+            30 day -> theorems
+            90 day -> unifying structures
 
         For general:
             balanced distribution.
