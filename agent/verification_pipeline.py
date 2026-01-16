@@ -405,11 +405,23 @@ class VerificationPipeline:
             except Exception:
                 gate_accept, gate_reasons = True, []
             if not gate_accept:
+                # Capture gating reasons or default marker
                 gating_reasons = gate_reasons or ["quality_gate_rejection"]
-                # Force scores to zero when the gate rejects
-                verification_score = 0.0
-                novelty_score = 0.0
-                disco_confidence = 0.0
+                # Instead of zeroing out scores entirely, apply a soft penalty.
+                # This prevents early exploratory cycles from being scored as complete failures.
+                # A configurable penalty factor may be supplied via quality_gate config; default 0.5.
+                try:
+                    penalty = float(qcfg.get("rejection_penalty", 0.5))
+                except Exception:
+                    penalty = 0.5
+                # Clamp penalty between 0 and 1
+                if penalty < 0.0:
+                    penalty = 0.0
+                if penalty > 1.0:
+                    penalty = 1.0
+                verification_score *= penalty
+                novelty_score *= penalty
+                disco_confidence *= penalty
                 # Ensure flags is a list and append rejection markers
                 try:
                     if not flags:
