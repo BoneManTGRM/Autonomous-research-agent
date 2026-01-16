@@ -787,6 +787,13 @@ def _sanitize_limits_in_config(config: Dict[str, Any]) -> Dict[str, Any]:
                     cfg["max_rounds"] = mr2
                     mr = mr2
 
+                # Accept macro_rounds or macro_cycles synonyms for swarm budgets.
+                if mr is None:
+                    alt_macro = _coerce_positive_int(cfg.get("macro_rounds") or cfg.get("macro_cycles"))
+                    if alt_macro is not None:
+                        cfg["max_rounds"] = alt_macro
+                        mr = alt_macro
+
             if mr is not None:
                 cfg.setdefault("rounds", int(mr))
                 cfg.setdefault("total_rounds", int(mr))
@@ -1223,10 +1230,17 @@ def update_worker_state(update: Dict[str, Any], *, replace: bool = False) -> Pat
     state["ts"] = now
     state["last_update_utc"] = _utc_iso(now)
 
-    # Heartbeat timestamp used by the Streamlit UI/status strip.
-    # Always refresh this on any worker-state update so the UI doesn't
-    # falsely report a lost heartbeat when the worker is healthy.
-    state["heartbeat_ts"] = now
+    # Some UIs treat `heartbeat_ts` as the primary liveness signal. Ensure it is
+    # always refreshed when we write worker_state so the UI doesn't report
+    # "Heartbeat lost" even if other fields are being updated.
+    try:
+        if "heartbeat_ts" not in state or state.get("heartbeat_ts") is None:
+            state["heartbeat_ts"] = now
+        else:
+            # If it's present but non-numeric, overwrite with a valid timestamp.
+            _ = float(state.get("heartbeat_ts"))
+    except Exception:
+        state["heartbeat_ts"] = now
 
     # Diagnostics
     state.setdefault("pid", os.getpid())
