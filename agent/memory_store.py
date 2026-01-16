@@ -3349,6 +3349,7 @@ class MemoryStore:
         self,
         goal: Optional[str] = None,
         role: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> Tuple[Optional[float], Optional[float], Optional[float], int]:
         """Compute basic RYE statistics.
 
@@ -3358,8 +3359,10 @@ class MemoryStore:
         Returns:
             (avg_rye, min_rye, max_rye, count)
         """
-        # Fast path: if goal is provided and no role filter, try goal_index
-        if goal is not None and role is None:
+        # Fast path: when run_id is not provided, if goal is provided and no role filter,
+        # attempt to use the goal_index cache. When run_id is provided, skip this fast
+        # path because goal_index aggregates across runs and may blend statistics.
+        if run_id is None and goal is not None and role is None:
             gi = self._data.get("goal_index") or {}
             if isinstance(gi, dict):
                 entry = gi.get(goal)
@@ -3378,6 +3381,13 @@ class MemoryStore:
 
         # Fallback: compute from cycles directly
         history = self._data.get("cycles", [])
+        # Filter by run_id first to avoid blending across runs
+        if run_id is not None:
+            try:
+                rid_str = str(run_id)
+                history = [c for c in history if isinstance(c, dict) and str(c.get("run_id") or "") == rid_str]
+            except Exception:
+                history = []
         if goal is not None:
             history = [c for c in history if c.get("goal") == goal]
         if role is not None:
@@ -3401,6 +3411,7 @@ class MemoryStore:
         self,
         goal: Optional[str] = None,
         role: Optional[str] = None,
+        run_id: Optional[str] = None,
     ) -> Dict[str, Optional[float]]:
         """Return advanced RYE metrics for a goal or role using rye_metrics.
 
@@ -3427,6 +3438,13 @@ class MemoryStore:
             return metrics
 
         history = self._data.get("cycles", [])
+        # Filter by run_id to avoid blending cross-run metrics
+        if run_id is not None:
+            try:
+                rid_str = str(run_id)
+                history = [c for c in history if isinstance(c, dict) and str(c.get("run_id") or "") == rid_str]
+            except Exception:
+                history = []
         if goal is not None:
             history = [c for c in history if c.get("goal") == goal]
         if role is not None:
