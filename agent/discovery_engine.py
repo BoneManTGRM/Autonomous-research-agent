@@ -56,7 +56,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 # indicate these artifacts.  _contains_banned_pattern is used to skip
 # candidates that match any of these patterns.
 # Expand the banned patterns list to catch more template leakage and
-# promptâdirective artefacts.  This prevents system directives or
+# prompt-directive artefacts.  This prevents system directives or
 # initialization text from being treated as real discoveries.  The
 # patterns below are all kept lowercase for simple substring checks.
 BANNED_DISCOVERY_PATTERNS: List[str] = [
