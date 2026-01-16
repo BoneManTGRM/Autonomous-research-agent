@@ -153,10 +153,10 @@ def _contains_banned_pattern(text: str) -> bool:
 def normalize_text(text: Any) -> str:
     """Best-effort fix for common mojibake sequences and numeric range dashes.
 
-    This function cleans up mojibake artifacts that commonly appear when UTFâ8
+    This function cleans up mojibake artifacts that commonly appear when UTF-8
     text has been decoded using a single-byte encoding such as Windows-1252.
     It also ensures that any dash or minus sign occurring between two digits
-    (for example, in numeric ranges like "15â20" or misdecoded forms like
+    (for example, in numeric ranges like "15-20" or misdecoded forms like
     "15Ã¢ï¿½ï¿½20") is replaced with a plain ASCII hyphen ('-').  This range
     normalization happens even if no mojibake markers are detected, so that
     genuine en dashes in ranges don't leak into downstream outputs.
@@ -170,7 +170,7 @@ def normalize_text(text: Any) -> str:
         return text
     # Always normalize dash/minus variants between digits.  By performing
     # this step before checking for mojibake markers, we ensure ranges like
-    # "15â20" are canonicalized to "15-20" even when no mojibake markers
+    # "15-20" are canonicalized to "15-20" even when no mojibake markers
     # are present.  We also handle common misdecoded sequences.
     try:
         for seq in ("Ã¢ï¿½ï¿½", "Ã¢??", "Ã¢â¬â", "Ã¢\u0080\u0093"):
