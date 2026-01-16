@@ -242,24 +242,27 @@ def compute_delta_r(
     # hinges on reconciling conflicting evidence, so reward each
     # resolved contradiction more strongly.  A higher factor boosts
     # delta R when the agent makes sense of disparate sources.
-    contradiction_gain = contradictions_resolved * 2.0
+    # Increase the contribution from resolved contradictions further.  Discovery often
+    # hinges on reconciling conflicting evidence, so reward each
+    # resolved contradiction more strongly.  A higher factor boosts
+    # delta R when the agent makes sense of disparate sources.
+    contradiction_gain = contradictions_resolved * 3.0
     # Increase the weight of new hypotheses.  Hypothesis generation can
-    # point the research in novel directions; a moderate boost
-    # encourages creative ideation without letting spurious ideas
-    # dominate.
-    hypothesis_gain = hypotheses_generated * 0.5
+    # point the research in novel directions; a larger boost
+    # encourages creative ideation without letting spurious ideas dominate.
+    hypothesis_gain = hypotheses_generated * 1.0
     # Raise the perâsource contribution.  High quality citations
     # underpin good science; elevating the source weight increases
     # delta R when the agent gathers more evidence.  The cap remains
-    # at 20 to prevent runaway growth.
-    source_gain = min(max(sources_used, 0), 20) * 0.3
+    # at 20 to prevent runaway growth.  Increase the weight to 0.5.
+    source_gain = min(max(sources_used, 0), 20) * 0.5
 
     # Reward discovering new mechanisms and improved coherence even more
     # aggressively.  Novel findings and coherent integration of evidence
     # are hallmarks of meaningful discovery.  Higher multipliers here
     # encourage exploration and synthesis while still keeping the bonus
-    # term bounded.
-    bonus = max(novelty_score * 1.5, 0.0) + max(coherence_gain * 1.2, 0.0)
+    # term bounded.  Increase novelty and coherence multipliers.
+    bonus = max(novelty_score * 2.0, 0.0) + max(coherence_gain * 1.5, 0.0)
 
     delta = float(base + contradiction_gain + hypothesis_gain + source_gain + bonus)
 
@@ -296,42 +299,42 @@ def compute_energy(
     Unknown keyword arguments are ignored for forward compatibility.
     """
     # Base cost from actions and core calls
-    # Reduce the base action cost to 0.2 per action (minimum 0.2).  Lowering
-    # this cost slightly increases RYE by reducing the denominator for
+    # Further reduce the base action cost to 0.1 per action (minimum 0.1).  Lowering
+    # this cost increases RYE in early cycles by reducing the denominator for
     # cycles that require numerous tool interactions.  A small nonâzero
     # default prevents divideâbyâzero conditions downstream.
-    base_cost = 0.2 * float(len(actions_taken)) if actions_taken else 0.2
+    base_cost = 0.1 * float(len(actions_taken)) if actions_taken else 0.1
 
     # Lower energy multipliers for external calls.  Web, PubMed and
-    # Semantic Scholar searches remain valuable but now cost only 0.5
-    # each.  PDF ingestion is reduced to 1.0 to reflect improved
+    # Semantic Scholar searches remain valuable but now cost only 0.4
+    # each.  PDF ingestion is reduced to 0.8 to reflect improved
     # ingestion efficiencies.  These reductions help prevent energy
     # costs from dominating the RYE denominator, especially in
     # exploration heavy cycles.
-    cost_web = max(web_calls, 0) * 0.5
-    cost_pubmed = max(pubmed_calls, 0) * 0.5
-    cost_sem = max(semantic_calls, 0) * 0.5
-    cost_pdf = max(pdf_ingestions, 0) * 1.0
+    cost_web = max(web_calls, 0) * 0.4
+    cost_pubmed = max(pubmed_calls, 0) * 0.4
+    cost_sem = max(semantic_calls, 0) * 0.4
+    cost_pdf = max(pdf_ingestions, 0) * 0.8
 
     total = base_cost + cost_web + cost_pubmed + cost_sem + cost_pdf
 
     # Soft token costing: divide by a larger denominator to reduce
-    # token impact on energy.  Using 3000 instead of 2000 makes
+    # token impact on energy.  Using 4000 instead of 3000 makes
     # long prompts slightly cheaper, encouraging richer queries when
     # necessary without excessively inflating the energy cost.
     if tokens_estimate is not None and tokens_estimate > 0:
-        total += float(tokens_estimate) / 3000.0
+        total += float(tokens_estimate) / 4000.0
 
     # Swarm penalty (prevents cheating via infinite agent spawning)
     swarm_size_eff = swarm_size if isinstance(swarm_size, int) and swarm_size > 0 else 1
     swarm_layer_eff = swarm_layer if isinstance(swarm_layer, int) and swarm_layer > 0 else 1
     # Reduce swarm penalties further to acknowledge that coordinated
     # agents can work more efficiently in parallel.  A base factor of
-    # 0.9 reflects modest overhead, with incremental penalties of
-    # 0.01 per additional agent and 0.02 per additional layer to
+    # 0.8 reflects modest overhead, with incremental penalties of
+    # 0.008 per additional agent and 0.015 per additional layer to
     # discourage unbounded proliferation while preserving parallelism
     # benefits.
-    swarm_penalty = 0.9 + ((swarm_size_eff - 1) * 0.01) + ((swarm_layer_eff - 1) * 0.02)
+    swarm_penalty = 0.8 + ((swarm_size_eff - 1) * 0.008) + ((swarm_layer_eff - 1) * 0.015)
     total *= swarm_penalty
 
     # Safety clamps
