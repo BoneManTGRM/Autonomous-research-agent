@@ -28,6 +28,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# Try to import placeholder detection from quality_gates.  If unavailable,
+# define a noop fallback.  Placeholder detection helps assign lower scores
+# to memory entries that still contain unresolved templates or prompt
+# artifacts, encouraging their eventual decay.  See quality_gates.contains_placeholder.
+try:
+    from .quality_gates import contains_placeholder  # type: ignore
+except Exception:  # pragma: no cover
+    def contains_placeholder(_: Any) -> bool:  # type: ignore
+        return False
+
 LOG_DIR = Path("logs")
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 PRUNE_LOG_PATH = LOG_DIR / "memory_pruning_log.md"
@@ -492,6 +502,17 @@ class MemoryPruner:
             pred_comp = predictive_weight * pred_raw
 
             combined = rye_comp + recency_comp + access_comp + d_comp + e_comp + pred_comp
+
+            # Apply a penalty for entries that contain unresolved placeholders.
+            # Placeholder-laden content is less valuable and should decay faster.
+            try:
+                content = e.get("content")
+                # Lower the combined score when the content contains template markers
+                if content and contains_placeholder(content):
+                    combined *= 0.7  # decay factor: reduce by 30%
+            except Exception:
+                # Best effort only: if detection fails, leave score unchanged
+                pass
 
             raw_scores.append(combined)
             objects.append(
