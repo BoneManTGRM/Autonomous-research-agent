@@ -31,7 +31,7 @@ from concurrent.futures import (
     FIRST_COMPLETED,
 )
 
-# InterpreterPoolExecutor was added in PythonÂ 3.14; import lazily to
+# InterpreterPoolExecutor was added in Python 3.14; import lazily to
 # gracefully handle older versions where it is unavailable.
 try:  # pragma: no cover
     from concurrent.futures import InterpreterPoolExecutor  # type: ignore
@@ -347,8 +347,8 @@ class SwarmOrchestrator:
     # parallel agent execution. The default of ``"thread"`` preserves the
     # existing behaviour of using a ``ThreadPoolExecutor``. Other supported
     # values are ``"process"`` (uses ``ProcessPoolExecutor`` to leverage
-    # multiple CPU cores for CPUâbound workloads) and ``"interpreter"``
-    # (uses ``InterpreterPoolExecutor`` when running on PythonÂ 3.14+).  If
+    # multiple CPU cores for CPU-bound workloads) and ``"interpreter"``
+    # (uses ``InterpreterPoolExecutor`` when running on Python 3.14+).  If
     # the requested executor is unavailable (for example, on older Python
     # versions), the orchestrator will automatically fall back to the
     # threaded executor to maintain compatibility.
@@ -609,7 +609,7 @@ class SwarmOrchestrator:
         """Pick a list of roles for this swarm, biased by weight and domain.
 
         By default the orchestrator repeats roles proportionally to their
-        weights in a deterministic roundârobin manner.  If
+        weights in a deterministic round-robin manner.  If
         ``self.randomize_roles`` is true, roles are selected randomly based
         on their weights using ``random.choices``.  This provides a
         lightweight mechanism to introduce variety across swarms while
@@ -633,7 +633,7 @@ class SwarmOrchestrator:
             # Sample without replacement if possible.  When swarm_size
             # exceeds the number of available roles, sample with
             # replacement.  random.sample does not accept weights prior
-            # to PythonÂ 3.11; therefore we use random.choices when
+            # to Python 3.11; therefore we use random.choices when
             # replacement is needed and fallback to sampling by ranks.
             import random
 
@@ -642,7 +642,7 @@ class SwarmOrchestrator:
                 # Normalize weights for sample without replacement
                 # Approach: compute cumulative distribution and draw
                 # sequentially while updating weights to avoid
-                # reâselecting roles.  This avoids external
+                    # re-selecting roles.  This avoids external
                 # dependencies such as numpy.
                 available = list(pool)
                 current_weights = list(weights)
@@ -663,7 +663,7 @@ class SwarmOrchestrator:
                 chosen = random.choices(pool, weights=weights, k=swarm_size)
             return chosen
 
-        # Deterministic roundârobin selection using weight repetition
+        # Deterministic round-robin selection using weight repetition
         weighted: List[RoleSpec] = []
         for role in pool:
             reps = max(1, int(round(role.weight * 2)))
@@ -776,8 +776,8 @@ class SwarmOrchestrator:
         # Determine worker count based on mode
         # Historically "pulse" ran with half of ``max_workers`` to reduce
         # simultaneous agent load.  However, this halves the number of
-        # agents that can run at once (e.g. 64 â 32), which in turn makes
-        # multiâcycle runs appear to drop agents.  To avoid hidden limits,
+        # agents that can run at once (e.g. 64 -> 32), which in turn makes
+        # multi-cycle runs appear to drop agents.  To avoid hidden limits,
         # we use the full ``max_workers`` for all parallel modes.
         workers = min(len(payloads), self.max_workers)
 
