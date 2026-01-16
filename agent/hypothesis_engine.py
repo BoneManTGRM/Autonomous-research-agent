@@ -215,9 +215,9 @@ def _estimate_delta_r_hint(
     domain: Optional[str],
     role: Optional[str],
 ) -> float:
-    """Deterministic hint for how much ÃÂR this hypothesis might deliver if confirmed.
+    """Deterministic hint for how much delta R this hypothesis might deliver if confirmed.
 
-    This is NOT ÃÂR itself, just a small scalar that can feed into
+    This is NOT delta R itself, just a small scalar that can feed into
     compute_delta_r(...) as an extra signal or be logged with the hypothesis.
     """
     d = (domain or "").lower()
@@ -239,7 +239,7 @@ def _estimate_delta_r_hint(
     elif r == "researcher":
         base *= 1.0
 
-    # Map to a gentle ÃÂR hint range, for example [0.0, 2.0]
+    # Map to a gentle delta R hint range, for example [0.0, 2.0]
     return max(0.0, min(2.0, 2.0 * base))
 
 
@@ -822,7 +822,7 @@ def generate_hypotheses(
               "rye_relevance": 0.0-1.0,
               "priority": 0.0-1.0,
               "score": 0.0-1.0,              # alias of priority for reports/sorting
-              "delta_r_hint": float,         # estimated ÃÂR contribution if confirmed
+              "delta_r_hint": float,         # estimated delta R contribution if confirmed
               "tier_label": "tier1_candidate" | "tier2_candidate" | "tier3_candidate" | None,
               "classification": {
                   "kind": "...",
@@ -1040,7 +1040,8 @@ def generate_hypotheses(
                     k1 = cls.get("k1") if isinstance(cls, dict) else None
                     k2 = cls.get("k2") if isinstance(cls, dict) else None
                     if k1 and k2:
-                        title = f"{k1} Ã¢ÂÂ {k2} constraint"
+                        # Use ASCII arrow for compatibility
+                        title = f"{k1} <-> {k2} constraint"
                     else:
                         title = "candidate hypothesis"
                 _log_event(
