@@ -1519,7 +1519,11 @@ class TGRMLoop:
         total_cycles_for_goal: int = 0
         try:
             if hasattr(self.memory_store, "get_rye_stats"):
-                avg, _min_rye, _max_rye, count = self.memory_store.get_rye_stats(goal=goal, run_id=run_id)  # type: ignore[attr-defined]
+                # Prefer run_id-scoped stats when supported; fall back to goal-wide stats
+                try:
+                    avg, _min_rye, _max_rye, count = self.memory_store.get_rye_stats(goal=goal, run_id=run_id)  # type: ignore[attr-defined]
+                except TypeError:
+                    avg, _min_rye, _max_rye, count = self.memory_store.get_rye_stats(goal=goal)  # type: ignore[attr-defined]
                 avg_rye = avg
                 total_cycles_for_goal = count
         except Exception:
@@ -1666,19 +1670,34 @@ class TGRMLoop:
         else:
             # REPAIR phase
             # Use only the primary issue(s) for repair to focus the run
-            repair_actions, notes_added, citations, stats = self._repair(
-                goal=goal,
-                issues=primary_issues,
-                descriptions=issue_descriptions,
-                role=role,
-                source_controls=src_ctrl,
-                pdf_bytes=pdf_bytes,
-                maintenance_mode=maintenance_mode,
-                domain=domain_tag,
-                tool_usage=tool_usage,
-                deadline_ts=deadline_ts,
-                cycle_index=cycle_index,
-            )
+            # Wrap repair in a try/except so that tool crashes never abort the entire cycle.
+            try:
+                repair_actions, notes_added, citations, stats = self._repair(
+                    goal=goal,
+                    issues=primary_issues,
+                    descriptions=issue_descriptions,
+                    role=role,
+                    source_controls=src_ctrl,
+                    pdf_bytes=pdf_bytes,
+                    maintenance_mode=maintenance_mode,
+                    domain=domain_tag,
+                    tool_usage=tool_usage,
+                    deadline_ts=deadline_ts,
+                    cycle_index=cycle_index,
+                )
+            except Exception as repair_err:
+                # If repair fails, mark the cycle as interrupted and continue with empty outputs.
+                repair_actions, notes_added, citations = [], [], []
+                stats = _empty_stats()
+                stats["interrupted"] = True
+                stats["stop_reason"] = f"repair_error: {getattr(repair_err, '__class__', type(repair_err)).__name__}"
+                interrupted = True
+                stop_reason = stats["stop_reason"]
+                try:
+                    logger_exception = logger.exception  # type: ignore
+                    logger_exception("TGRM repair phase crashed: %s", stats["stop_reason"])
+                except Exception:
+                    pass
 
             if stats.get("interrupted"):
                 interrupted = True
@@ -1849,20 +1868,52 @@ class TGRMLoop:
         issues_before_count = sum(int(v) for v in issue_code_counts_before.values()) if issue_code_counts_before else 0
         issues_after_count = sum(int(v) for v in issue_code_counts_after.values()) if issue_code_counts_after else 0
 
+        # Compute richer delta_R components including novelty and coherence signals.
+        sources_effective = max(
+            stats.get("sources_used", 0) or 0,
+            len(citations) if citations else 0,
+        )
+        # Novelty score aggregates the number of new interventions, hypotheses, notes, and citations.
+        novelty_score = 0.0
+        try:
+            novelty_score += float(len(candidate_hypotheses or []))
+        except Exception:
+            pass
+        try:
+            novelty_score += float(len(candidate_interventions or []))
+        except Exception:
+            pass
+        try:
+            novelty_score += float(len(notes_added or []))
+        except Exception:
+            pass
+        try:
+            novelty_score += float(len(citations or []))
+        except Exception:
+            pass
+        # Coherence gain derived from contradictions resolved (handled in delta_R weighting).
+        coherence_gain = float(stats.get("contradictions_resolved", 0) or 0.0)
+        # Record component breakdown for debugging
         delta_r_components = {
             "issue_reduction": max(0, issues_before_count - issues_after_count),
             "repairs_applied": len(repair_actions),
             "hypotheses": len(hypotheses),
             "sources_used": stats.get("sources_used", 0),
+            "sources_used_effective": sources_effective,
             "contradictions_resolved": stats.get("contradictions_resolved", 0),
+            "novelty_score": novelty_score,
+            "coherence_gain": coherence_gain,
         }
+        # Compute delta_R using the enhanced parameters
         delta_r = compute_delta_r(
             issues_before=issues_before_count,
             issues_after=issues_after_count,
             repairs_applied=len(repair_actions),
             contradictions_resolved=stats.get("contradictions_resolved", 0),
             hypotheses_generated=len(hypotheses),
-            sources_used=stats.get("sources_used", 0),
+            sources_used=sources_effective,
+            novelty_score=novelty_score,
+            coherence_gain=coherence_gain,
         )
 
         energy_e = compute_energy(
@@ -1889,37 +1940,76 @@ class TGRMLoop:
                 qcfg = self.config.get("quality_gate", {}) if hasattr(self, "config") else {}
             except Exception:
                 qcfg = {}
-            # Gather recent history from the memory store if available.
-            history_slice: List[Dict[str, Any]] = []
-            try:
-                window = int(qcfg.get("window", 10))
-            except Exception:
-                window = 10
-            try:
-                if hasattr(self.memory_store, "get_cycle_history_for_goal"):
-                    try:
-                        # Pass run_id when supported to avoid mixing cycles across runs
-                        history_slice = self.memory_store.get_cycle_history_for_goal(goal=goal, limit=window, run_id=run_id)  # type: ignore
-                    except TypeError:
-                        # Fallback: call without run_id
-                        history_slice = self.memory_store.get_cycle_history_for_goal(goal, limit=window)  # type: ignore
-                else:
+            # If the quality gate is disabled in config, skip it.
+            if qcfg.get("enabled", True):
+                # Capture raw values before gating for diagnostics.
+                delta_r_pre_gates = delta_r
+                try:
+                    rye_raw_pre_gates = compute_rye(delta_r_pre_gates, energy_e)
+                except Exception:
+                    rye_raw_pre_gates = 0.0
+                # Gather recent history from the memory store if available.
+                history_slice: List[Dict[str, Any]] = []
+                try:
+                    window = int(qcfg.get("window", 10))
+                except Exception:
+                    window = 10
+                try:
+                    if hasattr(self.memory_store, "get_cycle_history_for_goal"):
+                        try:
+                            # Pass run_id when supported to avoid mixing cycles across runs
+                            history_slice = self.memory_store.get_cycle_history_for_goal(goal=goal, limit=window, run_id=run_id)  # type: ignore
+                        except TypeError:
+                            # Fallback: call without run_id
+                            history_slice = self.memory_store.get_cycle_history_for_goal(goal, limit=window)  # type: ignore
+                    else:
+                        history_slice = []
+                except Exception:
                     history_slice = []
-            except Exception:
-                history_slice = []
-            cycle_for_gate: Dict[str, Any] = {
-                "delta_R": delta_r,
-                "energy_E": energy_e,
-                "citations": citations,
-                "hypotheses": hypotheses,
-            }
-            try:
-                gate_accept, gate_reasons = evaluate_cycle_gate(cycle_for_gate, history_slice, config=qcfg)
-            except Exception:
-                gate_accept, gate_reasons = True, []
-            if not gate_accept:
-                delta_r = 0.0
-                gating_reasons = gate_reasons or ["quality_gate_rejection"]
+                cycle_for_gate: Dict[str, Any] = {
+                    "delta_R": delta_r,
+                    "energy_E": energy_e,
+                    "citations": citations,
+                    "hypotheses": hypotheses,
+                }
+                try:
+                    gate_accept, gate_reasons = evaluate_cycle_gate(cycle_for_gate, history_slice, config=qcfg)
+                except Exception:
+                    gate_accept, gate_reasons = True, []
+                # Optionally ignore "no_citations" gating when citations are not required.
+                require_citations = bool(qcfg.get("require_citations", True))
+                if not gate_accept:
+                    if not require_citations:
+                        filtered = [r for r in gate_reasons if r != "no_citations"]
+                        # If all reasons were "no_citations", accept the cycle
+                        if not filtered:
+                            gate_accept = True
+                            gate_reasons = []
+                        else:
+                            gate_reasons = filtered
+                # Apply penalty or rejection based on gate result
+                if not gate_accept:
+                    hard_reject = bool(qcfg.get("hard_reject", True))
+                    penalty = 0.0
+                    try:
+                        penalty = float(qcfg.get("penalty", 0.0) or 0.0)
+                    except Exception:
+                        penalty = 0.0
+                    if not hard_reject and penalty > 0.0:
+                        delta_r *= max(0.0, 1.0 - penalty)
+                        gate_penalty_ratio = 1.0 - penalty
+                    else:
+                        delta_r = 0.0
+                        gate_penalty_ratio = 0.0
+                    gating_reasons = gate_reasons or ["quality_gate_rejection"]
+                    # Preserve raw values for later debug fields
+                    delta_r_pre_gating = delta_r_pre_gates
+                    rye_raw_pre_gating = rye_raw_pre_gates
+                else:
+                    gate_penalty_ratio = None
+                    # Set debugging pre-gate values to current values
+                    delta_r_pre_gating = delta_r_pre_gates
+                    rye_raw_pre_gating = rye_raw_pre_gates
         # Additional gating using the high RYE ledger.  After applying
         # the quality gate, compare the current cycle's repair efficiency
         # against the best previously recorded cycle for this goal.  If the
@@ -1928,7 +2018,14 @@ class TGRMLoop:
         # is recorded.  This mechanism encourages exploitation of
         # highâvalue repairs before exploring new ones.
         try:
-            if hasattr(self, "memory_store") and hasattr(self.memory_store, "get_top_candidates"):
+            # Optionally apply a high RYE ledger gate to enforce progressive improvement.
+            ledger_cfg: Dict[str, Any] = {}
+            try:
+                ledger_cfg = self.config.get("ledger_gate", {}) if hasattr(self, "config") else {}
+            except Exception:
+                ledger_cfg = {}
+            ledger_enabled = bool(ledger_cfg.get("enabled", False))
+            if ledger_enabled and hasattr(self, "memory_store") and hasattr(self.memory_store, "get_top_candidates"):
                 # Compute candidate RYE using current delta_R and energy_E.
                 try:
                     candidate_rye = compute_rye(delta_r, energy_e)
@@ -1939,9 +2036,40 @@ class TGRMLoop:
                     best_entry = ledger_entries[0]
                     best_rye = best_entry.get("rye")
                     if isinstance(best_rye, (int, float)) and best_rye is not None:
-                        threshold = float(best_rye) * 1.05 if best_rye > 0 else 0.0
-                        if candidate_rye <= threshold:
-                            delta_r = 0.0
+                        # Minimum best RYE required to apply improvement gating
+                        try:
+                            min_best = float(ledger_cfg.get("min_best_rye", 0.0) or 0.0)
+                        except Exception:
+                            min_best = 0.0
+                        improve_ratio = 0.05
+                        try:
+                            improve_ratio = float(ledger_cfg.get("improve_ratio", 0.05) or 0.05)
+                        except Exception:
+                            improve_ratio = 0.05
+                        threshold = float(best_rye) * (1.0 + improve_ratio) if best_rye > min_best else 0.0
+                        if threshold > 0.0 and candidate_rye <= threshold:
+                            hard_reject_l = bool(ledger_cfg.get("hard_reject", True))
+                            penalty_l = 0.0
+                            try:
+                                penalty_l = float(ledger_cfg.get("penalty", 0.0) or 0.0)
+                            except Exception:
+                                penalty_l = 0.0
+                            if not hard_reject_l and penalty_l > 0.0:
+                                delta_r *= max(0.0, 1.0 - penalty_l)
+                                # Combine penalties multiplicatively if quality gate also applied
+                                try:
+                                    if gate_penalty_ratio is not None:
+                                        gate_penalty_ratio *= (1.0 - penalty_l)
+                                    else:
+                                        gate_penalty_ratio = 1.0 - penalty_l
+                                except Exception:
+                                    gate_penalty_ratio = 1.0 - penalty_l
+                            else:
+                                delta_r = 0.0
+                                try:
+                                    gate_penalty_ratio = 0.0
+                                except Exception:
+                                    pass
                             gating_reasons.append("ledger_insufficient_improvement")
         except Exception:
             pass
@@ -2165,6 +2293,10 @@ class TGRMLoop:
             # backward compatibility and existing trend analyses.  The
             # quality weighted RYE is exposed under "RYE_quality", while
             # the quality factor itself is available as "quality_score".
+            # Debug fields for gating: pre-gate delta_R and RYE and applied penalty ratio
+            "delta_R_pre_gates": locals().get("delta_r_pre_gating", delta_r),
+            "RYE_pre_gates": locals().get("rye_raw_pre_gating", rye_raw),
+            "gate_penalty_ratio": locals().get("gate_penalty_ratio", None),
             "RYE": rye_raw,
             "RYE_quality": rye_value,
             "quality_score": quality_score,
@@ -2214,7 +2346,11 @@ class TGRMLoop:
             replay_item_ids=replay_item_ids,
         )
 
-        self.memory_store.log_cycle(cycle_summary)
+        # Log the cycle safely: if logging raises an error, swallow it to avoid crashing the run
+        try:
+            self.memory_store.log_cycle(cycle_summary)
+        except Exception:
+            pass
 
         # Update the high RYE ledger with this cycle's summary.  The ledger
         # captures the most efficient cycles so that future cycles can
