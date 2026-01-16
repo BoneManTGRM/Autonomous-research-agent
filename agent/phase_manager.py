@@ -26,7 +26,7 @@ def phases_for_cycles(total_cycles: int) -> List[str]:
     different behaviours across long runs.  The phase naming follows:
 
     * Every 10th cycle (1-based index) is labelled ``"explore"`` to signal
-      a highâexploration burst.  These cycles may allocate more tool budget
+      a high-exploration burst.  These cycles may allocate more tool budget
       or allow riskier actions.
     * Every 5th cycle (except those already marked as explore) is labelled
       ``"exploit"`` to emphasise consolidation and integration of recent
@@ -41,7 +41,7 @@ def phases_for_cycles(total_cycles: int) -> List[str]:
     Returns
     -------
     List[str]
-        A list of humanâreadable phase names, length equal to ``total_cycles``.
+        A list of human-readable phase names, length equal to ``total_cycles``.
     """
     phases: List[str] = []
     if total_cycles < 1:
@@ -69,7 +69,7 @@ def phase_name_for_index(index: int, total_cycles: int) -> Optional[str]:
     Parameters
     ----------
     index: int
-        Zeroâbased index of the cycle.  If out of bounds, ``None`` is
+        Zero-based index of the cycle.  If out of bounds, ``None`` is
         returned.
     total_cycles: int
         Total number of cycles in the run.
