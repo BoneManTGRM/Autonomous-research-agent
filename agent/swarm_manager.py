@@ -69,7 +69,7 @@ from concurrent.futures import (
     wait,
     FIRST_COMPLETED,
 )
-try:  # PythonÂ 3.14 introduced InterpreterPoolExecutor
+try:  # Python 3.14 introduced InterpreterPoolExecutor
     from concurrent.futures import InterpreterPoolExecutor  # type: ignore
 except Exception:
     InterpreterPoolExecutor = None  # type: ignore
