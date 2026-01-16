@@ -355,6 +355,137 @@ def recovery_momentum_from_rye(
     # Clamp to a reasonable range to avoid wild outliers
     return max(min(momentum, 1.0), -1.0)
 
+# ---------------------------------------------------------------------------
+# Trajectory signals for compounding readiness
+# ---------------------------------------------------------------------------
+
+def trajectory_signals(
+    history: List[Dict[str, Any]],
+    window: int = 10,
+) -> Dict[str, Optional[float]]:
+    """
+    Compute simple signals that indicate whether a run is transitioning from
+    exploration into compounding discovery mode.  These metrics look at
+    hypothesis persistence, novelty variability, and citation reuse over
+    recent cycles.
+
+    Parameters
+    ----------
+    history: List[Dict[str, Any]]
+        Sequence of cycle log entries as produced by TGRMLoop.  Each entry
+        should include hypotheses (list of dicts), citations (list of dicts),
+        and optional novelty metrics.
+    window: int, optional
+        Number of recent cycles to consider.  Defaults to 10.  Fewer cycles
+        reduce noise when runs are short; more cycles provide smoother
+        estimates when runs are long.
+
+    Returns
+    -------
+    Dict[str, Optional[float]]
+        A dictionary with keys:
+        - ``hypothesis_survival_rate``: the average fraction of hypotheses
+          that persist from one cycle to the next across the window.  Higher
+          values suggest that the system is refining existing ideas rather
+          than starting from scratch each time.
+        - ``novelty_variance``: variance of novelty scores over the window.
+          Decreasing variance may indicate convergence on a stable line of
+          inquiry.  Returns None when novelty scores are unavailable.
+        - ``constraint_reuse_rate``: the average fraction of citations
+          reused in consecutive cycles.  Higher values suggest that
+          constraints and evidence are being integrated rather than
+          discarded.
+
+    Notes
+    -----
+    These signals are intended as heuristics only.  They do not alter the
+    stability index or volatility measures but can be consumed by higher
+    level controllers or visualizations to decide when to extend runs.
+    """
+    if not isinstance(history, list) or not history:
+        return {
+            "hypothesis_survival_rate": None,
+            "novelty_variance": None,
+            "constraint_reuse_rate": None,
+        }
+    # Trim to the last ``window`` entries
+    tail = history[-window:]
+    # Hypothesis survival
+    survival_rates: List[float] = []
+    for prev, curr in zip(tail[:-1], tail[1:]):
+        try:
+            prev_hyps = prev.get("hypotheses") or []
+            curr_hyps = curr.get("hypotheses") or []
+        except Exception:
+            prev_hyps, curr_hyps = [], []
+        # Normalize to strings for simple comparison
+        def _hyp_key(h: Any) -> str:
+            if isinstance(h, dict):
+                return str(h.get("title") or h.get("text") or h)
+            return str(h)
+        prev_keys = {_hyp_key(h).strip().lower() for h in prev_hyps if _hyp_key(h).strip()}
+        curr_keys = {_hyp_key(h).strip().lower() for h in curr_hyps if _hyp_key(h).strip()}
+        if not prev_keys:
+            continue
+        persisted = prev_keys.intersection(curr_keys)
+        survival_rates.append(len(persisted) / float(len(prev_keys)))
+    hypothesis_survival_rate: Optional[float] = None
+    if survival_rates:
+        try:
+            hypothesis_survival_rate = float(sum(survival_rates)) / float(len(survival_rates))
+        except Exception:
+            hypothesis_survival_rate = None
+    # Novelty variance
+    novelty_scores: List[float] = []
+    for entry in tail:
+        try:
+            n = entry.get("novelty_score") or entry.get("novelty") or entry.get("noveltyScore")
+            if isinstance(n, (int, float)):
+                novelty_scores.append(float(n))
+        except Exception:
+            continue
+    novelty_variance: Optional[float] = None
+    if novelty_scores:
+        try:
+            # Compute variance; require at least two samples
+            if len(novelty_scores) >= 2:
+                mean_val = statistics.fmean(novelty_scores)
+                var = statistics.pvariance(novelty_scores)
+                novelty_variance = float(var)
+            else:
+                novelty_variance = 0.0
+        except Exception:
+            novelty_variance = None
+    # Constraint reuse (citation reuse)
+    reuse_rates: List[float] = []
+    for prev, curr in zip(tail[:-1], tail[1:]):
+        try:
+            prev_cites = prev.get("citations") or prev.get("sources") or []
+            curr_cites = curr.get("citations") or curr.get("sources") or []
+        except Exception:
+            prev_cites, curr_cites = [], []
+        def _cite_key(c: Any) -> str:
+            if isinstance(c, dict):
+                return str(c.get("url") or c.get("title") or c)
+            return str(c)
+        prev_keys = {_cite_key(c).strip().lower() for c in prev_cites if _cite_key(c).strip()}
+        curr_keys = {_cite_key(c).strip().lower() for c in curr_cites if _cite_key(c).strip()}
+        if not curr_keys:
+            continue
+        reused = curr_keys.intersection(prev_keys)
+        reuse_rates.append(len(reused) / float(len(curr_keys)))
+    constraint_reuse_rate: Optional[float] = None
+    if reuse_rates:
+        try:
+            constraint_reuse_rate = float(sum(reuse_rates)) / float(len(reuse_rates))
+        except Exception:
+            constraint_reuse_rate = None
+    return {
+        "hypothesis_survival_rate": hypothesis_survival_rate,
+        "novelty_variance": novelty_variance,
+        "constraint_reuse_rate": constraint_reuse_rate,
+    }
+
 
 # ---------------------------------------------------------------------------
 # Volatility and oscillation signatures
