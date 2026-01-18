@@ -33,7 +33,9 @@ JsonObj = Dict[str, Any]
 # ---------------------------------------------------------------------------
 # To prevent extremely long reports from freezing the UI, we limit the number
 # of cycles included in the appendix and the number of lines shown for each
-# agent output.  These limits can be overridden via environment variables.
+# agent output.  These limits can be overridden via environment variables
+# APPENDIX_MAX_CYCLES and MAX_AGENT_OUTPUT_LINES.  If not provided, we use
+# conservative defaults that balance fidelity with responsiveness.
 try:
     MAX_APPENDIX_CYCLES: int = int(os.getenv("APPENDIX_MAX_CYCLES", "5"))
 except Exception:
