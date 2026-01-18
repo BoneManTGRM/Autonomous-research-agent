@@ -185,20 +185,23 @@ RUNS_ERROR_DIR: Optional[Path] = None
 # defaults and repair mojibake (broken Unicode) in citation metadata. You can
 # override these values via environment variables.
 
-# Limit the number of citations shown inline.  Defaults to 50.  Set
-# CITATIONS_INLINE_LIMIT environment variable to override.
+# Limit the number of citations shown inline.  Defaults to a lower value to
+# avoid freezing the UI.  Set CITATIONS_INLINE_LIMIT environment variable to
+# override.  Previously this default was 50, which could overwhelm the
+# browser on long runs.  A more conservative default of 10 keeps the
+# interface responsive while still showing enough context.
 try:
     _citations_inline_limit_env = os.getenv("CITATIONS_INLINE_LIMIT")
-    CITATIONS_INLINE_LIMIT: int = int(_citations_inline_limit_env) if _citations_inline_limit_env else 50
+    CITATIONS_INLINE_LIMIT: int = int(_citations_inline_limit_env) if _citations_inline_limit_env else 10
 except Exception:
     CITATIONS_INLINE_LIMIT = 50
 
-# Limit the number of per-cycle details rendered in the UI.  Defaults to 50.  Set
+# Limit the number of per-cycle details rendered in the UI.  Defaults to 20.  Set
 # CYCLE_DETAIL_LIMIT environment variable to override.  Only the most recent
 # cycles are shown; earlier cycles remain accessible via download.
 try:
     _cycle_detail_limit_env = os.getenv("CYCLE_DETAIL_LIMIT")
-    CYCLE_DETAIL_LIMIT: int = int(_cycle_detail_limit_env) if _cycle_detail_limit_env else 50
+    CYCLE_DETAIL_LIMIT: int = int(_cycle_detail_limit_env) if _cycle_detail_limit_env else 20
 except Exception:
     CYCLE_DETAIL_LIMIT = 50
 
@@ -3394,6 +3397,23 @@ def compute_progress_view(
     # status fallback below.
     running_like = status_s in {"running", "active", "in_progress", "working"}
 
+    # Attempt to load run_state from disk for additional progress clues.  The
+    # run_state may include expected_cycles, cycle_index, stop_reason and
+    # status fields that help determine progress when progress_state is
+    # missing or incomplete.  We import lazily here to avoid circular
+    # dependencies at module load time.
+    rs = None
+    if run_id:
+        try:
+            from .run_state_manager import default_state_path  # type: ignore
+            rs_path = default_state_path(run_id)  # type: ignore
+            if rs_path and os.path.exists(rs_path):
+                with open(rs_path, "r", encoding="utf-8") as f:
+                    import json as _json  # local alias to avoid shadowing
+                    rs = _json.load(f)
+        except Exception:
+            rs = None
+
     if run_id is None:
         run_id_val = _coalesce(ws.get("run_id"), ps.get("run_id"), ws.get("job_id"), ps.get("job_id"))
         if run_id_val is not None:
@@ -3448,6 +3468,29 @@ def compute_progress_view(
         "timed out", "killed", "exited", "shutdown", "shutdown_complete",
         "shutting_down", "exception", "panic",
     }
+
+    # If the run state reports a stop or finished status, override the
+    # finished_like flag.  This ensures that the progress bar is marked
+    # complete when the engine terminates early or without updating the
+    # worker_state/progress_state.  We treat any non-empty stop_reason as
+    # final, as well as run_state.status values that indicate completion.
+    if not finished_like and rs:
+        try:
+            rs_status = str(rs.get("status") or "").strip().lower()
+        except Exception:
+            rs_status = ""
+        if rs.get("stop_reason") or rs_status in {
+            "finished", "done", "completed", "complete", "success",
+            "idle", "stopped",
+            "canceled", "cancelled", "abort", "aborted",
+            "error", "failed", "failure",
+            "stopping", "stopped_by_user", "stopped by user", "stop_requested",
+            "canceling", "cancelling", "cancelled by user", "aborting",
+            "terminated", "terminating", "terminated_by_user", "timeout",
+            "timed out", "killed", "exited", "shutdown", "shutdown_complete",
+            "shutting_down", "exception", "panic",
+        }:
+            finished_like = True
 
     # Treat unrecognized statuses as finished-like unless they clearly
     # represent an active or queued state.  This prevents the UI from
@@ -3543,6 +3586,29 @@ def compute_progress_view(
     # Otherwise show cycle progress
     c2 = _safe_int(cur, None)
     t2 = _safe_int(tot, None)
+    # Fallback: if progress is missing, try run_state for cycle progress.  Some
+    # backends do not emit progress JSON files or events; in those cases the
+    # run_state (persisted by the worker) contains the planned total and the
+    # last recorded cycle index.  Use these values only if both c2 and t2
+    # are missing or zero to avoid overriding valid progress_state data.
+    if rs:
+        try:
+            if c2 is None:
+                c2 = _safe_int(
+                    rs.get("cycle_index")
+                    or rs.get("current_cycle")
+                    or rs.get("current"),
+                    None,
+                )
+            if t2 is None or (isinstance(t2, (int, float)) and t2 <= 0):
+                t2 = _safe_int(
+                    rs.get("expected_cycles")
+                    or rs.get("total_cycles")
+                    or rs.get("total"),
+                    None,
+                )
+        except Exception:
+            pass
 
     # If the job is finished but the reported cycle progress has not
     # reached the total, treat it as complete.  This prevents the
