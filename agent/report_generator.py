@@ -111,11 +111,11 @@ def _is_vague(text: str) -> bool:
 
 # Patterns to detect and exclude internal or template-like discovery entries.
 # These match fragments of placeholder entries (maintenance modes, templates, logs).
-# Patterns used to detect and exclude internal or placeholder discovery entries.
-# NOTE: This list intentionally omits common words like "agent" and "description"
-# that could legitimately appear in discovery labels.  Overly generic patterns
-# previously led to all discoveries being filtered out.  Only include phrases
-# that are clearly indicative of template content, logs, or internal scaffolding.
+# Patterns used to detect and exclude internal or template-like discovery entries.
+# NOTE: Only phrases that are clearly indicative of maintenance logs, templates or
+# placeholders are included.  Generic words like "agent" or "description" are
+# intentionally omitted to avoid filtering out real discoveries.  Removing overly
+# broad patterns restores the visibility of legitimate discovery labels.
 BANNED_DISCOVERY_PATTERNS = [
     "maintenance_mode",
     "maintenance mode",
@@ -132,7 +132,6 @@ BANNED_DISCOVERY_PATTERNS = [
     "initial discovery log",
     "used only to show",
     "shows how an",
-    # Keep only specific patterns that are extremely unlikely to be valid discoveries.
 ]
 
 def _contains_banned_pattern(text: str) -> bool:
