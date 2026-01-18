@@ -28,6 +28,22 @@ from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Tuple, Unio
 
 JsonObj = Dict[str, Any]
 
+# ---------------------------------------------------------------------------
+# Performance tuning constants
+# ---------------------------------------------------------------------------
+# To prevent extremely long reports from freezing the UI, we limit the number
+# of cycles included in the appendix and the number of lines shown for each
+# agent output.  These limits can be overridden via environment variables.
+try:
+    MAX_APPENDIX_CYCLES: int = int(os.getenv("APPENDIX_MAX_CYCLES", "5"))
+except Exception:
+    MAX_APPENDIX_CYCLES = 5
+
+try:
+    MAX_AGENT_OUTPUT_LINES: int = int(os.getenv("MAX_AGENT_OUTPUT_LINES", "50"))
+except Exception:
+    MAX_AGENT_OUTPUT_LINES = 50
+
 
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
@@ -741,11 +757,18 @@ def build_agent_report(
                 out.append(f"- {role}: {first_line}{cite}")
         out.append("")
 
-    # Appendix with full agent outputs (no truncation)
-    out.append("## Appendix: full agent outputs (no truncation)")
+    # Appendix with full agent outputs.  To keep the report from freezing the UI,
+    # we limit the number of cycles displayed and the length of each agent
+    # output.  See MAX_APPENDIX_CYCLES and MAX_AGENT_OUTPUT_LINES above.
+    out.append("## Appendix: full agent outputs (limited)")
     # Determine sorted cycles encountered in outputs
     all_cycles = sorted([c for c in by_cycle_outputs.keys() if c is not None])
-    for c in all_cycles:
+    # Limit to the most recent cycles if necessary
+    if MAX_APPENDIX_CYCLES and len(all_cycles) > MAX_APPENDIX_CYCLES:
+        display_cycles = all_cycles[-MAX_APPENDIX_CYCLES:]
+    else:
+        display_cycles = all_cycles
+    for c in display_cycles:
         out.append(f"### Cycle {c}")
         outs = by_cycle_outputs.get(c, [])
         if not outs:
@@ -774,6 +797,9 @@ def build_agent_report(
                     # or contain unresolved bold markup (e.g., "**agent**").
                     if not _is_placeholder_text(ln) and "**" not in str(ln):
                         sanitized_lines.append(ln)
+                # Truncate long outputs to prevent UI lockup
+                if MAX_AGENT_OUTPUT_LINES and len(sanitized_lines) > MAX_AGENT_OUTPUT_LINES:
+                    sanitized_lines = sanitized_lines[:MAX_AGENT_OUTPUT_LINES] + ["... [truncated]"]
                 sanitized_text = "\n".join(sanitized_lines).rstrip()
                 out.append("```")
                 out.append(sanitized_text)
