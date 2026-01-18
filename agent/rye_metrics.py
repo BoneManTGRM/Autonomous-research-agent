@@ -78,6 +78,17 @@ CYCLE_TIER3_MIN_DELTA_R: float = 2.0
 CYCLE_TIER3_MIN_NOVELTY: float = 0.4
 CYCLE_TIER3_MIN_COHERENCE: float = 0.4
 
+# ---------------------------------------------------------------------------
+# RYE sanity caps
+#
+# During long runs with multiple agents, erroneous calculations or runaway
+# feedback can inflate RYE values far beyond realistic bounds.  Extremely
+# large RYE values poison averages and diagnostic metrics, producing
+# misleading "max" and "avg" statistics.  To guard against this, the
+# perâcycle RYE is clamped to a reasonable maximum.  You can adjust this
+# constant if your domain demands higher theoretical RYE values.
+MAX_CYCLE_RYE: float = 10.0
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -138,7 +149,17 @@ def _extract_rye_from_entry(entry: Dict[str, Any]) -> Optional[float]:
     if delta is None or delta <= 0 or energy is None or energy <= 0:
         return None
 
-    return float(delta) / float(energy)
+    try:
+        ratio = float(delta) / float(energy)
+    except Exception:
+        return None
+    # Clamp runaway RYE values to a sane maximum.  Without this guard,
+    # extremely small energy values (or spurious delta calculations) can
+    # produce huge RYE numbers that distort summaries.  See MAX_CYCLE_RYE
+    # above for the limit.
+    if ratio > MAX_CYCLE_RYE:
+        ratio = MAX_CYCLE_RYE
+    return ratio
 
 
 def normalize_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
