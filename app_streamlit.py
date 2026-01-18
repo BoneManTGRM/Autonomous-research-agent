@@ -3471,8 +3471,6 @@ def compute_progress_view(
     finished_like = status_s in {
         # Normal termination
         "finished", "done", "completed", "complete", "success",
-        # Worker idle after completion
-        "idle", "stopped",
         # Cancellation and aborts
         "canceled", "cancelled", "abort", "aborted",
         # Errors
@@ -3504,12 +3502,14 @@ def compute_progress_view(
         # finished_like set for consistency.
         elif rs_status in {
             "finished", "done", "completed", "complete", "success",
-            "idle", "stopped", "canceled", "cancelled", "abort", "aborted",
-            "error", "failed", "failure", "stopping", "stopped_by_user",
-            "stopped by user", "stop_requested", "canceling", "cancelling",
-            "cancelled by user", "aborting", "terminated", "terminating",
-            "terminated_by_user", "timeout", "timed out", "killed", "exited",
-            "shutdown", "shutdown_complete", "shutting_down", "exception", "panic",
+            # explicit cancellations/aborts/failures
+            "canceled", "cancelled", "abort", "aborted",
+            "error", "failed", "failure",
+            "stopping", "stopped_by_user", "stopped by user", "stop_requested",
+            "canceling", "cancelling", "cancelled by user", "aborting",
+            "terminated", "terminating", "terminated_by_user", "timeout",
+            "timed out", "killed", "exited", "shutdown", "shutdown_complete",
+            "shutting_down", "exception", "panic",
         }:
             finished_like = True
 
@@ -3519,8 +3519,13 @@ def compute_progress_view(
     # different backends.  If the status is not in the finished set,
     # running-like set or known queued states, assume the run is done.
     queued_like = status_s in {"queued", "pending", "waiting"}
+    # Do not automatically mark the run as finished when the status is blank or unknown.
+    # Previously, unknown statuses were treated as finished, which caused the
+    # progress bar to fill completely (1/1) even when no run was active.  Now,
+    # only mark as finished if the status is non-empty (not None) and not "unknown".
     if not running_like and not finished_like and not queued_like:
-        finished_like = True
+        if status_s and status_s not in {"unknown"}:
+            finished_like = True
 
     # Signals that the worker has started doing real work (status running OR fresh-ish heartbeat)
     hb_count = _safe_int((watchdog or {}).get("count"), 0) or 0
@@ -4071,18 +4076,35 @@ def _pulse_label_to_progress(pulse_label: str, fallback: float = 0.25) -> float:
 
 
 def _friendly_job_status_text(status: Any) -> str:
-    """Human-friendly, UI-safe status text for job/runs."""
+    """Human-friendly, UI-safe status text for job/runs.
+
+    Prior behaviour treated unknown statuses as ârunningâ, which led to
+    confusing UI states such as showing âJob runningâ when the worker was
+    idle.  This helper now returns âJob idleâ for blank or unknown statuses
+    and explicitly handles the common idle/stopped variants.  Only known
+    active statuses map to âJob runningâ.
+    """
     s = str(status or "").strip().lower()
+    # Completed states
     if s in {"finished", "done", "completed", "complete", "success", "succeeded"}:
         return "Job finished"
+    # Error states
     if s in {"error", "failed", "fail"}:
         return "Job error"
+    # Pending/queued states
     if s in {"queued", "pending", "waiting"}:
         return "Job pending"
+    # Active/running states
     if s in {"running", "active", "in_progress", "working", "busy", "processing"}:
         return "Job running"
-    # Default: treat unknown as running to avoid showing raw 0/960 progress.
-    return "Job running"
+    # Idle or stopped states
+    if s in {"idle", "stopped", "stop", "none"}:
+        return "Job idle"
+    # Default: treat blank/unknown statuses as idle rather than running.
+    if not s or s == "unknown":
+        return "Job idle"
+    # For any other unrecognised status, return the raw status prefixed for clarity.
+    return f"Job {s}"
 
 
 def derive_health_class(
