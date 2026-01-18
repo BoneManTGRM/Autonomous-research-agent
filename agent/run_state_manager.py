@@ -127,6 +127,28 @@ class RunState:
     updated_at: str = field(default_factory=_utc_iso)
 
     # ------------------------------------------------------------------
+    # Extended run termination metadata
+    #
+    # expected_cycles:
+    #     The number of cycles the run was intended to execute (if known).
+    # actual_cycles:
+    #     The number of cycles actually executed when the run terminated.
+    # stop_reason:
+    #     A human readable reason for why the run stopped (e.g. "time_limit",
+    #     "max_cycles", "repair_error", etc.).  This field is set by the
+    #     engine loop or worker when the run concludes.
+    # stop_source:
+    #     The filename or subsystem that triggered the stop (e.g. "tgrm_loop.py").
+    # uptime_seconds:
+    #     How long the run executed in seconds.  Useful for diagnostics and
+    #     reproducibility.  Not set until the run finishes.
+    expected_cycles: Optional[int] = None
+    actual_cycles: Optional[int] = None
+    stop_reason: Optional[str] = None
+    stop_source: Optional[str] = None
+    uptime_seconds: Optional[float] = None
+
+    # ------------------------------------------------------------------
     # Construction helpers
     # ------------------------------------------------------------------
     @classmethod
@@ -158,6 +180,15 @@ class RunState:
             current_cycle=None,
             total_cycles=int(total_cycles) if total_cycles else 0,
             cycle_index=None,
+            # Initialise extended termination metadata.  expected_cycles is
+            # automatically set to the requested total_cycles so that the
+            # engine knows how many cycles were planned.  Other fields are
+            # left unset until the run finishes.
+            expected_cycles=int(total_cycles) if total_cycles else None,
+            actual_cycles=None,
+            stop_reason=None,
+            stop_source=None,
+            uptime_seconds=None,
         )
         if ensure_dirs:
             try:
@@ -187,6 +218,8 @@ class RunState:
             runs_root=runs_root,
             ensure_dirs=ensure_dirs,
         )
+        # Mark the run as running and initialise the cycle index.  expected_cycles
+        # is already set by cls.new(); do not override it here.
         st.status = "running"
         st.update_phase(0, name="cycle 0")
         return st
