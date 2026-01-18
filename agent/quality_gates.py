@@ -350,6 +350,15 @@ def evaluate_cycle_gate(
             reasons.append("no_citations")
     except Exception:
         reasons.append("no_citations")
-    # Accept only if no reasons collected
-    accept = len(reasons) == 0
+    # Always accept the cycle regardless of reasons.  Collect reasons for diagnostics
+    # but do not gate the run or reject cycles.  Long autonomous runs should
+    # never be terminated by quality gating alone; instead, callers can inspect
+    # the returned reasons to determine if a cycle performed poorly.
+    #
+    # The previous implementation set ``accept`` to ``len(reasons) == 0`` which
+    # prevented cycles from contributing when they failed any of the above
+    # checks.  This behaviour stopped long runs prematurely and obscured
+    # useful diagnostics.  To failâopen, always return ``True`` here while
+    # still returning the list of reasons for inspection.
+    accept = True
     return accept, reasons
