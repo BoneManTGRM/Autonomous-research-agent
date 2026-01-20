@@ -25,8 +25,8 @@ import os
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 import time
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 
@@ -128,17 +128,6 @@ class RunState:
     updated_at: str = field(default_factory=_utc_iso)
 
     # ------------------------------------------------------------------
-    # Monotonic timing
-    #
-    # To provide a monotonic measure of uptime that is immune to system
-    # clock changes, record the monotonic clock when the RunState is
-    # instantiated.  The uptime_monotonic field captures the elapsed
-    # monotonic seconds at termination.  These fields are excluded from
-    # minimal state mode.
-    started_monotonic: float = field(default_factory=time.monotonic)
-    uptime_monotonic: Optional[float] = None
-
-    # ------------------------------------------------------------------
     # Extended run termination metadata
     #
     # expected_cycles:
@@ -159,6 +148,19 @@ class RunState:
     stop_reason: Optional[str] = None
     stop_source: Optional[str] = None
     uptime_seconds: Optional[float] = None
+
+    # Monotonic timing fields
+    # started_monotonic:
+    #     Monotonic clock reading when the run state was created.  This
+    #     timestamp is captured from time.monotonic() and is unaffected
+    #     by system clock adjustments.  It is used together with
+    #     uptime_monotonic to compute precise run durations.
+    started_monotonic: Optional[float] = None
+    # uptime_monotonic:
+    #     The elapsed time between started_monotonic and the moment the
+    #     run ends.  It remains None until mark_finished() or
+    #     record_termination() populates it.
+    uptime_monotonic: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Construction helpers
@@ -201,6 +203,11 @@ class RunState:
             stop_reason=None,
             stop_source=None,
             uptime_seconds=None,
+            # Initialize monotonic fields: record the monotonic start time
+            # immediately when constructing the run state so that uptime
+            # can later be computed relative to a stable reference.
+            started_monotonic=time.monotonic(),
+            uptime_monotonic=None,
         )
         if ensure_dirs:
             try:
@@ -433,21 +440,18 @@ class RunState:
             except Exception:
                 pass
 
-        # Compute monotonic uptime if unset.  Use the monotonic clock
-        # captured at instantiation and the current monotonic reading.
+        # Compute monotonic uptime if unset.  Use the monotonic start time
+        # recorded when the run was created.  This ensures stable duration
+        # measurement even if the system clock is adjusted or leaps
+        # backwards/forwards.  Do not override an existing value.
         if self.uptime_monotonic is None:
             try:
-                current_mono = time.monotonic()
-                # started_monotonic is defined at initialisation; ensure it's
-                # numeric and non-negative before subtracting.
-                start_mono = float(self.started_monotonic) if self.started_monotonic is not None else 0.0
-                if current_mono >= start_mono:
-                    self.uptime_monotonic = current_mono - start_mono
-                else:
-                    # Guard against clock anomalies
-                    self.uptime_monotonic = 0.0
+                if self.started_monotonic is not None:
+                    diff = time.monotonic() - float(self.started_monotonic)
+                    # Only record non-negative durations
+                    if diff >= 0:
+                        self.uptime_monotonic = diff
             except Exception:
-                # If monotonic clock is unavailable, leave unset
                 pass
 
         # Do not modify stop_reason or stop_source here; those should be
@@ -530,15 +534,16 @@ class RunState:
             except Exception:
                 pass
 
-        # Compute monotonic uptime if unset
+        # Compute monotonic uptime if unset.  Use the monotonic clock value
+        # captured at run start (started_monotonic) and the current
+        # monotonic reading.  Only record non-negative durations to avoid
+        # corrupting existing metadata.
         if self.uptime_monotonic is None:
             try:
-                current_mono = time.monotonic()
-                start_mono = float(self.started_monotonic) if self.started_monotonic is not None else 0.0
-                if current_mono >= start_mono:
-                    self.uptime_monotonic = current_mono - start_mono
-                else:
-                    self.uptime_monotonic = 0.0
+                if self.started_monotonic is not None:
+                    diff = time.monotonic() - float(self.started_monotonic)
+                    if diff >= 0:
+                        self.uptime_monotonic = diff
             except Exception:
                 pass
 
