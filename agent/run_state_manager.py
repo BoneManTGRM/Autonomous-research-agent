@@ -366,12 +366,140 @@ class RunState:
         self.cycle_index = idx
 
     def mark_finished(self) -> None:
+        """
+        Mark the run as finished and populate termination metadata.  This
+        method now records a final cycle count and uptime when they have
+        not already been set.  It will not overwrite existing values on
+        repeated calls, preserving the "write once" contract for the
+        run ledger fields (expected_cycles, actual_cycles, stop_reason,
+        stop_source, uptime_seconds).
+
+        When called at the end of a run, it moves the phase index to
+        the last cycle (if a total is known) and records the number of
+        completed cycles and uptime if they are not already set.  Optionally
+        one can provide a stop_reason and stop_source to capture why
+        the run ended and which subsystem triggered it.
+        """
         self.status = "finished"
         # Move to the last known phase if we have a total
         if self.phase_total > 0:
             last = max(0, int(self.phase_total) - 1)
             if self.phase_index is None or self.phase_index < last:
                 self.update_phase(last, name=self.phase_name)
+
+        # Derive actual_cycles if not already set.  Use the most
+        # authoritative counter available.  The cycle_index property
+        # reflects the zero-based index of the current cycle.  Add 1 to
+        # convert to a count of completed cycles.  If cycle_index is
+        # unavailable, fall back to phase_index or current.  Do not
+        # override a preexisting value.
+        if self.actual_cycles is None:
+            idx: Optional[int] = None
+            for cand in (self.cycle_index, self.phase_index, self.current_cycle, self.current):
+                if cand is not None:
+                    try:
+                        idx = int(cand)
+                    except Exception:
+                        idx = None
+                    if idx is not None:
+                        break
+            if idx is not None:
+                # actual cycles is one more than zero-based index
+                self.actual_cycles = max(0, idx + 1)
+
+        # Compute uptime_seconds if unset.  Use created_at as the start
+        # time and current UTC as end time.  Parsing errors are silently
+        # ignored.
+        if self.uptime_seconds is None:
+            try:
+                # Strip trailing Z for fromisoformat support
+                start_str = self.created_at.rstrip("Z")
+                start_dt = datetime.fromisoformat(start_str)
+                end_dt = datetime.now(timezone.utc).replace(tzinfo=None)
+                delta = end_dt - start_dt
+                self.uptime_seconds = delta.total_seconds()
+            except Exception:
+                pass
+
+        # Do not modify stop_reason or stop_source here; those should be
+        # recorded explicitly by the caller via record_termination() to
+        # respect the writeâonce semantics.
+
+    def record_termination(
+        self,
+        *,
+        actual_cycles: Optional[int] = None,
+        stop_reason: Optional[str] = None,
+        stop_source: Optional[str] = None,
+        end_time: Optional[datetime] = None,
+    ) -> None:
+        """
+        Record termination metadata for the run.  This helper should be
+        called once when the engine or worker decides to stop a run.
+
+        Parameters
+        ----------
+        actual_cycles:
+            The total number of cycles executed.  If None and not
+            already set, the value will be derived from the run's
+            current counters.  The value is ignored when actual_cycles
+            is already populated.
+        stop_reason:
+            A human readable reason why the run stopped (e.g. "time_limit",
+            "max_cycles", "repair_error").  Only set when stop_reason
+            has not been previously recorded.
+        stop_source:
+            A string identifying the file or subsystem that triggered
+            the stop (e.g. "tgrm_loop.py").  Only set when stop_source
+            has not been previously recorded.
+        end_time:
+            A datetime representing when the run ended.  Defaults to
+            current UTC time.  This is used to compute uptime_seconds
+            if not already set.
+
+        The writeâonce contract ensures that existing metadata values
+        (actual_cycles, stop_reason, stop_source, uptime_seconds) are
+        not overwritten by subsequent calls.
+        """
+        # Set actual_cycles only if unset
+        if self.actual_cycles is None:
+            ac = actual_cycles
+            if ac is None:
+                # Derive from current counters
+                idx: Optional[int] = None
+                for cand in (self.cycle_index, self.phase_index, self.current_cycle, self.current):
+                    if cand is not None:
+                        try:
+                            idx = int(cand)
+                        except Exception:
+                            idx = None
+                        if idx is not None:
+                            break
+                if idx is not None:
+                    ac = max(0, idx + 1)
+            if ac is not None:
+                try:
+                    self.actual_cycles = int(ac)
+                except Exception:
+                    pass
+        # Set stop_reason if unset and provided
+        if stop_reason and self.stop_reason is None:
+            self.stop_reason = str(stop_reason)
+        # Set stop_source if unset and provided
+        if stop_source and self.stop_source is None:
+            self.stop_source = str(stop_source)
+        # Compute uptime_seconds if unset
+        if self.uptime_seconds is None:
+            try:
+                et = end_time
+                if et is None:
+                    et = datetime.now(timezone.utc).replace(tzinfo=None)
+                start_str = self.created_at.rstrip("Z")
+                st = datetime.fromisoformat(start_str)
+                delta = et - st
+                self.uptime_seconds = delta.total_seconds()
+            except Exception:
+                pass
 
 
 __all__ = ["RunState", "resolve_runs_root", "resolve_run_dir", "default_state_path"]
