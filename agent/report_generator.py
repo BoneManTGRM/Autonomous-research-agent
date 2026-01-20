@@ -92,6 +92,45 @@ HEDGING_PATTERNS = [
     r"\bunlikly\b",
 ]
 
+# -------------------------------------------------------------
+# Goal sanitization helper
+# -------------------------------------------------------------
+def _sanitize_goal_text(goal: Optional[str]) -> Optional[str]:
+    """
+    Best effort removal of run-level directives, system titles and control
+    constraints from a goal string.  Report generators should never echo
+    back the raw run specification, which may include ``TITLE:``,
+    ``PRIMARY OBJECTIVE``, numbered constraints or other system prompts.
+    This helper returns a cleaned goal for display.
+
+    Parameters
+    ----------
+    goal : Optional[str]
+        Raw goal string from agent memory or caller.
+
+    Returns
+    -------
+    Optional[str]
+        Sanitized goal or None if input was None.
+    """
+    if not goal:
+        return goal
+    lines: List[str] = []
+    for ln in str(goal).splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        lower = s.lower()
+        # drop directive lines such as TITLE, PRIMARY OBJECTIVE, constraints
+        if lower.startswith(("title:", "primary objective", "primary goal", "constraints", "control constraints")):
+            continue
+        # Skip markdown headings and enumerated constraints (e.g., "##", "1.")
+        if re.match(r"^#+\s", s) or re.match(r"^\d+\.", s):
+            continue
+        lines.append(ln)
+    cleaned = "\n".join(lines).strip()
+    return cleaned if cleaned else None
+
 def _is_vague(text: str) -> bool:
     """Return True if the sentence contains hedging language that weakens the claim."""
     if not text:
@@ -408,7 +447,10 @@ def _render_event_only_report(events: List[Dict[str, Any]], run_id: Optional[str
     if run_id:
         lines.append(f"**Run ID:** `{run_id}`\n")
     if goal:
-        lines.append(f"**Goal:** `{goal}`\n")
+        # Sanitize goal to remove system directives before inclusion
+        sg = _sanitize_goal_text(goal)
+        if sg:
+            lines.append(f"**Goal:** `{sg}`\n")
     lines.append("## Event-only summary\n")
     if not disc:
         lines.append("No candidate hypotheses or discoveries found in the event stream.\n")
@@ -1607,7 +1649,12 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
 
     # Goals
     if goal:
-        lines.append(f"**Filtered goal:** {goal}\n")
+        # Show a sanitized filtered goal rather than the raw run spec
+        sg = _sanitize_goal_text(goal)
+        if sg:
+            lines.append(f"**Filtered goal:** {sg}\n")
+        else:
+            lines.append(f"**Filtered goal:** {goal}\n")
     else:
         goals_list = [g for g in goals_seen if g]
         if goals_list:
@@ -2410,7 +2457,10 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None, run_
         lines.append(f"**Run ID:** `{inferred_run_id}`\n")
 
     if goal:
-        lines.append(f"**Filtered goal:** {goal}\n")
+        # Use a cleaned goal string when printing the filtered goal
+        sg = _sanitize_goal_text(goal)
+        if sg:
+            lines.append(f"**Filtered goal:** {sg}\n")
 
     # Structured discoveries first
     lines.append("## Structured discoveries from agent memory\n")
