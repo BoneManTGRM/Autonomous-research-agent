@@ -88,6 +88,15 @@ class DiscoveryCandidate:
     tier_hint: Optional[str] = None  # "tier1", "tier2", "tier3"
     tier_score: Optional[float] = None
 
+    # Lifecycle status
+    #
+    # Candidates progress through a lifecycle: seed -> candidate -> verified
+    # (closed).  By default candidates are considered "open" until a
+    # verification event closes them.  Downstream components can update
+    # this field to reflect closure.  The status is included in exports
+    # to simplify report generation and external audits.
+    status: str = "open"
+
     # Raw metadata from the engine
     metadata: Dict[str, Any] = field(default_factory=dict)
 
@@ -487,6 +496,19 @@ class DiscoveryManager:
         metadata = raw.get("metadata") or raw.get("meta") or {}
         biomarker_ev, biomarker_shift_count = _extract_biomarker_evidence(metadata)
 
+        # Determine lifecycle status.  Candidates may include an explicit
+        # status field (e.g. "closed") or a boolean closed/is_closed flag.
+        status = "open"
+        try:
+            raw_status = raw.get("status") or raw.get("state")
+            if raw_status:
+                status = str(raw_status)
+            else:
+                if raw.get("closed") is True or raw.get("is_closed"):
+                    status = "closed"
+        except Exception:
+            status = "open"
+
         return DiscoveryCandidate(
             discovery_id=str(raw.get("id") or uuid.uuid4()),
             run_id=run_id,
@@ -511,6 +533,7 @@ class DiscoveryManager:
             biomarker_evidence=biomarker_ev,
             biomarker_shift_count=biomarker_shift_count,
             metadata=metadata if isinstance(metadata, dict) else {},
+            status=status,
         )
 
     def _score_candidate(
