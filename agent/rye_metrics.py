@@ -387,12 +387,50 @@ def compute_energy(
 # ---------------------------------------------------------------------------
 
 def compute_rye(delta_r: float, energy_e: float) -> float:
-    """RYE = Delta R / E, with a defensive zero floor for bad E."""
+    """
+    Compute the repair yield efficiency (RYE) as the ratio of improvement to
+    effort.  This metric expresses how many issues were resolved per unit of
+    energy spent.
+
+    Parameters
+    ----------
+    delta_r : float
+        The improvement or reduction in outstanding issues during the cycle.
+    energy_e : float
+        The effort expended to achieve the improvement.  Negative or zero
+        energy is treated as invalid and yields an RYE of 0.0.
+
+    Returns
+    -------
+    float
+        The computed RYE value, clamped to a reasonable maximum to avoid
+        runaway ratios when energy is extremely small.  A larger RYE
+        indicates more efficient repairs; 0.0 indicates no improvement or
+        invalid energy.  Values above ``MAX_CYCLE_RYE`` are capped to
+        prevent outliers from dominating averages.
+
+    Interpretation
+    --------------
+    A high RYE means the agent is fixing many issues relative to the energy it
+    expends, signalling efficient progress.  A low RYE (near zero) suggests
+    that either little improvement is happening or that the agent is
+    consuming excessive energy for the gains made.  RYE never becomes
+    negative; nonâimproving or energyâconstrained cycles simply return zero.
+    """
     dr = _safe_float(delta_r) or 0.0
     e = _safe_float(energy_e)
     if e is None or e <= 0:
         return 0.0
-    return float(dr) / float(e)
+    try:
+        ratio = float(dr) / float(e)
+    except Exception:
+        return 0.0
+    # Clamp extremely large RYE values to avoid runaway ratios.  Without
+    # this guard, tiny energy values can produce unrealistic numbers that
+    # distort averages and medians.  See MAX_CYCLE_RYE above for the cap.
+    if ratio > MAX_CYCLE_RYE:
+        ratio = MAX_CYCLE_RYE
+    return ratio
 
 # ---------------------------------------------------------------------------
 # Qualityâweighted RYE (optional)
@@ -437,7 +475,13 @@ def compute_effective_rye(delta_r: float, energy_e: float, quality_score: float 
     if q > 1.0:
         q = 1.0
     raw_rye = compute_rye(delta_r, energy_e)
-    return raw_rye * q
+    # Apply the quality factor then clamp to the same maximum as raw RYE.  This
+    # ensures the adjusted value remains bounded and comparable across
+    # different runs.
+    adjusted = raw_rye * q
+    if adjusted > MAX_CYCLE_RYE:
+        adjusted = MAX_CYCLE_RYE
+    return adjusted
 
 
 # ---------------------------------------------------------------------------
@@ -802,21 +846,37 @@ def build_cycle_rye_summary(
     learning_profile_hint: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
-    Build a structured per cycle RYE summary used by TGRM and CoreAgent.
+    Build a structured perâcycle RYE summary used by TGRM and CoreAgent.
 
-    This helper is the canonical place to:
-    - compute raw RYE
-    - apply domain weighting
-    - attach basic metadata (domain, role, cycle_index)
-    - attach learning aware RYE (10x modes) when a learning_speed_factor is provided
-    - carry forward any extra signals (novelty, coherence, biomarkers, etc)
+    This helper produces a dictionary containing the core repair efficiency
+    metrics for a single cycle and optional learningâaware adjustments.  It
+    performs the following steps:
 
-    Learning logic:
-        rye_raw = Delta R / E
-        rye_learning_adjusted = rye_raw * learning_speed_factor
+      * Computes the raw RYE ratio (delta_r / energy_e) and clamps it to a
+        reasonable maximum via :func:`compute_rye`.
+      * Applies domain weighting via :func:`apply_domain_weight`, so
+        domains like longevity or AI get a modest uplift in RYE.
+      * Attaches basic metadata such as domain, role, and cycle index.
+      * Propagates any extra signals provided (e.g. novelty, coherence,
+        biomarker measurements) directly into the summary.
+      * When a learning_speed_factor is provided, computes a learningâ
+        adjusted RYE (raw RYE * factor) and applies domain weighting to it.
 
-    Where learning_speed_factor > 1.0 represents faster learning
-    (more repair yield per unit energy).
+    Learning logic
+    --------------
+        ``rye_raw = delta_r / energy_e``
+        ``rye_learning_adjusted = rye_raw * learning_speed_factor``
+
+    When ``learning_speed_factor`` > 1.0, the agent is assumed to learn
+    faster, effectively amplifying the yield per energy.  When the factor
+    is less than 1.0, learning slows down and the adjusted RYE diminishes.
+
+    Returns
+    -------
+    dict
+        A mapping with at least the keys ``RYE`` and ``RYE_weighted``.  When
+        learning adjustments are enabled, the summary also includes
+        ``RYE_learning_adjusted`` and ``RYE_learning_adjusted_weighted``.
     """
     rye_raw = compute_rye(delta_r, energy_e)
     rye_weighted = apply_domain_weight(rye_raw, domain)
@@ -924,21 +984,35 @@ def build_run_diagnostics(
     """
     Build a compact diagnostics bundle over a full run.
 
-    This is the main Repair Efficiency Signature object for a session.
-    It is safe to compute at any time, including long 24 hour or 90 day runs.
+    This helper summarises repair efficiency over the entire history.  It
+    aggregates perâcycle RYE values and computes descriptive statistics
+    such as average, median, last cycle value, rolling averages, and
+    varianceâbased stability.  These metrics provide a comprehensive
+    picture of how efficiently the agent is improving over time.  High
+    RYE averages indicate the agent fixes many issues per unit energy;
+    rolling and robust rolling metrics smooth out noise to reveal trends.
+    The stability index quantifies consistency (1.0 means very stable),
+    while recovery momentum measures acceleration in efficiency.
+    Percentiles (low/mid/high) describe the distribution of RYE scores,
+    giving a pessimistic floor, a central tendency, and an optimistic
+    ceiling.
+
+    It is safe to call this at any time, including long 24 hour or
+    90 day runs.  All ratios used are subject to the same clamp as
+    `compute_rye` to prevent runaway values from skewing the summary.
 
     Returns:
         {
           "count": int,
-          "rye_avg": Optional[float],
-          "rye_median": Optional[float],
-          "rye_last": Optional[float],
-          "rolling_rye": Optional[float],
-          "robust_rolling_rye": Optional[float],
-          "trend_simple": Optional[float],
-          "trend_slope": Optional[float],
-          "stability_index": Optional[float],
-          "recovery_momentum": Optional[float],
+          "rye_avg": Optional[float],     # mean RYE across all cycles
+          "rye_median": Optional[float],  # median RYE across all cycles
+          "rye_last": Optional[float],    # RYE of the most recent cycle
+          "rolling_rye": Optional[float], # mean RYE over the last ``window`` cycles
+          "robust_rolling_rye": Optional[float],  # median RYE over the last ``window`` cycles
+          "trend_simple": Optional[float],        # difference of recent vs earlier avg
+          "trend_slope": Optional[float],         # regression slope of RYE series
+          "stability_index": Optional[float],     # varianceânormalised stability score
+          "recovery_momentum": Optional[float],   # acceleration of RYE efficiency
           "low_percentile": Optional[float],
           "mid_percentile": Optional[float],
           "high_percentile": Optional[float],
