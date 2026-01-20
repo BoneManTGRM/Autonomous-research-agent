@@ -97,11 +97,11 @@ HEDGING_PATTERNS = [
 # ---------------------------------------------------------------------------
 def _sanitize_goal_text(goal: Optional[str]) -> Optional[str]:
     """
-    Best effort removal of run-level directives, system titles, numbered constraints
-    and directive bullet lists from a goal string. Report generators should never
-    echo back the raw run specification, which may include ``TITLE:``, ``PRIMARY OBJECTIVE``,
-    enumerated or bulleted constraints or other system prompts. This helper
-    returns a cleaned goal for display.
+    Best effort removal of run-level directives, system titles and control
+    constraints from a goal string. Report generators should never echo back
+    the raw run specification, which may include ``TITLE:``, ``PRIMARY OBJECTIVE``,
+    numbered constraints or other system prompts. This helper returns a cleaned
+    goal for display.
 
     Parameters
     ----------
@@ -116,37 +116,16 @@ def _sanitize_goal_text(goal: Optional[str]) -> Optional[str]:
     if not goal:
         return goal
     lines: List[str] = []
-    # Define directive and meta-prompt prefixes that should be removed.
-    directive_prefixes = (
-        "title",
-        "primary objective",
-        "primary goal",
-        "secondary objectives",
-        "constraints",
-        "control constraints",
-        "instruction handling rule",
-        "evidence priority order",
-        "highâprobability search domains",
-        "cycle behavior rules",
-        "discovery standard",
-        "falsification requirement",
-        "cycle checkpoints",
-        "stop conditions",
-    )
     for ln in str(goal).splitlines():
         s = ln.strip()
         if not s:
             continue
         lower = s.lower()
-        # Remove trailing colon when matching prefixes.
-        stripped_lower = lower.rstrip(":")
-        if any(stripped_lower.startswith(pref) for pref in directive_prefixes):
+        # Drop directive lines
+        if lower.startswith(("title:", "primary objective", "primary goal", "constraints", "control constraints")):
             continue
-        # Skip markdown headings or numbered lists (e.g. 1. or 1)).
-        if re.match(r"^#+\s", s) or re.match(r"^\d+[\.\)]\s", s):
-            continue
-        # Skip bullet lists (-, *, â¢) if they are part of directive sections.
-        if re.match(r"^[\-*â¢]\s", s) and any(pref in lower for pref in directive_prefixes):
+        # Drop markdown headings and numbered constraints
+        if re.match(r"^#+\s", s) or re.match(r"^\d+\.\s", s):
             continue
         lines.append(ln)
     cleaned = "\n".join(lines).strip()
@@ -2146,6 +2125,33 @@ def generate_publishable_report(
     timestamps = [str(c.get("timestamp")) for c in cycles if c.get("timestamp")]
     runtime = _extract_session_runtime(timestamps) or "(runtime unavailable)"
 
+    # ---------------------------------------------------------------------
+    # Domain relevance preparation: compute sets of meaningful tokens from
+    # the sanitized goal and domain name. These token sets are later used
+    # to filter candidate findings and citations that do not intersect with
+    # the runâs core subject matter. This helps avoid accidentally
+    # propagating unrelated entries (e.g. dietary grain references in a
+    # longevity run) when the structured discovery extraction contains
+    # leftover placeholder content or metrics labels.
+    try:
+        # Sanitize the goal up front and break into tokens of length â¥ 4
+        _sanitized_goal_for_filter = _sanitize_goal_text(inferred_goal) or ""
+        goal_tokens: set[str] = set(
+            t.lower() for t in re.findall(r"[A-Za-z]{4,}", _sanitized_goal_for_filter)
+        )
+    except Exception:
+        goal_tokens = set()
+    # Extract simple alphabetic tokens from the domain (e.g. "longevity" -> {"long", "longevity"})
+    domain_tokens: set[str] = set()
+    try:
+        domain_tokens = set(
+            t.lower() for t in re.findall(r"[A-Za-z]{4,}", str(inferred_domain) or "")
+        )
+    except Exception:
+        domain_tokens = set()
+    # Union of goal and domain tokens for relevance checks
+    relevant_tokens: set[str] = goal_tokens.union(domain_tokens)
+
     # Pull structured discoveries from events.jsonl if possible.
     structured: List[Dict[str, Any]] = []
     try:
@@ -2188,6 +2194,30 @@ def generate_publishable_report(
             _ingest_cites(summ.get("citations"))
             _ingest_cites(summ.get("sources"))
 
+    # After gathering all citations we perform a second pass to filter out
+    # obviously irrelevant sources. For example, in a longevity run
+    # structured extractions occasionally reference dietârelated metrics
+    # ("RYE", "whole grain"), which originate from internal benchmarks and
+    # should not appear in the public report. We remove any citation whose
+    # title or URL contains banned keywords if the domain suggests they are
+    # unrelated.
+    if citations:
+        banned_tokens: set[str] = set()
+        # Domainâspecific banned tokens: for longevity runs skip cereal/grain
+        # references and obvious placeholder terms.
+        if domain_tokens and "longevity" in domain_tokens:
+            banned_tokens.update({"rye", "grain", "cereal", "whole", "grainy"})
+        if banned_tokens:
+            filtered_citations: List[Dict[str, Any]] = []
+            for cit in citations:
+                title_l = str(cit.get("title") or cit.get("raw") or "").lower()
+                url_l = str(cit.get("url") or cit.get("link") or "").lower()
+                # Remove if any banned token appears in title or URL
+                if any(tok in title_l or tok in url_l for tok in banned_tokens):
+                    continue
+                filtered_citations.append(cit)
+            citations = filtered_citations
+
     # Heuristic citation matching for inline refs.
     def _match_citations(text: str, max_refs: int = 2) -> List[int]:
         if not citations:
@@ -2220,26 +2250,48 @@ def generate_publishable_report(
             pass
         return base
 
+    # Rank and trim the raw discoveries from events.  Findings are initially
+    # sorted by a composite score/tier and truncated to the top N entries.
     findings = sorted(structured, key=_finding_score, reverse=True)
     findings = findings[: max(0, int(max_findings))]
 
-    # Filter out low-quality or placeholder-like discoveries.  We drop any
-    # finding whose label contains internal logs, templates, or hedging
-    # language, or that lacks any matching citation in the current run.
+    # Apply a series of quality, relevance and safety filters to candidate
+    # discoveries. Each filter removes low-quality placeholders, template
+    # artifacts, vague statements, domainâirrelevant entries and labels
+    # lacking supporting citations.  The goal is to surface only the
+    # highestâconfidence, domainâaligned hypotheses or mechanisms.
     filtered_findings: List[Dict[str, Any]] = []
     for d in findings:
-        label = str(d.get("label") or "").strip()
+        label_raw = d.get("label")
+        label = str(label_raw or "").strip()
         if not label:
             continue
         # Skip internal or template entries (e.g. maintenance logs, examples)
         if _contains_banned_pattern(label) or _is_vague(label):
             continue
-        # Skip labels containing unresolved bold markup or template variables.  In previous
-        # runs we observed labels like "**agent**" or "**description**" where the
-        # templating engine failed to substitute real values.  Any label with
-        # leftover markdown bold markers is considered malformed and discarded.
+        # Skip labels containing unresolved bold markup or template variables.
         if "**" in label:
             continue
+        # Additional domainârelevance filtering:
+        try:
+            # Extract tokens of length >=4 from the label for overlap check
+            label_tokens = set(t.lower() for t in re.findall(r"[A-Za-z]{4,}", label))
+        except Exception:
+            label_tokens = set()
+        # If a set of relevant tokens is available, require at least one overlap
+        if relevant_tokens and not label_tokens.intersection(relevant_tokens):
+            # Skip labels unrelated to the runâs domain/goal
+            continue
+        # Remove labels that simply echo the sanitized goal text
+        if _sanitized_goal_for_filter and _sanitized_goal_for_filter.lower() in normalize_text(label).lower():
+            continue
+        # Domainâspecific bans: exclude dietary or cereal references when the domain
+        # is longevity.  This prevents the inclusion of metrics labels (e.g. RYE)
+        # and grain names that are unrelated to ageing biology.
+        if domain_tokens:
+            if "longevity" in domain_tokens:
+                if any(tok in label_tokens for tok in {"rye", "grain", "cereal", "whole", "grainy"}):
+                    continue
         # Only keep findings that can be matched to at least one citation
         try:
             matched = _match_citations(label)
