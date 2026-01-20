@@ -92,16 +92,16 @@ HEDGING_PATTERNS = [
     r"\bunlikly\b",
 ]
 
-# -------------------------------------------------------------
+# ---------------------------------------------------------------------------
 # Goal sanitization helper
-# -------------------------------------------------------------
+# ---------------------------------------------------------------------------
 def _sanitize_goal_text(goal: Optional[str]) -> Optional[str]:
     """
     Best effort removal of run-level directives, system titles and control
-    constraints from a goal string.  Report generators should never echo
-    back the raw run specification, which may include ``TITLE:``,
-    ``PRIMARY OBJECTIVE``, numbered constraints or other system prompts.
-    This helper returns a cleaned goal for display.
+    constraints from a goal string. Report generators should never echo back
+    the raw run specification, which may include ``TITLE:``, ``PRIMARY OBJECTIVE``,
+    numbered constraints or other system prompts. This helper returns a cleaned
+    goal for display.
 
     Parameters
     ----------
@@ -111,7 +111,7 @@ def _sanitize_goal_text(goal: Optional[str]) -> Optional[str]:
     Returns
     -------
     Optional[str]
-        Sanitized goal or None if input was None.
+        Sanitized goal or None if input was None or empty after cleaning.
     """
     if not goal:
         return goal
@@ -121,11 +121,11 @@ def _sanitize_goal_text(goal: Optional[str]) -> Optional[str]:
         if not s:
             continue
         lower = s.lower()
-        # drop directive lines such as TITLE, PRIMARY OBJECTIVE, constraints
+        # Drop directive lines
         if lower.startswith(("title:", "primary objective", "primary goal", "constraints", "control constraints")):
             continue
-        # Skip markdown headings and enumerated constraints (e.g., "##", "1.")
-        if re.match(r"^#+\s", s) or re.match(r"^\d+\.", s):
+        # Drop markdown headings and numbered constraints
+        if re.match(r"^#+\s", s) or re.match(r"^\d+\.\s", s):
             continue
         lines.append(ln)
     cleaned = "\n".join(lines).strip()
@@ -447,7 +447,7 @@ def _render_event_only_report(events: List[Dict[str, Any]], run_id: Optional[str
     if run_id:
         lines.append(f"**Run ID:** `{run_id}`\n")
     if goal:
-        # Sanitize goal to remove system directives before inclusion
+        # Sanitize the goal before display to strip run directives and constraints
         sg = _sanitize_goal_text(goal)
         if sg:
             lines.append(f"**Goal:** `{sg}`\n")
@@ -1520,7 +1520,10 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
             rs_updated = run_state.get("updated_at")
 
             if rs_goal:
-                lines.append(f"- Goal: `{rs_goal}`")
+                # Sanitize run state goal before display
+                sg = _sanitize_goal_text(rs_goal)
+                if sg:
+                    lines.append(f"- Goal: `{sg}`")
             if rs_domain:
                 lines.append(f"- Domain: `{rs_domain}`")
             if rs_role:
@@ -1557,7 +1560,10 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
             if ws_mode:
                 lines.append(f"- Mode: `{ws_mode}`")
             if ws_goal:
-                lines.append(f"- Goal: `{ws_goal}`")
+                # Sanitize worker state goal before display
+                sg = _sanitize_goal_text(ws_goal)
+                if sg:
+                    lines.append(f"- Goal: `{sg}`")
             if ws_domain:
                 lines.append(f"- Domain: `{ws_domain}`")
             if ws_roles:
@@ -1648,22 +1654,28 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
         lines.append("")
 
     # Goals
+    # If a specific goal was provided, sanitize it before display; otherwise sanitize the collected goals.
     if goal:
-        # Show a sanitized filtered goal rather than the raw run spec
+        # Sanitize the provided goal to strip any run-level directives before display.
         sg = _sanitize_goal_text(goal)
         if sg:
             lines.append(f"**Filtered goal:** {sg}\n")
-        else:
-            lines.append(f"**Filtered goal:** {goal}\n")
     else:
-        goals_list = [g for g in goals_seen if g]
-        if goals_list:
+        # Sanitize each observed goal from the cycle history and limit entries for readability.
+        sanitized_goals: List[str] = []
+        for g in goals_seen:
+            if not g:
+                continue
+            sg = _sanitize_goal_text(g)
+            if sg:
+                trimmed = sg if len(sg) <= 100 else sg[:97] + "..."
+                sanitized_goals.append(trimmed)
+        if sanitized_goals:
             lines.append("**Goals touched during session:**")
-            for g in goals_list[:10]:
-                trimmed = g if len(g) <= 100 else g[:97] + "..."
+            for trimmed in sanitized_goals[:10]:
                 lines.append(f"- {trimmed}")
-            if len(goals_list) > 10:
-                lines.append(f"- ... and {len(goals_list) - 10} more")
+            if len(sanitized_goals) > 10:
+                lines.append(f"- ... and {len(sanitized_goals) - 10} more")
         lines.append("")
 
     # Time span
@@ -2231,8 +2243,11 @@ def generate_publishable_report(
     lines.append(f"- Cycles captured: **{len(cycles)}**")
     lines.append(f"- Runtime: **{runtime}**")
     if inferred_goal:
-        lines.append("- Goal:")
-        lines.append(f"  > {normalize_text(inferred_goal).strip()}")
+        # Sanitize inferred goal to strip run-level directives before display
+        sg = _sanitize_goal_text(inferred_goal)
+        if sg:
+            lines.append("- Goal:")
+            lines.append(f"  > {normalize_text(sg).strip()}")
     lines.append("")
 
     # Abstract
@@ -2457,7 +2472,7 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None, run_
         lines.append(f"**Run ID:** `{inferred_run_id}`\n")
 
     if goal:
-        # Use a cleaned goal string when printing the filtered goal
+        # Sanitize the requested goal before display in the findings report
         sg = _sanitize_goal_text(goal)
         if sg:
             lines.append(f"**Filtered goal:** {sg}\n")
