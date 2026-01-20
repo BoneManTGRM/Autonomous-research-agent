@@ -498,18 +498,23 @@ class VerificationPipeline:
             verification_score=verification_score,
         )
 
-        # Determine pass/fail status for the verification event.  A
-        # verification is considered passed when the verification_score
-        # exceeds the configured threshold for motif routing.  This field
-        # is included in the summary so that downstream report builders
-        # and diagnostics have an explicit verdict instead of relying on
-        # implicit heuristics.  Use a strict comparison to avoid
-        # accidental passes on equality.
+        # Determine whether this cycle passes the verification threshold.  We
+        # reuse the min_verification_for_motif threshold used for motif routing
+        # as the pass criterion.  A cycle passes when its verification_score
+        # meets or exceeds this threshold.  When the threshold is undefined,
+        # default to False to avoid inadvertently marking cycles as passed.
         try:
             pass_threshold = float(self.min_verification_for_motif)
         except Exception:
-            pass_threshold = 0.7
-        passed_flag = bool(verification_score > pass_threshold)
+            pass_threshold = None
+        passed: Optional[bool]
+        if pass_threshold is not None:
+            try:
+                passed = bool(verification_score >= pass_threshold)
+            except Exception:
+                passed = False
+        else:
+            passed = False
 
         verification_summary = {
             "cycle": cycle_log.get("cycle"),
@@ -532,9 +537,11 @@ class VerificationPipeline:
             # the specific codes.  This field is empty when the gate
             # accepts the cycle or when the gate is unavailable.
             "gating_reasons": gating_reasons,
-            # Explicit pass/fail verdict for the verification.  True indicates
-            # that the verification_score exceeded the motif threshold.
-            "passed": passed_flag,
+            # Pass/fail indicator based on verification_score compared to
+            # min_verification_for_motif.  True when the score meets or
+            # exceeds the threshold, False otherwise.  When the threshold
+            # cannot be parsed, this defaults to False.
+            "passed": passed,
         }
 
         # 7) Log into memory store if possible
