@@ -498,6 +498,19 @@ class VerificationPipeline:
             verification_score=verification_score,
         )
 
+        # Determine pass/fail status for the verification event.  A
+        # verification is considered passed when the verification_score
+        # exceeds the configured threshold for motif routing.  This field
+        # is included in the summary so that downstream report builders
+        # and diagnostics have an explicit verdict instead of relying on
+        # implicit heuristics.  Use a strict comparison to avoid
+        # accidental passes on equality.
+        try:
+            pass_threshold = float(self.min_verification_for_motif)
+        except Exception:
+            pass_threshold = 0.7
+        passed_flag = bool(verification_score > pass_threshold)
+
         verification_summary = {
             "cycle": cycle_log.get("cycle"),
             "run_id": run_id,
@@ -519,6 +532,9 @@ class VerificationPipeline:
             # the specific codes.  This field is empty when the gate
             # accepts the cycle or when the gate is unavailable.
             "gating_reasons": gating_reasons,
+            # Explicit pass/fail verdict for the verification.  True indicates
+            # that the verification_score exceeded the motif threshold.
+            "passed": passed_flag,
         }
 
         # 7) Log into memory store if possible
