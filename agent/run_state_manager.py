@@ -26,6 +26,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+import time
 from typing import Any, Dict, Optional
 
 
@@ -125,6 +126,17 @@ class RunState:
     # Timestamps
     created_at: str = field(default_factory=_utc_iso)
     updated_at: str = field(default_factory=_utc_iso)
+
+    # ------------------------------------------------------------------
+    # Monotonic timing
+    #
+    # To provide a monotonic measure of uptime that is immune to system
+    # clock changes, record the monotonic clock when the RunState is
+    # instantiated.  The uptime_monotonic field captures the elapsed
+    # monotonic seconds at termination.  These fields are excluded from
+    # minimal state mode.
+    started_monotonic: float = field(default_factory=time.monotonic)
+    uptime_monotonic: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Extended run termination metadata
@@ -421,6 +433,23 @@ class RunState:
             except Exception:
                 pass
 
+        # Compute monotonic uptime if unset.  Use the monotonic clock
+        # captured at instantiation and the current monotonic reading.
+        if self.uptime_monotonic is None:
+            try:
+                current_mono = time.monotonic()
+                # started_monotonic is defined at initialisation; ensure it's
+                # numeric and non-negative before subtracting.
+                start_mono = float(self.started_monotonic) if self.started_monotonic is not None else 0.0
+                if current_mono >= start_mono:
+                    self.uptime_monotonic = current_mono - start_mono
+                else:
+                    # Guard against clock anomalies
+                    self.uptime_monotonic = 0.0
+            except Exception:
+                # If monotonic clock is unavailable, leave unset
+                pass
+
         # Do not modify stop_reason or stop_source here; those should be
         # recorded explicitly by the caller via record_termination() to
         # respect the writeâonce semantics.
@@ -498,6 +527,18 @@ class RunState:
                 st = datetime.fromisoformat(start_str)
                 delta = et - st
                 self.uptime_seconds = delta.total_seconds()
+            except Exception:
+                pass
+
+        # Compute monotonic uptime if unset
+        if self.uptime_monotonic is None:
+            try:
+                current_mono = time.monotonic()
+                start_mono = float(self.started_monotonic) if self.started_monotonic is not None else 0.0
+                if current_mono >= start_mono:
+                    self.uptime_monotonic = current_mono - start_mono
+                else:
+                    self.uptime_monotonic = 0.0
             except Exception:
                 pass
 
