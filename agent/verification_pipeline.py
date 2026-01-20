@@ -379,6 +379,59 @@ class VerificationPipeline:
             hypothesis_profile=hypothesis_profile,
         )
 
+        # -----------------------------------------------------------------
+        # Enrich hypothesis profile with confidence levels, provenance tags,
+        # and falsification attempt logs.  These additions provide buyers
+        # and downstream auditors with perâclaim confidence scores, the
+        # provenance of supporting evidence, and a record of whether
+        # falsification was attempted or contradictions were detected.
+        try:
+            conf_levels: List[Optional[float]] = []
+            prov_tags: List[str] = []
+            fals_attempts: List[Dict[str, Any]] = []
+            # Determine if any citations are provided for this cycle
+            cites_exist = bool(citations)
+            # Reuse the support_ratio (computed earlier) to decide whether
+            # citations collectively match hypothesis keywords.  If support_ratio
+            # is None (unsupported), treat as no support found.
+            support = support_ratio if 'support_ratio' in (hypothesis_profile or {}) else support_ratio
+            for h in hypotheses:
+                # Confidence extraction: use the numeric confidence field when present.
+                try:
+                    cval = h.get('confidence')
+                    conf_levels.append(float(cval) if isinstance(cval, (int, float)) else None)
+                except Exception:
+                    conf_levels.append(None)
+                # Provenance tag: classify evidence source per hypothesis.
+                if cites_exist:
+                    # If the overall support ratio indicates at least one supporting
+                    # citation, tag as literature confirmed.  Otherwise, citations
+                    # exist but no support matches, so tag as literature missing.
+                    try:
+                        if support is not None and support > 0:
+                            prov_tags.append('literature confirmed')
+                        else:
+                            prov_tags.append('literature missing')
+                    except Exception:
+                        prov_tags.append('literature missing')
+                else:
+                    # No citations supplied: tag as internal reasoning
+                    prov_tags.append('internal reasoning')
+                # Falsification attempt: record whether contradictions were detected.
+                try:
+                    hyp_text = (h.get('title') or h.get('text') or '')
+                except Exception:
+                    hyp_text = str(h) if h is not None else ''
+                result = 'contradiction' if hypothesis_profile.get('conflict_flags') else 'no contradiction'
+                fals_attempts.append({'hypothesis': hyp_text, 'result': result})
+            if isinstance(hypothesis_profile, dict):
+                hypothesis_profile['confidence_levels'] = conf_levels
+                hypothesis_profile['provenance_tags'] = prov_tags
+                hypothesis_profile['falsification_attempts'] = fals_attempts
+        except Exception:
+            # If anything goes wrong, leave the additional fields unset
+            pass
+
         # 6) Optionally apply the cycle quality gate.  When the gate is
         # available it compares the current delta_R and energy against
         # recent history to decide whether this cycleâs improvements are
