@@ -175,18 +175,16 @@ def _is_placeholder_text(text: Any) -> bool:
             return True
     return False
 
-
 # ---------------------------------------------------------------------------
 # Goal sanitization helper
 # ---------------------------------------------------------------------------
 def _sanitize_goal_text(goal: str) -> str:
     """
-    Remove run instructions, titles, and other system directives from a
-    goal string.  Incoming goal text may contain the full agent prompt
-    including ``TITLE:``, ``PRIMARY OBJECTIVE``, or control constraints.
-    These items should never appear verbatim in a final report.  This helper
-    strips any lines that look like directive headers or constraints, leaving
-    only the user defined goal description.
+    Remove run-level directives, titles, and numbered constraints from a goal string.
+    Agent prompts often include headings like ``TITLE:``, ``PRIMARY OBJECTIVE``,
+    or enumerated constraints. These should never appear verbatim in a final
+    report. This helper strips such directive lines, markdown headings, and
+    numbered instructions, returning only the user-defined goal description.
 
     Parameters
     ----------
@@ -206,13 +204,13 @@ def _sanitize_goal_text(goal: str) -> str:
         if not s:
             continue
         lower = s.lower()
-        # Skip common directive prefixes and headings
+        # Skip directive prefixes and constraint headers
         if lower.startswith(("title:", "primary objective", "primary goal", "constraints", "control constraints")):
             continue
-        # Skip lines that look like markdown headings (e.g. "# Step"), or enumerated constraints
+        # Skip markdown headings and numbered instructions
         if re.match(r"^#+\s", s):
             continue
-        if re.match(r"^\d+\.", s):
+        if re.match(r"^\d+\.\s", s):
             continue
         cleaned.append(ln)
     return "\n".join(cleaned).strip()
@@ -497,7 +495,8 @@ def build_agent_report(
         lines.append(f"- domain: `{domain}`")
         lines.append("")
         lines.append("## Goal")
-        lines.append(goal or "")
+        # Sanitize the goal to remove any run directives or constraint markers
+        lines.append(_sanitize_goal_text(goal or ""))
         lines.append("")
         lines.append("## Diagnostics")
         lines.append("```json")
@@ -609,11 +608,7 @@ def build_agent_report(
     out.append("")
 
     out.append("## Goal")
-    # Sanitize the goal to remove run directives or template artefacts.  When
-    # callers pass the full run specification into the report builder, the raw
-    # string can include system directives (e.g., TITLE, PRIMARY OBJECTIVE,
-    # control constraints) that do not belong in the final narrative.  Strip
-    # these before rendering the goal in the report.
+    # Sanitize the goal to remove run-level directives before display
     out.append(_sanitize_goal_text(goal or ""))
     out.append("")
 
