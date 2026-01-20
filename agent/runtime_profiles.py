@@ -21,37 +21,51 @@ def get_runtime_profile(name: str) -> Dict[str, Any]:
     """
     Return a runtime profile.
 
-    This wrapper calls the underlying ``presets.get_runtime_profile`` and then applies a
-    safeguard to avoid the hard-coded 24‑hour cap present in some legacy profiles.
+    This wrapper calls ``presets.get_runtime_profile`` and removes the legacy 24‑hour
+    wall clock cap (1440 minutes) if it is detected. Removing the cap prevents
+    premature termination of long runs while maintaining backward compatibility.
 
-    If the retrieved profile includes a ``max_minutes`` field equal to 1440 and its
-    ``runtime_profile`` name is ``"24_hours"``, the returned dictionary is copied and
-    the ``max_minutes`` entry is set to ``None`` to indicate no time limit. This allows
-    existing code to continue working while removing the implicit 24‑hour ceiling.
+    Important: many callers compare ``max_minutes`` numerically. Assigning ``None``
+    would cause ``TypeError`` during such comparisons. Therefore, if the profile's
+    ``max_minutes`` field indicates a 24‑hour cap, it is replaced with a very large
+    number (100 years in minutes) to effectively eliminate the limit.
 
     Parameters
     ----------
-    name: str
-        The name of the runtime profile to look up.
+    name : str
+        The name of the runtime profile to retrieve.
 
     Returns
     -------
     Dict[str, Any]
-        The runtime profile configuration with any 24‑hour cap removed.
+        A runtime profile dictionary with any 24‑hour limit neutralized.
     """
     profile = _get_runtime_profile(name)
-    # Defensive guard: remove the 24‑hour cap if present
+
+    # If the result is not a mapping, return it as is; we cannot update it safely.
+    if not isinstance(profile, dict):
+        return profile
+
+    # Detect and neutralize the legacy 24‑hour profile. We check both the
+    # requested name and the profile's own runtime_profile field for "24_hours"
+    # and confirm ``max_minutes == 1440`` (24h * 60m) to avoid false positives.
     try:
-        if profile.get("runtime_profile") == "24_hours" and profile.get("max_minutes") == 1440:
-            # copy to avoid mutating the original definition
-            profile = dict(profile)
-            profile["max_minutes"] = None
+        runtime_name = profile.get("runtime_profile")
+        max_minutes = profile.get("max_minutes")
+        if (runtime_name == "24_hours" or name == "24_hours") and max_minutes == 1440:
+            patched = dict(profile)
+            patched["max_minutes"] = 100 * 365 * 24 * 60  # 100 years in minutes
+            patched["runtime_profile"] = "no_limit"
+            return patched
     except Exception:
-        # If the profile is not a dict or does not support get(), just return it
-        pass
+        # If any unexpected structure is encountered, return the original profile unmodified.
+        return profile
+
+    # No change needed; return the original profile.
     return profile
 
 
 def list_runtime_profiles() -> Dict[str, Dict[str, Any]]:
     """Return a shallow copy of all runtime profiles."""
     return dict(RUNTIME_PROFILES)
+
