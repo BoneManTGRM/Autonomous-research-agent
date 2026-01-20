@@ -97,11 +97,11 @@ HEDGING_PATTERNS = [
 # ---------------------------------------------------------------------------
 def _sanitize_goal_text(goal: Optional[str]) -> Optional[str]:
     """
-    Best effort removal of run-level directives, system titles and control
-    constraints from a goal string. Report generators should never echo back
-    the raw run specification, which may include ``TITLE:``, ``PRIMARY OBJECTIVE``,
-    numbered constraints or other system prompts. This helper returns a cleaned
-    goal for display.
+    Best effort removal of run-level directives, system titles, numbered constraints
+    and directive bullet lists from a goal string. Report generators should never
+    echo back the raw run specification, which may include ``TITLE:``, ``PRIMARY OBJECTIVE``,
+    enumerated or bulleted constraints or other system prompts. This helper
+    returns a cleaned goal for display.
 
     Parameters
     ----------
@@ -116,16 +116,37 @@ def _sanitize_goal_text(goal: Optional[str]) -> Optional[str]:
     if not goal:
         return goal
     lines: List[str] = []
+    # Define directive and meta-prompt prefixes that should be removed.
+    directive_prefixes = (
+        "title",
+        "primary objective",
+        "primary goal",
+        "secondary objectives",
+        "constraints",
+        "control constraints",
+        "instruction handling rule",
+        "evidence priority order",
+        "highâprobability search domains",
+        "cycle behavior rules",
+        "discovery standard",
+        "falsification requirement",
+        "cycle checkpoints",
+        "stop conditions",
+    )
     for ln in str(goal).splitlines():
         s = ln.strip()
         if not s:
             continue
         lower = s.lower()
-        # Drop directive lines
-        if lower.startswith(("title:", "primary objective", "primary goal", "constraints", "control constraints")):
+        # Remove trailing colon when matching prefixes.
+        stripped_lower = lower.rstrip(":")
+        if any(stripped_lower.startswith(pref) for pref in directive_prefixes):
             continue
-        # Drop markdown headings and numbered constraints
-        if re.match(r"^#+\s", s) or re.match(r"^\d+\.\s", s):
+        # Skip markdown headings or numbered lists (e.g. 1. or 1)).
+        if re.match(r"^#+\s", s) or re.match(r"^\d+[\.\)]\s", s):
+            continue
+        # Skip bullet lists (-, *, â¢) if they are part of directive sections.
+        if re.match(r"^[\-*â¢]\s", s) and any(pref in lower for pref in directive_prefixes):
             continue
         lines.append(ln)
     cleaned = "\n".join(lines).strip()
