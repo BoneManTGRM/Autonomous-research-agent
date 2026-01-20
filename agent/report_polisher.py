@@ -109,7 +109,7 @@ def sanitize_goal_text(goal: Optional[str], *, max_chars: int = 700) -> str:
         # Drop numbered list items and bullets (prompt scaffolding)
         if re.match(r"^\d+[\.|\)]\s", s):
             continue
-        if s.startswith(("-", "•", "*")):
+        if s.startswith(("-", "â¢", "*")):
             continue
 
         if any(lower.startswith(p) for p in directive_prefixes):
@@ -142,7 +142,7 @@ def _first_sentence(text: str, *, max_chars: int = 260) -> str:
     parts = re.split(r"(?<=[\.!\?])\s+", s)
     first = parts[0].strip() if parts else s
     if len(first) > max_chars:
-        first = first[: max_chars - 1].rstrip() + "…"
+        first = first[: max_chars - 1].rstrip() + "â¦"
     return first
 
 
@@ -189,7 +189,7 @@ def _domain_from_url(url: str) -> str:
 
 
 def score_source(url: str) -> int:
-    """Return a coarse 0–2 score for source trustworthiness.
+    """Return a coarse 0â2 score for source trustworthiness.
 
     2 = high-trust scholarly / primary sources
     1 = unknown / mixed quality
@@ -413,7 +413,7 @@ def _format_source_line(idx: int, c: Dict[str, Any]) -> str:
     title = _safe_str(c.get("title") or c.get("raw") or "(untitled)").strip()
     url = _safe_str(c.get("url") or c.get("link") or "").strip()
     if url:
-        return f"{idx}. {title} — {url}"
+        return f"{idx}. {title} â {url}"
     return f"{idx}. {title}"
 
 
@@ -571,7 +571,7 @@ def build_publishable_report(context: Dict[str, Any]) -> str:
         out.append(
             _wrap(
                 "No validated findings were recorded in the artifacts, but the run produced a small set of *promising* candidates "
-                "worth follow-up. These are ranked by the run’s own scoring/priority fields when available."
+                "worth follow-up. These are ranked by the runâs own scoring/priority fields when available."
             )
         )
     else:
@@ -626,13 +626,13 @@ def build_publishable_report(context: Dict[str, Any]) -> str:
 
             meta_bits = ", ".join([b for b in [score_txt, status] if b])
             meta_txt = f"({meta_bits})" if meta_bits else ""
-            out.append(f"{i}. **{label}** — *{kind}* {meta_txt}{refs_txt}")
+            out.append(f"{i}. **{label}** â *{kind}* {meta_txt}{refs_txt}")
             if ev1:
                 out.append(f"   - Evidence: {_wrap(ev1)}")
             if tags_txt:
                 out.append(f"   -{tags_txt}")
         if len(items) > limit:
-            out.append(f"\n… and {len(items) - limit} more.\n")
+            out.append(f"\nâ¦ and {len(items) - limit} more.\n")
         else:
             out.append("")
 
@@ -674,7 +674,7 @@ def build_publishable_report(context: Dict[str, Any]) -> str:
         for i, c in enumerate(citations[:max_sources], start=1):
             out.append(_format_source_line(i, c))
         if len(citations) > max_sources:
-            out.append(f"… and {len(citations) - max_sources} more.")
+            out.append(f"â¦ and {len(citations) - max_sources} more.")
         out.append("")
 
     # Recommendations
@@ -685,7 +685,7 @@ def build_publishable_report(context: Dict[str, Any]) -> str:
     if evidence_summary["quality"] in {"low", "unknown"}:
         recs.append("Prefer scholarly sources (PubMed / clinical trials / major journals) and avoid dictionary or glossary hits.")
     recs.append("Ensure each candidate discovery includes an evidence_summary and citations so the report can attribute claims.")
-    recs.append("If the run is immune–senescence focused, enforce domain keywords in search queries to avoid generic web results.")
+    recs.append("If the run is immuneâsenescence focused, enforce domain keywords in search queries to avoid generic web results.")
     out.extend([f"- {r}" for r in recs])
     out.append("")
 
@@ -743,14 +743,14 @@ def build_findings_report(context: Dict[str, Any]) -> str:
             score_txt = f"{float(score):.2f}" if isinstance(score, (int, float)) else ""
             ev = _first_sentence(_safe_str(d.get("evidence_summary") or ""), max_chars=180)
             meta = ", ".join([x for x in [score_txt and f"score {score_txt}", status] if x])
-            out.append(f"{i}. **{label}** — *{kind}* ({meta})")
+            out.append(f"{i}. **{label}** â *{kind}* ({meta})")
             if ev:
                 out.append(f"   - {_wrap(ev)}")
         if len(kept) > limit:
-            out.append(f"\n… and {len(kept) - limit} more.\n")
+            out.append(f"\nâ¦ and {len(kept) - limit} more.\n")
         out.append("")
 
-    # Unstructured signals (e.g., hypotheses text mining) – shown separately so
+    # Unstructured signals (e.g., hypotheses text mining) â shown separately so
     # the reader can distinguish between structured memory entries and raw text.
     if unstructured:
         out.append("## Other signals (unstructured)\n")
@@ -770,7 +770,7 @@ def build_findings_report(context: Dict[str, Any]) -> str:
             for i, s in enumerate(picked, start=1):
                 out.append(f"{i}. {s}")
             if len(unstructured) > len(picked):
-                out.append(f"… and {len(unstructured) - len(picked)} more.")
+                out.append(f"â¦ and {len(unstructured) - len(picked)} more.")
         out.append("")
 
     out.append("## Filtering disclosure\n")
@@ -783,7 +783,7 @@ def build_findings_report(context: Dict[str, Any]) -> str:
         for i, c in enumerate(citations[:max_sources], start=1):
             out.append(_format_source_line(i, c))
         if len(citations) > max_sources:
-            out.append(f"… and {len(citations) - max_sources} more.")
+            out.append(f"â¦ and {len(citations) - max_sources} more.")
         out.append("")
 
     return "\n".join(out).strip() + "\n"
