@@ -180,11 +180,11 @@ def _is_placeholder_text(text: Any) -> bool:
 # ---------------------------------------------------------------------------
 def _sanitize_goal_text(goal: str) -> str:
     """
-    Remove run-level directives, titles, numbered constraints and directive bullet lists from a goal string.
+    Remove run-level directives, titles, and numbered constraints from a goal string.
     Agent prompts often include headings like ``TITLE:``, ``PRIMARY OBJECTIVE``,
     or enumerated constraints. These should never appear verbatim in a final
-    report. This helper strips such directive lines, markdown headings, numbered
-    or bulleted instructions and returns only the user-defined goal description.
+    report. This helper strips such directive lines, markdown headings, and
+    numbered instructions, returning only the user-defined goal description.
 
     Parameters
     ----------
@@ -204,32 +204,13 @@ def _sanitize_goal_text(goal: str) -> str:
         if not s:
             continue
         lower = s.lower()
-        # Define directive and meta-prompt prefixes that should be removed.
-        directive_prefixes = (
-            "title",
-            "primary objective",
-            "primary goal",
-            "secondary objectives",
-            "constraints",
-            "control constraints",
-            "instruction handling rule",
-            "evidence priority order",
-            "highâprobability search domains",
-            "cycle behavior rules",
-            "discovery standard",
-            "falsification requirement",
-            "cycle checkpoints",
-            "stop conditions",
-        )
-        # Remove trailing colon when matching prefixes (e.g. "title:" or "title").
-        stripped_lower = lower.rstrip(":")
-        if any(stripped_lower.startswith(pref) for pref in directive_prefixes):
+        # Skip directive prefixes and constraint headers
+        if lower.startswith(("title:", "primary objective", "primary goal", "constraints", "control constraints")):
             continue
-        # Skip markdown headings or numbered lists (1. or 1) style)
-        if re.match(r"^#+\s", s) or re.match(r"^\d+[\.\)]\s", s):
+        # Skip markdown headings and numbered instructions
+        if re.match(r"^#+\s", s):
             continue
-        # Skip bullet lists (-, *, â¢) if they are part of directive sections.
-        if re.match(r"^[\-*â¢]\s", s) and any(pref in lower for pref in directive_prefixes):
+        if re.match(r"^\d+\.\s", s):
             continue
         cleaned.append(ln)
     return "\n".join(cleaned).strip()
