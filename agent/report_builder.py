@@ -176,6 +176,48 @@ def _is_placeholder_text(text: Any) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Goal sanitization helper
+# ---------------------------------------------------------------------------
+def _sanitize_goal_text(goal: str) -> str:
+    """
+    Remove run instructions, titles, and other system directives from a
+    goal string.  Incoming goal text may contain the full agent prompt
+    including ``TITLE:``, ``PRIMARY OBJECTIVE``, or control constraints.
+    These items should never appear verbatim in a final report.  This helper
+    strips any lines that look like directive headers or constraints, leaving
+    only the user defined goal description.
+
+    Parameters
+    ----------
+    goal : str
+        Raw goal text passed to the report builder.
+
+    Returns
+    -------
+    str
+        Sanitized goal text with directive lines removed.
+    """
+    if not goal:
+        return ""
+    cleaned: List[str] = []
+    for ln in _safe_str(goal).splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        lower = s.lower()
+        # Skip common directive prefixes and headings
+        if lower.startswith(("title:", "primary objective", "primary goal", "constraints", "control constraints")):
+            continue
+        # Skip lines that look like markdown headings (e.g. "# Step"), or enumerated constraints
+        if re.match(r"^#+\s", s):
+            continue
+        if re.match(r"^\d+\.", s):
+            continue
+        cleaned.append(ln)
+    return "\n".join(cleaned).strip()
+
+
 def _source_key(src: Any) -> str:
     if isinstance(src, dict):
         return _safe_str(src.get("url") or src.get("id") or src.get("title") or json.dumps(src, sort_keys=True, ensure_ascii=False))
@@ -567,7 +609,12 @@ def build_agent_report(
     out.append("")
 
     out.append("## Goal")
-    out.append(goal or "")
+    # Sanitize the goal to remove run directives or template artefacts.  When
+    # callers pass the full run specification into the report builder, the raw
+    # string can include system directives (e.g., TITLE, PRIMARY OBJECTIVE,
+    # control constraints) that do not belong in the final narrative.  Strip
+    # these before rendering the goal in the report.
+    out.append(_sanitize_goal_text(goal or ""))
     out.append("")
 
     # Tier 1: Executive summary â summarise key counts concisely.
