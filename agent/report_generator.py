@@ -1280,19 +1280,193 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
         if k not in known_diag_keys and isinstance(v, (int, float))
     }
 
+    # Compute learning speed grade (fix undefined variables)
+    try:
+        speed_grade_label, speed_grade_text = _learning_speed_grade(
+            cycles_per_hour, rye_per_hour, stab, momentum
+        )
+    except Exception:
+        speed_grade_label, speed_grade_text = (
+            "insufficient data",
+            "Learning speed could not be computed due to missing metrics.",
+        )
+
+    # Compile failure and safety events for explicit disclosure
+    failure_lines: List[str] = []
+    # Hard and soft safety violations from safety_meta
+    try:
+        hv = safety_meta.get("hard_violations")
+        if isinstance(hv, int) and hv > 0:
+            failure_lines.append(
+                f"- Hard safety violations recorded: **{hv}**"
+            )
+        sw = safety_meta.get("soft_warnings")
+        if isinstance(sw, int) and sw > 0:
+            failure_lines.append(
+                f"- Soft safety warnings recorded: **{sw}**"
+            )
+    except Exception:
+        pass
+    # Early failure warning
+    try:
+        ef_score = early_fail.get("score")
+        if isinstance(ef_score, (int, float)) and ef_score > 0.5:
+            failure_lines.append(
+                f"- Early failure warning score high at **{ef_score:.3f}** (risk of premature termination)"
+            )
+    except Exception:
+        pass
+    # Autonomy safety envelope state
+    try:
+        env_state = env.get("state")
+        env_details = env.get("details") or {}
+        if env_state:
+            # If not explicitly safe, highlight
+            safe_states = {"safe", "safe_zone", "stable", "ok", "within_envelope"}
+            if str(env_state).strip().lower() not in safe_states:
+                reason = env_details.get("reason") or ""
+                reason_str = f" ({reason})" if reason else ""
+                failure_lines.append(
+                    f"- Autonomy safety envelope state: **{env_state}**{reason_str}"
+                )
+    except Exception:
+        pass
+    # If no failure conditions were detected, still include a line for transparency
+    if not failure_lines:
+        failure_lines.append("- No failures or safety issues recorded during this run.")
+
     # Build report
     lines: List[str] = []
     lines.append("# Autonomous Research Agent Report\n")
-
-    # Runtime
-    if runtime:
-        lines.append(f"**Session runtime:** {runtime}\n")
+    # Build immutable run metadata header
+    metadata_lines: List[str] = []
+    # Run ID
     if inferred_run_id:
-        lines.append(f"**Run ID:** `{inferred_run_id}`\n")
+        metadata_lines.append(f"- Run ID: `{inferred_run_id}`")
+    else:
+        metadata_lines.append("- Run ID: unknown")
+    # Start and end times
+    try:
+        first_ts = sorted(timestamps)[0] if timestamps else None
+        last_ts = sorted(timestamps)[-1] if timestamps else None
+    except Exception:
+        first_ts = None
+        last_ts = None
+    if first_ts:
+        metadata_lines.append(f"- Start time (UTC): `{first_ts}`")
+    if last_ts:
+        metadata_lines.append(f"- End time (UTC): `{last_ts}`")
+    if runtime:
+        metadata_lines.append(f"- Total runtime: {runtime}")
+    # Macro cycles requested vs completed
+    macro_requested = None
+    macro_completed = None
+    for src in (run_state, worker_state):
+        try:
+            if src:
+                for key in (
+                    "expected_cycles",
+                    "expected_macro_cycles",
+                    "max_cycles",
+                    "target_cycles",
+                    "planned_cycles",
+                ):
+                    if key in src and src[key] is not None:
+                        macro_requested = src[key]
+                        break
+        except Exception:
+            pass
+        if macro_requested is not None:
+            break
+    try:
+        if run_state and run_state.get("last_cycle_index") is not None:
+            macro_completed = run_state.get("last_cycle_index")
+    except Exception:
+        macro_completed = None
+    if macro_completed is None:
+        macro_completed = n_cycles
+    req_str = str(macro_requested) if macro_requested is not None else "unknown"
+    comp_str = str(macro_completed) if macro_completed is not None else "unknown"
+    metadata_lines.append(f"- Macro cycles requested vs completed: {req_str} / {comp_str}")
+    # Mini cycles completed
+    mini_completed = None
+    for src in (run_state, worker_state):
+        try:
+            if src:
+                for key in (
+                    "mini_cycles_completed",
+                    "micro_cycles_completed",
+                    "mini_cycles",
+                    "micro_cycles",
+                ):
+                    if key in src and src[key] is not None:
+                        mini_completed = src[key]
+                        break
+        except Exception:
+            pass
+        if mini_completed is not None:
+            break
+    metadata_lines.append(
+        f"- Mini cycles completed: {mini_completed if mini_completed is not None else 'unknown'}"
+    )
+    # Agent count
+    agent_count = None
+    for src in (worker_state, run_state):
+        try:
+            if src:
+                for key in ("swarm_size", "agent_count", "num_agents", "agents"):
+                    if key in src and src[key] is not None:
+                        agent_count = src[key]
+                        break
+        except Exception:
+            pass
+        if agent_count is not None:
+            break
+    metadata_lines.append(
+        f"- Agent count: {agent_count if agent_count is not None else 'unknown'}"
+    )
+    # Zero intervention flag
+    zero_intervention = None
+    try:
+        wm = worker_state.get("learning_mode") if isinstance(worker_state, dict) else None
+        wm_mode = worker_state.get("mode") if isinstance(worker_state, dict) else None
+        if wm:
+            zero_intervention = not (
+                isinstance(wm, str)
+                and ("manual" in wm.lower() or "human" in wm.lower())
+            )
+        elif wm_mode:
+            zero_intervention = not (
+                isinstance(wm_mode, str)
+                and ("manual" in wm_mode.lower() or "human" in wm_mode.lower())
+            )
+    except Exception:
+        zero_intervention = None
+    if zero_intervention is None:
+        try:
+            rm = run_state.get("mode") if isinstance(run_state, dict) else None
+            if rm:
+                zero_intervention = not (
+                    isinstance(rm, str)
+                    and ("manual" in rm.lower() or "human" in rm.lower())
+                )
+        except Exception:
+            zero_intervention = None
+    if zero_intervention is None:
+        zero_flag = "unknown"
+    else:
+        zero_flag = "true" if zero_intervention else "false"
+    metadata_lines.append(f"- Zero intervention: {zero_flag}")
+    # Append metadata to lines
+    lines.append("## Run metadata\n")
+    lines.extend(metadata_lines)
+    lines.append("")
+    # Begin observations section.  All subsequent diagnostic details are nested under this heading
+    lines.append("## Observations\n")
 
     # Run control snapshot
     if run_state or worker_state or watchdog_info:
-        lines.append("## Run control snapshot\n")
+        lines.append("### Run control snapshot\n")
         if run_state:
             lines.append("**Last saved run state:**")
             rs_goal = run_state.get("goal")
@@ -1379,7 +1553,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
 
     # MSIL snapshot section
     if isinstance(msil_snapshot, dict) and msil_snapshot:
-        lines.append("## MSIL snapshot\n")
+        lines.append("### MSIL snapshot\n")
         msil_score = msil_snapshot.get("msil_score")
         if isinstance(msil_score, (int, float)):
             lines.append(
@@ -1409,7 +1583,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
 
     # Meta controller state section
     if isinstance(meta_state, dict) and meta_state:
-        lines.append("## Meta controller state\n")
+        lines.append("### Meta controller state\n")
         meta_mode = meta_state.get("mode")
         if meta_mode:
             lines.append(f"- Meta mode: `{meta_mode}`")
@@ -1454,7 +1628,8 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
         lines.append(f"- Last cycle: `{last_ts}`\n")
 
     # Basic stats
-    lines.append("## Overall statistics\n")
+    # Overall statistics inside observations
+    lines.append("### Overall statistics\n")
     lines.append(f"- Total cycles: **{n_cycles}**")
     lines.append(f"- Domains: **{', '.join(sorted(str(d) for d in domains))}**")
     lines.append(f"- Avg RYE: **{avg_rye:.3f}**")
@@ -1517,7 +1692,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
     lines.append("")
 
     # Discovery and equilibrium view
-    lines.append("## Discovery and equilibrium signals\n")
+    lines.append("### Discovery and equilibrium signals\n")
     lines.append(
         f"- Cycles with breakthrough signatures: **{be_stats['breakthrough_cycles']}** "
         f"of **{be_stats['total_cycles']}**"
@@ -1555,7 +1730,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
     lines.append("")
 
     # Citation coverage view
-    lines.append("## Citation coverage\n")
+    lines.append("### Citation coverage\n")
     lines.append(
         f"- Cycles with citations: **{cite_stats['cycles_with_citations']}** of "
         f"**{cite_stats['total_cycles']}** "
@@ -1572,7 +1747,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
     lines.append("")
 
     # Option C self diagnosis
-    lines.append("## Option C self diagnosis (10x learning signals)\n")
+    lines.append("### Option C self diagnosis (10x learning signals)\n")
 
     tier_label = run_tier.get("tier")
     tier_reason = run_tier.get("reason")
@@ -1675,8 +1850,14 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
     lines.append(f"  - {speed_grade_text}")
     lines.append("")
 
+    # Failures and safety events disclosure
+    lines.append("## Failures and safety events\n")
+    for fl in failure_lines:
+        lines.append(fl)
+    lines.append("")
+
     # Domain level view
-    lines.append("## Domain level RYE profile\n")
+    lines.append("### Domain level RYE profile\n")
     if not domain_stats:
         lines.append("No RYE data per domain.\n")
     else:
@@ -1689,7 +1870,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
         lines.append("")
 
     # Swarm role view
-    lines.append("## Swarm role efficiency\n")
+    lines.append("### Swarm role efficiency\n")
     if not role_stats or (len(role_stats) == 1 and "agent" in role_stats):
         lines.append(
             "Single role run or insufficient role diversity for swarm analysis.\n"
@@ -1704,7 +1885,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
         lines.append("")
 
     # Option C meta segments
-    lines.append("## Meta controller segments (Option C)\n")
+    lines.append("### Meta controller segments (Option C)\n")
     if not meta_segments:
         lines.append(
             "No meta segments detected in run_metadata. This may mean classic mode was used, "
@@ -1736,7 +1917,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
 
     # Goal index, if available
     if goal_index_entry:
-        lines.append("## Goal index snapshot\n")
+        lines.append("### Goal index snapshot\n")
         gi = goal_index_entry
         lines.append(f"- Created at: `{gi.get('created_at', 'unknown')}`")
         lines.append(f"- Last updated: `{gi.get('last_updated', 'unknown')}`")
@@ -1759,7 +1940,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
         lines.append("")
 
     # Hypotheses
-    lines.append("## Generated hypotheses\n")
+    lines.append("## Hypotheses\n")
     if not all_hypotheses:
         lines.append("No hypotheses generated.\n")
     else:
@@ -1783,7 +1964,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
             )
 
     # Citations
-    lines.append("\n## Key citations\n")
+    lines.append("\n## Evidence\n")
     if not all_citations:
         lines.append("No citations recorded.\n")
     else:
@@ -1808,7 +1989,7 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
             )
 
     # Discoveries
-    lines.append("\n## Structured discoveries\n")
+    lines.append("\n### Structured discoveries\n")
     if not discoveries:
         lines.append("No structured discoveries have been recorded yet.\n")
     else:
@@ -1836,7 +2017,8 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
         lines.append("")
 
     # Interpretation
-    lines.append("## Reparodynamics interpretation\n")
+    # Interpretation section summarises the overall run performance and context
+    lines.append("## Interpretation\n")
     lines.append(
         "This session reflects a sequence of TGRM cycles (Test -> Detect -> Repair -> Verify). "
         "RYE quantifies how much verified improvement (delta R) occurred per unit energy (E). "
