@@ -547,7 +547,13 @@ def build_agent_report(
     for ev in funnel_stages:
         by_cycle_funnel[_cycle_bucket(ev)].append(ev)
 
-    # Build report
+    # Build report with a strict section ordering.  To improve clarity for
+    # readers and buyers, we separate the narrative into three tiers:
+    # 1) an executive summary with highâlevel counts;
+    # 2) a technical summary with detailed tables and cycle narratives;
+    # 3) a raw appendix with full agent outputs.  Headings are
+    # consistently formatted and sections are grouped logically.
+
     out: List[str] = []
     out.append(f"# Run Report")
     out.append(f"- run_id: `{rid}`")
@@ -564,7 +570,7 @@ def build_agent_report(
     out.append(goal or "")
     out.append("")
 
-    # Executive summary driven by discoveries/hypotheses/verifications
+    # Tier 1: Executive summary â summarise key counts concisely.
     out.append("## Executive summary")
     if discoveries:
         out.append(f"- **Discoveries logged:** {len(discoveries)}")
@@ -587,8 +593,11 @@ def build_agent_report(
         out.append(f"- **Cycles with RYE updates:** {len(cycle_metrics)}")
     out.append("")
 
-    # RYE highlight table
-    out.append("## RYE highlights")
+    # Tier 2: Technical summary â deeper dive into metrics, discoveries, hypotheses and narratives.
+    out.append("## Technical summary")
+
+    # RYE highlight table (technical summary subâsection)
+    out.append("### RYE highlights")
     if not cycle_metrics:
         out.append("_No rye_update events were found._")
     else:
@@ -601,8 +610,8 @@ def build_agent_report(
             )
     out.append("")
 
-    # Key discoveries
-    out.append("## Key discoveries")
+    # Key discoveries (technical summary subâsection)
+    out.append("### Key discoveries")
     if not discoveries:
         out.append("_No discoveries were logged in the event stream._")
     else:
@@ -629,13 +638,13 @@ def build_agent_report(
                 out.append(f"  - {desc}")
     out.append("")
 
-    # Hypotheses and verifications
-    out.append("## Hypotheses and verification")
+    # Hypotheses and verifications (technical summary subâsection)
+    out.append("### Hypotheses and verification")
     if not hypotheses and not verifications:
         out.append("_No hypotheses or verification events were logged._")
     else:
         if hypotheses:
-            out.append("### Candidate hypotheses")
+            out.append("#### Candidate hypotheses")
             for ev in hypotheses[-15:]:
                 data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
                 text = data.get("text") or data.get("hypothesis") or _extract_text_from_event(ev)
@@ -654,7 +663,7 @@ def build_agent_report(
                 out.append(f"  - {text}")
         if verifications:
             out.append("")
-            out.append("### Verification results")
+            out.append("#### Verification results")
             for ev in verifications[-20:]:
                 data = ev.get("data") if isinstance(ev.get("data"), dict) else {}
                 passed = data.get("passed")
@@ -667,12 +676,12 @@ def build_agent_report(
                     out.append(f"  - {rationale}")
     out.append("")
 
-    # Cycle-by-cycle narrative for top cycles
-    out.append("## Narrative by highlighted cycle")
+    # Cycle-by-cycle narrative for highlighted cycles (technical summary subâsection)
+    out.append("### Narrative by highlighted cycle")
     if not highlight_cycles:
         out.append("_No cycle metrics available to select highlights._")
     for c in highlight_cycles:
-        out.append(f"### Cycle {c}")
+        out.append(f"#### Cycle {c}")
         fs_events = by_cycle_funnel.get(c) or []
         if fs_events:
             fs = fs_events[-1]  # last writer wins
@@ -759,10 +768,9 @@ def build_agent_report(
                 out.append(f"- {role}: {first_line}{cite}")
         out.append("")
 
-    # Appendix with full agent outputs.  To keep the report from freezing the UI,
-    # we limit the number of cycles displayed and the length of each agent
-    # output.  See MAX_APPENDIX_CYCLES and MAX_AGENT_OUTPUT_LINES above.
-    out.append("## Appendix: full agent outputs (limited)")
+    # Tier 3: Raw appendix with full agent outputs.
+    out.append("## Raw appendix")
+    out.append("### Full agent outputs (limited)")
     # Determine sorted cycles encountered in outputs
     all_cycles = sorted([c for c in by_cycle_outputs.keys() if c is not None])
     # Limit to the most recent cycles if necessary
@@ -771,7 +779,7 @@ def build_agent_report(
     else:
         display_cycles = all_cycles
     for c in display_cycles:
-        out.append(f"### Cycle {c}")
+        out.append(f"#### Cycle {c}")
         outs = by_cycle_outputs.get(c, [])
         if not outs:
             out.append("_No agent_output events for this cycle._")
@@ -785,7 +793,7 @@ def build_agent_report(
             by_role[r].append(ev)
 
         for role, evs in sorted(by_role.items(), key=lambda kv: kv[0]):
-            out.append(f"#### Role: {role}")
+            out.append(f"##### Role: {role}")
             for ev in evs:
                 ts = ev.get("timestamp")
                 cite = _format_source_refs(ev, source_index)
