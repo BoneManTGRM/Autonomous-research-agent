@@ -88,17 +88,14 @@ class DiscoveryCandidate:
     tier_hint: Optional[str] = None  # "tier1", "tier2", "tier3"
     tier_score: Optional[float] = None
 
-    # Lifecycle status
-    #
-    # Candidates progress through a lifecycle: seed -> candidate -> verified
-    # (closed).  By default candidates are considered "open" until a
-    # verification event closes them.  Downstream components can update
-    # this field to reflect closure.  The status is included in exports
-    # to simplify report generation and external audits.
-    status: str = "open"
-
     # Raw metadata from the engine
     metadata: Dict[str, Any] = field(default_factory=dict)
+
+    # Lifecycle status (open, closed, rejected, etc).  Defaults to "open".
+    # This field captures whether the candidate is still under consideration
+    # or has been closed by the research engine.  When a discovery record
+    # includes a status or state flag, the value here will reflect it.
+    status: str = "open"
 
 
 @dataclass
@@ -496,18 +493,21 @@ class DiscoveryManager:
         metadata = raw.get("metadata") or raw.get("meta") or {}
         biomarker_ev, biomarker_shift_count = _extract_biomarker_evidence(metadata)
 
-        # Determine lifecycle status.  Candidates may include an explicit
-        # status field (e.g. "closed") or a boolean closed/is_closed flag.
-        status = "open"
-        try:
-            raw_status = raw.get("status") or raw.get("state")
-            if raw_status:
-                status = str(raw_status)
+        # Derive candidate status.  Many raw discovery records include a
+        # "status" or "state" field or a boolean "closed" flag.  We map
+        # these to a normalized lifecycle status string.  Defaults to
+        # "open" when no status is provided or when closed=False.
+        status_raw = raw.get("status") or raw.get("state")
+        cand_status: str
+        if isinstance(status_raw, str):
+            cand_status = status_raw.strip().lower()
+        else:
+            # Check boolean closed flag: True means closed, False means open
+            closed_flag = raw.get("closed")
+            if isinstance(closed_flag, bool):
+                cand_status = "closed" if closed_flag else "open"
             else:
-                if raw.get("closed") is True or raw.get("is_closed"):
-                    status = "closed"
-        except Exception:
-            status = "open"
+                cand_status = "open"
 
         return DiscoveryCandidate(
             discovery_id=str(raw.get("id") or uuid.uuid4()),
@@ -533,7 +533,7 @@ class DiscoveryManager:
             biomarker_evidence=biomarker_ev,
             biomarker_shift_count=biomarker_shift_count,
             metadata=metadata if isinstance(metadata, dict) else {},
-            status=status,
+            status=cand_status,
         )
 
     def _score_candidate(
