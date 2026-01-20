@@ -95,41 +95,76 @@ HEDGING_PATTERNS = [
 # ---------------------------------------------------------------------------
 # Goal sanitization helper
 # ---------------------------------------------------------------------------
-def _sanitize_goal_text(goal: Optional[str]) -> Optional[str]:
-    """
-    Best effort removal of run-level directives, system titles and control
-    constraints from a goal string. Report generators should never echo back
-    the raw run specification, which may include ``TITLE:``, ``PRIMARY OBJECTIVE``,
-    numbered constraints or other system prompts. This helper returns a cleaned
-    goal for display.
+def _sanitize_goal_text(goal: Optional[str], *, max_chars: int = 700) -> Optional[str]:
+    """Best-effort removal of run-level directives and prompt scaffolding.
+
+    ARA runs often carry the full run prompt/spec as the "goal" string. Reports
+    should never echo that scaffolding. This helper keeps only the user-intent
+    lines and drops:
+      - Prompt headers (e.g., TITLE, PRIMARY OBJECTIVE, INSTRUCTION HANDLING RULE)
+      - Markdown headings, bullets, and numbered constraints
 
     Parameters
     ----------
-    goal : Optional[str]
-        Raw goal string from agent memory or caller.
-
-    Returns
-    -------
-    Optional[str]
-        Sanitized goal or None if input was None or empty after cleaning.
+    goal:
+        Raw goal text.
+    max_chars:
+        Soft limit on returned text length.
     """
     if not goal:
         return goal
-    lines: List[str] = []
+
+    directive_prefixes = (
+        "title",
+        "instruction handling rule",
+        "primary objective",
+        "primary goal",
+        "secondary objectives",
+        "evidence priority",
+        "evidence priority order",
+        "high-probability",
+        "high probability",
+        "cycle",
+        "phase",
+        "stop conditions",
+        "you must",
+        "you must not",
+        "discovery standard",
+        "falsification",
+        "checkpoints",
+        "truth",
+    )
+
+    cleaned: List[str] = []
     for ln in str(goal).splitlines():
         s = ln.strip()
         if not s:
             continue
-        lower = s.lower()
-        # Drop directive lines
-        if lower.startswith(("title:", "primary objective", "primary goal", "constraints", "control constraints")):
+
+        lower = s.lower().rstrip(":").strip()
+
+        # Drop markdown headings
+        if re.match(r"^#+\s", s):
             continue
-        # Drop markdown headings and numbered constraints
-        if re.match(r"^#+\s", s) or re.match(r"^\d+\.\s", s):
+
+        # Drop bullets and numbered instructions
+        if re.match(r"^\d+[\.|\)]\s", s):
             continue
-        lines.append(ln)
-    cleaned = "\n".join(lines).strip()
-    return cleaned if cleaned else None
+        if s.startswith(("-", "â¢", "*")):
+            continue
+
+        if any(lower.startswith(p) for p in directive_prefixes):
+            continue
+
+        cleaned.append(s)
+        if sum(len(x) for x in cleaned) >= max_chars:
+            break
+
+    out = "\n".join(cleaned).strip()
+    # Final guard against leaked headers
+    out = re.sub(r"(?im)^\s*(title|instruction handling rule)\s*:?.*$", "", out).strip()
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out if out else None
 
 def _is_vague(text: str) -> bool:
     """Return True if the sentence contains hedging language that weakens the claim."""
@@ -447,10 +482,10 @@ def _render_event_only_report(events: List[Dict[str, Any]], run_id: Optional[str
     if run_id:
         lines.append(f"**Run ID:** `{run_id}`\n")
     if goal:
-        # Sanitize the goal before display to strip run directives and constraints
-        sg = _sanitize_goal_text(goal)
-        if sg:
-            lines.append(f"**Goal:** `{sg}`\n")
+        sg = _sanitize_goal_text(goal) or str(goal).strip()
+        if len(sg) > 200:
+            sg = sg[:197].rstrip() + "..."
+        lines.append(f"**Goal:** `{sg}`\n")
     lines.append("## Event-only summary\n")
     if not disc:
         lines.append("No candidate hypotheses or discoveries found in the event stream.\n")
@@ -1520,10 +1555,10 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
             rs_updated = run_state.get("updated_at")
 
             if rs_goal:
-                # Sanitize run state goal before display
-                sg = _sanitize_goal_text(rs_goal)
-                if sg:
-                    lines.append(f"- Goal: `{sg}`")
+                rs_goal_clean = _sanitize_goal_text(rs_goal) or str(rs_goal)
+                if len(rs_goal_clean) > 140:
+                    rs_goal_clean = rs_goal_clean[:137].rstrip() + "..."
+                lines.append(f"- Goal: `{rs_goal_clean}`")
             if rs_domain:
                 lines.append(f"- Domain: `{rs_domain}`")
             if rs_role:
@@ -1560,10 +1595,10 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
             if ws_mode:
                 lines.append(f"- Mode: `{ws_mode}`")
             if ws_goal:
-                # Sanitize worker state goal before display
-                sg = _sanitize_goal_text(ws_goal)
-                if sg:
-                    lines.append(f"- Goal: `{sg}`")
+                ws_goal_clean = _sanitize_goal_text(ws_goal) or str(ws_goal)
+                if len(ws_goal_clean) > 140:
+                    ws_goal_clean = ws_goal_clean[:137].rstrip() + "..."
+                lines.append(f"- Goal: `{ws_goal_clean}`")
             if ws_domain:
                 lines.append(f"- Domain: `{ws_domain}`")
             if ws_roles:
@@ -1654,28 +1689,21 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
         lines.append("")
 
     # Goals
-    # If a specific goal was provided, sanitize it before display; otherwise sanitize the collected goals.
     if goal:
-        # Sanitize the provided goal to strip any run-level directives before display.
-        sg = _sanitize_goal_text(goal)
-        if sg:
-            lines.append(f"**Filtered goal:** {sg}\n")
+        sg = _sanitize_goal_text(goal) or str(goal).strip()
+        # Keep the display short to avoid echoing long run prompts.
+        if len(sg) > 900:
+            sg = sg[:897].rstrip() + "..."
+        lines.append(f"**Filtered goal:** {sg}\n")
     else:
-        # Sanitize each observed goal from the cycle history and limit entries for readability.
-        sanitized_goals: List[str] = []
-        for g in goals_seen:
-            if not g:
-                continue
-            sg = _sanitize_goal_text(g)
-            if sg:
-                trimmed = sg if len(sg) <= 100 else sg[:97] + "..."
-                sanitized_goals.append(trimmed)
-        if sanitized_goals:
+        goals_list = [g for g in goals_seen if g]
+        if goals_list:
             lines.append("**Goals touched during session:**")
-            for trimmed in sanitized_goals[:10]:
+            for g in goals_list[:10]:
+                trimmed = g if len(g) <= 100 else g[:97] + "..."
                 lines.append(f"- {trimmed}")
-            if len(sanitized_goals) > 10:
-                lines.append(f"- ... and {len(sanitized_goals) - 10} more")
+            if len(goals_list) > 10:
+                lines.append(f"- ... and {len(goals_list) - 10} more")
         lines.append("")
 
     # Time span
@@ -1692,7 +1720,8 @@ def generate_report(memory_store: Any, goal: Optional[str] = None, run_id: Optio
     lines.append(f"- Total cycles: **{n_cycles}**")
     lines.append(f"- Domains: **{', '.join(sorted(str(d) for d in domains))}**")
     lines.append(f"- Avg RYE: **{avg_rye:.3f}**")
-    lines.append(f"- Avg ÃÂR: **{avg_delta:.3f}**")
+    # Use ASCII to avoid mojibake in downstream renders.
+    lines.append(f"- Avg dR: **{avg_delta:.3f}**")
     lines.append(f"- Avg Energy: **{avg_energy:.3f}**")
 
     if cycles_per_hour is not None:
@@ -2098,6 +2127,7 @@ def generate_publishable_report(
     run_id: Optional[str] = None,
     max_findings: int = 12,
     max_sources: int = 25,
+    polish: bool = True,
 ) -> str:
     """Generate a *high-signal* report intended for external readers.
 
@@ -2125,40 +2155,27 @@ def generate_publishable_report(
     timestamps = [str(c.get("timestamp")) for c in cycles if c.get("timestamp")]
     runtime = _extract_session_runtime(timestamps) or "(runtime unavailable)"
 
-    # ---------------------------------------------------------------------
-    # Domain relevance preparation: compute sets of meaningful tokens from
-    # the sanitized goal and domain name. These token sets are later used
-    # to filter candidate findings and citations that do not intersect with
-    # the runâs core subject matter. This helps avoid accidentally
-    # propagating unrelated entries (e.g. dietary grain references in a
-    # longevity run) when the structured discovery extraction contains
-    # leftover placeholder content or metrics labels.
-    try:
-        # Sanitize the goal up front and break into tokens of length â¥ 4
-        _sanitized_goal_for_filter = _sanitize_goal_text(inferred_goal) or ""
-        goal_tokens: set[str] = set(
-            t.lower() for t in re.findall(r"[A-Za-z]{4,}", _sanitized_goal_for_filter)
-        )
-    except Exception:
-        goal_tokens = set()
-    # Extract simple alphabetic tokens from the domain (e.g. "longevity" -> {"long", "longevity"})
-    domain_tokens: set[str] = set()
-    try:
-        domain_tokens = set(
-            t.lower() for t in re.findall(r"[A-Za-z]{4,}", str(inferred_domain) or "")
-        )
-    except Exception:
-        domain_tokens = set()
-    # Union of goal and domain tokens for relevance checks
-    relevant_tokens: set[str] = goal_tokens.union(domain_tokens)
-
-    # Pull structured discoveries from events.jsonl if possible.
+    # Pull structured discoveries. Prefer the memory store (rich fields like
+    # evidence_summary, verification_status, citations) and fall back to the
+    # event stream shape when needed.
     structured: List[Dict[str, Any]] = []
     try:
-        events = _load_run_events(str(inferred_run_id) if inferred_run_id else "")
-        structured = _events_to_structured_discoveries(events, goal=inferred_goal)
+        if inferred_run_id and hasattr(memory_store, "get_discoveries_for_run"):
+            structured = memory_store.get_discoveries_for_run(str(inferred_run_id))  # type: ignore
     except Exception:
         structured = []
+    if not structured:
+        try:
+            if hasattr(memory_store, "get_discoveries"):
+                structured = memory_store.get_discoveries(goal=inferred_goal)  # type: ignore
+        except Exception:
+            structured = []
+    if not structured:
+        try:
+            events = _load_run_events(str(inferred_run_id) if inferred_run_id else "")
+            structured = _events_to_structured_discoveries(events, goal=inferred_goal)
+        except Exception:
+            structured = []
 
     # Extract citations from the cycle history (best-effort).
     citations: List[Dict[str, Any]] = []
@@ -2194,29 +2211,42 @@ def generate_publishable_report(
             _ingest_cites(summ.get("citations"))
             _ingest_cites(summ.get("sources"))
 
-    # After gathering all citations we perform a second pass to filter out
-    # obviously irrelevant sources. For example, in a longevity run
-    # structured extractions occasionally reference dietârelated metrics
-    # ("RYE", "whole grain"), which originate from internal benchmarks and
-    # should not appear in the public report. We remove any citation whose
-    # title or URL contains banned keywords if the domain suggests they are
-    # unrelated.
-    if citations:
-        banned_tokens: set[str] = set()
-        # Domainâspecific banned tokens: for longevity runs skip cereal/grain
-        # references and obvious placeholder terms.
-        if domain_tokens and "longevity" in domain_tokens:
-            banned_tokens.update({"rye", "grain", "cereal", "whole", "grainy"})
-        if banned_tokens:
-            filtered_citations: List[Dict[str, Any]] = []
-            for cit in citations:
-                title_l = str(cit.get("title") or cit.get("raw") or "").lower()
-                url_l = str(cit.get("url") or cit.get("link") or "").lower()
-                # Remove if any banned token appears in title or URL
-                if any(tok in title_l or tok in url_l for tok in banned_tokens):
-                    continue
-                filtered_citations.append(cit)
-            citations = filtered_citations
+    # If requested, return a polished report using report_polisher.
+    if polish:
+        try:
+            from .report_polisher import build_publishable_report as _build_publishable_report  # type: ignore
+
+            # Pre-rank and bound findings to avoid huge payloads.
+            def _pre_key(d: Dict[str, Any]) -> float:
+                sc = d.get("score")
+                try:
+                    return float(sc) if sc is not None else 0.0
+                except Exception:
+                    return 0.0
+
+            findings_raw: List[Dict[str, Any]] = [d for d in structured if isinstance(d, dict)]
+            findings_raw = sorted(findings_raw, key=_pre_key, reverse=True)
+            try:
+                lim = max(60, int(max_findings) * 10)
+            except Exception:
+                lim = 60
+            findings_for_report = findings_raw[:lim]
+
+            context = {
+                "run_id": inferred_run_id,
+                "domain": inferred_domain,
+                "goal": inferred_goal,
+                "runtime": runtime,
+                "cycles": len(cycles),
+                "findings": findings_for_report,
+                "citations": citations,
+                "max_findings": max_findings,
+                "max_sources": max_sources,
+            }
+            return _build_publishable_report(context)
+        except Exception:
+            # If polishing fails for any reason, fall back to the legacy renderer below.
+            pass
 
     # Heuristic citation matching for inline refs.
     def _match_citations(text: str, max_refs: int = 2) -> List[int]:
@@ -2250,48 +2280,26 @@ def generate_publishable_report(
             pass
         return base
 
-    # Rank and trim the raw discoveries from events.  Findings are initially
-    # sorted by a composite score/tier and truncated to the top N entries.
     findings = sorted(structured, key=_finding_score, reverse=True)
     findings = findings[: max(0, int(max_findings))]
 
-    # Apply a series of quality, relevance and safety filters to candidate
-    # discoveries. Each filter removes low-quality placeholders, template
-    # artifacts, vague statements, domainâirrelevant entries and labels
-    # lacking supporting citations.  The goal is to surface only the
-    # highestâconfidence, domainâaligned hypotheses or mechanisms.
+    # Filter out low-quality or placeholder-like discoveries.  We drop any
+    # finding whose label contains internal logs, templates, or hedging
+    # language, or that lacks any matching citation in the current run.
     filtered_findings: List[Dict[str, Any]] = []
     for d in findings:
-        label_raw = d.get("label")
-        label = str(label_raw or "").strip()
+        label = str(d.get("label") or "").strip()
         if not label:
             continue
         # Skip internal or template entries (e.g. maintenance logs, examples)
         if _contains_banned_pattern(label) or _is_vague(label):
             continue
-        # Skip labels containing unresolved bold markup or template variables.
+        # Skip labels containing unresolved bold markup or template variables.  In previous
+        # runs we observed labels like "**agent**" or "**description**" where the
+        # templating engine failed to substitute real values.  Any label with
+        # leftover markdown bold markers is considered malformed and discarded.
         if "**" in label:
             continue
-        # Additional domainârelevance filtering:
-        try:
-            # Extract tokens of length >=4 from the label for overlap check
-            label_tokens = set(t.lower() for t in re.findall(r"[A-Za-z]{4,}", label))
-        except Exception:
-            label_tokens = set()
-        # If a set of relevant tokens is available, require at least one overlap
-        if relevant_tokens and not label_tokens.intersection(relevant_tokens):
-            # Skip labels unrelated to the runâs domain/goal
-            continue
-        # Remove labels that simply echo the sanitized goal text
-        if _sanitized_goal_for_filter and _sanitized_goal_for_filter.lower() in normalize_text(label).lower():
-            continue
-        # Domainâspecific bans: exclude dietary or cereal references when the domain
-        # is longevity.  This prevents the inclusion of metrics labels (e.g. RYE)
-        # and grain names that are unrelated to ageing biology.
-        if domain_tokens:
-            if "longevity" in domain_tokens:
-                if any(tok in label_tokens for tok in {"rye", "grain", "cereal", "whole", "grainy"}):
-                    continue
         # Only keep findings that can be matched to at least one citation
         try:
             matched = _match_citations(label)
@@ -2316,11 +2324,8 @@ def generate_publishable_report(
     lines.append(f"- Cycles captured: **{len(cycles)}**")
     lines.append(f"- Runtime: **{runtime}**")
     if inferred_goal:
-        # Sanitize inferred goal to strip run-level directives before display
-        sg = _sanitize_goal_text(inferred_goal)
-        if sg:
-            lines.append("- Goal:")
-            lines.append(f"  > {normalize_text(sg).strip()}")
+        lines.append("- Goal:")
+        lines.append(f"  > {normalize_text(inferred_goal).strip()}")
     lines.append("")
 
     # Abstract
@@ -2389,7 +2394,12 @@ def generate_publishable_report(
 # ---------------------------------------------------------
 # TARGETED FINDINGS REPORT
 # ---------------------------------------------------------
-def generate_findings_report(memory_store: Any, goal: Optional[str] = None, run_id: Optional[str] = None) -> str:
+def generate_findings_report(
+    memory_store: Any,
+    goal: Optional[str] = None,
+    run_id: Optional[str] = None,
+    polish: bool = True,
+) -> str:
     """
     Extract actionable findings such as:
     - Possible cures
@@ -2535,6 +2545,24 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None, run_
         except Exception:
             pass
 
+    # If requested, generate a polished targeted findings report.
+    if polish:
+        try:
+            from .report_polisher import build_findings_report as _build_findings_report  # type: ignore
+
+            context = {
+                "run_id": inferred_run_id,
+                "goal": goal or "",
+                "runtime": runtime or "",
+                "findings": structured or [],
+                "citations": all_citations or [],
+                "unstructured_findings": findings_text or [],
+            }
+            return _build_findings_report(context)
+        except Exception:
+            # Fall back to the raw report below.
+            pass
+
     # Build report
     lines: List[str] = []
     lines.append("# Targeted Findings Report\n")
@@ -2545,10 +2573,10 @@ def generate_findings_report(memory_store: Any, goal: Optional[str] = None, run_
         lines.append(f"**Run ID:** `{inferred_run_id}`\n")
 
     if goal:
-        # Sanitize the requested goal before display in the findings report
-        sg = _sanitize_goal_text(goal)
-        if sg:
-            lines.append(f"**Filtered goal:** {sg}\n")
+        sg = _sanitize_goal_text(goal) or str(goal).strip()
+        if len(sg) > 900:
+            sg = sg[:897].rstrip() + "..."
+        lines.append(f"**Filtered goal:** {sg}\n")
 
     # Structured discoveries first
     lines.append("## Structured discoveries from agent memory\n")
