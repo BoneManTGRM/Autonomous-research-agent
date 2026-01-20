@@ -104,6 +104,65 @@ def _safe_str(x: Any) -> str:
     except Exception:
         return ""
 
+
+def _sanitize_goal_text(goal: Optional[str], *, max_chars: int = 700) -> str:
+    """Strip run-prompt scaffolding from the goal string for display.
+
+    Some pipelines pass the full control prompt/spec as the "goal". For
+    human-facing reports, we remove directive headers and bullet lists so the
+    report focuses on the user intent.
+    """
+    if not goal:
+        return ""
+
+    directive_prefixes = (
+        "title",
+        "instruction handling rule",
+        "primary objective",
+        "primary goal",
+        "secondary objectives",
+        "evidence priority",
+        "evidence priority order",
+        "high-probability",
+        "high probability",
+        "cycle",
+        "phase",
+        "stop conditions",
+        "you must",
+        "you must not",
+        "discovery standard",
+        "falsification",
+        "checkpoints",
+        "truth",
+    )
+
+    cleaned: List[str] = []
+    for ln in _safe_str(goal).splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        lower = s.lower().rstrip(":").strip()
+
+        # Drop markdown headings
+        if re.match(r"^#+\\s", s):
+            continue
+        # Drop bullets and numbered prompt constraints
+        if re.match(r"^\\d+[\\.|\\)]\\s", s):
+            continue
+        if s.startswith(("-", "â¢", "*")):
+            continue
+        if any(lower.startswith(p) for p in directive_prefixes):
+            continue
+
+        cleaned.append(s)
+        if sum(len(x) for x in cleaned) >= max_chars:
+            break
+
+    out = "\n".join(cleaned).strip()
+    out = re.sub(r"(?im)^\\s*(title|instruction handling rule)\\s*:?.*$", "", out).strip()
+    out = re.sub(r"\n{3,}", "\n\n", out).strip()
+    return out
+
 # ---------------------------------------------------------------------------
 # Placeholder detection
 # ---------------------------------------------------------------------------
@@ -118,8 +177,6 @@ _PLACEHOLDER_PATTERNS = [
     "insert here",
     "no content",
     "to be added",
-    "??",
-    "...",
     # Additional patterns for low-quality or stub content
     "no title",
     "no results",
@@ -145,15 +202,9 @@ _PLACEHOLDER_PATTERNS = [
     "used only to show",
     "shows how an",
 
-    # Additional patterns observed in malformed discovery labels.  These
-    # correspond to unresolved template variables that sometimes leak into
-    # agent outputs.  By listing them here, we ensure that any entry
-    # containing these words is treated as a placeholder and skipped.
-    "agent",
-    "description",
-    "detected",
-    "encountered",
-    "fully",
+    # NOTE: Do **not** include generic words like "agent" or "description" here.
+    # Overly-broad patterns will incorrectly remove legitimate content from
+    # the report, especially within agent outputs.
 ]
 
 
@@ -174,46 +225,6 @@ def _is_placeholder_text(text: Any) -> bool:
         if pat in s:
             return True
     return False
-
-# ---------------------------------------------------------------------------
-# Goal sanitization helper
-# ---------------------------------------------------------------------------
-def _sanitize_goal_text(goal: str) -> str:
-    """
-    Remove run-level directives, titles, and numbered constraints from a goal string.
-    Agent prompts often include headings like ``TITLE:``, ``PRIMARY OBJECTIVE``,
-    or enumerated constraints. These should never appear verbatim in a final
-    report. This helper strips such directive lines, markdown headings, and
-    numbered instructions, returning only the user-defined goal description.
-
-    Parameters
-    ----------
-    goal : str
-        Raw goal text passed to the report builder.
-
-    Returns
-    -------
-    str
-        Sanitized goal text with directive lines removed.
-    """
-    if not goal:
-        return ""
-    cleaned: List[str] = []
-    for ln in _safe_str(goal).splitlines():
-        s = ln.strip()
-        if not s:
-            continue
-        lower = s.lower()
-        # Skip directive prefixes and constraint headers
-        if lower.startswith(("title:", "primary objective", "primary goal", "constraints", "control constraints")):
-            continue
-        # Skip markdown headings and numbered instructions
-        if re.match(r"^#+\s", s):
-            continue
-        if re.match(r"^\d+\.\s", s):
-            continue
-        cleaned.append(ln)
-    return "\n".join(cleaned).strip()
 
 
 def _source_key(src: Any) -> str:
@@ -495,8 +506,8 @@ def build_agent_report(
         lines.append(f"- domain: `{domain}`")
         lines.append("")
         lines.append("## Goal")
-        # Sanitize the goal to remove any run directives or constraint markers
-        lines.append(_sanitize_goal_text(goal or ""))
+        goal_disp = _sanitize_goal_text(goal) or _safe_str(goal)
+        lines.append(goal_disp)
         lines.append("")
         lines.append("## Diagnostics")
         lines.append("```json")
@@ -608,8 +619,8 @@ def build_agent_report(
     out.append("")
 
     out.append("## Goal")
-    # Sanitize the goal to remove run-level directives before display
-    out.append(_sanitize_goal_text(goal or ""))
+    goal_disp = _sanitize_goal_text(goal) or _safe_str(goal)
+    out.append(goal_disp)
     out.append("")
 
     # Tier 1: Executive summary â summarise key counts concisely.
