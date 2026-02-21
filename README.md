@@ -6,20 +6,6 @@ Add your Tavily API key in the sidebar. Without it, search runs in offline stub 
 
 ---
 
-## 🔬 Scientific Attribution and Field Protection
-
-**Reparodynamics**, **TGRM (Targeted Gradient Repair Mechanism)**, and
-**RYE (Repair Yield per Energy)** were created and defined by **Cody Ryan Jenkins**.
-
-These scientific terms may not be renamed, repurposed, rebranded, or represented as originating from any other individual, institution, or entity.
-
-**Required Citation**
-Jenkins, C. R. (2025). *Reparodynamics v2.2*.
-
-Reparodynamics is a claimed scientific trademark of Cody Ryan Jenkins.
-
----
-
 ## 🚀 Overview
 
 The **Autonomous Research Agent (ARA)** is a long-run scientific intelligence engine based on Reparodynamics, the universal science of self-repairing systems.
@@ -244,7 +230,6 @@ The system architecture is designed for future reactivation of true wall-clock l
 - Deep Biomarkers
 - High Stability
 - Breakthrough Mode
-- Ultra Fast Learning
 - Ultra Fast Learning
 
 ---
