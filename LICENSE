@@ -1,164 +1,21 @@
-Autonomous Research Agent Full-Control Commercial License (ARA-FCCL) v1.0
-Copyright (c) 2025 Cody Ryan Jenkins. All rights reserved.
+MIT License
 
-1. Ownership
+Copyright (c) 2025 Cody Ryan Jenkins
 
-   The Autonomous Research Agent (“Software”), including but not limited to
-   all source code, models, data structures, mechanisms, Reparodynamics,
-   TGRM (Targeted Gradient Repair Mechanism), RYE (Repair Yield per Energy),
-   MSIL, swarm systems, diagnostics, analysis pipelines, or any derivative
-   intellectual property, is the exclusive property of Cody Ryan Jenkins.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-   No ownership, title, or intellectual property rights are transferred to
-   the Licensee under this Agreement.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-2. Grant of Rights (Extremely Limited)
-
-   Subject to strict compliance with this License and payment of all
-   required fees, the Licensee is granted a:
-
-   SINGLE, NON-TRANSFERABLE, NON-SUBLICENSABLE, NON-EXCLUSIVE,
-   REVOCABLE COMMERCIAL USE LICENSE
-
-   which allows:
-
-     a. Running the Software internally within the Licensee’s organization.
-     b. Use in ONE product, system, or commercial workflow.
-     c. Use on ONE server, cloud instance, or environment, unless otherwise
-        granted in writing.
-
-   This License does NOT permit any redistribution, sublicensing, publication,
-   open-sourcing, or sharing of the Software in any form.
-
-3. Restrictions (Maximum Protection)
-
-   The Licensee may NOT:
-
-     a. Sell, resell, sublicense, rent, lease, distribute, publish,
-        or otherwise transfer the Software to any third party.
-
-     b. Create forks, public or private, for any purpose other than internal
-        evaluation. Forks may NOT be shared, sold, or redistributed.
-
-     c. Create derivative works intended for commercial sale, distribution,
-        or public release.
-
-     d. Use the Software to create competing products, AI systems, research
-        agents, longevity engines, discovery pipelines, or mechanism analyzers.
-
-     e. Rebrand, rename, claim authorship of, or misrepresent the origin of
-        Reparodynamics, TGRM, RYE, MSIL, ARA, or any scientific terminology.
-
-     f. Make the Software accessible to clients, customers, users, or external
-        systems unless a separate enterprise agreement is signed.
-
-     g. Host the Software as a paid SaaS, API, subscription service, or paid
-        platform without explicit commercial terms signed by Cody Ryan Jenkins.
-
-     h. File patents or IP claims on any part of the Software or derivative
-        research outcomes.
-
-4. Derivative Works
-
-   Any improvements, modifications, extensions, or derivative works created
-   by the Licensee:
-
-     a. Automatically and immediately become the intellectual property of
-        Cody Ryan Jenkins.
-
-     b. May only be used internally by the Licensee unless additional
-        commercial rights are purchased.
-
-     c. Must not be distributed, sold, or published.
-
-   The Licensee agrees not to conceal derivative improvements and must
-   provide them upon request during audit.
-
-5. Commercial Rights and Royalties
-
-   Commercial use requires a paid license agreement with Cody Ryan Jenkins.
-
-   The Licensee agrees to:
-
-     a. Pay all licensing fees, royalties, or revenue-sharing terms as defined
-        by the commercial agreement.
-
-     b. Allow pricing, royalties, and terms to be changed or renegotiated at
-        the discretion of Cody Ryan Jenkins.
-
-   All commercial rights not explicitly granted remain the property of
-   Cody Ryan Jenkins.
-
-6. Confidentiality
-
-   The Licensee must maintain strict confidentiality regarding:
-
-     a. The Software
-     b. Source code
-     c. Internal architecture
-     d. Mechanisms, models, and algorithms
-     e. Any documentation or proprietary research
-
-   The Software must be treated as proprietary trade-secret material.
-
-7. No Sublicensing or Redistribution
-
-   The Licensee is strictly prohibited from:
-
-     a. Granting sublicenses  
-     b. Allowing third-party access  
-     c. Embedding the Software in customer-facing products  
-     d. Offering the Software as a managed service, SaaS, or platform  
-
-8. Audit Rights
-
-   Cody Ryan Jenkins reserves the right to audit the Licensee’s systems,
-   usage, and implementation of the Software to verify compliance at any time.
-
-   Non-cooperation or refusal constitutes breach and triggers termination.
-
-9. Revocation and Termination
-
-   This License may be revoked immediately for:
-
-     a. Non-payment  
-     b. Breach of any clause  
-     c. Unauthorized sharing  
-     d. Attempted sublicensing  
-     e. Competitive use  
-     f. Misrepresentation or fraud  
-
-   Upon revocation, the Licensee must:
-
-     a. Immediately uninstall and delete all copies  
-     b. Destroy any derivatives  
-     c. Cease all use  
-     d. Provide written certification of full deletion  
-
-10. Warranty Disclaimer
-
-   The Software is provided “AS IS” without warranty of any kind.
-
-11. Limitation of Liability
-
-   In no event shall Cody Ryan Jenkins be liable for:
-
-     a. Lost profits  
-     b. Loss of data  
-     c. Business interruption  
-     d. Indirect or consequential damages  
-
-12. Governing Law
-
-   This License is governed exclusively by the jurisdiction selected by
-   Cody Ryan Jenkins and may be enforced worldwide.
-
-13. Acceptance
-
-   Use of the Software in any capacity constitutes full acceptance of this License.
-
-For commercial licensing, enterprise deployments, paid forks, or extended rights,
-contact:
-
-   Cody Ryan Jenkins
-   (Insert your preferred contact method or website)
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
